@@ -1,0 +1,143 @@
+-- Схема базы findb. Применение: psql findb -f sql/001_schema.sql
+-- Файл идемпотентен: повторное выполнение не меняет состояние.
+-- Денежные величины — только numeric. NULL означает «не раскрыто», не ноль.
+
+BEGIN;
+
+-- Справочник организаций -----------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS organization (
+    inn         text PRIMARY KEY CHECK (inn ~ '^[0-9]{10}$' OR inn ~ '^[0-9]{12}$'),
+    name        text,
+    short_name  text,
+    ogrn        text,
+    okpo        text,
+    okved       text,
+    region      text,
+    meta        jsonb,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE organization IS 'Реквизиты организации, полученные вместе с отчётностью';
+COMMENT ON COLUMN organization.meta IS 'Прочие реквизиты источника в исходном виде';
+
+-- Источники отчётности -------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS src_file (
+    id                bigserial PRIMARY KEY,
+    inn               text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
+    report_year       integer NOT NULL,
+    source            text NOT NULL CHECK (source IN ('gir_bo', 'file')),
+    source_url        text,
+    raw_path          text,
+    checksum          text,
+    form_codes        text[],
+    unit_code         text,
+    unit_multiplier   numeric,
+    status            text NOT NULL DEFAULT 'loaded'
+                      CHECK (status IN ('loaded', 'processed', 'quarantine')),
+    quarantine_reason text,
+    meta              jsonb,
+    loaded_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT src_file_uniq UNIQUE (inn, report_year, source)
+);
+
+CREATE INDEX IF NOT EXISTS src_file_checksum_idx ON src_file (checksum);
+CREATE INDEX IF NOT EXISTS src_file_status_idx ON src_file (status);
+
+COMMENT ON TABLE src_file IS 'Загруженная отчётность как единица обработки';
+COMMENT ON COLUMN src_file.checksum IS 'sha256 сырого ответа источника';
+COMMENT ON COLUMN src_file.unit_code IS 'Единица измерения в источнике (ОКЕИ: 384 — тыс. руб., 385 — млн руб.)';
+COMMENT ON COLUMN src_file.unit_multiplier IS 'Коэффициент приведения значений источника к тысячам рублей';
+COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прошли контроли качества и в расчёт не идут';
+
+-- Факты отчётности -----------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS fact_report (
+    id          bigserial PRIMARY KEY,
+    src_file_id bigint NOT NULL REFERENCES src_file (id) ON DELETE CASCADE,
+    inn         text NOT NULL,
+    report_date date NOT NULL,
+    form_code   text NOT NULL,
+    line_code   text NOT NULL,
+    value       numeric(20, 3),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT fact_report_uniq UNIQUE (inn, report_date, form_code, line_code)
+);
+
+CREATE INDEX IF NOT EXISTS fact_report_period_idx ON fact_report (inn, report_date);
+CREATE INDEX IF NOT EXISTS fact_report_line_idx ON fact_report (line_code);
+CREATE INDEX IF NOT EXISTS fact_report_src_idx ON fact_report (src_file_id);
+
+COMMENT ON TABLE fact_report IS 'Одна строка — один код показателя за один период по одной организации';
+COMMENT ON COLUMN fact_report.value IS 'Тысячи рублей; NULL — показатель не раскрыт, замена нулём запрещена';
+COMMENT ON COLUMN fact_report.report_date IS 'Дата, на которую (или за период до которой) приведено значение';
+
+-- Журнал контролей качества --------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS dq_log (
+    id          bigserial PRIMARY KEY,
+    src_file_id bigint REFERENCES src_file (id) ON DELETE CASCADE,
+    inn         text NOT NULL,
+    report_date date,
+    check_code  text NOT NULL,
+    status      text NOT NULL CHECK (status IN ('pass', 'fail', 'warning')),
+    severity    text NOT NULL CHECK (severity IN ('blocking', 'warning')),
+    message     text,
+    details     jsonb,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS dq_log_src_idx ON dq_log (src_file_id);
+CREATE INDEX IF NOT EXISTS dq_log_inn_idx ON dq_log (inn, report_date);
+
+COMMENT ON TABLE dq_log IS 'Результаты контролей качества; провал блокирующего контроля отправляет src_file в карантин';
+COMMENT ON COLUMN dq_log.details IS 'Фактические значения, участвовавшие в контроле, с кодами строк';
+
+-- Рассчитанные показатели ----------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS metric_value (
+    id                    bigserial PRIMARY KEY,
+    inn                   text NOT NULL,
+    report_date           date NOT NULL,
+    metric_code           text NOT NULL,
+    value                 numeric(30, 10),
+    status                text NOT NULL CHECK (status IN ('ok', 'not_calculable')),
+    reason                text,
+    methodology_version   text NOT NULL,
+    computed_at           timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT metric_value_uniq UNIQUE (inn, report_date, metric_code)
+);
+
+CREATE INDEX IF NOT EXISTS metric_value_period_idx ON metric_value (inn, report_date);
+
+COMMENT ON TABLE metric_value IS 'Значения коэффициентов; считает Python, не языковая модель';
+COMMENT ON COLUMN metric_value.status IS 'not_calculable — нет входных данных, подстановка приближений запрещена';
+COMMENT ON COLUMN metric_value.reason IS 'Причина нерасчёта с указанием отсутствующего кода строки';
+
+-- Журнал обращений к языковой модели -----------------------------------------
+
+CREATE TABLE IF NOT EXISTS llm_log (
+    id              bigserial PRIMARY KEY,
+    inn             text,
+    report_date     date,
+    model           text NOT NULL,
+    prompt_name     text,
+    prompt_text     text,
+    response_text   text,
+    temperature     numeric,
+    verified        boolean,
+    foreign_numbers jsonb,
+    attempt         integer NOT NULL DEFAULT 1,
+    duration_ms     integer,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS llm_log_inn_idx ON llm_log (inn, report_date);
+
+COMMENT ON TABLE llm_log IS 'Каждое обращение к модели с результатом постпроверки';
+COMMENT ON COLUMN llm_log.verified IS 'false — ответ содержит посторонние числа и пользователю не показывается';
+COMMENT ON COLUMN llm_log.foreign_numbers IS 'Числа из ответа, не найденные во входных блоках';
+
+COMMIT;

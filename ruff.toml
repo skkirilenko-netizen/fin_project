@@ -1,0 +1,9 @@
+target-version = "py312"
+line-length = 100
+exclude = [".venv", "data"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "N", "SIM"]
+
+[format]
+quote-style = "double"

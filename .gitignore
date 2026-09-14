@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+data/
+*.docx
+.ipynb_checkpoints/
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
