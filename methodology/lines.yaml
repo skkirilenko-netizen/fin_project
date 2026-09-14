@@ -15,8 +15,26 @@
 #
 # Состав итоговых строк (components) — перечень слагаемых с операторами.
 # Именно он используется контролями сходимости (задача 5).
+#
+# Наборы строк (reporting_type):
+#   full       — полные формы;
+#   simplified — упрощённые формы (приложение 5 к приказу 66н).
+# Ключ справочника — пара (reporting_type, code): один и тот же код может
+# существовать в обоих наборах и означать разное (например, 2120).
+#
+# Особенность упрощённых форм: код укрупнённой строки не фиксирован, он
+# указывается по показателю с наибольшим удельным весом в её составе. Поэтому
+# строка опознаётся по наименованию (name + name_aliases), а code_allowed —
+# лишь перечень кодов, которые допустимо встретить. В fact_report пишется
+# канонический code, фактический код источника — в source_line_code.
+#
+# Поля упрощённого набора:
+#   code_allowed         — какие коды источника могут стоять у этой строки;
+#   aggregates           — какие строки полного набора она укрупняет;
+#   same_meaning_as_full — совпадает ли смысл со строкой полного набора
+#                          с тем же кодом; при false обязателен note.
 
-version: "1.0.0"
+version: "2.0.0"
 
 forms:
   "0710001":
@@ -25,6 +43,16 @@ forms:
     name: Отчёт о финансовых результатах
   "0710005":
     name: Отчёт о движении денежных средств
+
+reporting_types:
+  full:
+    name: Полная бухгалтерская отчётность
+    forms: ["0710001", "0710002", "0710005"]
+  simplified:
+    name: Упрощённая бухгалтерская отчётность (приложение 5 к приказу 66н)
+    # Отчёт о движении денежных средств и отчёт об изменениях капитала
+    # субъекты малого предпринимательства вправе не представлять.
+    forms: ["0710001", "0710002"]
 
 lines:
 
@@ -549,3 +577,280 @@ lines:
       - {code: "4450", op: "+"}
       - {code: "4400", op: "+"}
       - {code: "4490", op: "+"}
+
+  # ==========================================================================
+  # УПРОЩЁННАЯ ОТЧЁТНОСТЬ (приложение 5 к приказу 66н)
+  #
+  # Перечень name_aliases заведомо неполон: реальные формулировки будут
+  # выверены по ответам ГИР БО в задаче 3. Строка, которую не удалось опознать
+  # по наименованию, не подменяется по коду молча, а логируется.
+  # ==========================================================================
+
+  # --- Упрощённый баланс. Актив ---------------------------------------------
+
+  - code: "1150"
+    reporting_type: simplified
+    name: Материальные внеоборотные активы
+    name_aliases:
+      - Основные средства и незавершённые капитальные вложения в основные средства
+    code_allowed: ["1150", "1190"]
+    aggregates: ["1150"]
+    same_meaning_as_full: false
+    note: >-
+      Помимо основных средств включает незавершённые капитальные вложения
+      в них, которые в полной форме могут показываться по строке 1190.
+    form: "0710001"
+    section: Актив
+    sign: positive
+
+  - code: "1170"
+    reporting_type: simplified
+    name: Нематериальные, финансовые и другие внеоборотные активы
+    name_aliases:
+      - Нематериальные, финансовые и другие внеоборотные активы (кроме материальных)
+    code_allowed: ["1110", "1120", "1130", "1140", "1160", "1170", "1180", "1190"]
+    aggregates: ["1110", "1120", "1130", "1140", "1160", "1170", "1180", "1190"]
+    same_meaning_as_full: false
+    note: >-
+      Укрупнённая строка: весь раздел I, кроме основных средств. Со строкой
+      1170 «Финансовые вложения» полного набора не сопоставима.
+    form: "0710001"
+    section: Актив
+    sign: positive
+
+  - code: "1210"
+    reporting_type: simplified
+    name: Запасы
+    code_allowed: ["1210"]
+    aggregates: ["1210"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Актив
+    sign: positive
+
+  - code: "1250"
+    reporting_type: simplified
+    name: Денежные средства и денежные эквиваленты
+    code_allowed: ["1250"]
+    aggregates: ["1250"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Актив
+    sign: positive
+
+  - code: "1240"
+    reporting_type: simplified
+    name: Финансовые и другие оборотные активы
+    name_aliases:
+      - Финансовые и другие оборотные активы (включая дебиторскую задолженность)
+    code_allowed: ["1220", "1230", "1240", "1260"]
+    aggregates: ["1220", "1230", "1240", "1260"]
+    same_meaning_as_full: false
+    note: >-
+      Укрупнённая строка: НДС по приобретённым ценностям, дебиторская
+      задолженность, финансовые вложения и прочие оборотные активы вместе.
+      Со строкой 1240 полного набора не сопоставима.
+    form: "0710001"
+    section: Актив
+    sign: positive
+
+  # Наименование «Баланс» в упрощённой форме носят обе итоговые строки,
+  # различаются они только принадлежностью к активу или пассиву, поэтому
+  # псевдонима «Баланс» здесь нет: итог опознаётся по разделу формы.
+  - code: "1600"
+    reporting_type: simplified
+    name: БАЛАНС (актив)
+    code_allowed: ["1600"]
+    aggregates: ["1600"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Итог актива
+    sign: positive
+    is_total: true
+    components:
+      - {code: "1150", op: "+"}
+      - {code: "1170", op: "+"}
+      - {code: "1210", op: "+"}
+      - {code: "1250", op: "+"}
+      - {code: "1240", op: "+"}
+
+  # --- Упрощённый баланс. Пассив --------------------------------------------
+
+  - code: "1300"
+    reporting_type: simplified
+    name: Капитал и резервы
+    code_allowed: ["1300"]
+    aggregates: ["1300"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Пассив
+    sign: any
+
+  - code: "1410"
+    reporting_type: simplified
+    name: Долгосрочные заёмные средства
+    code_allowed: ["1410"]
+    aggregates: ["1410"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Пассив
+    sign: positive
+
+  - code: "1450"
+    reporting_type: simplified
+    name: Другие долгосрочные обязательства
+    code_allowed: ["1420", "1430", "1450"]
+    aggregates: ["1420", "1430", "1450"]
+    same_meaning_as_full: false
+    note: >-
+      Укрупнённая строка: отложенные налоговые обязательства, оценочные
+      и прочие долгосрочные обязательства вместе. Со строкой 1450 полного
+      набора не сопоставима.
+    form: "0710001"
+    section: Пассив
+    sign: positive
+
+  - code: "1510"
+    reporting_type: simplified
+    name: Краткосрочные заёмные средства
+    code_allowed: ["1510"]
+    aggregates: ["1510"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Пассив
+    sign: positive
+
+  - code: "1520"
+    reporting_type: simplified
+    name: Кредиторская задолженность
+    code_allowed: ["1520"]
+    aggregates: ["1520"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Пассив
+    sign: positive
+
+  - code: "1550"
+    reporting_type: simplified
+    name: Другие краткосрочные обязательства
+    code_allowed: ["1530", "1540", "1550"]
+    aggregates: ["1530", "1540", "1550"]
+    same_meaning_as_full: false
+    note: >-
+      Укрупнённая строка: доходы будущих периодов, оценочные и прочие
+      краткосрочные обязательства вместе. Со строкой 1550 полного набора
+      не сопоставима.
+    form: "0710001"
+    section: Пассив
+    sign: positive
+
+  - code: "1700"
+    reporting_type: simplified
+    name: БАЛАНС (пассив)
+    code_allowed: ["1700"]
+    aggregates: ["1700"]
+    same_meaning_as_full: true
+    form: "0710001"
+    section: Итог пассива
+    sign: positive
+    is_total: true
+    components:
+      - {code: "1300", op: "+"}
+      - {code: "1410", op: "+"}
+      - {code: "1450", op: "+"}
+      - {code: "1510", op: "+"}
+      - {code: "1520", op: "+"}
+      - {code: "1550", op: "+"}
+
+  # --- Упрощённый отчёт о финансовых результатах ----------------------------
+
+  - code: "2110"
+    reporting_type: simplified
+    name: Выручка
+    code_allowed: ["2110"]
+    aggregates: ["2110"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: positive
+
+  - code: "2120"
+    reporting_type: simplified
+    name: Расходы по обычной деятельности
+    name_aliases:
+      - Расходы по обычным видам деятельности
+    code_allowed: ["2120", "2210", "2220"]
+    aggregates: ["2120", "2210", "2220"]
+    same_meaning_as_full: false
+    note: >-
+      Укрупнённая строка: себестоимость продаж, коммерческие и управленческие
+      расходы вместе. Со строкой 2120 «Себестоимость продаж» полного набора
+      не сопоставима, валовая прибыль по упрощённой форме не вычисляется.
+    form: "0710002"
+    section: Финансовые результаты
+    sign: positive
+    in_brackets: true
+
+  - code: "2330"
+    reporting_type: simplified
+    name: Проценты к уплате
+    code_allowed: ["2330"]
+    aggregates: ["2330"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: positive
+    in_brackets: true
+
+  - code: "2340"
+    reporting_type: simplified
+    name: Прочие доходы
+    code_allowed: ["2340"]
+    aggregates: ["2340"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: positive
+
+  - code: "2350"
+    reporting_type: simplified
+    name: Прочие расходы
+    code_allowed: ["2350"]
+    aggregates: ["2350"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: positive
+    in_brackets: true
+
+  - code: "2410"
+    reporting_type: simplified
+    name: Налоги на прибыль (доходы)
+    name_aliases:
+      - Налог на прибыль
+      - Налоги на прибыль
+    code_allowed: ["2410"]
+    aggregates: ["2410"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: any
+    in_brackets: true
+
+  - code: "2400"
+    reporting_type: simplified
+    name: Чистая прибыль (убыток)
+    code_allowed: ["2400"]
+    aggregates: ["2400"]
+    same_meaning_as_full: true
+    form: "0710002"
+    section: Финансовые результаты
+    sign: any
+    is_total: true
+    components:
+      - {code: "2110", op: "+"}
+      - {code: "2120", op: "-"}
+      - {code: "2330", op: "-"}
+      - {code: "2340", op: "+"}
+      - {code: "2350", op: "-"}
+      - {code: "2410", op: "-"}

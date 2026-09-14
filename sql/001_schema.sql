@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS src_file (
     inn               text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
     report_year       integer NOT NULL,
     source            text NOT NULL CHECK (source IN ('gir_bo', 'file')),
+    reporting_type    text NOT NULL DEFAULT 'full'
+                      CHECK (reporting_type IN ('full', 'simplified')),
     source_url        text,
     raw_path          text,
     checksum          text,
@@ -50,6 +52,10 @@ COMMENT ON COLUMN src_file.checksum IS 'sha256 сырого ответа ист�
 COMMENT ON COLUMN src_file.unit_code IS 'Единица измерения в источнике (ОКЕИ: 384 — тыс. руб., 385 — млн руб.)';
 COMMENT ON COLUMN src_file.unit_multiplier IS 'Коэффициент приведения значений источника к тысячам рублей';
 COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прошли контроли качества и в расчёт не идут';
+COMMENT ON COLUMN src_file.reporting_type IS
+    'Набор строк отчётности: full — полные формы, simplified — упрощённые (приложение 5 к приказу 66н). '
+    'Свойство сданного комплекта, а не организации: право на упрощённую отчётность может быть утрачено. '
+    'По нему выбирается набор контролей качества и строк справочника';
 
 -- Факты отчётности -----------------------------------------------------------
 
@@ -60,6 +66,7 @@ CREATE TABLE IF NOT EXISTS fact_report (
     report_date  date NOT NULL,
     form_code    text NOT NULL,
     line_code    text NOT NULL,
+    source_line_code text,
     value        numeric(20, 3),
     value_status text NOT NULL DEFAULT 'ok'
                  CHECK (value_status IN ('ok', 'not_disclosed', 'not_applicable')),
@@ -78,6 +85,12 @@ CREATE INDEX IF NOT EXISTS fact_report_src_idx ON fact_report (src_file_id);
 COMMENT ON TABLE fact_report IS 'Одна строка — один код показателя за один период по одной организации';
 COMMENT ON COLUMN fact_report.value IS 'Тысячи рублей; NULL — показатель не раскрыт, замена нулём запрещена';
 COMMENT ON COLUMN fact_report.report_date IS 'Дата, на которую (или за период до которой) приведено значение';
+COMMENT ON COLUMN fact_report.line_code IS
+    'Канонический код строки из methodology/lines.yaml. Для упрощённых форм код укрупнённой строки '
+    'в отчётности берётся по показателю с наибольшим удельным весом и между периодами меняется, '
+    'поэтому ключом служит канонический код, а не код источника';
+COMMENT ON COLUMN fact_report.source_line_code IS
+    'Код строки, фактически указанный в отчётности; NULL — совпадает с line_code';
 COMMENT ON COLUMN fact_report.value_status IS
     'ok — значение раскрыто; not_disclosed — прочерк, «X» или пустая ячейка; '
     'not_applicable — строка неприменима к данной форме отчётности организации';

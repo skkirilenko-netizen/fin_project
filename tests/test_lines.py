@@ -5,7 +5,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from finlib.normalize.lines import LinesCatalog, Operator, Sign, load_lines
+from finlib.normalize.lines import (
+    LinesCatalog,
+    Operator,
+    ReportingType,
+    Sign,
+    load_lines,
+)
 
 # Минимальный перечень кодов из постановки задачи.
 REQUIRED_CODES: dict[str, tuple[str, ...]] = {
@@ -37,7 +43,7 @@ def test_catalog_loads(catalog: LinesCatalog) -> None:
     """Справочник читается, версия и формы заданы."""
     assert catalog.version
     assert set(catalog.forms) == {"0710001", "0710002", "0710005"}
-    assert len(catalog.lines) == len(catalog.codes)
+    assert len(catalog.for_type(ReportingType.FULL)) == len(catalog.codes(ReportingType.FULL))
 
 
 @pytest.mark.parametrize(("form", "codes"), REQUIRED_CODES.items())
@@ -50,10 +56,10 @@ def test_required_codes_present(catalog: LinesCatalog, form: str, codes: tuple[s
 
 
 def test_component_codes_exist(catalog: LinesCatalog) -> None:
-    """Все коды в составе итоговых строк существуют в справочнике."""
+    """Все коды в составе итоговых строк существуют в своём наборе."""
     for line in catalog.lines:
         for component in line.components:
-            assert catalog.has(component.code), (
+            assert catalog.has(component.code, line.reporting_type), (
                 f"в составе {line.code} указан отсутствующий код {component.code}"
             )
 
@@ -66,10 +72,10 @@ def test_totals_have_components(catalog: LinesCatalog) -> None:
 
 
 def test_components_belong_to_same_form(catalog: LinesCatalog) -> None:
-    """Итог не собирается из строк другой формы."""
-    for line in catalog.totals():
+    """Итог не собирается из строк другой формы или другого набора."""
+    for line in catalog.lines:
         for component in line.components:
-            assert catalog.require(component.code).form == line.form
+            assert catalog.require(component.code, line.reporting_type).form == line.form
 
 
 @pytest.mark.parametrize(
@@ -98,10 +104,10 @@ def test_known_compositions(
 
 
 def test_expense_lines_are_subtracted(catalog: LinesCatalog) -> None:
-    """Строки в круглых скобках входят в итог с минусом."""
-    for line in catalog.totals():
+    """Строки в круглых скобках входят в итог с минусом в обоих наборах."""
+    for line in catalog.lines:
         for component in line.components:
-            if catalog.require(component.code).in_brackets:
+            if catalog.require(component.code, line.reporting_type).in_brackets:
                 assert component.op is Operator.MINUS, (
                     f"{component.code} в составе {line.code} должна вычитаться"
                 )
@@ -133,6 +139,10 @@ def _catalog_dict(lines: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "version": "test",
         "forms": {"0710001": {"name": "Бухгалтерский баланс"}},
+        "reporting_types": {
+            "full": {"name": "Полная", "forms": ["0710001"]},
+            "simplified": {"name": "Упрощённая", "forms": ["0710001"]},
+        },
         "lines": lines,
     }
 
