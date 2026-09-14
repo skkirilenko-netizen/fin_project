@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS fact_report (
     report_date  date NOT NULL,
     form_code    text NOT NULL,
     line_code    text NOT NULL,
-    source_line_code text,
+    source_line_code text NOT NULL,
     value        numeric(20, 3),
     value_status text NOT NULL DEFAULT 'ok'
                  CHECK (value_status IN ('ok', 'not_disclosed', 'not_applicable')),
@@ -90,7 +90,9 @@ COMMENT ON COLUMN fact_report.line_code IS
     'в отчётности берётся по показателю с наибольшим удельным весом и между периодами меняется, '
     'поэтому ключом служит канонический код, а не код источника';
 COMMENT ON COLUMN fact_report.source_line_code IS
-    'Код строки, фактически указанный в отчётности; NULL — совпадает с line_code';
+    'Код строки, фактически указанный в отчётности. Заполняется всегда: для полных форм '
+    'совпадает с line_code, для упрощённых может отличаться. NULL не используется, '
+    'чтобы join и сравнения не требовали COALESCE';
 COMMENT ON COLUMN fact_report.value_status IS
     'ok — значение раскрыто; not_disclosed — прочерк, «X» или пустая ячейка; '
     'not_applicable — строка неприменима к данной форме отчётности организации';
