@@ -1,12 +1,21 @@
 """Тесты разбора ответа ГИР БО на реальных сохранённых пробах."""
 
+import inspect
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
-from probes import FULL_BFO, SEARCH_EMPTY, SEARCH_FOUND, SIMPLIFIED_BFO, read_probe
+from probes import (
+    CORRECTED_BFO,
+    FULL_BFO,
+    SEARCH_EMPTY,
+    SEARCH_FOUND,
+    SIMPLIFIED_BFO,
+    read_probe,
+)
 
 from finlib.normalize.lines import ReportingType
 from finlib.sources.cache import RawCache
@@ -16,6 +25,7 @@ from finlib.sources.girbo import (
     GirboSource,
     ReportSet,
     is_credit_organization,
+    parse_form,
     parse_organization,
     parse_report_sets,
     strip_highlight,
@@ -25,6 +35,7 @@ from finlib.utils import json_loads_decimal
 
 FULL_INN = "7736050003"
 SIMPLIFIED_INN = "2100010824"
+CORRECTED_INN = "2522002003"
 
 
 @pytest.fixture(scope="module")
@@ -37,6 +48,12 @@ def full_sets() -> list[ReportSet]:
 def simplified_sets() -> list[ReportSet]:
     """Комплекты упрощённой отчётности из пробы."""
     return parse_report_sets(json_loads_decimal(read_probe(SIMPLIFIED_BFO)), SIMPLIFIED_INN)
+
+
+@pytest.fixture(scope="module")
+def corrected_sets() -> list[ReportSet]:
+    """Комплекты организации, сдававшей корректировки."""
+    return parse_report_sets(json_loads_decimal(read_probe(CORRECTED_BFO)), CORRECTED_INN)
 
 
 def latest(sets: list[ReportSet]) -> ReportSet:
@@ -120,6 +137,41 @@ def test_values_are_decimal_not_float(full_sets: list[ReportSet]) -> None:
     assert ofr["2900"] == Decimal("0.48")
 
 
+def test_integer_json_value_becomes_decimal() -> None:
+    """Целая сумма приходит из JSON как int и обязана нормализоваться в Decimal.
+
+    json.loads переопределяет только parse_float, поэтому 418 остаётся int;
+    смешение int и Decimal в арифметике контролей недопустимо.
+    """
+    raw = b'{"okud": "0710001", "current1600": 418, "previous1600": 916.0}'
+    payload = json_loads_decimal(raw)
+    assert isinstance(payload["current1600"], int), "предпосылка теста изменилась"
+
+    form = parse_form(payload, 2024)
+    assert form is not None
+    value = form.values[date(2024, 12, 31)]["1600"]
+    assert isinstance(value, Decimal)
+    assert value == Decimal("418")
+    # Арифметика с другим периодом не падает и не приводит к float.
+    total = value + form.values[date(2023, 12, 31)]["1600"]
+    assert isinstance(total, Decimal)
+
+
+@pytest.mark.parametrize(
+    ("probe", "inn"),
+    [(FULL_BFO, FULL_INN), (SIMPLIFIED_BFO, SIMPLIFIED_INN), (CORRECTED_BFO, CORRECTED_INN)],
+)
+def test_every_value_is_decimal_or_none(probe: Path, inn: str) -> None:
+    """Ни одно значение из источника не доходит до БД в виде int или float."""
+    for report in parse_report_sets(json_loads_decimal(read_probe(probe)), inn):
+        for form in report.forms.values():
+            for values in form.values.values():
+                for code, value in values.items():
+                    assert value is None or isinstance(value, Decimal), (
+                        f"{inn} {form.form_code} {code}: {type(value).__name__}"
+                    )
+
+
 def test_missing_value_is_none_not_zero(full_sets: list[ReportSet]) -> None:
     """Нераскрытое значение приходит как None, а не как ноль."""
     balance = latest(full_sets).forms["0710001"].values[date(2025, 12, 31)]
@@ -193,7 +245,90 @@ def test_sets_are_sorted_newest_first(full_sets: list[ReportSet]) -> None:
     assert years == sorted(years, reverse=True)
 
 
+def test_real_correction_version_is_parsed(corrected_sets: list[ReportSet]) -> None:
+    """Номер корректировки читается из реальных данных, а не предполагается нулевым."""
+    by_year = {r.report_year: r for r in corrected_sets}
+    assert by_year[2024].correction_version == 1
+    assert by_year[2022].correction_version == 1
+    assert by_year[2021].correction_version == 1
+    assert by_year[2025].correction_version == 0
+    assert by_year[2023].correction_version == 0
+
+
+def test_corrected_sets_are_actual(corrected_sets: list[ReportSet]) -> None:
+    """Корректировка, совпавшая с actualCorrectionNumber, признаётся актуальной."""
+    for report in corrected_sets:
+        assert report.is_actual, f"год {report.report_year} признан неактуальным"
+
+
+def test_source_returns_only_actual_correction() -> None:
+    """Источник отдаёт только актуальную версию: прежней в ответе нет.
+
+    Проверено на реальном ответе: у 2024 года actualCorrectionNumber = 1
+    и ровно один элемент typeCorrections с correctionVersion = 1. Версия 0,
+    сданная до корректировки, в ответе отсутствует, и получить её неоткуда.
+    """
+    payload = json_loads_decimal(read_probe(CORRECTED_BFO))
+    corrected = [e for e in payload if int(e.get("actualCorrectionNumber") or 0) > 0]
+    assert corrected, "в пробе нет ни одной корректировки"
+    for entry in corrected:
+        versions = [
+            int(tc["correction"].get("correctionVersion") or 0)
+            for tc in entry["typeCorrections"]
+        ]
+        assert versions == [int(entry["actualCorrectionNumber"])]
+
+
+def test_non_actual_correction_is_kept_not_dropped() -> None:
+    """Если источник отдаст несколько версий, неактуальная сохраняется, а не теряется.
+
+    Форма ответа взята из реальной пробы, добавлен второй элемент
+    typeCorrections: в наблюдаемых ответах ГИР БО такого не встречалось,
+    но поле объявлено списком, и терять версии нельзя.
+    """
+    payload = json_loads_decimal(read_probe(CORRECTED_BFO))
+    entry = next(e for e in payload if int(e.get("actualCorrectionNumber") or 0) == 1)
+    superseded = deepcopy(entry["typeCorrections"][0])
+    superseded["correction"]["correctionVersion"] = 0
+    entry["typeCorrections"].append(superseded)
+
+    sets = parse_report_sets([entry], "2522002003")
+    assert len(sets) == 2, "версия потеряна при разборе"
+    actual = [s for s in sets if s.is_actual]
+    stale = [s for s in sets if not s.is_actual]
+    assert [s.correction_version for s in actual] == [1]
+    assert [s.correction_version for s in stale] == [0]
+    # Обе версии относятся к одному году и различаются только номером.
+    assert {s.report_year for s in sets} == {actual[0].report_year}
+
+
+def test_correction_version_separates_src_file_keys() -> None:
+    """Ключ комплекта различает версии: это и позволяет хранить обе в src_file."""
+    payload = json_loads_decimal(read_probe(CORRECTED_BFO))
+    entry = next(e for e in payload if int(e.get("actualCorrectionNumber") or 0) == 1)
+    superseded = deepcopy(entry["typeCorrections"][0])
+    superseded["correction"]["correctionVersion"] = 0
+    entry["typeCorrections"].append(superseded)
+
+    keys = {
+        (s.inn, s.report_year, s.correction_version)
+        for s in parse_report_sets([entry], "2522002003")
+    }
+    assert len(keys) == 2
+
+
 # --- отбраковка и ошибки ----------------------------------------------------
+
+
+def test_journal_is_on_by_default_and_keyword_only() -> None:
+    """Журналирование включено по умолчанию и случайно позиционно не отключается."""
+    parameter = inspect.signature(GirboSource.__init__).parameters["journal"]
+    assert parameter.default is True
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+    # Третий позиционный аргумент не существует: отключить журнал мимоходом нельзя.
+    with pytest.raises(TypeError):
+        GirboSource(None, None, False)  # type: ignore[misc]
 
 
 def test_credit_organization_flag() -> None:
