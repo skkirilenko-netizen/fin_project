@@ -176,6 +176,8 @@ CREATE TABLE IF NOT EXISTS metric_value (
     metric_code           text NOT NULL,
     value                 numeric(30, 10),
     status                text NOT NULL CHECK (status IN ('ok', 'not_calculable')),
+    confidence            text NOT NULL DEFAULT 'verified'
+                          CHECK (confidence IN ('verified', 'comparative_only', 'quarantined')),
     reason                text,
     methodology_version   text NOT NULL,
     computed_at           timestamptz NOT NULL DEFAULT now(),
@@ -185,6 +187,10 @@ CREATE TABLE IF NOT EXISTS metric_value (
 CREATE INDEX IF NOT EXISTS metric_value_period_idx ON metric_value (inn, report_date);
 
 COMMENT ON TABLE metric_value IS 'Значения коэффициентов; считает Python, не языковая модель';
+COMMENT ON COLUMN metric_value.confidence IS
+    'Доверие к периоду: verified — период проверен блокирующими контролями в своём комплекте; '
+    'comparative_only — период пришёл только сравнительной колонкой и блокирующими контролями '
+    'не проверялся; quarantined — собственный комплект периода в карантине';
 COMMENT ON COLUMN metric_value.status IS 'not_calculable — нет входных данных, подстановка приближений запрещена';
 COMMENT ON COLUMN metric_value.reason IS 'Причина нерасчёта с указанием отсутствующего кода строки';
 
@@ -211,5 +217,33 @@ CREATE INDEX IF NOT EXISTS llm_log_inn_idx ON llm_log (inn, report_date);
 COMMENT ON TABLE llm_log IS 'Каждое обращение к модели с результатом постпроверки';
 COMMENT ON COLUMN llm_log.verified IS 'false — ответ содержит посторонние числа и пользователю не показывается';
 COMMENT ON COLUMN llm_log.foreign_numbers IS 'Числа из ответа, не найденные во входных блоках';
+
+-- Доверие к периоду ----------------------------------------------------------
+
+-- Один и тот же период приходит и своим комплектом, и сравнительной колонкой
+-- более поздних. Блокирующие контроли применяются только к отчётному периоду
+-- комплекта, поэтому период, существующий ТОЛЬКО сравнительной колонкой,
+-- ими не проверялся. Без явного признака динамика за три года выглядела бы
+-- одинаково достоверной.
+CREATE OR REPLACE VIEW period_quality AS
+SELECT
+    f.inn,
+    f.report_date,
+    bool_or(f.period_role = 'current')                                  AS has_own_report,
+    bool_or(f.period_role = 'current' AND s.status = 'quarantine')      AS own_report_quarantined,
+    count(*)                                                            AS lines_total,
+    count(f.value)                                                      AS lines_disclosed,
+    min(f.src_file_id) FILTER (WHERE f.period_role = 'current')         AS own_src_file_id,
+    CASE
+        WHEN bool_or(f.period_role = 'current' AND s.status = 'quarantine') THEN 'quarantined'
+        WHEN NOT bool_or(f.period_role = 'current') THEN 'comparative_only'
+        ELSE 'verified'
+    END                                                                 AS confidence
+FROM fact_report f
+JOIN src_file s ON s.id = f.src_file_id
+GROUP BY f.inn, f.report_date;
+
+COMMENT ON VIEW period_quality IS
+    'Доверие к периоду: проверялся ли он блокирующими контролями в собственном комплекте';
 
 COMMIT;
