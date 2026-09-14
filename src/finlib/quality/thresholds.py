@@ -63,6 +63,8 @@ class Thresholds(BaseModel):
 
     version: str = Field(min_length=1)
     unit_code: str = Field(min_length=1)
+    # Именованные константы формул: числовых литералов в формулах нет.
+    constants: dict[str, Decimal] = Field(default_factory=dict)
     rounding: Rounding
     jump_detection: JumpDetection
     retained_earnings_link: RetainedEarningsLink

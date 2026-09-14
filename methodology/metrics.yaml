@@ -1,0 +1,288 @@
+# Определения показателей финансового состояния.
+#
+# ОТРАСЛЕВЫХ И ЕДИНЫХ АБСОЛЮТНЫХ НОРМАТИВОВ ЗДЕСЬ НЕТ И НЕ ДОЛЖНО БЫТЬ.
+# Основа интерпретации — динамика показателя во времени: направление
+# изменения, темп, устойчивость тренда, разрывы. Сравнение с числом,
+# взятым неизвестно откуда, запрещено: поля «норматив» в определениях нет.
+#
+# Единственное исключение — stop_factor: немногие пороги, имеющие
+# содержательный смысл вне отрасли (отрицательный собственный капитал,
+# покрытие процентов меньше единицы). Они помечены явно.
+#
+# Язык формул. Четырёхзначное число — код строки отчётности. avg(код) —
+# полусумма на начало и конец периода, требует предыдущего периода.
+# Прописные имена — константы из thresholds.yaml. Числовых литералов
+# в формулах нет: любое число либо код строки, либо именованная константа.
+#
+# formulas.simplified — переопределение формулы для упрощённой отчётности,
+# где состав строк другой. Показатель без переопределения и без
+# упрощённого набора в applicable_to для упрощённых форм не рассчитывается
+# и получает статус not_applicable_form.
+
+version: "1.0.0"
+
+groups:
+  liquidity:
+    name: Ликвидность
+  stability:
+    name: Финансовая устойчивость
+  debt:
+    name: Долговая нагрузка
+  profitability:
+    name: Рентабельность
+  turnover:
+    name: Оборачиваемость
+
+metrics:
+
+  # --- Ликвидность ----------------------------------------------------------
+
+  - code: cur_liq
+    name: Коэффициент текущей ликвидности
+    group: liquidity
+    unit: ratio
+    direction: higher_better
+    formula: "1200 / 1500"
+    formulas:
+      simplified: "(1210 + 1240 + 1250) / (1510 + 1520 + 1550)"
+    applicable_to: [full, simplified]
+
+  - code: quick_liq
+    name: Коэффициент быстрой ликвидности
+    group: liquidity
+    unit: ratio
+    direction: higher_better
+    formula: "(1230 + 1240 + 1250) / 1500"
+    applicable_to: [full]
+    note: >-
+      В упрощённой отчётности не рассчитывается: дебиторская задолженность
+      и финансовые вложения слиты в укрупнённую строку, выделить их нельзя.
+
+  - code: abs_liq
+    name: Коэффициент абсолютной ликвидности
+    group: liquidity
+    unit: ratio
+    direction: higher_better
+    formula: "(1240 + 1250) / 1500"
+    applicable_to: [full]
+    note: >-
+      В упрощённой отчётности не рассчитывается: строка 1240 там включает
+      дебиторскую задолженность и финансовыми вложениями не является.
+
+  - code: nwc
+    name: Чистый оборотный капитал
+    group: liquidity
+    unit: thousand_rub
+    direction: higher_better
+    formula: "1200 - 1500"
+    formulas:
+      simplified: "(1210 + 1240 + 1250) - (1510 + 1520 + 1550)"
+    applicable_to: [full, simplified]
+    stop_factor:
+      condition: lt
+      value: "0"
+      note: >-
+        Отрицательный чистый оборотный капитал означает, что краткосрочные
+        обязательства финансируют внеоборотные активы. Порог содержателен
+        вне отрасли.
+
+  # --- Финансовая устойчивость ----------------------------------------------
+
+  - code: equity
+    name: Собственный капитал (строка 1300)
+    group: stability
+    unit: thousand_rub
+    direction: higher_better
+    formula: "1300"
+    applicable_to: [full, simplified]
+    note: >-
+      Это итог раздела III баланса, а не чистые активы по методике Минфина
+      (приказ от 28.08.2014 № 84н). Та методика исключает задолженность
+      участников по взносам в уставный капитал и учитывает часть доходов
+      будущих периодов; ни то, ни другое в формах 0710001 и 0710002
+      отдельными строками не раскрывается, поэтому рассчитать её по нашим
+      входным данным невозможно. Для организаций без задолженности
+      участников и без целевых доходов будущих периодов величины совпадают.
+    stop_factor:
+      condition: lt
+      value: "0"
+      note: >-
+        Отрицательный собственный капитал — признак того, что обязательства
+        превышают активы. Порог содержателен вне отрасли.
+
+  - code: equity_ratio
+    name: Коэффициент автономии
+    group: stability
+    unit: ratio
+    direction: higher_better
+    formula: "1300 / 1700"
+    applicable_to: [full, simplified]
+    stop_factor:
+      condition: lt
+      value: "0"
+      note: >-
+        Отрицательное значение возможно только при отрицательном собственном
+        капитале и означает то же самое.
+
+  - code: debt_to_equity
+    name: Отношение обязательств к собственному капиталу
+    group: stability
+    unit: ratio
+    direction: lower_better
+    formula: "(1400 + 1500) / 1300"
+    formulas:
+      simplified: "(1700 - 1300) / 1300"
+    applicable_to: [full, simplified]
+
+  - code: own_wc_ratio
+    name: Обеспеченность собственными оборотными средствами
+    group: stability
+    unit: ratio
+    direction: higher_better
+    formula: "(1300 - 1100) / 1200"
+    formulas:
+      simplified: "(1300 - 1150 - 1170) / (1210 + 1240 + 1250)"
+    applicable_to: [full, simplified]
+
+  - code: fin_leverage
+    name: Финансовый рычаг
+    group: stability
+    unit: ratio
+    direction: lower_better
+    formula: "1700 / 1300"
+    applicable_to: [full, simplified]
+
+  # --- Долговая нагрузка ----------------------------------------------------
+
+  - code: debt_total
+    name: Совокупный долг
+    group: debt
+    unit: thousand_rub
+    direction: lower_better
+    formula: "1410 + 1510"
+    applicable_to: [full, simplified]
+    note: >-
+      В расчёт входят только заёмные средства — строки 1410 и 1510.
+      Обязательства по аренде, кредиторская задолженность, оценочные и прочие
+      обязательства сюда не включены: отдельными строками они не раскрываются
+      и по характеру не являются заёмным финансированием.
+
+  - code: net_debt
+    name: Чистый долг
+    group: debt
+    unit: thousand_rub
+    direction: lower_better
+    formula: "1410 + 1510 - 1250"
+    applicable_to: [full, simplified]
+    note: >-
+      Совокупный долг за вычетом денежных средств. Ограничение по составу
+      долга — то же, что у показателя «Совокупный долг».
+
+  - code: debt_to_op_profit
+    name: Чистый долг к прибыли от продаж
+    group: debt
+    unit: ratio
+    direction: lower_better
+    formula: "(1410 + 1510 - 1250) / 2200"
+    applicable_to: [full]
+    note: >-
+      Это НЕ «Чистый долг / EBITDA». Амортизация в формах 0710001, 0710002
+      и 0710005 не раскрывается — она приводится в пояснениях, которые
+      методикой не разбираются, поэтому EBITDA рассчитать нельзя. Показатель
+      назван по фактическому знаменателю, чтобы не выдавать одно за другое.
+
+  - code: interest_cover
+    name: Покрытие процентов прибылью от продаж
+    group: debt
+    unit: ratio
+    direction: higher_better
+    formula: "2200 / 2330"
+    applicable_to: [full]
+    zero_denominator_note: >-
+      Проценты к уплате раскрыты и равны нулю. Если при этом у организации
+      есть заёмные средства по строкам 1410 или 1510, отсутствие процентных
+      расходов требует пояснения: это сигнал, а не отсутствие данных.
+    stop_factor:
+      condition: lt
+      value: "1"
+      note: >-
+        Покрытие меньше единицы означает, что прибыли от продаж не хватает
+        на обслуживание процентов. Порог содержателен вне отрасли.
+
+  # --- Рентабельность -------------------------------------------------------
+
+  - code: gross_margin
+    name: Валовая рентабельность
+    group: profitability
+    unit: ratio
+    direction: higher_better
+    formula: "2100 / 2110"
+    applicable_to: [full]
+    note: >-
+      В упрощённой отчётности не рассчитывается: валовой прибыли там нет,
+      а строка 2120 включает коммерческие и управленческие расходы.
+
+  - code: op_margin
+    name: Рентабельность продаж
+    group: profitability
+    unit: ratio
+    direction: higher_better
+    formula: "2200 / 2110"
+    applicable_to: [full]
+
+  - code: net_margin
+    name: Чистая рентабельность
+    group: profitability
+    unit: ratio
+    direction: higher_better
+    formula: "2400 / 2110"
+    applicable_to: [full, simplified]
+
+  - code: roa
+    name: Рентабельность активов
+    group: profitability
+    unit: ratio
+    direction: higher_better
+    formula: "2400 / avg(1600)"
+    applicable_to: [full, simplified]
+
+  - code: roe
+    name: Рентабельность собственного капитала
+    group: profitability
+    unit: ratio
+    direction: higher_better
+    formula: "2400 / avg(1300)"
+    applicable_to: [full, simplified]
+
+  # --- Оборачиваемость ------------------------------------------------------
+
+  - code: asset_turnover
+    name: Оборачиваемость активов
+    group: turnover
+    unit: ratio
+    direction: higher_better
+    formula: "2110 / avg(1600)"
+    applicable_to: [full, simplified]
+
+  - code: receivables_days
+    name: Оборачиваемость дебиторской задолженности, дней
+    group: turnover
+    unit: days
+    direction: lower_better
+    formula: "DAYS * avg(1230) / 2110"
+    applicable_to: [full]
+    note: >-
+      В упрощённой отчётности не рассчитывается: дебиторская задолженность
+      отдельной строкой не раскрывается.
+
+  - code: inventory_days
+    name: Оборачиваемость запасов, дней
+    group: turnover
+    unit: days
+    direction: lower_better
+    formula: "DAYS * avg(1210) / 2120"
+    applicable_to: [full]
+    note: >-
+      В упрощённой отчётности не рассчитывается: строка 2120 там означает
+      все расходы по обычной деятельности, а не себестоимость продаж,
+      и знаменатель был бы несопоставим.

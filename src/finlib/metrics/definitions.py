@@ -1,0 +1,210 @@
+"""Загрузка определений показателей из methodology/metrics.yaml."""
+
+from decimal import Decimal
+from enum import StrEnum
+from functools import cached_property, lru_cache
+from pathlib import Path
+from typing import Self
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from finlib.config import settings
+from finlib.metrics.formula import (
+    Node,
+    average_codes,
+    constant_names,
+    line_codes,
+    parse_formula,
+)
+from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
+
+
+class Direction(StrEnum):
+    """Куда лучше двигаться показателю; основа интерпретации динамики."""
+
+    HIGHER_BETTER = "higher_better"
+    LOWER_BETTER = "lower_better"
+    NEUTRAL = "neutral"
+
+
+class Unit(StrEnum):
+    """Единица измерения показателя."""
+
+    RATIO = "ratio"
+    THOUSAND_RUB = "thousand_rub"
+    DAYS = "days"
+
+
+class Condition(StrEnum):
+    """Условие срабатывания стоп-фактора."""
+
+    LT = "lt"
+    LTE = "lte"
+    GT = "gt"
+    GTE = "gte"
+
+
+class StopFactor(BaseModel):
+    """Порог, имеющий содержательный смысл вне отрасли."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    condition: Condition
+    value: Decimal
+    note: str = Field(min_length=1)
+
+    def triggered(self, value: Decimal) -> bool:
+        """Сработал ли стоп-фактор на этом значении."""
+        if self.condition is Condition.LT:
+            return value < self.value
+        if self.condition is Condition.LTE:
+            return value <= self.value
+        if self.condition is Condition.GT:
+            return value > self.value
+        return value >= self.value
+
+
+class GroupDef(BaseModel):
+    """Группа показателей."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+
+
+class MetricDef(BaseModel):
+    """Определение одного показателя."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    name: str = Field(min_length=1)
+    group: str = Field(min_length=1)
+    unit: Unit
+    direction: Direction
+    formula: str = Field(min_length=1)
+    formulas: dict[ReportingType, str] = Field(default_factory=dict)
+    applicable_to: tuple[ReportingType, ...] = Field(min_length=1)
+    note: str | None = None
+    zero_denominator_note: str | None = None
+    stop_factor: StopFactor | None = None
+
+    @cached_property
+    def trees(self) -> dict[ReportingType, Node]:
+        """Разобранные формулы по наборам отчётности."""
+        result: dict[ReportingType, Node] = {}
+        for reporting_type in self.applicable_to:
+            text = self.formulas.get(reporting_type, self.formula)
+            result[reporting_type] = parse_formula(text)
+        return result
+
+    def tree_for(self, reporting_type: ReportingType) -> Node | None:
+        """Дерево формулы для набора; None — показатель к набору неприменим."""
+        return self.trees.get(reporting_type)
+
+    def formula_text(self, reporting_type: ReportingType) -> str:
+        """Текст формулы, применяемой для набора."""
+        return self.formulas.get(reporting_type, self.formula)
+
+    def requires_previous(self, reporting_type: ReportingType) -> bool:
+        """Нужен ли предыдущий период: есть ли в формуле средние величины."""
+        tree = self.tree_for(reporting_type)
+        return bool(tree is not None and average_codes(tree))
+
+    def is_applicable(self, reporting_type: ReportingType) -> bool:
+        """Рассчитывается ли показатель для этого набора отчётности."""
+        return reporting_type in self.applicable_to
+
+    @model_validator(mode="after")
+    def _check_formulas(self) -> Self:
+        """Формулы разбираются, переопределения относятся к применимым наборам."""
+        for reporting_type in self.formulas:
+            if reporting_type not in self.applicable_to:
+                raise ValueError(
+                    f"показатель {self.code}: переопределение формулы для набора "
+                    f"{reporting_type}, к которому показатель неприменим"
+                )
+        _ = self.trees  # разбор формул на этапе загрузки, а не расчёта
+        return self
+
+
+class MetricsCatalog(BaseModel):
+    """Справочник показателей."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1)
+    groups: dict[str, GroupDef]
+    metrics: tuple[MetricDef, ...]
+
+    @model_validator(mode="after")
+    def _check_integrity(self) -> Self:
+        """Коды уникальны, группы известны."""
+        seen: set[str] = set()
+        for metric in self.metrics:
+            if metric.code in seen:
+                raise ValueError(f"код показателя {metric.code} встречается дважды")
+            if metric.group not in self.groups:
+                raise ValueError(
+                    f"показатель {metric.code} ссылается на неизвестную группу {metric.group}"
+                )
+            seen.add(metric.code)
+        return self
+
+    def get(self, code: str) -> MetricDef | None:
+        """Определение показателя по коду."""
+        return next((item for item in self.metrics if item.code == code), None)
+
+    def require(self, code: str) -> MetricDef:
+        """Определение показателя; отсутствие — ошибка."""
+        metric = self.get(code)
+        if metric is None:
+            raise KeyError(f"показатель {code} отсутствует в методике")
+        return metric
+
+    def for_type(self, reporting_type: ReportingType) -> tuple[MetricDef, ...]:
+        """Показатели, применимые к набору отчётности."""
+        return tuple(item for item in self.metrics if item.is_applicable(reporting_type))
+
+    def by_group(self, group: str) -> tuple[MetricDef, ...]:
+        """Показатели одной группы."""
+        return tuple(item for item in self.metrics if item.group == group)
+
+    def stop_factors(self) -> tuple[MetricDef, ...]:
+        """Показатели, у которых объявлен стоп-фактор."""
+        return tuple(item for item in self.metrics if item.stop_factor is not None)
+
+    def validate_against(self, catalog: LinesCatalog, constants: set[str]) -> None:
+        """Проверяет, что формулы опираются на существующие строки и константы."""
+        for metric in self.metrics:
+            for reporting_type in metric.applicable_to:
+                tree = metric.trees[reporting_type]
+                for code in line_codes(tree):
+                    if not catalog.has(code, reporting_type):
+                        raise ValueError(
+                            f"показатель {metric.code}: строка {code} отсутствует "
+                            f"в наборе {reporting_type}"
+                        )
+                unknown = constant_names(tree) - constants
+                if unknown:
+                    raise ValueError(
+                        f"показатель {metric.code}: неизвестные константы {sorted(unknown)}"
+                    )
+
+
+def default_path() -> Path:
+    """Путь к определениям показателей по умолчанию."""
+    return settings.methodology_dir / "metrics.yaml"
+
+
+@lru_cache(maxsize=8)
+def load_metrics(path: Path | None = None) -> MetricsCatalog:
+    """Читает и проверяет определения показателей; результат кэшируется."""
+    from finlib.quality.thresholds import load_thresholds
+
+    source = Path(path) if path is not None else default_path()
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    catalog = MetricsCatalog.model_validate(raw)
+    catalog.validate_against(load_lines(), set(load_thresholds().constants))
+    return catalog

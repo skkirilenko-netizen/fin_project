@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS metric_value (
     confidence            text NOT NULL DEFAULT 'verified'
                           CHECK (confidence IN ('verified', 'comparative_only', 'quarantined')),
     reason                text,
+    reason_code           text,
     methodology_version   text NOT NULL,
     computed_at           timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT metric_value_uniq UNIQUE (inn, report_date, metric_code)
