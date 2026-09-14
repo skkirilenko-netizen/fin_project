@@ -27,6 +27,7 @@ from finlib.sources.girbo import (
     Organization,
     ReportSet,
 )
+from finlib.standards import Standard
 from finlib.utils import ValueStatus
 
 logger = logging.getLogger(__name__)
@@ -71,21 +72,22 @@ ON CONFLICT (inn) DO UPDATE SET
 
 _SUPERSEDE_OTHER_VERSIONS = """
 UPDATE src_file SET is_actual = false
-WHERE inn = %(inn)s AND report_year = %(report_year)s AND source = %(source)s
-  AND correction_version <> %(correction_version)s AND is_actual
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)s
+  AND source = %(source)s AND correction_version <> %(correction_version)s AND is_actual
 """
 
 _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
-    inn, report_year, source, source_url, raw_path, checksum, form_codes, knd, girbo_bfo_id,
-    correction_version, is_actual, reporting_type, unit_code, unit_multiplier, unit_source,
-    status, meta
+    inn, standard, report_year, source, source_url, raw_path, checksum, form_codes, knd,
+    girbo_bfo_id, correction_version, is_actual, reporting_type, unit_code, unit_multiplier,
+    unit_source, status, meta
 ) VALUES (
-    %(inn)s, %(report_year)s, %(source)s, %(source_url)s, %(raw_path)s, %(checksum)s,
-    %(form_codes)s, %(knd)s, %(girbo_bfo_id)s, %(correction_version)s, %(is_actual)s,
-    %(reporting_type)s, %(unit_code)s, %(unit_multiplier)s, %(unit_source)s, 'loaded', %(meta)s
+    %(inn)s, %(standard)s, %(report_year)s, %(source)s, %(source_url)s, %(raw_path)s,
+    %(checksum)s, %(form_codes)s, %(knd)s, %(girbo_bfo_id)s, %(correction_version)s,
+    %(is_actual)s, %(reporting_type)s, %(unit_code)s, %(unit_multiplier)s, %(unit_source)s,
+    'loaded', %(meta)s
 )
-ON CONFLICT (inn, report_year, source, correction_version) DO UPDATE SET
+ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
     source_url = EXCLUDED.source_url,
     raw_path = EXCLUDED.raw_path,
     checksum = EXCLUDED.checksum,
@@ -105,20 +107,21 @@ RETURNING id
 _SELECT_EXISTING = """
 SELECT report_date, form_code, line_code, value, value_status, period_role, src_file_id
 FROM fact_report
-WHERE inn = %(inn)s AND report_date = ANY(%(dates)s) AND form_code = ANY(%(forms)s)
+WHERE inn = %(inn)s AND standard = %(standard)s
+  AND report_date = ANY(%(dates)s) AND form_code = ANY(%(forms)s)
 """
 
 # Сравнительный период не затирает уже загруженное отчётное значение, а
 # совпадающее значение не трогает updated_at и не порождает записей журнала.
 _UPSERT_FACT = """
 INSERT INTO fact_report (
-    src_file_id, inn, report_date, form_code, line_code, source_line_code,
+    src_file_id, inn, standard, report_date, form_code, line_code, source_line_code,
     value, value_status, period_role
 ) VALUES (
-    %(src_file_id)s, %(inn)s, %(report_date)s, %(form_code)s, %(line_code)s,
+    %(src_file_id)s, %(inn)s, %(standard)s, %(report_date)s, %(form_code)s, %(line_code)s,
     %(source_line_code)s, %(value)s, %(value_status)s, %(period_role)s
 )
-ON CONFLICT (inn, report_date, form_code, line_code) DO UPDATE SET
+ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     src_file_id = EXCLUDED.src_file_id,
     source_line_code = EXCLUDED.source_line_code,
     value = EXCLUDED.value,
@@ -263,6 +266,7 @@ def load_report_set(
     raw_path: str | None = None,
     checksum: str | None = None,
     source_url: str | None = None,
+    standard: Standard = Standard.RSBU,
 ) -> LoadReport:
     """Загружает один комплект отчётности целиком в переданной транзакции.
 
@@ -283,6 +287,7 @@ def load_report_set(
             _SUPERSEDE_OTHER_VERSIONS,
             {
                 "inn": report.inn,
+                "standard": standard.value,
                 "report_year": report.report_year,
                 "source": SOURCE,
                 "correction_version": report.correction_version,
@@ -290,7 +295,7 @@ def load_report_set(
             conn=conn,
         )
 
-    src_file_id = _upsert_src_file(report, conn, raw_path, checksum, source_url)
+    src_file_id = _upsert_src_file(report, conn, raw_path, checksum, source_url, standard)
     result.src_file_id = src_file_id
 
     built = build_facts(report, catalog)
@@ -304,7 +309,7 @@ def load_report_set(
         sorted({d for form in report.forms.values() for d in form.values}, reverse=True)
     )
 
-    existing = _read_existing(report, conn)
+    existing = _read_existing(report, conn, standard)
     to_write, records = _decide(report, built.facts, existing, src_file_id, result)
 
     if to_write:
@@ -314,6 +319,7 @@ def load_report_set(
                 {
                     "src_file_id": src_file_id,
                     "inn": report.inn,
+                    "standard": standard.value,
                     "report_date": _fact_date(report, fact),
                     "form_code": fact.form_code,
                     "line_code": fact.line_code,
@@ -366,10 +372,12 @@ def _upsert_src_file(
     raw_path: str | None,
     checksum: str | None,
     source_url: str | None,
+    standard: Standard,
 ) -> int:
     """Пишет комплект как единицу обработки и возвращает его идентификатор."""
     params: dict[str, Any] = {
         "inn": report.inn,
+        "standard": standard.value,
         "report_year": report.report_year,
         "source": SOURCE,
         "source_url": source_url,
@@ -395,7 +403,7 @@ def _upsert_src_file(
 
 
 def _read_existing(
-    report: ReportSet, conn: PgConnection
+    report: ReportSet, conn: PgConnection, standard: Standard
 ) -> dict[tuple[date, str, str], _Existing]:
     """Читает уже загруженные значения затрагиваемых периодов и форм."""
     dates = sorted({d for form in report.forms.values() for d in form.values})
@@ -403,7 +411,12 @@ def _read_existing(
         return {}
     rows = fetch_all(
         _SELECT_EXISTING,
-        {"inn": report.inn, "dates": dates, "forms": list(report.form_codes)},
+        {
+            "inn": report.inn,
+            "standard": standard.value,
+            "dates": dates,
+            "forms": list(report.form_codes),
+        },
         conn=conn,
     )
     return {

@@ -18,6 +18,7 @@ from finlib.quality.checks import (
 from finlib.quality.codes import CheckStatus, Severity
 from finlib.quality.context import LineValue, PeriodFacts, ReportContext
 from finlib.quality.thresholds import load_thresholds
+from finlib.standards import Standard
 
 BALANCE = "0710001"
 PROFIT = "0710002"
@@ -54,6 +55,7 @@ def context(
         inn="7736050003",
         report_year=CURRENT.year,
         reporting_type=reporting_type,
+        standard=Standard.RSBU,
         unit_code="384",
         unit_source="assumed",
         status="loaded",

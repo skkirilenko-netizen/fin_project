@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS src_file (
     inn               text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
     report_year       integer NOT NULL,
     source            text NOT NULL CHECK (source IN ('gir_bo', 'file')),
+    standard          text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
     reporting_type    text NOT NULL DEFAULT 'full'
                       CHECK (reporting_type IN ('full', 'simplified')),
     source_url        text,
@@ -48,7 +49,7 @@ CREATE TABLE IF NOT EXISTS src_file (
     quarantine_reason text,
     meta              jsonb,
     loaded_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT src_file_uniq UNIQUE (inn, report_year, source, correction_version)
+    CONSTRAINT src_file_uniq UNIQUE (inn, standard, report_year, source, correction_version)
 );
 
 CREATE INDEX IF NOT EXISTS src_file_checksum_idx ON src_file (checksum);
@@ -61,6 +62,10 @@ COMMENT ON COLUMN src_file.unit_source IS
     'declared — единица указана источником; assumed — принята по умолчанию. '
     'В ответе ГИР БО поля единицы измерения нет вообще, значения приходят в тысячах рублей, '
     'поэтому для него всегда assumed';
+COMMENT ON COLUMN src_file.standard IS
+    'Стандарт отчётности: rsbu — РСБУ отдельного юридического лица, ifrs — консолидированная '
+    'по МСФО. Входит в ключ уникальности: за один год организация может раскрыть и то, и другое. '
+    'Ветка ifrs пока не реализована, значение заведено, чтобы потом не мигрировать данные';
 COMMENT ON COLUMN src_file.knd IS 'Код налогового документа: 0710099 — полная отчётность, 0710096 — упрощённая';
 COMMENT ON COLUMN src_file.correction_version IS
     'Номер корректировки отчётности. Входит в ключ уникальности: организация может сдать '
@@ -96,6 +101,7 @@ CREATE TABLE IF NOT EXISTS fact_report (
     id           bigserial PRIMARY KEY,
     src_file_id  bigint NOT NULL REFERENCES src_file (id) ON DELETE CASCADE,
     inn          text NOT NULL,
+    standard     text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
     report_date  date NOT NULL,
     form_code    text NOT NULL,
     line_code    text NOT NULL,
@@ -107,7 +113,7 @@ CREATE TABLE IF NOT EXISTS fact_report (
                  CHECK (period_role IN ('current', 'previous', 'before_previous')),
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT fact_report_uniq UNIQUE (inn, report_date, form_code, line_code),
+    CONSTRAINT fact_report_uniq UNIQUE (inn, standard, report_date, form_code, line_code),
     -- Значение есть тогда и только тогда, когда показатель раскрыт.
     CONSTRAINT fact_report_value_status_consistent
         CHECK ((value IS NOT NULL) = (value_status = 'ok'))
@@ -172,6 +178,7 @@ COMMENT ON COLUMN dq_log.status IS 'info — запись информацион
 CREATE TABLE IF NOT EXISTS metric_value (
     id                    bigserial PRIMARY KEY,
     inn                   text NOT NULL,
+    standard              text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
     report_date           date NOT NULL,
     metric_code           text NOT NULL,
     value                 numeric(30, 10),
@@ -182,8 +189,12 @@ CREATE TABLE IF NOT EXISTS metric_value (
     reason_code           text,
     methodology_version   text NOT NULL,
     computed_at           timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT metric_value_uniq UNIQUE (inn, report_date, metric_code)
+    CONSTRAINT metric_value_uniq UNIQUE (inn, standard, report_date, metric_code)
 );
+
+COMMENT ON COLUMN metric_value.standard IS
+    'Стандарт отчётности, по которому посчитан показатель. Входит в ключ: ряды по РСБУ '
+    'и по МСФО смешивать нельзя, а без этого поля расчёт по одному стандарту затирал бы другой';
 
 CREATE INDEX IF NOT EXISTS metric_value_period_idx ON metric_value (inn, report_date);
 
@@ -229,6 +240,7 @@ COMMENT ON COLUMN llm_log.foreign_numbers IS 'Числа из ответа, не
 CREATE OR REPLACE VIEW period_quality AS
 SELECT
     f.inn,
+    f.standard,
     f.report_date,
     bool_or(f.period_role = 'current')                                  AS has_own_report,
     bool_or(f.period_role = 'current' AND s.status = 'quarantine')      AS own_report_quarantined,
@@ -242,7 +254,7 @@ SELECT
     END                                                                 AS confidence
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
-GROUP BY f.inn, f.report_date;
+GROUP BY f.inn, f.standard, f.report_date;
 
 COMMENT ON VIEW period_quality IS
     'Доверие к периоду: проверялся ли он блокирующими контролями в собственном комплекте';

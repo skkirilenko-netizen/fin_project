@@ -18,6 +18,7 @@ from finlib.metrics.formula import (
 from finlib.normalize.lines import ReportingType
 from finlib.quality.periods import PeriodConfidence, period_quality
 from finlib.quality.thresholds import Thresholds, load_thresholds
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +26,21 @@ _SELECT_FACTS = """
 SELECT f.report_date, f.line_code, f.value
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND s.status <> 'quarantine'
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND s.status <> 'quarantine'
 ORDER BY f.report_date DESC
 """
 
 _SELECT_REPORTING_TYPE = """
 SELECT DISTINCT s.reporting_type
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.report_date = %(d)s AND f.period_role = 'current'
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
+  AND f.period_role = 'current'
 """
 
 _SELECT_ANY_TYPE = """
 SELECT s.reporting_type, count(*) AS n
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s
 GROUP BY s.reporting_type ORDER BY n DESC LIMIT 1
 """
 
@@ -76,10 +78,12 @@ class PeriodValues:
     values: dict[str, Decimal | None]
 
 
-def load_period_values(inn: str, conn: PgConnection | None = None) -> dict[date, PeriodValues]:
+def load_period_values(
+    inn: str, conn: PgConnection | None = None, standard: Standard = Standard.RSBU
+) -> dict[date, PeriodValues]:
     """Читает значения строк организации по периодам, минуя карантин."""
     periods: dict[date, PeriodValues] = {}
-    for row in fetch_all(_SELECT_FACTS, {"inn": inn}, conn=conn):
+    for row in fetch_all(_SELECT_FACTS, {"inn": inn, "standard": standard.value}, conn=conn):
         period = periods.setdefault(
             row["report_date"], PeriodValues(row["report_date"], {})
         )
@@ -88,13 +92,17 @@ def load_period_values(inn: str, conn: PgConnection | None = None) -> dict[date,
 
 
 def reporting_type_of(
-    inn: str, report_date: date, conn: PgConnection | None = None
+    inn: str,
+    report_date: date,
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
 ) -> ReportingType:
     """Набор строк, по которому сдан период; при отсутствии — преобладающий у организации."""
-    rows = fetch_all(_SELECT_REPORTING_TYPE, {"inn": inn, "d": report_date}, conn=conn)
+    params = {"inn": inn, "standard": standard.value, "d": report_date}
+    rows = fetch_all(_SELECT_REPORTING_TYPE, params, conn=conn)
     if rows:
         return ReportingType(rows[0]["reporting_type"])
-    fallback = fetch_all(_SELECT_ANY_TYPE, {"inn": inn}, conn=conn)
+    fallback = fetch_all(_SELECT_ANY_TYPE, {"inn": inn, "standard": standard.value}, conn=conn)
     if not fallback:
         raise ValueError(f"для ИНН {inn} нет загруженной отчётности")
     return ReportingType(fallback[0]["reporting_type"])
@@ -190,13 +198,18 @@ def compute_all(
     *,
     catalog: MetricsCatalog | None = None,
     thresholds: Thresholds | None = None,
+    standard: Standard = Standard.RSBU,
 ) -> list[MetricResult]:
-    """Считает все применимые показатели по всем периодам организации."""
+    """Считает все применимые показатели по всем периодам организации.
+
+    Расчёт всегда идёт в пределах одного стандарта: ряды по РСБУ и по МСФО
+    несопоставимы и смешению не подлежат.
+    """
     catalog = catalog if catalog is not None else load_metrics()
     thresholds = thresholds if thresholds is not None else load_thresholds()
 
-    periods = load_period_values(inn, conn)
-    quality = period_quality(inn, conn)
+    periods = load_period_values(inn, conn, standard)
+    quality = period_quality(inn, conn, standard)
     ordered = sorted(periods, reverse=True)
 
     results: list[MetricResult] = []
@@ -206,7 +219,7 @@ def compute_all(
             logger.info("период %s в карантине, показатели не считаются", report_date)
             continue
         confidence = info.confidence if info is not None else PeriodConfidence.VERIFIED
-        reporting_type = reporting_type_of(inn, report_date, conn)
+        reporting_type = reporting_type_of(inn, report_date, conn, standard)
         previous_date = _previous_usable(report_date, ordered, quality)
         previous = periods[previous_date].values if previous_date is not None else None
 

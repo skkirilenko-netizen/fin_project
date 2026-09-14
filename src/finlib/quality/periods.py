@@ -6,13 +6,16 @@ from datetime import date
 from enum import StrEnum
 
 from finlib.db import PgConnection, fetch_all
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
 _SELECT = """
 SELECT report_date, has_own_report, own_report_quarantined, own_src_file_id,
        lines_total, lines_disclosed, confidence
-FROM period_quality WHERE inn = %(inn)s ORDER BY report_date DESC
+FROM period_quality
+WHERE inn = %(inn)s AND standard = %(standard)s
+ORDER BY report_date DESC
 """
 
 
@@ -59,10 +62,14 @@ class PeriodQuality:
         return None
 
 
-def period_quality(inn: str, conn: PgConnection | None = None) -> dict[date, PeriodQuality]:
-    """Доверие ко всем периодам организации."""
+def period_quality(
+    inn: str,
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
+) -> dict[date, PeriodQuality]:
+    """Доверие ко всем периодам организации в пределах одного стандарта."""
     result: dict[date, PeriodQuality] = {}
-    for row in fetch_all(_SELECT, {"inn": inn}, conn=conn):
+    for row in fetch_all(_SELECT, {"inn": inn, "standard": standard.value}, conn=conn):
         result[row["report_date"]] = PeriodQuality(
             report_date=row["report_date"],
             confidence=PeriodConfidence(row["confidence"]),
@@ -75,10 +82,12 @@ def period_quality(inn: str, conn: PgConnection | None = None) -> dict[date, Per
     return result
 
 
-def limitations(inn: str, conn: PgConnection | None = None) -> list[str]:
+def limitations(
+    inn: str,
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
+) -> list[str]:
     """Оговорки по периодам для раздела «Ограничения анализа» заключения."""
-    notes = [
-        item.limitation
-        for item in sorted(period_quality(inn, conn).values(), key=lambda p: p.report_date)
-    ]
+    quality = period_quality(inn, conn, standard)
+    notes = [item.limitation for item in sorted(quality.values(), key=lambda p: p.report_date)]
     return [note for note in notes if note is not None]

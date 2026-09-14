@@ -10,18 +10,20 @@ from finlib.db import PgConnection, fetch_all, fetch_one
 from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.codes import CheckCode
 from finlib.quality.thresholds import Thresholds, load_thresholds
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
 _SELECT_SRC_FILE = """
-SELECT id, inn, report_year, reporting_type, unit_code, unit_source, status, correction_version
+SELECT id, inn, report_year, reporting_type, standard, unit_code, unit_source, status,
+       correction_version
 FROM src_file WHERE id = %(id)s
 """
 
 _SELECT_FACTS = """
 SELECT report_date, form_code, line_code, source_line_code, value, value_status, period_role
 FROM fact_report
-WHERE inn = %(inn)s AND report_date = ANY(%(dates)s)
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = ANY(%(dates)s)
 ORDER BY report_date DESC, form_code, line_code
 """
 
@@ -31,7 +33,8 @@ WHERE src_file_id = %(id)s ORDER BY report_date DESC
 """
 
 _SELECT_ALL_PERIODS = """
-SELECT DISTINCT report_date FROM fact_report WHERE inn = %(inn)s ORDER BY report_date DESC
+SELECT DISTINCT report_date FROM fact_report
+WHERE inn = %(inn)s AND standard = %(standard)s ORDER BY report_date DESC
 """
 
 # Записи загрузчика, из-за которых строка не попала в fact_report.
@@ -97,6 +100,7 @@ class ReportContext:
     inn: str
     report_year: int
     reporting_type: ReportingType
+    standard: Standard
     unit_code: str
     unit_source: str
     status: str
@@ -152,7 +156,9 @@ def build_context(
     dates = [row["report_date"] for row in period_rows]
     periods = {report_date: PeriodFacts(report_date) for report_date in dates}
 
-    for row in fetch_all(_SELECT_FACTS, {"inn": src["inn"], "dates": dates}, conn=conn):
+    standard = Standard(src["standard"])
+    facts_params = {"inn": src["inn"], "standard": standard.value, "dates": dates}
+    for row in fetch_all(_SELECT_FACTS, facts_params, conn=conn):
         facts = periods.get(row["report_date"])
         if facts is None:
             continue
@@ -183,7 +189,9 @@ def build_context(
 
     known = tuple(
         row["report_date"]
-        for row in fetch_all(_SELECT_ALL_PERIODS, {"inn": src["inn"]}, conn=conn)
+        for row in fetch_all(
+            _SELECT_ALL_PERIODS, {"inn": src["inn"], "standard": standard.value}, conn=conn
+        )
     )
 
     return ReportContext(
@@ -191,6 +199,7 @@ def build_context(
         inn=src["inn"],
         report_year=src["report_year"],
         reporting_type=ReportingType(src["reporting_type"]),
+        standard=standard,
         unit_code=src["unit_code"],
         unit_source=src["unit_source"],
         status=src["status"],

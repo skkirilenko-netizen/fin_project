@@ -10,18 +10,19 @@ from finlib.db import PgConnection, execute_many, fetch_all
 from finlib.metrics.definitions import load_metrics
 from finlib.metrics.engine import MetricResult, MetricStatus
 from finlib.quality.periods import PeriodConfidence
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
 _UPSERT = """
 INSERT INTO metric_value (
-    inn, report_date, metric_code, value, status, confidence, reason, reason_code,
+    inn, standard, report_date, metric_code, value, status, confidence, reason, reason_code,
     methodology_version
 ) VALUES (
-    %(inn)s, %(report_date)s, %(metric_code)s, %(value)s, %(status)s, %(confidence)s,
-    %(reason)s, %(reason_code)s, %(methodology_version)s
+    %(inn)s, %(standard)s, %(report_date)s, %(metric_code)s, %(value)s, %(status)s,
+    %(confidence)s, %(reason)s, %(reason_code)s, %(methodology_version)s
 )
-ON CONFLICT (inn, report_date, metric_code) DO UPDATE SET
+ON CONFLICT (inn, standard, report_date, metric_code) DO UPDATE SET
     value = EXCLUDED.value,
     status = EXCLUDED.status,
     confidence = EXCLUDED.confidence,
@@ -31,10 +32,12 @@ ON CONFLICT (inn, report_date, metric_code) DO UPDATE SET
     computed_at = now()
 """
 
+# Ряд строится строго в пределах одного стандарта: точки по РСБУ и по МСФО
+# несопоставимы, а в ряду выглядели бы одинаково.
 _SELECT_SERIES = """
 SELECT report_date, value, status, confidence, reason, reason_code
 FROM metric_value
-WHERE inn = %(inn)s AND metric_code = %(code)s
+WHERE inn = %(inn)s AND standard = %(standard)s AND metric_code = %(code)s
 ORDER BY report_date DESC
 """
 
@@ -56,6 +59,7 @@ class MetricSeries:
 
     metric_code: str
     points: tuple[SeriesPoint, ...]
+    standard: Standard = Standard.RSBU
 
     @property
     def calculated(self) -> tuple[SeriesPoint, ...]:
@@ -95,7 +99,10 @@ class MetricSeries:
 
 
 def save_results(
-    inn: str, results: Sequence[MetricResult], conn: PgConnection | None = None
+    inn: str,
+    results: Sequence[MetricResult],
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
 ) -> int:
     """Пишет результаты расчёта; повторный расчёт не создаёт дублей."""
     if not results:
@@ -106,6 +113,7 @@ def save_results(
         [
             {
                 "inn": inn,
+                "standard": standard.value,
                 "report_date": item.report_date,
                 "metric_code": item.metric_code,
                 "value": item.value,
@@ -123,8 +131,14 @@ def save_results(
     return len(results)
 
 
-def load_series(inn: str, metric_code: str, conn: PgConnection | None = None) -> MetricSeries:
-    """Читает ряд показателя вместе с доверием к каждому периоду."""
+def load_series(
+    inn: str,
+    metric_code: str,
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
+) -> MetricSeries:
+    """Читает ряд показателя одного стандарта вместе с доверием к каждому периоду."""
+    params = {"inn": inn, "standard": standard.value, "code": metric_code}
     points = tuple(
         SeriesPoint(
             report_date=row["report_date"],
@@ -133,6 +147,6 @@ def load_series(inn: str, metric_code: str, conn: PgConnection | None = None) ->
             confidence=PeriodConfidence(row["confidence"]),
             reason=row["reason"],
         )
-        for row in fetch_all(_SELECT_SERIES, {"inn": inn, "code": metric_code}, conn=conn)
+        for row in fetch_all(_SELECT_SERIES, params, conn=conn)
     )
-    return MetricSeries(metric_code=metric_code, points=points)
+    return MetricSeries(metric_code=metric_code, points=points, standard=standard)
