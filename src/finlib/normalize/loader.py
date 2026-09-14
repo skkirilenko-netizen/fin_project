@@ -10,7 +10,13 @@ from typing import Any
 
 from finlib.db import PgConnection, cursor, execute, execute_many, fetch_all
 from finlib.normalize.lines import LinesCatalog, load_lines
-from finlib.normalize.mapper import Fact, LineConflict, MappingResult, map_codes
+from finlib.normalize.mapper import (
+    AmbiguousCode,
+    Fact,
+    LineConflict,
+    MappingResult,
+    map_codes,
+)
 from finlib.normalize.report import LoadReport
 from finlib.quality.codes import CheckCode, CheckStatus
 from finlib.quality.journal import CheckRecord, log_records
@@ -156,6 +162,7 @@ class BuiltFacts:
     ignored: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     not_applicable: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     ambiguous: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
+    ambiguous_details: list[AmbiguousCode] = dc_field(default_factory=list)
     conflicts: list[LineConflict] = dc_field(default_factory=list)
 
 
@@ -188,6 +195,10 @@ def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
             )
         if mapping.ambiguous:
             built.ambiguous[form_code] = tuple(item.source_code for item in mapping.ambiguous)
+            built.ambiguous_details.extend(
+                AmbiguousCode(form_code, item.source_code, item.candidates)
+                for item in mapping.ambiguous
+            )
 
         for report_date, values in form.values.items():
             role = period_role(report.report_year, report_date)
@@ -315,7 +326,7 @@ def load_report_set(
             ],
             conn=conn,
         )
-    records.extend(_code_records(report, src_file_id, built.unknown, built.ambiguous))
+    records.extend(_code_records(report, src_file_id, built.unknown, built.ambiguous_details))
     records.extend(_conflict_records(report, src_file_id, built.conflicts))
     log_records(records, conn=conn)
     logger.info("загрузка: %s", result.summary())
@@ -565,7 +576,7 @@ def _code_records(
     report: ReportSet,
     src_file_id: int,
     unknown: dict[str, tuple[str, ...]],
-    ambiguous: dict[str, tuple[str, ...]],
+    ambiguous: list[AmbiguousCode],
 ) -> list[CheckRecord]:
     """Записи о кодах, которые не попали в fact_report."""
     records: list[CheckRecord] = []
@@ -584,22 +595,26 @@ def _code_records(
                     details={"reporting_type": report.reporting_type.value},
                 )
             )
-    for form_code, codes in ambiguous.items():
-        for code in codes:
-            records.append(
-                CheckRecord(
-                    inn=report.inn,
-                    check_code=CheckCode.AMBIGUOUS_LINE_CODE,
-                    status=CheckStatus.WARNING,
-                    src_file_id=src_file_id,
-                    report_date=report.report_date,
-                    form_code=form_code,
-                    line_code=code,
-                    message=(
-                        "Код допускают несколько укрупнённых строк, выбрать однозначно нельзя: "
-                        "строка не загружена"
-                    ),
-                    details={"reporting_type": report.reporting_type.value},
-                )
+    for item in ambiguous:
+        records.append(
+            CheckRecord(
+                inn=report.inn,
+                check_code=CheckCode.AMBIGUOUS_LINE_CODE,
+                status=CheckStatus.WARNING,
+                src_file_id=src_file_id,
+                report_date=report.report_date,
+                form_code=item.form_code,
+                line_code=item.source_code,
+                message=(
+                    "Код допускают несколько укрупнённых строк, выбрать однозначно нельзя: "
+                    "строка не загружена"
+                ),
+                # Перечень претендентов нужен контролям: итог, в состав которого
+                # входит любая из этих строк, проверить нельзя.
+                details={
+                    "candidates": list(item.candidates),
+                    "reporting_type": report.reporting_type.value,
+                },
             )
+        )
     return records

@@ -27,9 +27,13 @@ class CheckCode(StrEnum):
     BALANCE_EQUALITY = "balance_equality"
     SECTION_SUM = "section_sum"
     PROFIT_CHAIN = "profit_chain"
-    PERIOD_CONTINUITY = "period_continuity"
+    # Не «непрерывность»: сальдо на начало периода у нас конструктивно совпадает
+    # с сальдо на конец предыдущего. Содержательная проверка — пересмотр
+    # отчётности прошлых периодов.
+    PERIOD_REVISED = "period_revised"
     MANDATORY_FIELDS = "mandatory_fields"
     JUMP_DETECTION = "jump_detection"
+    RETAINED_EARNINGS_LINK = "retained_earnings_link"
     # Записи получения и загрузки (задачи 3 и 4).
     CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
@@ -58,3 +62,17 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.PERIOD_VALUE_MISMATCH: Severity.WARNING,
     CheckCode.FACT_OVERWRITE: Severity.INFO,
 }
+
+# Семейство кодов, которые контроли качества переписывают при каждом прогоне.
+# Записи загрузчика в это семейство не входят: они история, а не снимок.
+CHECK_CODES: frozenset[CheckCode] = frozenset(
+    {
+        CheckCode.BALANCE_EQUALITY,
+        CheckCode.SECTION_SUM,
+        CheckCode.PROFIT_CHAIN,
+        CheckCode.PERIOD_REVISED,
+        CheckCode.MANDATORY_FIELDS,
+        CheckCode.JUMP_DETECTION,
+        CheckCode.RETAINED_EARNINGS_LINK,
+    }
+)

@@ -52,6 +52,15 @@ class Fact:
 
 
 @dataclass(frozen=True, slots=True)
+class AmbiguousCode:
+    """Код, который не удалось привязать к единственной строке справочника."""
+
+    form_code: str
+    source_code: str
+    candidates: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LineConflict:
     """Несколько исходных кодов раскрыли значение для одной укрупнённой строки."""
 
