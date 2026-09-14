@@ -1,7 +1,9 @@
 """Арифметические хелперы: разбор чисел отчётности и безопасное деление."""
 
 import math
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 
 # Маркеры нераскрытия показателя: в БД им соответствует NULL, но не ноль.
 NOT_DISCLOSED: frozenset[str] = frozenset(
@@ -31,6 +33,59 @@ _GROUP_SEPARATORS: tuple[str, ...] = (
     "'",
     "’",
 )
+
+
+class ValueStatus(StrEnum):
+    """Статус значения в fact_report; значения совпадают с CHECK в схеме БД."""
+
+    OK = "ok"
+    NOT_DISCLOSED = "not_disclosed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ParseOutcome(StrEnum):
+    """Итог разбора ячейки отчётности, более подробный, чем статус в БД."""
+
+    OK = "ok"
+    NOT_DISCLOSED = "not_disclosed"  # явный маркер: прочерк, «X», «н/д»
+    MISSING = "missing"  # ячейки нет вовсе: None или пустая строка
+    INVALID = "invalid"  # содержимое есть, но числом не является
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedValue:
+    """Разобранная ячейка: значение, итог разбора и исходное представление."""
+
+    value: Decimal | None
+    outcome: ParseOutcome
+    raw: str | None
+
+    @property
+    def value_status(self) -> ValueStatus:
+        """Статус для записи в fact_report: всё, кроме числа, — нераскрытие."""
+        return ValueStatus.OK if self.outcome is ParseOutcome.OK else ValueStatus.NOT_DISCLOSED
+
+    @property
+    def is_ok(self) -> bool:
+        """Значение раскрыто и разобрано."""
+        return self.outcome is ParseOutcome.OK
+
+
+def parse_value(raw: object) -> ParsedValue:
+    """Разбирает ячейку отчётности, различая прочерк, пустую ячейку и мусор."""
+    text = raw.strip() if isinstance(raw, str) else None
+
+    if raw is None:
+        return ParsedValue(None, ParseOutcome.MISSING, None)
+    if isinstance(raw, str) and not text:
+        return ParsedValue(None, ParseOutcome.MISSING, raw)
+    if isinstance(raw, str) and text is not None and text.casefold() in NOT_DISCLOSED:
+        return ParsedValue(None, ParseOutcome.NOT_DISCLOSED, text)
+
+    value = to_decimal(raw)
+    if value is None:
+        return ParsedValue(None, ParseOutcome.INVALID, text if text is not None else str(raw))
+    return ParsedValue(value, ParseOutcome.OK, text)
 
 
 def to_decimal(raw: object) -> Decimal | None:

@@ -54,16 +54,21 @@ COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прош�
 -- Факты отчётности -----------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS fact_report (
-    id          bigserial PRIMARY KEY,
-    src_file_id bigint NOT NULL REFERENCES src_file (id) ON DELETE CASCADE,
-    inn         text NOT NULL,
-    report_date date NOT NULL,
-    form_code   text NOT NULL,
-    line_code   text NOT NULL,
-    value       numeric(20, 3),
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT fact_report_uniq UNIQUE (inn, report_date, form_code, line_code)
+    id           bigserial PRIMARY KEY,
+    src_file_id  bigint NOT NULL REFERENCES src_file (id) ON DELETE CASCADE,
+    inn          text NOT NULL,
+    report_date  date NOT NULL,
+    form_code    text NOT NULL,
+    line_code    text NOT NULL,
+    value        numeric(20, 3),
+    value_status text NOT NULL DEFAULT 'ok'
+                 CHECK (value_status IN ('ok', 'not_disclosed', 'not_applicable')),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT fact_report_uniq UNIQUE (inn, report_date, form_code, line_code),
+    -- Значение есть тогда и только тогда, когда показатель раскрыт.
+    CONSTRAINT fact_report_value_status_consistent
+        CHECK ((value IS NOT NULL) = (value_status = 'ok'))
 );
 
 CREATE INDEX IF NOT EXISTS fact_report_period_idx ON fact_report (inn, report_date);
@@ -73,27 +78,40 @@ CREATE INDEX IF NOT EXISTS fact_report_src_idx ON fact_report (src_file_id);
 COMMENT ON TABLE fact_report IS 'Одна строка — один код показателя за один период по одной организации';
 COMMENT ON COLUMN fact_report.value IS 'Тысячи рублей; NULL — показатель не раскрыт, замена нулём запрещена';
 COMMENT ON COLUMN fact_report.report_date IS 'Дата, на которую (или за период до которой) приведено значение';
+COMMENT ON COLUMN fact_report.value_status IS
+    'ok — значение раскрыто; not_disclosed — прочерк, «X» или пустая ячейка; '
+    'not_applicable — строка неприменима к данной форме отчётности организации';
 
 -- Журнал контролей качества --------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS dq_log (
-    id          bigserial PRIMARY KEY,
-    src_file_id bigint REFERENCES src_file (id) ON DELETE CASCADE,
-    inn         text NOT NULL,
-    report_date date,
-    check_code  text NOT NULL,
-    status      text NOT NULL CHECK (status IN ('pass', 'fail', 'warning')),
-    severity    text NOT NULL CHECK (severity IN ('blocking', 'warning')),
-    message     text,
-    details     jsonb,
-    created_at  timestamptz NOT NULL DEFAULT now()
+    id             bigserial PRIMARY KEY,
+    src_file_id    bigint REFERENCES src_file (id) ON DELETE CASCADE,
+    inn            text NOT NULL,
+    report_date    date,
+    form_code      text,
+    line_code      text,
+    check_code     text NOT NULL,
+    status         text NOT NULL CHECK (status IN ('pass', 'fail', 'warning', 'info')),
+    severity       text NOT NULL CHECK (severity IN ('blocking', 'warning', 'info')),
+    message        text,
+    previous_value numeric(20, 3),
+    new_value      numeric(20, 3),
+    details        jsonb,
+    created_at     timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS dq_log_src_idx ON dq_log (src_file_id);
 CREATE INDEX IF NOT EXISTS dq_log_inn_idx ON dq_log (inn, report_date);
+CREATE INDEX IF NOT EXISTS dq_log_check_idx ON dq_log (check_code);
 
 COMMENT ON TABLE dq_log IS 'Результаты контролей качества; провал блокирующего контроля отправляет src_file в карантин';
 COMMENT ON COLUMN dq_log.details IS 'Фактические значения, участвовавшие в контроле, с кодами строк';
+COMMENT ON COLUMN dq_log.check_code IS
+    'Код контроля; служебный код fact_overwrite фиксирует перезаписи строки fact_report при повторной загрузке';
+COMMENT ON COLUMN dq_log.previous_value IS 'Прежнее значение строки fact_report до перезаписи, в тысячах рублей';
+COMMENT ON COLUMN dq_log.new_value IS 'Новое значение строки fact_report после перезаписи, в тысячах рублей';
+COMMENT ON COLUMN dq_log.status IS 'info — запись информационная (например, перезапись значения), карантин не вызывает';
 
 -- Рассчитанные показатели ----------------------------------------------------
 
