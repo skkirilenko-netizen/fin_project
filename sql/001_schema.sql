@@ -76,6 +76,22 @@ COMMENT ON COLUMN src_file.reporting_type IS
 
 -- Факты отчётности -----------------------------------------------------------
 
+-- Приоритет источника значения: отчётный период комплекта старше сравнительных.
+-- Один и тот же период приходит и как current комплекта 2023 года, и как
+-- previous комплекта 2024-го; значения могут расходиться из-за переклассификации.
+-- Без приоритета побеждал бы тот, кто загрузился последним.
+CREATE OR REPLACE FUNCTION period_rank(role text) RETURNS smallint
+LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT (CASE role
+        WHEN 'current' THEN 0
+        WHEN 'previous' THEN 1
+        WHEN 'before_previous' THEN 2
+    END)::smallint
+$$;
+
+COMMENT ON FUNCTION period_rank(text) IS
+    'Приоритет периода: 0 — отчётный, 1 — предыдущий, 2 — позапрошлый. Меньше значит важнее';
+
 CREATE TABLE IF NOT EXISTS fact_report (
     id           bigserial PRIMARY KEY,
     src_file_id  bigint NOT NULL REFERENCES src_file (id) ON DELETE CASCADE,
@@ -87,6 +103,8 @@ CREATE TABLE IF NOT EXISTS fact_report (
     value        numeric(20, 3),
     value_status text NOT NULL DEFAULT 'ok'
                  CHECK (value_status IN ('ok', 'not_disclosed', 'not_applicable')),
+    period_role  text NOT NULL
+                 CHECK (period_role IN ('current', 'previous', 'before_previous')),
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fact_report_uniq UNIQUE (inn, report_date, form_code, line_code),
@@ -106,6 +124,10 @@ COMMENT ON COLUMN fact_report.line_code IS
     'Канонический код строки из methodology/lines.yaml. Для упрощённых форм код укрупнённой строки '
     'в отчётности берётся по показателю с наибольшим удельным весом и между периодами меняется, '
     'поэтому ключом служит канонический код, а не код источника';
+COMMENT ON COLUMN fact_report.period_role IS
+    'Каким периодом значение пришло в комплекте: current — отчётный, previous — сравнительный, '
+    'before_previous — позапрошлый (есть только в балансе). Сравнительное значение не затирает '
+    'уже загруженное отчётное, иначе результат зависел бы от порядка загрузки комплектов';
 COMMENT ON COLUMN fact_report.source_line_code IS
     'Код строки, фактически указанный в отчётности. Заполняется всегда: для полных форм '
     'совпадает с line_code, для упрощённых может отличаться. NULL не используется, '

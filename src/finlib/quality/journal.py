@@ -2,10 +2,13 @@
 
 import json
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from finlib.db import execute
+from finlib.db import PgConnection, execute, execute_many
 from finlib.quality.codes import LOADER_SEVERITY, CheckCode, CheckStatus, Severity
 
 logger = logging.getLogger(__name__)
@@ -21,15 +24,73 @@ INSERT INTO dq_log (
 """
 
 
+@dataclass(frozen=True, slots=True)
+class CheckRecord:
+    """Одна запись журнала качества."""
+
+    inn: str
+    check_code: CheckCode
+    status: CheckStatus
+    severity: Severity | None = None
+    message: str | None = None
+    src_file_id: int | None = None
+    report_date: date | None = None
+    form_code: str | None = None
+    line_code: str | None = None
+    previous_value: Decimal | None = None
+    new_value: Decimal | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+def _resolve_severity(record: CheckRecord) -> Severity:
+    """Уровень записи: заданный явно либо умолчание из словаря кодов."""
+    level = record.severity if record.severity is not None else LOADER_SEVERITY.get(
+        record.check_code
+    )
+    if level is None:
+        raise ValueError(f"для контроля {record.check_code} не задан уровень severity")
+    return level
+
+
+def _as_params(record: CheckRecord) -> dict[str, Any]:
+    """Превращает запись в параметры запроса."""
+    return {
+        "src_file_id": record.src_file_id,
+        "inn": record.inn,
+        "report_date": record.report_date,
+        "form_code": record.form_code,
+        "line_code": record.line_code,
+        "check_code": record.check_code.value,
+        "status": record.status.value,
+        "severity": _resolve_severity(record).value,
+        "message": record.message,
+        "previous_value": record.previous_value,
+        "new_value": record.new_value,
+        "details": json.dumps(record.details, ensure_ascii=False, default=str)
+        if record.details
+        else None,
+    }
+
+
+def log_records(records: Sequence[CheckRecord], conn: PgConnection | None = None) -> int:
+    """Пишет пачку записей журнала; при переданном соединении — в его транзакции."""
+    if not records:
+        return 0
+    execute_many(_INSERT, [_as_params(record) for record in records], conn=conn)
+    logger.info("dq_log: записано %d событий", len(records))
+    return len(records)
+
+
 def log_check(
     inn: str,
     check_code: CheckCode,
     status: CheckStatus,
     *,
+    conn: PgConnection | None = None,
     severity: Severity | None = None,
     message: str | None = None,
     src_file_id: int | None = None,
-    report_date: str | None = None,
+    report_date: date | None = None,
     form_code: str | None = None,
     line_code: str | None = None,
     previous_value: Decimal | None = None,
@@ -37,26 +98,25 @@ def log_check(
     details: dict[str, Any] | None = None,
 ) -> None:
     """Пишет одну запись в dq_log; уровень по умолчанию берётся из словаря кодов."""
-    level = severity if severity is not None else LOADER_SEVERITY.get(check_code)
-    if level is None:
-        raise ValueError(f"для контроля {check_code} не задан уровень severity")
-    execute(
-        _INSERT,
-        {
-            "src_file_id": src_file_id,
-            "inn": inn,
-            "report_date": report_date,
-            "form_code": form_code,
-            "line_code": line_code,
-            "check_code": check_code.value,
-            "status": status.value,
-            "severity": level.value,
-            "message": message,
-            "previous_value": previous_value,
-            "new_value": new_value,
-            "details": json.dumps(details, ensure_ascii=False, default=str)
-            if details is not None
-            else None,
-        },
+    record = CheckRecord(
+        inn=inn,
+        check_code=check_code,
+        status=status,
+        severity=severity,
+        message=message,
+        src_file_id=src_file_id,
+        report_date=report_date,
+        form_code=form_code,
+        line_code=line_code,
+        previous_value=previous_value,
+        new_value=new_value,
+        details=details or {},
     )
-    logger.info("dq_log: %s %s %s (%s)", inn, check_code.value, status.value, level.value)
+    execute(_INSERT, _as_params(record), conn=conn)
+    logger.info(
+        "dq_log: %s %s %s (%s)",
+        inn,
+        check_code.value,
+        status.value,
+        _resolve_severity(record).value,
+    )

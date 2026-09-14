@@ -310,6 +310,24 @@ class LinesCatalog(BaseModel):
             )
         return self._by_name.get((reporting_type, form, normalize_name(name)))
 
+    def candidates_for_code(
+        self, code: str, reporting_type: ReportingType, form: str
+    ) -> tuple[LineDef, ...]:
+        """Строки набора, которые допускают такой код в отчётности.
+
+        В упрощённых формах перечни допустимых кодов пересекаются: код 1190
+        входит и в «Материальные внеоборотные активы», и в «Нематериальные,
+        финансовые и другие внеоборотные активы». Разрешать неоднозначность
+        обязан вызывающий, молчаливый выбор запрещён.
+        """
+        return tuple(
+            line
+            for line in self.lines
+            if line.reporting_type is reporting_type
+            and line.form == form
+            and line.accepts_code(code)
+        )
+
     def for_type(self, reporting_type: ReportingType) -> tuple[LineDef, ...]:
         """Строки одного набора в порядке справочника."""
         return tuple(line for line in self.lines if line.reporting_type is reporting_type)

@@ -35,6 +35,7 @@ class CheckCode(StrEnum):
     LINE_NOT_RECOGNIZED = "line_not_recognized"
     AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
     UNKNOWN_LINE_CODE = "unknown_line_code"
+    PERIOD_VALUE_MISMATCH = "period_value_mismatch"
     FACT_OVERWRITE = "fact_overwrite"
 
 
@@ -48,5 +49,8 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.LINE_NOT_RECOGNIZED: Severity.WARNING,
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
+    # Расхождение сравнительного значения с отчётным — признак переклассификации
+    # или исправления, содержательный сигнал для заключения.
+    CheckCode.PERIOD_VALUE_MISMATCH: Severity.WARNING,
     CheckCode.FACT_OVERWRITE: Severity.INFO,
 }
