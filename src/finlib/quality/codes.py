@@ -33,7 +33,10 @@ class CheckCode(StrEnum):
     # Записи получения и загрузки (задачи 3 и 4).
     CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
+    # Код не привязывается к строке: неполон справочник.
     AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
+    # Несколько кодов раскрыли одну укрупнённую строку: аномалия самой отчётности.
+    MULTIPLE_SOURCE_CODES = "multiple_source_codes"
     UNKNOWN_LINE_CODE = "unknown_line_code"
     PERIOD_VALUE_MISMATCH = "period_value_mismatch"
     FACT_OVERWRITE = "fact_overwrite"
@@ -48,6 +51,7 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.CREDIT_ORGANIZATION: Severity.BLOCKING,
     CheckCode.LINE_NOT_RECOGNIZED: Severity.WARNING,
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
+    CheckCode.MULTIPLE_SOURCE_CODES: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
     # Расхождение сравнительного значения с отчётным — признак переклассификации
     # или исправления, содержательный сигнал для заключения.

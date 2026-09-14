@@ -279,6 +279,48 @@ def test_period_mismatch_is_logged(db_conn) -> None:
     assert record["details"]["rejected_period_role"] == "previous"
 
 
+def test_mismatch_is_found_on_real_data(db_conn) -> None:
+    """Расхождение периодов существует в реальной отчётности, а не только в тестах.
+
+    ПАО «Газпром» пересмотрело баланс на 31.12.2021: в собственной отчётности
+    за 2021 год итог 20,3 трлн, в сравнительной колонке отчётности за 2023 год
+    тот же период показан как 24,9 трлн — переоценка внеоборотных активов
+    перенесена в нераспределённую прибыль.
+    """
+    sets = sets_from(FULL_BFO, FULL_INN)
+    total = 0
+    for report in sorted(sets, key=lambda item: item.report_year):
+        total += load_report_set(report, org(FULL_INN), db_conn).period_mismatches
+    assert total > 0, "на реальных данных расхождений не найдено"
+
+    records = dq(db_conn, FULL_INN, "period_value_mismatch")
+    assert {r["line_code"] for r in records} >= {"1600", "1370"}
+
+
+def test_mismatch_is_found_in_both_load_orders(db_conn) -> None:
+    """Сигнал о расхождении не зависит от порядка загрузки комплектов."""
+    sets = sets_from(FULL_BFO, FULL_INN)
+
+    forward = 0
+    for report in sorted(sets, key=lambda item: item.report_year):
+        forward += load_report_set(report, org(FULL_INN), db_conn).period_mismatches
+    forward_lines = {
+        (r["report_date"], r["line_code"]) for r in dq(db_conn, FULL_INN, "period_value_mismatch")
+    }
+
+    db_conn.rollback()
+
+    backward = 0
+    for report in sorted(sets, key=lambda item: item.report_year, reverse=True):
+        backward += load_report_set(report, org(FULL_INN), db_conn).period_mismatches
+    backward_lines = {
+        (r["report_date"], r["line_code"]) for r in dq(db_conn, FULL_INN, "period_value_mismatch")
+    }
+
+    assert forward > 0 and backward > 0
+    assert forward_lines == backward_lines, "набор расхождений зависит от порядка загрузки"
+
+
 def test_load_order_does_not_change_result(db_conn) -> None:
     """Результат не зависит от порядка загрузки комплектов."""
     sets = sets_from(FULL_BFO, FULL_INN)
@@ -385,25 +427,52 @@ def test_both_versions_are_kept_in_src_file(db_conn) -> None:
 # --- коды, не попавшие в расчёт ---------------------------------------------
 
 
-def test_unknown_codes_are_logged(db_conn) -> None:
-    """Коды вне справочника логируются и попадают в отчёт о загрузке."""
+def test_unknown_code_is_logged(db_conn) -> None:
+    """Код вне справочника логируется и попадает в отчёт о загрузке."""
     report = by_year(sets_from(FULL_BFO, FULL_INN), 2025)
+    report.forms["0710001"].values[date(2025, 12, 31)]["1265"] = Decimal("7")
+
     result = load_report_set(report, org(FULL_INN), db_conn)
 
-    assert result.unknown_codes, "неизвестные коды не обнаружены"
-    logged = {row["line_code"] for row in dq(db_conn, FULL_INN, "unknown_line_code")}
-    assert "1105" in logged
-    assert "13101" in logged
+    assert "1265" in result.unknown_codes.get("0710001", ())
+    assert "1265" in {row["line_code"] for row in dq(db_conn, FULL_INN, "unknown_line_code")}
+    assert "1265" not in {row["line_code"] for row in facts(db_conn, FULL_INN)}
     assert result.has_warnings
 
 
-def test_unknown_codes_are_not_written_as_facts(db_conn) -> None:
-    """Неизвестный код в fact_report не попадает."""
+def test_probes_have_no_unknown_codes(db_conn) -> None:
+    """На реальных пробах неизвестных кодов нет: справочник полон."""
+    for probe, inn in ((FULL_BFO, FULL_INN), (SIMPLIFIED_BFO, SIMPLIFIED_INN)):
+        sets = sets_from(probe, inn)
+        report = max(sets, key=lambda item: item.report_year)
+        result = load_report_set(report, org(inn), db_conn)
+        assert result.unknown_codes == {}, f"{inn}: {result.unknown_codes}"
+
+
+def test_ignored_codes_do_not_pollute_journal(db_conn) -> None:
+    """Заведомо игнорируемые коды не шумят в журнале качества."""
     report = by_year(sets_from(FULL_BFO, FULL_INN), 2025)
-    load_report_set(report, org(FULL_INN), db_conn)
-    codes = {row["line_code"] for row in facts(db_conn, FULL_INN)}
-    assert "1105" not in codes
+    result = load_report_set(report, org(FULL_INN), db_conn)
+
+    assert result.ignored_codes["0710001"], "игнорируемые коды не распознаны"
+    logged = {row["line_code"] for row in dq(db_conn, FULL_INN, "unknown_line_code")}
+    assert "13101" not in logged
+    assert "4111" not in logged
+    assert "2900" not in logged
+    assert not result.has_warnings, "игнорируемый код не должен считаться предупреждением"
+
+
+def test_ignored_and_not_applicable_are_not_facts(db_conn) -> None:
+    """Игнорируемые и неприменимые коды в fact_report не попадают."""
+    report = by_year(sets_from(SIMPLIFIED_BFO, SIMPLIFIED_INN), 2024)
+    result = load_report_set(report, org(SIMPLIFIED_INN), db_conn)
+
+    codes = {row["line_code"] for row in facts(db_conn, SIMPLIFIED_INN)}
     assert "13101" not in codes
+    assert "1100" not in codes, "код полного набора попал в упрощённую отчётность"
+    assert "1100" in result.not_applicable_codes["0710001"]
+    logged = {row["line_code"] for row in dq(db_conn, SIMPLIFIED_INN, "unknown_line_code")}
+    assert "1100" not in logged
 
 
 def test_build_facts_maps_every_known_code() -> None:
@@ -413,7 +482,8 @@ def test_build_facts_maps_every_known_code() -> None:
     assert built.facts
     assert not built.ambiguous
     assert not built.conflicts
-    assert built.unknown
+    assert not built.unknown, "на полной отчётности неизвестных кодов быть не должно"
+    assert built.ignored, "игнорируемые коды должны быть распознаны"
     roles = {fact.period_role for fact in built.facts}
     assert roles == {"current", "previous", "before_previous"}
 
@@ -444,11 +514,14 @@ def test_conflicting_codes_are_not_guessed(db_conn) -> None:
     assert result.line_conflicts >= 1
     assert facts(db_conn, SIMPLIFIED_INN, report_date=date(2024, 12, 31), line_code="1240") == []
     records = [
-        r for r in dq(db_conn, SIMPLIFIED_INN, "ambiguous_line_code") if r["line_code"] == "1240"
+        r for r in dq(db_conn, SIMPLIFIED_INN, "multiple_source_codes") if r["line_code"] == "1240"
     ]
     assert records
     assert set(records[0]["details"]["source_codes"]) == {"1220", "1230"}
     assert records[0]["severity"] == "warning"
+    # Причина другая, чем у 1190, поэтому и код контроля другой.
+    other = {r["line_code"] for r in dq(db_conn, SIMPLIFIED_INN, "ambiguous_line_code")}
+    assert "1240" not in other
 
 
 def test_ambiguous_source_code_is_logged(db_conn) -> None:

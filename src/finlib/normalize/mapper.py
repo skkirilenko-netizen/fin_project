@@ -16,7 +16,9 @@ class MappingOutcome(StrEnum):
     """Итог сопоставления кода отчётности со справочником."""
 
     MAPPED = "mapped"
-    UNKNOWN = "unknown"  # кода нет в справочнике набора
+    UNKNOWN = "unknown"  # кода нет ни в одном наборе — повод проверить справочник
+    IGNORED = "ignored"  # код объявлен неиспользуемым осознанно
+    NOT_APPLICABLE = "not_applicable"  # код есть в полном наборе, но не в этом
     AMBIGUOUS = "ambiguous"  # претендентов несколько, выбрать нельзя
 
 
@@ -65,6 +67,8 @@ class MappingResult:
 
     mapped: dict[str, MappedLine] = field(default_factory=dict)
     unknown: list[MappedLine] = field(default_factory=list)
+    ignored: list[MappedLine] = field(default_factory=list)
+    not_applicable: list[MappedLine] = field(default_factory=list)
     ambiguous: list[MappedLine] = field(default_factory=list)
 
 
@@ -84,9 +88,20 @@ def map_codes(
     """
     result = MappingResult()
     for code in sorted(codes):
+        if catalog.is_ignored(code, form):
+            result.ignored.append(MappedLine(code, MappingOutcome.IGNORED))
+            continue
         candidates = catalog.candidates_for_code(code, reporting_type, form)
         if not candidates:
-            result.unknown.append(MappedLine(code, MappingOutcome.UNKNOWN))
+            # Упрощённая форма приходит в той же схеме, что полная, поэтому
+            # в ответе есть коды, которых у упрощённого набора нет вовсе.
+            # Это неприменимость, а не пробел в справочнике.
+            if reporting_type is not ReportingType.FULL and catalog.candidates_for_code(
+                code, ReportingType.FULL, form
+            ):
+                result.not_applicable.append(MappedLine(code, MappingOutcome.NOT_APPLICABLE))
+            else:
+                result.unknown.append(MappedLine(code, MappingOutcome.UNKNOWN))
             continue
         if len(candidates) == 1:
             result.mapped[code] = MappedLine(code, MappingOutcome.MAPPED, candidates[0])

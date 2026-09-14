@@ -26,10 +26,42 @@ def test_full_codes_map_to_themselves(catalog) -> None:
 
 def test_unknown_code_is_reported_not_dropped(catalog) -> None:
     """Код вне справочника попадает в перечень неизвестных."""
-    result = map_codes({"1105", "13101", "1110"}, set(), catalog, FULL, "0710001")
-    assert {item.source_code for item in result.unknown} == {"1105", "13101"}
+    result = map_codes({"1195", "1265", "1110"}, set(), catalog, FULL, "0710001")
+    assert {item.source_code for item in result.unknown} == {"1195", "1265"}
     assert all(item.outcome is MappingOutcome.UNKNOWN for item in result.unknown)
     assert "1110" in result.mapped
+
+
+def test_ignored_code_is_not_unknown(catalog) -> None:
+    """Заведомо игнорируемый код — принятое решение, а не пробел в справочнике."""
+    result = map_codes({"13101", "4111", "2900"}, set(), catalog, FULL, "0710001")
+    assert {item.source_code for item in result.ignored} == {"13101"}
+    assert not result.unknown or {item.source_code for item in result.unknown} == {"4111", "2900"}
+    assert all(item.outcome is MappingOutcome.IGNORED for item in result.ignored)
+
+
+def test_ignore_rules_are_scoped_to_form(catalog) -> None:
+    """Правило игнорирования действует только в своей форме."""
+    assert catalog.is_ignored("13101", "0710001")
+    assert not catalog.is_ignored("13101", "0710002")
+    assert catalog.is_ignored("4111", "0710005")
+    assert not catalog.is_ignored("4110", "0710005"), "сальдообразующая строка не игнорируется"
+    assert catalog.ignore_reason("2900", "0710002")
+
+
+def test_full_set_codes_are_not_applicable_in_simplified(catalog) -> None:
+    """Коды полного набора в упрощённой отчётности неприменимы, а не неизвестны."""
+    result = map_codes({"1100", "1370", "1400"}, set(), catalog, SIMPLIFIED, "0710001")
+    assert {item.source_code for item in result.not_applicable} == {"1100", "1370", "1400"}
+    assert not result.unknown
+    assert all(item.outcome is MappingOutcome.NOT_APPLICABLE for item in result.not_applicable)
+
+
+def test_additional_lines_are_part_of_section_totals(catalog) -> None:
+    """Строки 1105 и 1215 входят в итоги разделов, иначе сходимость не проверить."""
+    assert "1105" in {c.code for c in catalog.require("1100").components}
+    assert "1215" in {c.code for c in catalog.require("1200").components}
+    assert catalog.require("1215").note
 
 
 def test_simplified_code_maps_to_canonical(catalog) -> None:

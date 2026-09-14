@@ -141,6 +141,34 @@ class ReportingTypeDef(BaseModel):
     forms: tuple[str, ...] = Field(min_length=1)
 
 
+class IgnoredCode(BaseModel):
+    """Код источника, который методика не использует осознанно."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str | None = None
+    pattern: str | None = None
+    form: str | None = None
+    reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_selector(self) -> Self:
+        """Задан ровно один способ отбора: конкретный код либо шаблон."""
+        if (self.code is None) == (self.pattern is None):
+            raise ValueError("игнорируемый код задаётся либо code, либо pattern, но не обоими")
+        if self.pattern is not None:
+            re.compile(self.pattern)
+        return self
+
+    def matches(self, code: str, form: str) -> bool:
+        """Подпадает ли код формы под это правило."""
+        if self.form is not None and self.form != form:
+            return False
+        if self.code is not None:
+            return self.code == code
+        return re.fullmatch(str(self.pattern), code) is not None
+
+
 class LinesCatalog(BaseModel):
     """Справочник строк всех форм с индексами по коду и наименованию."""
 
@@ -150,6 +178,7 @@ class LinesCatalog(BaseModel):
     forms: dict[str, FormDef]
     reporting_types: dict[ReportingType, ReportingTypeDef]
     lines: tuple[LineDef, ...]
+    ignored_codes: tuple[IgnoredCode, ...] = ()
 
     _index: dict[tuple[ReportingType, str], LineDef] = PrivateAttr(default_factory=dict)
     _by_name: dict[tuple[ReportingType, str, str], LineDef] = PrivateAttr(default_factory=dict)
@@ -309,6 +338,21 @@ class LinesCatalog(BaseModel):
                 "в полных формах наименования повторяются, ключом служит код строки"
             )
         return self._by_name.get((reporting_type, form, normalize_name(name)))
+
+    def is_ignored(self, code: str, form: str) -> bool:
+        """Объявлен ли код заведомо игнорируемым.
+
+        Игнорируемый код — принятое решение методики, неизвестный — сигнал
+        проверить справочник. Первый в журнал качества не пишется.
+        """
+        return any(rule.matches(code, form) for rule in self.ignored_codes)
+
+    def ignore_reason(self, code: str, form: str) -> str | None:
+        """Обоснование, по которому код игнорируется."""
+        for rule in self.ignored_codes:
+            if rule.matches(code, form):
+                return rule.reason
+        return None
 
     def candidates_for_code(
         self, code: str, reporting_type: ReportingType, form: str

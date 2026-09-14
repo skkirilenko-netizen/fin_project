@@ -153,6 +153,8 @@ class BuiltFacts:
 
     facts: list[Fact] = dc_field(default_factory=list)
     unknown: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
+    ignored: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
+    not_applicable: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     ambiguous: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     conflicts: list[LineConflict] = dc_field(default_factory=list)
 
@@ -178,6 +180,12 @@ def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
         mapping = map_codes(codes, filled, catalog, report.reporting_type, form_code)
         if mapping.unknown:
             built.unknown[form_code] = tuple(item.source_code for item in mapping.unknown)
+        if mapping.ignored:
+            built.ignored[form_code] = tuple(item.source_code for item in mapping.ignored)
+        if mapping.not_applicable:
+            built.not_applicable[form_code] = tuple(
+                item.source_code for item in mapping.not_applicable
+            )
         if mapping.ambiguous:
             built.ambiguous[form_code] = tuple(item.source_code for item in mapping.ambiguous)
 
@@ -277,6 +285,8 @@ def load_report_set(
     built = build_facts(report, catalog)
     result.facts_total = len(built.facts)
     result.unknown_codes = built.unknown
+    result.ignored_codes = built.ignored
+    result.not_applicable_codes = built.not_applicable
     result.ambiguous_codes = built.ambiguous
     result.line_conflicts = len(built.conflicts)
     result.periods = tuple(
@@ -425,7 +435,9 @@ def _decide(
             if changed:
                 result.period_mismatches += 1
                 records.append(
-                    _mismatch_record(report, fact, previous, report_date, src_file_id)
+                    _mismatch_record(
+                        report, fact, previous, report_date, src_file_id, winner="stored"
+                    )
                 )
             continue
 
@@ -435,7 +447,20 @@ def _decide(
 
         to_write.append(fact)
         result.facts_written += 1
-        if changed:
+        if not changed:
+            continue
+
+        if incoming_rank < existing_rank:
+            # Отчётное значение вытесняет ранее загруженное сравнительное.
+            # Это то же расхождение периодов, только обнаруженное с другой
+            # стороны: журнал не должен зависеть от порядка загрузки.
+            result.period_mismatches += 1
+            records.append(
+                _mismatch_record(
+                    report, fact, previous, report_date, src_file_id, winner="incoming"
+                )
+            )
+        else:
             result.overwritten += 1
             records.append(_overwrite_record(report, fact, previous, report_date, src_file_id))
     return to_write, records
@@ -447,8 +472,16 @@ def _mismatch_record(
     previous: _Existing,
     report_date: date,
     src_file_id: int,
+    *,
+    winner: str,
 ) -> CheckRecord:
-    """Расхождение сравнительного значения с ранее загруженным отчётным."""
+    """Расхождение отчётного и сравнительного значений одного периода.
+
+    Фиксируется независимо от того, в каком порядке загружены комплекты:
+    победило ли уже лежащее отчётное значение или его принесла эта загрузка.
+    """
+    kept_role = previous.period_role if winner == "stored" else fact.period_role
+    rejected_role = fact.period_role if winner == "stored" else previous.period_role
     return CheckRecord(
         inn=report.inn,
         check_code=CheckCode.PERIOD_VALUE_MISMATCH,
@@ -460,12 +493,13 @@ def _mismatch_record(
         previous_value=previous.value,
         new_value=fact.value,
         message=(
-            "Сравнительное значение расходится с отчётным, загруженным ранее: "
-            "признак переклассификации или исправления. Сохранено отчётное значение"
+            "Отчётное и сравнительное значения периода расходятся: признак "
+            "переклассификации или исправления. Сохранено отчётное значение"
         ),
         details={
-            "kept_period_role": previous.period_role,
-            "rejected_period_role": fact.period_role,
+            "winner": winner,
+            "kept_period_role": kept_role,
+            "rejected_period_role": rejected_role,
             "source_report_year": report.report_year,
             "source_line_code": fact.source_line_code,
         },
@@ -508,7 +542,7 @@ def _conflict_records(
     return [
         CheckRecord(
             inn=report.inn,
-            check_code=CheckCode.AMBIGUOUS_LINE_CODE,
+            check_code=CheckCode.MULTIPLE_SOURCE_CODES,
             status=CheckStatus.WARNING,
             src_file_id=src_file_id,
             report_date=conflict.report_date,
@@ -516,7 +550,7 @@ def _conflict_records(
             line_code=conflict.line_code,
             message=(
                 "Значение укрупнённой строки раскрыто сразу несколькими кодами: "
-                "выбрать источник нельзя, строка не загружена"
+                "аномалия отчётности, выбрать источник нельзя, строка не загружена"
             ),
             details={
                 "source_codes": list(conflict.source_codes),

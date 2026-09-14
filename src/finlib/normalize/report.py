@@ -20,6 +20,10 @@ class LoadReport:
     overwritten: int = 0
     period_mismatches: int = 0
     unknown_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Игнорируемые коды — принятое решение методики, предупреждением не считаются.
+    ignored_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Коды полного набора, отсутствующие в упрощённом: неприменимость, не пробел.
+    not_applicable_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     ambiguous_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     line_conflicts: int = 0
     superseded_versions: int = 0
