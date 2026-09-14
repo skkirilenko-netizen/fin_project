@@ -18,24 +18,23 @@ SIMPLIFIED_INN = "2100010824"
 CORRECTED_INN = "2522002003"
 
 
+def wipe(conn) -> None:
+    """Убирает следы прежних прогонов по тестовым ИНН внутри транзакции теста.
+
+    База findb рабочая: в ней лежат загруженные пробы тех же организаций
+    (`make probes`). Удаление делается в транзакции теста и откатывается
+    вместе с ней, поэтому рабочие данные не страдают. Тест, который сам
+    вызывает rollback, обязан позвать wipe заново: откат снимает и очистку.
+    """
+    inns = [FULL_INN, SIMPLIFIED_INN, CORRECTED_INN]
+    execute("DELETE FROM organization WHERE inn = ANY(%(i)s)", {"i": inns}, conn=conn)
+    execute("DELETE FROM dq_log WHERE inn = ANY(%(i)s)", {"i": inns}, conn=conn)
+
+
 @pytest.fixture(autouse=True)
 def clean_test_organizations(db_conn):
-    """Убирает следы прежних прогонов по тестовым ИНН внутри той же транзакции.
-
-    База findb рабочая, в ней может лежать реально загруженная отчётность тех
-    же организаций. Удаление делается в транзакции теста и откатывается вместе
-    с ней, поэтому настоящие данные не страдают.
-    """
-    execute(
-        "DELETE FROM organization WHERE inn = ANY(%(inns)s)",
-        {"inns": [FULL_INN, SIMPLIFIED_INN, CORRECTED_INN]},
-        conn=db_conn,
-    )
-    execute(
-        "DELETE FROM dq_log WHERE inn = ANY(%(inns)s)",
-        {"inns": [FULL_INN, SIMPLIFIED_INN, CORRECTED_INN]},
-        conn=db_conn,
-    )
+    """Очищает тестовые ИНН перед каждым тестом."""
+    wipe(db_conn)
     return db_conn
 
 
@@ -309,6 +308,7 @@ def test_mismatch_is_found_in_both_load_orders(db_conn) -> None:
     }
 
     db_conn.rollback()
+    wipe(db_conn)  # откат снял и очистку фикстуры
 
     backward = 0
     for report in sorted(sets, key=lambda item: item.report_year, reverse=True):
@@ -334,6 +334,7 @@ def test_load_order_does_not_change_result(db_conn) -> None:
     }
 
     db_conn.rollback()
+    wipe(db_conn)  # откат снял и очистку фикстуры
 
     load_report_set(older, org(FULL_INN), db_conn)
     load_report_set(newer, org(FULL_INN), db_conn)
@@ -544,6 +545,7 @@ def test_everything_rolls_back_together(db_conn) -> None:
     assert facts(db_conn, FULL_INN)
 
     db_conn.rollback()
+    wipe(db_conn)  # откат снял и очистку фикстуры
 
     assert facts(db_conn, FULL_INN) == []
     assert (
