@@ -1,9 +1,11 @@
 """Арифметические хелперы: разбор чисел отчётности и безопасное деление."""
 
+import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from typing import Any
 
 # Маркеры нераскрытия показателя: в БД им соответствует NULL, но не ноль.
 NOT_DISCLOSED: frozenset[str] = frozenset(
@@ -147,6 +149,14 @@ def _normalize_decimal_separator(text: str) -> str:
     if has_dot and text.count(".") > 1:
         return text.replace(".", "")
     return text
+
+
+def json_loads_decimal(raw: str | bytes) -> Any:
+    """Читает JSON, превращая дробные числа в Decimal, а не в float."""
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    # parse_int не переопределяем: целые в Python и так точны, а идентификаторы
+    # источника должны остаться int.
+    return json.loads(text, parse_float=Decimal)
 
 
 def safe_div(a: object, b: object) -> Decimal | None:

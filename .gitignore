@@ -1,10 +1,16 @@
 .env
 .venv/
 __pycache__/
-data/
 *.docx
 .ipynb_checkpoints/
 .DS_Store
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# Данные не коммитятся, кроме публичных проб ГИР БО — они нужны тестам,
+# чтобы не ходить в сеть на каждом прогоне.
+data/*
+!data/raw/
+data/raw/*
+!data/raw/probe/

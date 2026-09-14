@@ -30,18 +30,23 @@ class CheckCode(StrEnum):
     PERIOD_CONTINUITY = "period_continuity"
     MANDATORY_FIELDS = "mandatory_fields"
     JUMP_DETECTION = "jump_detection"
-    # Записи загрузки (задача 4).
+    # Записи получения и загрузки (задачи 3 и 4).
+    CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
+    AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
     UNKNOWN_LINE_CODE = "unknown_line_code"
     FACT_OVERWRITE = "fact_overwrite"
 
 
-# Уровень служебных записей загрузки. Строка, не опознанная по наименованию,
-# в fact_report не попадает, поэтому запись обязана быть видна в сводке
-# качества; блокирующим её делает не факт неопознания, а последующее
-# несхождение итога раздела.
+# Уровень служебных записей получения и загрузки. Строка, не опознанная
+# по наименованию, в fact_report не попадает, поэтому запись обязана быть видна
+# в сводке качества; блокирующим её делает не факт неопознания, а последующее
+# несхождение итога раздела. Кредитная организация — вне периметра методики,
+# анализ по РСБУ для неё не проводится вовсе.
 LOADER_SEVERITY: dict[CheckCode, Severity] = {
+    CheckCode.CREDIT_ORGANIZATION: Severity.BLOCKING,
     CheckCode.LINE_NOT_RECOGNIZED: Severity.WARNING,
+    CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
     CheckCode.FACT_OVERWRITE: Severity.INFO,
 }

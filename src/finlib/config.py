@@ -28,6 +28,23 @@ class Settings(BaseSettings):
     llm_model: str
     embed_model: str = "bge-m3"
 
+    # Источник отчётности. Домен уже менялся, поэтому в коде его нет.
+    girbo_base_url: str = "https://bo.nalog.gov.ru"
+    girbo_contact: str = ""
+
+    http_timeout_s: float = 30.0
+    http_retries: int = 3
+    http_backoff_s: float = 1.0
+    http_min_interval_s: float = 0.5
+
+    @property
+    def user_agent(self) -> str:
+        """Вежливый User-Agent с контактом; без контакта — только имя и версия."""
+        from finlib import __version__
+
+        base = f"fin-analysis/{__version__}"
+        return f"{base} (+{self.girbo_contact})" if self.girbo_contact else base
+
     @property
     def base_dir(self) -> Path:
         """Корень репозитория."""

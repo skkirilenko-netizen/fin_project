@@ -8,6 +8,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS organization (
     inn         text PRIMARY KEY CHECK (inn ~ '^[0-9]{10}$' OR inn ~ '^[0-9]{12}$'),
+    girbo_id    bigint,
     name        text,
     short_name  text,
     ogrn        text,
@@ -34,14 +35,20 @@ CREATE TABLE IF NOT EXISTS src_file (
     raw_path          text,
     checksum          text,
     form_codes        text[],
+    knd               text,
+    girbo_bfo_id      bigint,
+    correction_version integer NOT NULL DEFAULT 0,
+    is_actual         boolean NOT NULL DEFAULT true,
     unit_code         text,
     unit_multiplier   numeric,
+    unit_source       text NOT NULL DEFAULT 'assumed'
+                      CHECK (unit_source IN ('declared', 'assumed')),
     status            text NOT NULL DEFAULT 'loaded'
                       CHECK (status IN ('loaded', 'processed', 'quarantine')),
     quarantine_reason text,
     meta              jsonb,
     loaded_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT src_file_uniq UNIQUE (inn, report_year, source)
+    CONSTRAINT src_file_uniq UNIQUE (inn, report_year, source, correction_version)
 );
 
 CREATE INDEX IF NOT EXISTS src_file_checksum_idx ON src_file (checksum);
@@ -49,7 +56,17 @@ CREATE INDEX IF NOT EXISTS src_file_status_idx ON src_file (status);
 
 COMMENT ON TABLE src_file IS 'Загруженная отчётность как единица обработки';
 COMMENT ON COLUMN src_file.checksum IS 'sha256 сырого ответа источника';
-COMMENT ON COLUMN src_file.unit_code IS 'Единица измерения в источнике (ОКЕИ: 384 — тыс. руб., 385 — млн руб.)';
+COMMENT ON COLUMN src_file.unit_code IS 'Единица измерения (ОКЕИ: 384 — тыс. руб., 385 — млн руб.)';
+COMMENT ON COLUMN src_file.unit_source IS
+    'declared — единица указана источником; assumed — принята по умолчанию. '
+    'В ответе ГИР БО поля единицы измерения нет вообще, значения приходят в тысячах рублей, '
+    'поэтому для него всегда assumed';
+COMMENT ON COLUMN src_file.knd IS 'Код налогового документа: 0710099 — полная отчётность, 0710096 — упрощённая';
+COMMENT ON COLUMN src_file.correction_version IS
+    'Номер корректировки отчётности. Входит в ключ уникальности: организация может сдать '
+    'несколько версий за один год, и они сохраняются обе';
+COMMENT ON COLUMN src_file.is_actual IS
+    'Является ли эта корректировка актуальной по данным источника; в расчёт идёт только актуальная';
 COMMENT ON COLUMN src_file.unit_multiplier IS 'Коэффициент приведения значений источника к тысячам рублей';
 COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прошли контроли качества и в расчёт не идут';
 COMMENT ON COLUMN src_file.reporting_type IS
