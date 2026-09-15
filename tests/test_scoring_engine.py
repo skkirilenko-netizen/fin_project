@@ -10,6 +10,7 @@ from finlib.quality.periods import PeriodConfidence
 from finlib.quality.thresholds import load_thresholds
 from finlib.scoring.definitions import (
     Confidence,
+    GroupStatus,
     ScoringCatalog,
     StopEffect,
     load_flags,
@@ -408,3 +409,44 @@ def test_narrow_basis_caps_confidence() -> None:
     level, reasons = _confidence(groups, confidences, [], SCORING, scores)
     assert level is Confidence.LOW
     assert any("узкое" in reason for reason in reasons)
+
+
+def test_excluded_group_has_zero_weight_and_reason() -> None:
+    """Исключённая группа весит ноль и объясняет, почему исключена."""
+    turnover = SCORING.groups["turnover"]
+    assert turnover.scoring_status is GroupStatus.EXCLUDED
+    assert turnover.weight == Decimal(0)
+    assert "перцентил" in (turnover.reason or "")
+    assert "turnover" not in SCORING.scored_groups()
+
+
+def test_scored_group_weights_are_explicit_and_sum_to_hundred() -> None:
+    """Веса участвующих групп заданы явно и в сумме дают 100 без пересчёта."""
+    scored = SCORING.scored_groups()
+    assert len(scored) == 4
+    assert sum(item.weight for item in scored.values()) == Decimal(100)
+
+
+def test_excluded_group_with_weight_is_rejected() -> None:
+    """Исключённая группа с ненулевым весом методику не проходит."""
+    raw = SCORING.model_dump(mode="json")
+    raw["groups"]["turnover"]["weight"] = 15
+    with pytest.raises(ValidationError, match="исключена из балла, но имеет вес"):
+        ScoringCatalog.model_validate(raw)
+
+
+def test_scored_group_with_zero_weight_is_rejected() -> None:
+    """Нулевой вес у участвующей группы — ошибка: исключение объявляется явно."""
+    raw = SCORING.model_dump(mode="json")
+    raw["groups"]["liquidity"]["weight"] = 0
+    with pytest.raises(ValidationError, match="нулевой вес"):
+        ScoringCatalog.model_validate(raw)
+
+
+def test_turnover_metrics_are_computed_but_unscored() -> None:
+    """Показатели оборачиваемости считаются, но баллов не дают."""
+    turnover = [item for item in CATALOG.metrics if item.group == "turnover"]
+    assert len(turnover) == 3
+    for metric in turnover:
+        assert not metric.in_scoring
+        assert "шкалы уровня" in (metric.scoring_exclusion_reason or "")

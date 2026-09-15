@@ -139,13 +139,39 @@ class MetricScorePolicy(BaseModel):
     dynamics: DynamicsWeights
 
 
+class GroupStatus(StrEnum):
+    """Участвует ли группа в балльной оценке."""
+
+    SCORED = "scored"
+    EXCLUDED = "excluded"
+
+
 class GroupPolicy(BaseModel):
     """Группа показателей и её вес."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    weight: Decimal = Field(gt=0)
+    weight: Decimal = Field(ge=0)
+    scoring_status: GroupStatus = GroupStatus.SCORED
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_status(self) -> Self:
+        """Исключённая группа весит ноль и объясняет почему; участвующая весит больше нуля."""
+        if self.scoring_status is GroupStatus.EXCLUDED:
+            if self.weight != 0:
+                raise ValueError(
+                    f"группа «{self.name}» исключена из балла, но имеет вес {self.weight}"
+                )
+            if not (self.reason or "").strip():
+                raise ValueError(f"группа «{self.name}» исключена из балла без объяснения причины")
+        elif self.weight <= 0:
+            raise ValueError(
+                f"группа «{self.name}» участвует в балле, но имеет нулевой вес: "
+                "исключение объявляется полем scoring_status"
+            )
+        return self
 
 
 class ClassDef(BaseModel):
@@ -298,7 +324,12 @@ class ScoringCatalog(BaseModel):
 
     @model_validator(mode="after")
     def _check_group_weights(self) -> Self:
-        """Сумма весов групп обязана равняться 100."""
+        """Сумма весов групп обязана равняться 100.
+
+        Веса заданы явными числами и в рантайме не пересчитываются: иначе
+        эта проверка перестала бы что-либо проверять. Исключённые группы
+        весят ноль и в сумму не вносят ничего.
+        """
         total = sum(item.weight for item in self.groups.values())
         if total != Decimal(100):
             raise ValueError(
@@ -306,6 +337,14 @@ class ScoringCatalog(BaseModel):
                 "иначе общий балл зависит от того, сколько групп заведено"
             )
         return self
+
+    def scored_groups(self) -> dict[str, GroupPolicy]:
+        """Группы, участвующие в балльной оценке."""
+        return {
+            code: policy
+            for code, policy in self.groups.items()
+            if policy.scoring_status is GroupStatus.SCORED
+        }
 
     @model_validator(mode="after")
     def _check_integrity(self) -> Self:
