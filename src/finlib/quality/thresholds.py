@@ -34,6 +34,67 @@ class JumpDetection(BaseModel):
     min_base: Decimal = Field(ge=0)
 
 
+class BalanceTotalBounds(BaseModel):
+    """Границы правдоподобия валюты баланса при заявленной единице."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    min: Decimal = Field(gt=0)
+    max: Decimal = Field(gt=0)
+    origin: str = Field(min_length=1)
+
+    def implausible(self, total: Decimal) -> str | None:
+        """Чем величина неправдоподобна при заявленной единице; None — в границах.
+
+        Ноль исключён: умножение на тысячу его не меняет, поэтому подменой
+        единицы он быть не может. Нулевая валюта баланса — признак
+        недействующей организации, и говорят о ней другие контроли.
+        """
+        value = abs(total)
+        if value == 0:
+            return None
+        if value < self.min:
+            return "ниже нижней границы правдоподобия"
+        if value > self.max:
+            return "выше верхней границы правдоподобия"
+        return None
+
+
+class PeriodMagnitudeShift(BaseModel):
+    """Кратность между смежными периодами, указывающая на подмену единицы."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    factor: Decimal = Field(gt=1)
+    tolerance: Decimal = Field(gt=0, lt=1)
+    min_base: Decimal = Field(ge=0)
+    origin: str = Field(min_length=1)
+
+    def shifted(self, current: Decimal, previous: Decimal) -> Decimal | None:
+        """Кратность, близкая к подмене единицы; None — обычное изменение.
+
+        Проверяется близость отношения к тысяче, а не просто большая
+        величина: рост в триста раз бывает хозяйственным событием, ровно
+        тысячекратный — нет.
+        """
+        if abs(previous) < self.min_base or previous == 0 or current == 0:
+            return None
+        ratio = abs(current) / abs(previous)
+        for candidate in (self.factor, Decimal(1) / self.factor):
+            if abs(ratio - candidate) <= candidate * self.tolerance:
+                return ratio
+        return None
+
+
+class Magnitude(BaseModel):
+    """Контроли правдоподобия абсолютных величин."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    balance_total: BalanceTotalBounds
+    period_shift: PeriodMagnitudeShift
+
+
 class RetainedEarningsLink(BaseModel):
     """Порог необъяснённого расхождения прироста прибыли с чистой прибылью."""
 
@@ -67,6 +128,7 @@ class Thresholds(BaseModel):
     constants: dict[str, Decimal] = Field(default_factory=dict)
     rounding: Rounding
     jump_detection: JumpDetection
+    magnitude: Magnitude
     retained_earnings_link: RetainedEarningsLink
     checks: dict[str, CheckPolicy]
     mandatory_lines: dict[ReportingType, tuple[str, ...]]

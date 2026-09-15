@@ -38,6 +38,11 @@ class CheckCode(StrEnum):
     # не ловится ни одним другим контролем: баланс сойдётся, коэффициенты
     # будут верны, а все абсолютные величины окажутся неверны.
     UNIT_NOT_DETERMINED = "unit_not_determined"
+    # Правдоподобие абсолютных величин при заявленной единице. Определение
+    # единицы по форме — правило, выведенное из состава форм, и оно сломается
+    # на источнике, отдающем рубли или миллионы.
+    BALANCE_MAGNITUDE = "balance_magnitude"
+    PERIOD_MAGNITUDE_SHIFT = "period_magnitude_shift"
     # Записи получения и загрузки (задачи 3 и 4).
     CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
@@ -79,5 +84,7 @@ CHECK_CODES: frozenset[CheckCode] = frozenset(
         CheckCode.JUMP_DETECTION,
         CheckCode.RETAINED_EARNINGS_LINK,
         CheckCode.UNIT_NOT_DETERMINED,
+        CheckCode.BALANCE_MAGNITUDE,
+        CheckCode.PERIOD_MAGNITUDE_SHIFT,
     }
 )

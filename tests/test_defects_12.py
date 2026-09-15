@@ -300,3 +300,79 @@ def test_defect_7_numbering_is_continuous(db_conn, tmp_path) -> None:
     ]
     assert numbers == list(range(1, len(numbers) + 1)), numbers
     assert len(numbers) == len(document.tables)
+
+
+# --- 1 (продолжение). Правдоподобие величин --------------------------------
+
+
+def test_magnitude_bounds_have_origin() -> None:
+    """Пороги правдоподобия объявлены с происхождением, как калибровочные точки."""
+    magnitude = load_thresholds().magnitude
+    assert magnitude.balance_total.origin.strip()
+    assert magnitude.period_shift.origin.strip()
+    assert magnitude.balance_total.min < magnitude.balance_total.max
+
+
+@pytest.mark.parametrize(
+    ("total", "flagged"),
+    [
+        (Decimal(418), False),
+        (Decimal("26162827395"), False),
+        (Decimal(5), True),
+        (Decimal("500000000000"), True),
+        (Decimal(0), False),
+    ],
+)
+def test_balance_bounds_catch_only_implausible(total: Decimal, flagged: bool) -> None:
+    """Границы ловят подмену единицы и не задевают реальные величины проб.
+
+    Ноль исключён намеренно: умножение на тысячу его не меняет, подменой
+    единицы он быть не может.
+    """
+    bounds = load_thresholds().magnitude.balance_total
+    assert (bounds.implausible(total) is not None) is flagged
+
+
+@pytest.mark.parametrize(
+    ("current", "previous", "shifted"),
+    [
+        (Decimal(418000), Decimal(418), True),
+        (Decimal(418), Decimal(418000), True),
+        (Decimal(125400), Decimal(418), False),
+        (Decimal(500), Decimal(418), False),
+        (Decimal(1000), Decimal(1), False),
+    ],
+)
+def test_period_shift_catches_only_thousandfold(
+    current: Decimal, previous: Decimal, shifted: bool
+) -> None:
+    """Ловится кратность тысяче, а не всякий большой скачок.
+
+    Рост в триста раз бывает хозяйственным событием и ловится jump_detection;
+    ровно тысячекратный — подмена единицы. На микровеличинах (база ниже
+    min_base) отношение бессмысленно и не проверяется.
+    """
+    rule = load_thresholds().magnitude.period_shift
+    assert (rule.shifted(current, previous) is not None) is shifted
+
+
+def test_magnitude_severities_match_the_decision() -> None:
+    """Границы предупреждают, тысячекратный скачок блокирует."""
+    thresholds = load_thresholds()
+    assert thresholds.severity_of(CheckCode.BALANCE_MAGNITUDE.value).value == "warning"
+    assert (
+        thresholds.severity_of(CheckCode.PERIOD_MAGNITUDE_SHIFT.value).value == "blocking"
+    )
+
+
+def test_magnitude_checks_ran_on_real_data(db_conn) -> None:
+    """Оба контроля выполняются на пробах и не срабатывают ложно."""
+    from finlib.db import fetch_all
+
+    rows = fetch_all(
+        "SELECT check_code, status, count(*) AS n FROM dq_log "
+        "WHERE check_code = ANY(%(c)s) GROUP BY 1, 2",
+        {"c": [CheckCode.BALANCE_MAGNITUDE.value, CheckCode.PERIOD_MAGNITUDE_SHIFT.value]},
+    )
+    assert rows, "контроли правдоподобия не выполнялись"
+    assert all(row["status"] == "pass" for row in rows), rows

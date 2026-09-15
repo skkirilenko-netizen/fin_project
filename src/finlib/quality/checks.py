@@ -449,8 +449,95 @@ def unit_not_determined(context: ReportContext) -> Iterator[CheckOutcome]:
     )
 
 
+def balance_magnitude(context: ReportContext) -> Iterator[CheckOutcome]:
+    """Валюта баланса правдоподобна при заявленной единице измерения.
+
+    Границы грубые намеренно: контроль ловит подмену единицы, а не отклонение
+    от отраслевой нормы. Поэтому он предупреждающий — величина за границами
+    требует ручного подтверждения, а не карантина.
+    """
+    code = CheckCode.BALANCE_MAGNITUDE
+    bounds = context.thresholds.magnitude.balance_total
+    for report_date in context.ordered_periods:
+        facts = context.periods[report_date]
+        if not facts.has_form(BALANCE):
+            continue
+        total = facts.get(BALANCE, "1600")
+        if total is None:
+            yield _skipped(code, report_date, "валюта баланса не раскрыта", form_code=BALANCE)
+            continue
+        severity = _severity(context, code, report_date)
+        details = {
+            "1600": str(total),
+            "min": str(bounds.min),
+            "max": str(bounds.max),
+            "unit_code": context.unit_code,
+        }
+        problem = bounds.implausible(total)
+        if problem is None:
+            yield CheckOutcome(
+                code, CheckStatus.PASS, report_date, BALANCE, "1600",
+                "Валюта баланса правдоподобна при заявленной единице измерения",
+                details, severity,
+            )
+        else:
+            yield CheckOutcome(
+                code, CheckStatus.WARNING, report_date, BALANCE, "1600",
+                f"Валюта баланса {total} тыс. руб. {problem}: требуется ручное "
+                f"подтверждение единицы измерения",
+                details, severity,
+            )
+
+
+def period_magnitude_shift(context: ReportContext) -> Iterator[CheckOutcome]:
+    """Между смежными периодами величины не меняются в тысячу раз.
+
+    Непрерывно действующая организация так не меняется: ровно тысячекратное
+    отношение означает, что периоды пришли в разных единицах. Рост в триста
+    раз бывает хозяйственным событием и ловится контролем jump_detection.
+    """
+    code = CheckCode.PERIOD_MAGNITUDE_SHIFT
+    rule = context.thresholds.magnitude.period_shift
+    periods = context.ordered_periods
+    for index, report_date in enumerate(periods):
+        previous_date = periods[index + 1] if index + 1 < len(periods) else None
+        if previous_date is None:
+            continue
+        facts = context.periods[report_date]
+        earlier = context.periods[previous_date]
+        if not (facts.has_form(BALANCE) and earlier.has_form(BALANCE)):
+            continue
+        current = facts.get(BALANCE, "1600")
+        previous = earlier.get(BALANCE, "1600")
+        if current is None or previous is None:
+            continue
+        severity = _severity(context, code, report_date)
+        details = {
+            "current": str(current),
+            "previous": str(previous),
+            "factor": str(rule.factor),
+        }
+        ratio = rule.shifted(current, previous)
+        if ratio is None:
+            yield CheckOutcome(
+                code, CheckStatus.PASS, report_date, BALANCE, "1600",
+                "Порядок величин согласован с предыдущим периодом",
+                details, severity,
+            )
+        else:
+            yield CheckOutcome(
+                code, CheckStatus.FAIL, report_date, BALANCE, "1600",
+                f"Валюта баланса изменилась в {ratio:.0f} раз относительно "
+                f"{previous_date:%d.%m.%Y}: признак того, что периоды пришли "
+                f"в разных единицах измерения",
+                {**details, "ratio": str(ratio)}, severity,
+            )
+
+
 ALL_CHECKS = (
     unit_not_determined,
+    balance_magnitude,
+    period_magnitude_shift,
     balance_equality,
     section_sum,
     profit_chain,
