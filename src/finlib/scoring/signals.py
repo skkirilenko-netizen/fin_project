@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from finlib.config import settings
 from finlib.metrics.definitions import Condition
@@ -32,6 +32,15 @@ class SignalLevel(StrEnum):
 
     ATTENTION = "attention"
     SUPERVISORY = "supervisory"
+
+
+class CalibrationStatus(StrEnum):
+    """Зрелость порога: на скольких наблюдениях он установлен."""
+
+    # Порог экспертный, проверен на нескольких организациях.
+    PRELIMINARY = "preliminary"
+    # Порог установлен на регрессионном наборе (задача 17).
+    CALIBRATED = "calibrated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,16 +66,53 @@ def _triggered(condition: Condition, value: Decimal, threshold: Decimal) -> bool
     return value >= threshold
 
 
-class SignalDef(BaseModel):
-    """Сигнал, задаваемый выражением по строкам отчётности."""
+class SignalRule(BaseModel):
+    """Общее у всех сигналов: условие, происхождение порога и формулировка.
+
+    Условие обязательно у каждого, включая сигналы, величина которых считается
+    не формулой. Иначе отсечка лежала бы в методике, а знак сравнения — в коде,
+    и по справочнику нельзя было бы сказать, когда печатается формулировка.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     name: str = Field(min_length=1)
     level: SignalLevel
-    expression: str = Field(min_length=1)
     condition: Condition
+    origin: str = Field(min_length=1)
+    # Происхождение и зрелость порога — разные сведения: origin отвечает,
+    # откуда взялась величина, статус — можно ли на неё опираться.
+    calibration_status: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+    @field_validator("calibration_status")
+    @classmethod
+    def _check_status(cls, value: str) -> str:
+        """Статус начинается машинным признаком, дальше — пояснение словами."""
+        token = value.split(",", 1)[0].strip()
+        if token not in set(CalibrationStatus):
+            allowed = ", ".join(item.value for item in CalibrationStatus)
+            raise ValueError(
+                f"статус калибровки «{token}» неизвестен; допустимы: {allowed}"
+            )
+        return value
+
+    @property
+    def calibration(self) -> CalibrationStatus:
+        """Машинный признак зрелости порога."""
+        return CalibrationStatus(self.calibration_status.split(",", 1)[0].strip())
+
+    @property
+    def preliminary(self) -> bool:
+        """Порог предварительный: опираться на него как на норму нельзя."""
+        return self.calibration is CalibrationStatus.PRELIMINARY
+
+
+class SignalDef(SignalRule):
+    """Сигнал, задаваемый выражением по строкам отчётности."""
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    expression: str = Field(min_length=1)
     threshold: Decimal
     # Порог задан долей этой строки, а не абсолютом: у крупной организации
     # расхождение в миллион — округление, у малой — вся деятельность.
@@ -77,35 +123,18 @@ class SignalDef(BaseModel):
     # Подставлять величину по модулю: знак уже выражен словами формулировки
     # («не объясняется», «расхождение»), и минус читался бы как опечатка.
     as_absolute: bool = False
-    origin: str = Field(min_length=1)
-    text: str = Field(min_length=1)
 
 
-class StructureShift(BaseModel):
+class StructureShift(SignalRule):
     """Структурный сдвиг баланса: изменение доли укрупнённой статьи."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str = Field(min_length=1)
-    level: SignalLevel
     threshold_points: Decimal = Field(gt=0)
-    origin: str = Field(min_length=1)
-    text: str = Field(min_length=1)
 
 
-class RevisionIntensity(BaseModel):
+class RevisionIntensity(SignalRule):
     """Интенсивность пересмотра сравнительных данных."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str = Field(min_length=1)
-    level: SignalLevel
     threshold_per_set: Decimal = Field(gt=0)
-    # Порог подогнан под известный ответ на малой выборке. Признак
-    # обязателен, чтобы подгонка не выдавалась за калибровку.
-    preliminary: bool = False
-    origin: str = Field(min_length=1)
-    text: str = Field(min_length=1)
 
 
 class SignalsCatalog(BaseModel):
@@ -212,7 +241,8 @@ def structure_shifts(
         if before is None:
             continue
         shift = after - before
-        if abs(shift) < rule.threshold_points:
+        # Сравнивается модуль: сигнал даёт и уход доли, и её приход.
+        if not _triggered(rule.condition, abs(shift), rule.threshold_points):
             continue
         found.append(
             SignalHit(
@@ -241,7 +271,9 @@ def revision_intensity(
     if sets <= 0:
         return None
     per_set = safe_div(Decimal(mismatches), Decimal(sets))
-    if per_set is None or per_set <= rule.threshold_per_set:
+    if per_set is None or not _triggered(
+        rule.condition, per_set, rule.threshold_per_set
+    ):
         return None
     return SignalHit(
         code="revision_intensity",

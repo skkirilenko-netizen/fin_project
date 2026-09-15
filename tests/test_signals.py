@@ -6,14 +6,20 @@
 не может оставаться на усмотрение модели.
 """
 
+import copy
 from decimal import Decimal
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from finlib.metrics.formula import FormulaError, PrevRef, evaluate, parse_formula
 from finlib.report.data import load_report_data
 from finlib.scoring.signals import (
+    CalibrationStatus,
     SignalLevel,
+    SignalsCatalog,
+    default_path,
     evaluate_signals,
     load_signals,
     revision_intensity,
@@ -21,6 +27,15 @@ from finlib.scoring.signals import (
 )
 
 CATALOG = load_signals()
+
+# Все пороги методики: четыре сигнала-выражения и два, считаемые не формулой.
+# Требования к порогу одни и те же независимо от того, как получена величина.
+RULES = (*CATALOG.signals, CATALOG.structure_shift, CATALOG.revision_intensity)
+
+
+def raw() -> dict:
+    """Справочник сигналов в исходном виде, до разбора моделью."""
+    return yaml.safe_load(default_path().read_text(encoding="utf-8"))
 
 # Отчётность ПК «Стройсервис»: тот самый случай из экспертной оценки.
 NOW = {"1300": Decimal(-442), "2400": Decimal(40839), "2110": Decimal(44771), "1600": Decimal(418)}
@@ -48,6 +63,75 @@ def test_every_signal_has_a_prescribed_wording() -> None:
     for signal in CATALOG.signals:
         assert "{value}" in signal.text, signal.code
         assert len(signal.text) > 80, signal.code
+
+
+def test_every_threshold_declares_its_calibration_status() -> None:
+    """Зрелость порога объявлена у всех шести, а не у одного.
+
+    Происхождение и зрелость — разные сведения: origin отвечает, откуда
+    взялась величина, статус — на скольких наблюдениях она проверена.
+    Пока наблюдений три, и предварительны все.
+    """
+    assert len(RULES) == 6
+    for rule in RULES:
+        assert rule.calibration_status.strip(), rule.name
+        assert rule.calibration is CalibrationStatus.PRELIMINARY, rule.name
+        assert rule.preliminary, rule.name
+        assert "3 организациям" in rule.calibration_status, rule.name
+
+
+def test_calibration_status_is_machine_readable() -> None:
+    """Статус начинается признаком из перечня, а не свободным текстом.
+
+    Без машинного признака «предварительный порог» отличался бы от
+    установленного только на глаз, и переход к калиброванным (задача 19)
+    нечем было бы проверить.
+    """
+    payload = raw()
+    payload["signals"][0]["calibration_status"] = "проверено на практике"
+    with pytest.raises(ValidationError, match="статус калибровки"):
+        SignalsCatalog(**payload)
+
+
+def test_every_rule_declares_its_condition() -> None:
+    """Формулировка без условия срабатывания методику не проходит."""
+    for rule in RULES:
+        assert rule.condition is not None, rule.name
+
+
+@pytest.mark.parametrize("place", ["structure_shift", "revision_intensity"])
+def test_condition_is_required_for_rules_computed_in_code(place: str) -> None:
+    """Условие обязательно и там, где величина считается не формулой.
+
+    Иначе отсечка лежала бы в методике, а знак сравнения — в коде, и по
+    справочнику нельзя было бы сказать, когда печатается формулировка.
+    """
+    payload = raw()
+    del payload[place]["condition"]
+    with pytest.raises(ValidationError, match="condition"):
+        SignalsCatalog(**payload)
+
+
+def test_condition_is_required_for_signal_expressions() -> None:
+    """То же для сигналов, задаваемых выражением."""
+    payload = raw()
+    del payload["signals"][0]["condition"]
+    with pytest.raises(ValidationError, match="condition"):
+        SignalsCatalog(**payload)
+
+
+def test_structure_shift_follows_the_declared_condition() -> None:
+    """Сравнение идёт по объявленному условию, а не по зашитому в коде."""
+    payload = copy.deepcopy(raw())
+    payload["structure_shift"]["condition"] = "gt"
+    strict = SignalsCatalog(**payload)
+    exactly = strict.structure_shift.threshold_points
+    shares_now = {"1200": Decimal(50) + exactly}
+    shares_before = {"1200": Decimal(50)}
+    names = {"1200": "Оборотные активы"}
+    # Ровно на пороге: gte даёт сигнал, gt молчит.
+    assert structure_shifts(shares_now, shares_before, names, CATALOG)
+    assert structure_shifts(shares_now, shares_before, names, strict) == []
 
 
 def test_levels_are_declared() -> None:

@@ -177,6 +177,21 @@ def test_forbidden_wording_is_logged_separately() -> None:
     assert row["foreign_numbers"]["wordings"][0]["label"] == "норма"
 
 
+def test_code_version_is_logged() -> None:
+    """Обращение помечается версией кода, которой сделан прогон.
+
+    Записи разных версий несопоставимы: правка инструкции или постпроверки
+    меняет поведение текстового слоя целиком, и разбор журнала считает
+    только текущую версию.
+    """
+    from finlib.version import code_version
+
+    with client_returning(GOOD) as client:
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
+
+    assert journal()[0]["code_version"] == code_version()
+
+
 def test_prompt_and_response_are_logged() -> None:
     """Текст инструкции и ответа сохраняются целиком."""
     with client_returning(GOOD) as client:

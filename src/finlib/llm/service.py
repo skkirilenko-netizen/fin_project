@@ -20,6 +20,7 @@ from finlib.llm.textcheck import TextContext
 from finlib.llm.verify import VerificationResult, strip_reasoning, verify
 from finlib.metrics.definitions import load_metrics
 from finlib.standards import Standard
+from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +34,12 @@ MAX_ATTEMPTS = 3
 _INSERT_LOG = """
 INSERT INTO llm_log (
     inn, report_date, model, prompt_name, prompt_text, response_text,
-    temperature, verified, foreign_numbers, attempt, duration_ms, is_test
+    temperature, verified, foreign_numbers, attempt, duration_ms, code_version,
+    is_test
 ) VALUES (
     %(inn)s, %(report_date)s, %(model)s, %(prompt_name)s, %(prompt_text)s, %(response_text)s,
     %(temperature)s, %(verified)s, %(foreign_numbers)s, %(attempt)s, %(duration_ms)s,
-    %(is_test)s
+    %(code_version)s, %(is_test)s
 )
 """
 
@@ -176,6 +178,9 @@ def _log(
             else None,
             "attempt": attempt,
             "duration_ms": completion.duration_ms if completion else None,
+            # Версия кода прогона: записи разных версий несопоставимы, и разбор
+            # журнала считает только текущую.
+            "code_version": code_version(),
             "is_test": is_test,
         },
     )

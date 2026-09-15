@@ -337,12 +337,23 @@ CREATE TABLE IF NOT EXISTS llm_log (
     foreign_numbers jsonb,
     attempt         integer NOT NULL DEFAULT 1,
     duration_ms     integer,
+    -- Версия кода, которой сделан прогон: короткий git-хеш рабочего дерева.
+    -- Записи разных версий несопоставимы: правка инструкции или постпроверки
+    -- меняет поведение текстового слоя целиком, и статистика по смеси версий
+    -- описывает историю разработки, а не систему.
+    code_version    text,
     -- Запись сделана тестом, а не рабочим прогоном. Журнал обращений
     -- к модели — доказательная база системы, и стирать его прогоном тестов
     -- нельзя. Тесты помечают свои записи и убирают только их.
     is_test         boolean NOT NULL DEFAULT false,
     created_at      timestamptz NOT NULL DEFAULT now()
 );
+
+-- Колонка добавлена после того, как таблица уже существовала в рабочей базе.
+-- CREATE TABLE IF NOT EXISTS её туда не принесёт, а журнал пересоздавать
+-- нельзя: он доказательная база системы. Прежние записи остаются с NULL —
+-- версия тех прогонов действительно неизвестна.
+ALTER TABLE llm_log ADD COLUMN IF NOT EXISTS code_version text;
 
 CREATE INDEX IF NOT EXISTS llm_log_real_idx ON llm_log (inn, created_at)
     WHERE NOT is_test;
@@ -352,6 +363,7 @@ CREATE INDEX IF NOT EXISTS llm_log_inn_idx ON llm_log (inn, report_date);
 COMMENT ON TABLE llm_log IS 'Каждое обращение к модели с результатом постпроверки';
 COMMENT ON COLUMN llm_log.verified IS 'false — ответ содержит посторонние числа и пользователю не показывается';
 COMMENT ON COLUMN llm_log.foreign_numbers IS 'Числа из ответа, не найденные во входных блоках';
+COMMENT ON COLUMN llm_log.code_version IS 'Версия кода прогона (git-хеш); записи других версий в статистику не идут';
 
 -- Доверие к периоду ----------------------------------------------------------
 
