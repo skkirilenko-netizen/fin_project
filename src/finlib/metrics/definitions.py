@@ -331,6 +331,20 @@ class MetricsCatalog(BaseModel):
         """Показатели, у которых объявлен стоп-фактор."""
         return tuple(item for item in self.metrics if item.stop_factor is not None)
 
+    def stop_factor_values(self) -> dict[str, frozenset[Decimal]]:
+        """Пороги стоп-факторов по коду показателя.
+
+        Это единственные числа-ориентиры, объявленные методикой прямо, и
+        называть их в заключении разрешено — но только при своём показателе.
+        «Покрытие процентов ниже 1» правомерно, «текущая ликвидность ниже 1»
+        — выдуманный норматив, хотя число то же самое.
+        """
+        return {
+            item.code: frozenset({item.stop_factor.value})
+            for item in self.stop_factors()
+            if item.stop_factor
+        }
+
     def validate_against(self, catalog: LinesCatalog, constants: set[str]) -> None:
         """Проверяет, что формулы и производные опираются на существующие строки."""
         known = (

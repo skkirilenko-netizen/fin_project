@@ -16,6 +16,7 @@ from finlib.db import PgConnection, execute
 from finlib.llm.client import Completion, LLMClient
 from finlib.llm.context import ConclusionContext, build_context
 from finlib.llm.verify import VerificationResult, strip_reasoning, verify
+from finlib.metrics.definitions import load_metrics
 from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
@@ -96,11 +97,29 @@ def _log(
             "response_text": completion.text if completion else None,
             "temperature": 0,
             "verified": result.verified if result else None,
+            # В журнал уходят все виды замечаний, а не только числа: отсылка
+            # к нормативу и ложное утверждение о нерасчёте отклоняют ответ
+            # наравне с посторонним числом, и разбирать отказ надо по ним же.
             "foreign_numbers": json.dumps(
-                [
-                    {"number": item.text, "context": item.context}
-                    for item in (result.foreign if result else [])
-                ],
+                {
+                    "numbers": [
+                        {
+                            "number": item.text,
+                            "violation": item.violation.value,
+                            "anchor": item.anchor,
+                            "context": item.context,
+                        }
+                        for item in result.foreign
+                    ],
+                    "wordings": [
+                        {"text": item.text, "label": item.label, "context": item.context}
+                        for item in result.wordings
+                    ],
+                    "claims": [
+                        {"code": item.code, "text": item.text, "context": item.context}
+                        for item in result.claims
+                    ],
+                },
                 ensure_ascii=False,
             )
             if result
@@ -126,6 +145,10 @@ def generate_conclusion(
     )
     prompt = build_prompt(context)
     blocks = context.blocks()
+    # Пороги стоп-факторов — единственные числа-ориентиры, которые методика
+    # объявляет прямо; называть их модели разрешено. Всякий другой порог
+    # («ниже 1,0» для текущей ликвидности) она выдумала.
+    thresholds = load_metrics().stop_factor_values()
 
     own_client = client is None
     client = client or LLMClient()
@@ -134,7 +157,7 @@ def generate_conclusion(
         for attempt in range(1, MAX_ATTEMPTS + 1):
             completion = client.complete(prompt)
             text = strip_reasoning(completion.text)
-            result = verify(completion.text, blocks)
+            result = verify(completion.text, blocks, thresholds=thresholds)
             _log(context, prompt, completion, result, attempt)
 
             if result.verified:
@@ -152,7 +175,7 @@ def generate_conclusion(
                     checked_numbers=result.checked,
                 )
 
-            last_foreign = result.foreign_values
+            last_foreign = result.problems
             logger.warning(
                 "попытка %d отклонена: %s", attempt, result.summary()
             )

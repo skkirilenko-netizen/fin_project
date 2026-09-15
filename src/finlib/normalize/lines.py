@@ -67,7 +67,13 @@ class LineDef(BaseModel):
     code_allowed: tuple[str, ...] = ()
     aggregates: tuple[str, ...] = ()
     same_meaning_as_full: bool | None = None
+    # Безусловная оговорка о содержании строки: верна для любой организации,
+    # сдавшей отчётность в этом наборе. Идёт в раздел «Ограничения анализа».
     note: str | None = None
+    # Сопоставление с другим набором отчётности и прочее описание методики.
+    # **В промпт не передаётся никогда**: сказанное о наборе, которым
+    # организация не пользуется, модель выдаёт за факт о самой организации.
+    methodology_note: str | None = None
 
     @property
     def key(self) -> tuple[ReportingType, str]:

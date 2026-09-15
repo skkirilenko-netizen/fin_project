@@ -85,7 +85,7 @@ def test_rejected_answer_is_retried_once_then_fails() -> None:
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError) as info:
         generate_conclusion(INN, context=CONTEXT, client=client)
     assert info.value.attempts == 2
-    assert "37,4" in info.value.foreign
+    assert any("37,4" in item for item in info.value.foreign)
 
 
 def test_second_attempt_can_succeed() -> None:
@@ -150,9 +150,23 @@ def test_foreign_numbers_are_logged_with_context() -> None:
         generate_conclusion(INN, context=CONTEXT, client=client)
 
     row = journal()[0]
-    assert row["foreign_numbers"]
-    assert row["foreign_numbers"][0]["number"] == "37,4"
-    assert "Рентабельность" in row["foreign_numbers"][0]["context"]
+    numbers = row["foreign_numbers"]["numbers"]
+    assert numbers
+    assert numbers[0]["number"] == "37,4"
+    assert numbers[0]["violation"] == "not_in_blocks"
+    assert "Рентабельность" in numbers[0]["context"]
+
+
+def test_forbidden_wording_is_logged_separately() -> None:
+    """Отсылка к нормативу пишется в журнал своим разделом, а не среди чисел."""
+    answer = "### 2. Фактическая база\nЛиквидность (cur_liq) — 0,82 при норме не менее."
+    with client_returning(answer, answer) as client, pytest.raises(ConclusionRejectedError):
+        generate_conclusion(INN, context=CONTEXT, client=client)
+
+    row = journal()[0]
+    assert row["foreign_numbers"]["numbers"] == []
+    assert row["foreign_numbers"]["wordings"]
+    assert row["foreign_numbers"]["wordings"][0]["label"] == "норма"
 
 
 def test_prompt_and_response_are_logged() -> None:

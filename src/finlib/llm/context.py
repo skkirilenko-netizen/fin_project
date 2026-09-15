@@ -281,9 +281,13 @@ def _assessment_block(
     stop = assessment["stop_factor_code"]
     if stop:
         policy = next((item for item in scoring.stop_factors if item.code == stop), None)
+        # В промпт идёт statement — что стоп-фактор означает для этой
+        # организации. Поле rationale объясняет устройство методики
+        # («бывает штатным режимом при быстром обороте») и рядом с оценкой
+        # читалось бы как оправдание положения именно этой организации.
         lines.append(
             f"Сработал стоп-фактор «{policy.name if policy else stop}»: "
-            f"{' '.join(policy.rationale.split()) if policy else ''}"
+            f"{' '.join(policy.statement.split()) if policy else ''}"
         )
         lines.append(
             "ВНИМАНИЕ: при сработавшем стоп-факторе балл в текст заключения "
@@ -322,11 +326,39 @@ def _flags_block(assessment: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _line_notes(
+    inn: str,
+    periods: list[date],
+    conn: PgConnection | None,
+    lines_catalog: LinesCatalog,
+    standard: Standard,
+    reporting_type: ReportingType,
+) -> list[str]:
+    """Оговорки справочника по строкам, раскрытым у этой организации.
+
+    Оговорка, оставшаяся только в справочнике, считается потерянной: строка
+    участвует в расчёте и в тексте заключения, а ограничение её содержания
+    читателю не видно.
+    """
+    rows = fetch_all(
+        _FACTS, {"inn": inn, "standard": standard.value, "dates": periods[:2]}, conn=conn
+    )
+    notes: list[str] = []
+    for code in sorted({row["line_code"] for row in rows}):
+        line = lines_catalog.get(code, reporting_type)
+        if line is not None and line.note:
+            notes.append(f"{line.name} (строка {code}): {' '.join(line.note.split())}")
+    return notes
+
+
 def _limitations_block(
     inn: str,
+    periods: list[date],
     conn: PgConnection | None,
     scoring: ScoringCatalog,
     catalog: MetricsCatalog,
+    lines_catalog: LinesCatalog,
+    reporting_type: ReportingType,
     assessment: dict | None,
     standard: Standard,
 ) -> str:
@@ -350,6 +382,9 @@ def _limitations_block(
         metric = catalog.get(code)
         if metric is not None and metric.note:
             notes.append(f"{metric.name}: {' '.join(metric.note.split())}")
+    notes.extend(
+        _line_notes(inn, periods, conn, lines_catalog, standard, reporting_type)
+    )
     notes.append(" ".join(catalog.derived.share.note.split()))
 
     lines.extend(f"- {note}" for note in notes)
@@ -401,6 +436,14 @@ def build_context(
         flags=_flags_block(assessment),
         assessment=_assessment_block(assessment, scoring, metrics_catalog),
         limitations=_limitations_block(
-            inn, conn, scoring, metrics_catalog, assessment, standard
+            inn,
+            periods,
+            conn,
+            scoring,
+            metrics_catalog,
+            lines_catalog,
+            reporting_type,
+            assessment,
+            standard,
         ),
     )

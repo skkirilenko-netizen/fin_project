@@ -12,8 +12,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 
+from finlib.llm.claims import FalseClaim, find_false_claims
 from finlib.llm.direction import agrees, stated_direction
 from finlib.llm.pairs import Anchor, AnchorIndex, build_index, find_anchor
+from finlib.llm.wording import Wording, find_forbidden
 from finlib.utils import to_decimal
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,19 @@ _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 # Дата: числом отчётности не является, разбирать её на части нельзя.
 _DATE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+
+# Сравнение перед числом: «ниже 1,0», «не достигает 100 %», «против 0».
+# После такого слова число перестаёт быть проходным: 0, 1 и 100 сами по себе
+# ничего не утверждают, но как объект сравнения превращаются в порог,
+# а абсолютных порогов методика не содержит.
+_COMPARISON = re.compile(
+    r"(?:ниже|выше|меньше|больше|менее|более|превыша\w*|превыси\w*|достига\w*"
+    r"|порог\w*|против|сравнени\w*\s+с)\W{0,3}$",
+    re.IGNORECASE,
+)
+
+# Насколько далеко назад смотреть в поисках слова сравнения.
+_COMPARISON_LOOKBEHIND = 24
 
 # Код формы по ОКУД: ссылка на форму, а не величина.
 _FORM_CODE = re.compile(r"\b0\d{6}\b")
@@ -91,25 +106,34 @@ class ForeignNumber:
 
 @dataclass
 class VerificationResult:
-    """Итог постпроверки."""
+    """Итог постпроверки: числа, формулировки и утверждения о состоянии."""
 
     verified: bool
     foreign: list[ForeignNumber] = field(default_factory=list)
     checked: int = 0
+    wordings: list[Wording] = field(default_factory=list)
+    claims: list[FalseClaim] = field(default_factory=list)
 
     @property
     def foreign_values(self) -> list[str]:
         """Посторонние числа строками — для записи в журнал."""
         return [item.text for item in self.foreign]
 
+    @property
+    def problems(self) -> list[str]:
+        """Все замечания одним перечнем, человеческими формулировками."""
+        return [item.describe() for item in (*self.foreign, *self.wordings, *self.claims)]
+
     def summary(self) -> str:
         """Однострочная сводка."""
         if self.verified:
             return f"проверка пройдена, сверено чисел: {self.checked}"
-        return (
-            f"проверка не пройдена, посторонних чисел {len(self.foreign)} "
-            f"из {self.checked}: {', '.join(self.foreign_values[:5])}"
-        )
+        parts = [f"посторонних чисел {len(self.foreign)} из {self.checked}"]
+        if self.wordings:
+            parts.append(f"отсылок к нормативу {len(self.wordings)}")
+        if self.claims:
+            parts.append(f"ложных утверждений о нерасчёте {len(self.claims)}")
+        return f"проверка не пройдена: {'; '.join(parts)}"
 
 
 def strip_reasoning(text: str) -> str:
@@ -162,16 +186,44 @@ def allowed_values(blocks: str) -> set[Decimal]:
     return {value for _, value in extract_numbers(blocks)}
 
 
-def verify(response: str, blocks: str, *, require_anchor: bool = True) -> VerificationResult:
+# Блоки готовых формулировок. Их текст модель обязана привести дословно
+# и сокращать не вправе, а кодов в нём нет и быть не может: доля активов
+# в тексте флага — часть фразы, а не значение показателя.
+_READY_BLOCKS = ("ФЛАГИ", "ОГРАНИЧЕНИЯ")
+
+
+def quotable_values(blocks: str) -> set[Decimal]:
+    """Числа из готовых формулировок: их цитирование кода не требует."""
+    found: set[Decimal] = set()
+    for section in blocks.split("=== "):
+        header = section.split("\n", 1)[0]
+        if any(name in header for name in _READY_BLOCKS):
+            found.update(value for _, value in extract_numbers(section))
+    return found
+
+
+def verify(
+    response: str,
+    blocks: str,
+    *,
+    require_anchor: bool = True,
+    thresholds: dict[str, frozenset[Decimal]] | None = None,
+) -> VerificationResult:
     """Сверяет пары «число — код» в ответе с входными блоками.
 
     Число обязано не только встречаться во входных данных, но и стоять при том
     показателе, которому принадлежит: верное значение при чужом коде — ложное
     утверждение, а не опечатка. При require_anchor число без кода рядом тоже
     считается нарушением: проверить его не с чем.
+
+    В thresholds передаются пороги стоп-факторов по коду показателя —
+    единственные числа-ориентиры, объявленные методикой. Называть их разрешено,
+    но только при своём показателе; всякий другой порог модель выдумала.
     """
+    thresholds = thresholds or {}
     text = strip_reasoning(response)
     allowed = allowed_values(blocks)
+    quotable = quotable_values(blocks)
     rounded = _rounded_forms(allowed)
     index = build_index(blocks)
     skip = (
@@ -195,15 +247,28 @@ def verify(response: str, blocks: str, *, require_anchor: bool = True) -> Verifi
         if text[span[1] : span[1] + 1] == "_":
             continue  # начало кода производной величины: 1230 в 1230_chg_pct
         checked += 1
-        if _is_trivial(value):
+        if _is_year(value):
             continue
+        # 0, 1 и 100 сами по себе ничего не утверждают, но как объект
+        # сравнения превращаются в порог: «что ниже 1,0». Год под это правило
+        # не подпадает — «по сравнению с 2024 годом» сравнивает периоды.
+        trivial = abs(value) in ALWAYS_ALLOWED
+        compared = trivial and _is_compared(text, span)
+        if trivial and not compared:
+            continue
+        if value in quotable:
+            continue  # число из готовой формулировки, приведённой дословно
 
         # Якорь ищется первым: он задаёт, с чем именно сверять число.
         # Общий набор чисел блоков — запасная проверка для числа без якоря.
         anchor = find_anchor(text, span, index)
         if anchor is not None:
-            actual = _matched_value(value, match.group(), anchor)
+            actual = _matched_value(value, match.group(), anchor, exact=compared)
             if actual is None:
+                # Порог стоп-фактора при своём показателе назвать разрешено:
+                # методика объявляет его прямо, и он содержателен вне отрасли.
+                if value in thresholds.get(anchor.key, frozenset()):
+                    continue
                 violation = (
                     Violation.WRONG_ANCHOR
                     if _is_allowed(value, match.group(), allowed, rounded)
@@ -229,7 +294,15 @@ def verify(response: str, blocks: str, *, require_anchor: bool = True) -> Verifi
         elif require_anchor:
             foreign.append(_foreign(text, match, value, Violation.NO_ANCHOR))
 
-    result = VerificationResult(verified=not foreign, foreign=foreign, checked=checked)
+    wordings = find_forbidden(text)
+    claims = find_false_claims(text, index, index.calculated_codes())
+    result = VerificationResult(
+        verified=not (foreign or wordings or claims),
+        foreign=foreign,
+        checked=checked,
+        wordings=wordings,
+        claims=claims,
+    )
     logger.info("постпроверка: %s", result.summary())
     return result
 
@@ -253,21 +326,33 @@ def _foreign(
     )
 
 
-def _matched_value(value: Decimal, text: str, anchor: Anchor) -> Decimal | None:
+def _matched_value(
+    value: Decimal, text: str, anchor: Anchor, *, exact: bool = False
+) -> Decimal | None:
     """Значение якоря, с которым сошлось число; None — если не сошлось ни с одним.
 
     У изменения за период направление задаёт глагол, а не знак: «сократилась
     на 59,6 %» — правильный русский, «сократилась на −59,6 %» — нет. Поэтому
     изменение узнаётся и по модулю, но возвращается всегда со знаком: знак
     нужен, чтобы проверить глагол.
+
+    При exact послабление на округление не действует. Оно нужно для цитирования
+    с меньшей точностью, но у тривиального числа в роли порога вырождается:
+    0,82, округлённое до нуля знаков, равно единице, и «ликвидность ниже 1»
+    сошлось бы со значением самой ликвидности.
     """
     places = _decimal_places(text)
     quant = Decimal(1).scaleb(-places)
     for item in anchor.values:
-        if value == item or value == item.quantize(quant):
+        if value == item:
             return item
-        if anchor.is_change and (value == -item or value == (-item).quantize(quant)):
+        if not exact and value == item.quantize(quant):
             return item
+        if anchor.is_change:
+            if value == -item:
+                return item
+            if not exact and value == (-item).quantize(quant):
+                return item
     return None
 
 
@@ -291,10 +376,14 @@ def _misstates_direction(
     return not agrees(actual, stated_direction(text, span[0]))
 
 
-def _is_trivial(value: Decimal) -> bool:
-    """Число, не несущее сведений об организации: ноль, единица, сто, год."""
-    if abs(value) in ALWAYS_ALLOWED:
-        return True
+def _is_compared(text: str, span: tuple[int, int]) -> bool:
+    """Стоит ли число объектом сравнения — «ниже 1,0», «против 0»."""
+    start = max(0, span[0] - _COMPARISON_LOOKBEHIND)
+    return _COMPARISON.search(text[start : span[0]]) is not None
+
+
+def _is_year(value: Decimal) -> bool:
+    """Номер года: величиной отчётности не является ни при каких условиях."""
     return value == value.to_integral_value() and YEAR_MIN <= int(value) <= YEAR_MAX
 
 
