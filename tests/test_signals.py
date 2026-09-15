@@ -245,3 +245,15 @@ def test_signal_wording_is_not_paraphrased(db_conn, tmp_path) -> None:
     text = "\n".join(item.text for item in Document(report.path).paragraphs)
     for signal in data.signals:
         assert signal["message"] in text, signal["signal_code"]
+
+
+def test_preliminary_threshold_is_marked_as_such() -> None:
+    """Порог, подогнанный под известный ответ, помечен предварительным.
+
+    Отсечка интенсивности пересмотра подобрана так, чтобы сработали обе
+    наблюдаемые организации. На выборке из трёх это подгонка, а не
+    калибровка, и признак не даёт выдать одно за другое.
+    """
+    rule = CATALOG.revision_intensity
+    assert rule.preliminary
+    assert "не калибровка" in rule.origin

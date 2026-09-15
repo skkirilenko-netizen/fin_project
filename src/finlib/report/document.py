@@ -7,6 +7,7 @@
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -28,7 +29,8 @@ from finlib.report.appendix import (
 )
 from finlib.report.consistency import InconsistentReportError, check_document
 from finlib.report.data import ReportData, load_report_data
-from finlib.report.sections import Section, split_sections
+from finlib.report.integrity import NumbersAlteredError, check_numbers
+from finlib.report.sections import EXPECTED, Section, split_sections
 from finlib.report.summary import build_summary
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
 from finlib.standards import Standard
@@ -163,6 +165,27 @@ def build_report(
     path = output_path(inn, data.report_date, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     document.save(path)
+
+    # Сквозная сверка: всё, что выполняется после постпроверки — снятие
+    # разметки, разбор на разделы, оформление, запись docx, — находилось
+    # вне контроля. Очистка однажды съела минус величины, и число сменило
+    # знак уже после того, как проверка его подтвердила.
+    if conclusion is not None and conclusion.verified_text:
+        try:
+            check_numbers(
+                conclusion.verified_text,
+                _model_text_of(path),
+                extra=[
+                    # Номера заголовков разделов.
+                    *(f"{number}." for number, _ in EXPECTED),
+                    # Предписанные формулировки сигналов: они детерминированы
+                    # и в тексте модели отсутствуют по построению.
+                    *(item["message"] for item in data.signals),
+                ],
+            )
+        except NumbersAlteredError:
+            path.unlink(missing_ok=True)
+            raise
     logger.info("заключение записано: %s", path)
     return RenderedReport(
         path=path,
@@ -171,6 +194,26 @@ def build_report(
         model=model,
         sections=tuple(sections),
     )
+
+
+def _model_text_of(path: Path) -> str:
+    """Текст разделов 2–6 из записанного документа.
+
+    Читается с диска, а не из памяти: сверять надо то, что получит читатель,
+    вместе с последствиями оформления и сериализации.
+    """
+    document = Document(str(path))
+    collected: list[str] = []
+    inside = False
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if re.match(r"^2\.\s", text) or text.startswith("2–6"):
+            inside = True
+        elif text.startswith("Приложение"):
+            break
+        if inside:
+            collected.append(paragraph.text)
+    return "\n".join(collected)
 
 
 def _limitations_text(

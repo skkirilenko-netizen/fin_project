@@ -101,6 +101,9 @@ class RevisionIntensity(BaseModel):
     name: str = Field(min_length=1)
     level: SignalLevel
     threshold_per_set: Decimal = Field(gt=0)
+    # Порог подогнан под известный ответ на малой выборке. Признак
+    # обязателен, чтобы подгонка не выдавалась за калибровку.
+    preliminary: bool = False
     origin: str = Field(min_length=1)
     text: str = Field(min_length=1)
 

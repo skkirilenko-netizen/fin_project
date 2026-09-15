@@ -64,6 +64,10 @@ class Conclusion:
     model: str
     attempt: int
     checked_numbers: int
+    # Текст в том виде, в каком его подтвердила постпроверка, до снятия
+    # разметки. Нужен сквозной сверке: всё, что происходит после проверки,
+    # иначе остаётся вне контроля.
+    verified_text: str = ""
 
 
 def load_prompt(path: Path | None = None) -> str:
@@ -233,6 +237,7 @@ def generate_conclusion(
                     # Коды снимаются после проверки: они механизм сверки,
                     # а не часть заключения. Читатель их видеть не должен.
                     text=strip_identifiers(text),
+                    verified_text=text,
                     model=completion.model,
                     attempt=attempt,
                     checked_numbers=result.checked,
