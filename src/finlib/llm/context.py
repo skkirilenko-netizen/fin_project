@@ -233,15 +233,18 @@ def _metrics_block(
             reason = by_metric[code][0]["reason"] or "причина не указана"
             not_calculable.append(f"{code} «{metric.name}»: {reason}")
             continue
-        note = f"\n      оговорка: {' '.join(metric.note.split())}" if metric.note else ""
-        lines.append(f"{code}  «{metric.name}»  {rendered}{note}")
+        # Оговорок здесь нет намеренно: в блок ПОКАЗАТЕЛИ идёт только
+        # фактическое состояние показателя у этой организации — значение
+        # либо причина, по которой он не рассчитан. Оговорки о содержании
+        # показателя собраны в блоке ОГРАНИЧЕНИЯ АНАЛИЗА; рядом со значением
+        # модель читает их как утверждение о самой организации.
+        lines.append(f"{code}  «{metric.name}»  {rendered}")
 
     if derived_lines:
         lines.append("")
         lines.append("Изменения за период и структура баланса — величины готовы,")
         lines.append("считать их заново не нужно:")
         lines.extend(derived_lines)
-        lines.append(f"  {' '.join(catalog.derived.share.note.split())}")
 
     if not_calculable:
         lines.append("")
@@ -339,11 +342,15 @@ def _limitations_block(
         if assessment["confidence_reasons"]:
             notes.extend(assessment["confidence_reasons"])
 
+    # Оговорка о содержании показателя — безусловная, то есть верная для любой
+    # организации. Условные формулировки живут в methodology_note и в промпт
+    # не идут: рядом с посчитанным значением модель выдаёт их за факт.
     used = {item["metric_code"] for item in (assessment["metrics"] if assessment else [])}
     for code in sorted(used):
         metric = catalog.get(code)
         if metric is not None and metric.note:
             notes.append(f"{metric.name}: {' '.join(metric.note.split())}")
+    notes.append(" ".join(catalog.derived.share.note.split()))
 
     lines.extend(f"- {note}" for note in notes)
     return "\n".join(lines)

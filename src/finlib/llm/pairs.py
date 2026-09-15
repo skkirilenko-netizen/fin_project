@@ -48,11 +48,28 @@ _NUMBER_IN_VALUES = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class Anchor:
-    """Код или наименование показателя и допустимые при нём значения."""
+    """Код или наименование показателя и допустимые при нём значения.
+
+    Значения хранятся со знаком, как они даны в блоках. Для изменения за
+    период знак важен дважды: он допускает цитирование по модулю («сократилась
+    на 59,6 %») и он же задаёт направление, с которым обязан быть согласован
+    глагол при числе.
+    """
 
     key: str
     kind: str
     values: frozenset[Decimal]
+    is_change: bool = False
+
+    @property
+    def base(self) -> str | None:
+        """Код величины, изменением которой якорь является."""
+        if not self.is_change:
+            return None
+        for suffix in CHANGE_SUFFIXES:
+            if self.key.endswith(suffix):
+                return self.key[: -len(suffix)]
+        return None
 
 
 @dataclass
@@ -61,14 +78,21 @@ class AnchorIndex:
 
     anchors: dict[str, Anchor] = field(default_factory=dict)
 
-    def add(self, key: str, kind: str, values: set[Decimal]) -> None:
+    def add(
+        self, key: str, kind: str, values: set[Decimal], *, is_change: bool = False
+    ) -> None:
         """Добавляет якорь; повторный ключ расширяет набор значений."""
         normalized = key.strip().casefold()
         if not normalized:
             return
         existing = self.anchors.get(normalized)
         merged = set(values) | (set(existing.values) if existing else set())
-        self.anchors[normalized] = Anchor(normalized, kind, frozenset(merged))
+        self.anchors[normalized] = Anchor(
+            normalized,
+            kind,
+            frozenset(merged),
+            is_change or (existing.is_change if existing else False),
+        )
 
     def get(self, key: str) -> Anchor | None:
         """Якорь по коду или наименованию."""
@@ -104,15 +128,9 @@ def build_index(blocks: str) -> AnchorIndex:
         index.add(name, "line_name", parsed)
     for code, name, values in _METRIC_LINE.findall(blocks):
         parsed = _values_of(values)
-        if code.endswith(CHANGE_SUFFIXES):
-            # У изменения направление выражается глаголом, а не знаком:
-            # «сократилась на 59,6 %» — правильный русский, а «сократилась
-            # на −59,6 %» — нет. Поэтому изменение узнаётся и по модулю.
-            # Направление проверкой чисел не ловится в принципе: «выросла
-            # с 1,23 до 0,82» тоже прошло бы, оба числа верны.
-            parsed |= {abs(item) for item in parsed}
-        index.add(code, "metric", parsed)
-        index.add(name, "metric_name", parsed)
+        is_change = code.endswith(CHANGE_SUFFIXES)
+        index.add(code, "metric", parsed, is_change=is_change)
+        index.add(name, "metric_name", parsed, is_change=is_change)
     for name, score, weight in _GROUP_LINE.findall(blocks):
         index.add(name, "group", _values_of(f"{score} {weight}"))
     for label, value in _LABELLED.findall(blocks):

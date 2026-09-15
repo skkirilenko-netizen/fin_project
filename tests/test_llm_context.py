@@ -7,7 +7,7 @@ import pytest
 
 from finlib.llm.context import build_context, format_metric, money, ratio
 from finlib.llm.verify import verify
-from finlib.metrics.definitions import Unit
+from finlib.metrics.definitions import Unit, load_metrics
 
 INN = "7736050003"
 SIMPLIFIED_INN = "2100010824"
@@ -109,6 +109,36 @@ def test_model_gets_only_computed_values(context) -> None:
     assert "data/raw" not in blocks
     assert "current1600" not in blocks, "сырые атрибуты источника не просачиваются"
     assert "girbo" not in blocks.lower()
+
+
+def test_methodology_notes_never_reach_the_prompt(context) -> None:
+    """Условная оговорка методики в контекст не идёт ни одним полем.
+
+    «В упрощённой отчётности не рассчитывается» — свойство методики, а не факт
+    об организации. Поданная рядом с посчитанным значением, она читается как
+    утверждение: модель написала так про Газпром, который сдаёт полную
+    отчётность, и постпроверка чисел этого не поймала.
+    """
+    blocks = context.blocks()
+    checked = 0
+    for metric in load_metrics().metrics:
+        if not metric.methodology_note:
+            continue
+        checked += 1
+        fragment = " ".join(metric.methodology_note.split())[:60]
+        assert fragment not in blocks, f"{metric.code}: описание методики попало в промпт"
+    assert checked >= 5, "в методике не осталось условных оговорок — проверка выродилась"
+
+
+def test_metrics_block_states_only_facts(context) -> None:
+    """В блоке ПОКАЗАТЕЛИ нет оговорок — только значения и причины отказа."""
+    assert "оговорка" not in context.metrics
+    assert "не рассчитывается" not in context.metrics
+
+
+def test_unconditional_notes_still_reach_limitations(context) -> None:
+    """Безусловная оговорка о содержании показателя из заключения не исчезла."""
+    assert "чистые активы по методике Минфина" in context.limitations
 
 
 def test_context_is_self_consistent_for_verification(context) -> None:

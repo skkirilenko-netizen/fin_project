@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 
-from finlib.llm.pairs import Anchor, build_index, find_anchor
+from finlib.llm.direction import agrees, stated_direction
+from finlib.llm.pairs import Anchor, AnchorIndex, build_index, find_anchor
 from finlib.utils import to_decimal
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class Violation(StrEnum):
     NOT_IN_BLOCKS = "not_in_blocks"
     NO_ANCHOR = "no_anchor"
     WRONG_ANCHOR = "wrong_anchor"
+    WRONG_DIRECTION = "wrong_direction"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,10 @@ class ForeignNumber:
     context: str
     violation: Violation = Violation.NOT_IN_BLOCKS
     anchor: str | None = None
+    # Значение из блоков, с которым число сошлось, — со знаком. Нужно для
+    # wrong_direction: модель вправе назвать величину изменения по модулю,
+    # и направление видно только по знаку входного значения.
+    actual: Decimal | None = None
 
     def describe(self) -> str:
         """Человеческое объяснение, чем число плохо."""
@@ -73,6 +79,13 @@ class ForeignNumber:
             return f"{self.text} — приведено без кода показателя"
         if self.violation is Violation.WRONG_ANCHOR:
             return f"{self.text} — не является значением «{self.anchor}»"
+        if self.violation is Violation.WRONG_DIRECTION:
+            actual = self.actual if self.actual is not None else self.value
+            movement = "рост" if actual > 0 else "снижение"
+            return (
+                f"{self.text} — направление названо неверно: «{self.anchor}» "
+                f"означает {movement}"
+            )
         return f"{self.text} — отсутствует во входных данных"
 
 
@@ -189,14 +202,26 @@ def verify(response: str, blocks: str, *, require_anchor: bool = True) -> Verifi
         # Общий набор чисел блоков — запасная проверка для числа без якоря.
         anchor = find_anchor(text, span, index)
         if anchor is not None:
-            if _matches_anchor(value, match.group(), anchor):
+            actual = _matched_value(value, match.group(), anchor)
+            if actual is None:
+                violation = (
+                    Violation.WRONG_ANCHOR
+                    if _is_allowed(value, match.group(), allowed, rounded)
+                    else Violation.NOT_IN_BLOCKS
+                )
+                foreign.append(_foreign(text, match, value, violation, anchor.key))
                 continue
-            violation = (
-                Violation.WRONG_ANCHOR
-                if _is_allowed(value, match.group(), allowed, rounded)
-                else Violation.NOT_IN_BLOCKS
-            )
-            foreign.append(_foreign(text, match, value, violation, anchor.key))
+            if _misstates_direction(text, span, actual, anchor, index):
+                foreign.append(
+                    _foreign(
+                        text,
+                        match,
+                        value,
+                        Violation.WRONG_DIRECTION,
+                        anchor.key,
+                        actual,
+                    )
+                )
             continue
 
         if not _is_allowed(value, match.group(), allowed, rounded):
@@ -215,6 +240,7 @@ def _foreign(
     value: Decimal,
     violation: Violation,
     anchor: str | None = None,
+    actual: Decimal | None = None,
 ) -> ForeignNumber:
     """Собирает запись о непрошедшем числе."""
     return ForeignNumber(
@@ -223,16 +249,46 @@ def _foreign(
         context=_context_of(text, match.span()),
         violation=violation,
         anchor=anchor,
+        actual=actual,
     )
 
 
-def _matches_anchor(value: Decimal, text: str, anchor: Anchor) -> bool:
-    """Принадлежит ли число тому показателю, при котором стоит."""
-    if value in anchor.values:
-        return True
+def _matched_value(value: Decimal, text: str, anchor: Anchor) -> Decimal | None:
+    """Значение якоря, с которым сошлось число; None — если не сошлось ни с одним.
+
+    У изменения за период направление задаёт глагол, а не знак: «сократилась
+    на 59,6 %» — правильный русский, «сократилась на −59,6 %» — нет. Поэтому
+    изменение узнаётся и по модулю, но возвращается всегда со знаком: знак
+    нужен, чтобы проверить глагол.
+    """
     places = _decimal_places(text)
     quant = Decimal(1).scaleb(-places)
-    return value in {item.quantize(quant) for item in anchor.values}
+    for item in anchor.values:
+        if value == item or value == item.quantize(quant):
+            return item
+        if anchor.is_change and (value == -item or value == (-item).quantize(quant)):
+            return item
+    return None
+
+
+def _misstates_direction(
+    text: str, span: tuple[int, int], actual: Decimal, anchor: Anchor, index: AnchorIndex
+) -> bool:
+    """Назван ли при изменении глагол, противоречащий его знаку.
+
+    Проверяется только изменение за период — у него знак и есть направление.
+    Отрицательная база проверку отменяет: у убытка и отрицательного капитала
+    «рост убытка» означает падение самого показателя, и судить по глаголу
+    нельзя.
+    """
+    if not anchor.is_change:
+        return False
+    base = anchor.base
+    if base is not None:
+        source = index.get(base)
+        if source is not None and any(item < 0 for item in source.values):
+            return False
+    return not agrees(actual, stated_direction(text, span[0]))
 
 
 def _is_trivial(value: Decimal) -> bool:
