@@ -41,6 +41,9 @@ _GROUP_LINE = re.compile(
 # оценки: ИНН, ОГРН, общий балл. Без этого они оставались бы без якоря.
 _LABELLED = re.compile(r"^([А-ЯЁA-Z][^:\n]{2,60}):\s*(.+)$", re.MULTILINE)
 
+# Сокращение в скобках внутри ярлыка: «Основной вид деятельности (ОКВЭД)».
+_ABBREVIATION = re.compile(r"\(([А-ЯЁA-Z]{2,10})\)")
+
 _NUMBER_IN_VALUES = re.compile(
     r"[-−]?\d{1,3}(?:[    ]\d{3})+(?:[.,]\d+)?|[-−]?\d+(?:[.,]\d+)?"
 )
@@ -150,7 +153,15 @@ def build_index(blocks: str) -> AnchorIndex:
     for name, score, weight in _GROUP_LINE.findall(blocks):
         index.add(name, "group", _values_of(f"{score} {weight}"))
     for label, value in _LABELLED.findall(blocks):
-        index.add(label, "label", _values_of(value))
+        values = _values_of(value)
+        index.add(label, "label", values)
+        # Сокращение в скобках — такой же якорь, как и сам ярлык: блок даёт
+        # «Основной вид деятельности (ОКВЭД): 70.22», а модель пишет
+        # «ОКВЭД 70.22», и без этого якоря число привязывалось к соседнему
+        # ярлыку — к ОГРН — и объявлялось чужим.
+        short = _ABBREVIATION.search(label)
+        if short is not None:
+            index.add(short.group(1), "label", values)
     return index
 
 

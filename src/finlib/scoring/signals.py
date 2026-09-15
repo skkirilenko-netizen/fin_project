@@ -256,7 +256,13 @@ def structure_shifts(
                     before=f"{_money(before, 1)} %",
                     after=f"{_money(after, 1)} %",
                 ),
-                details={"line_code": code, "shift_points": str(shift)},
+                details={
+                    "line_code": code,
+                    "shift_points": str(shift),
+                    # Отсечка идёт вместе с величиной: в документе тезис
+                    # приводится с тем порогом, по которому он сработал.
+                    "threshold": str(rule.threshold_points),
+                },
             )
         )
     return sorted(found, key=lambda item: abs(item.value), reverse=True)
@@ -281,7 +287,11 @@ def revision_intensity(
         level=rule.level,
         value=per_set,
         message=rule.text.format(value=mismatches, sets=sets),
-        details={"mismatches": str(mismatches), "sets": str(sets)},
+        details={
+            "mismatches": str(mismatches),
+            "sets": str(sets),
+            "threshold": str(rule.threshold_per_set),
+        },
     )
 
 

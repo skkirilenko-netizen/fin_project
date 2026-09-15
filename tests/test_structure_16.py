@@ -179,6 +179,35 @@ def test_fact_base_block_reaches_the_model(db_conn) -> None:
     assert "СОСТАВ РАЗДЕЛОВ" in context.blocks()
 
 
+def test_extra_values_are_selected_by_machine_grounds(db_conn) -> None:
+    """Сверх обязательных перечисляются участники стоп-фактора, флага и сдвигов.
+
+    Отбор машинный: иначе состав раздела зависел бы от того, что модель сочтёт
+    заслуживающим упоминания, — и в него попадало нераскрытие одной строки
+    вместо совокупного долга.
+    """
+    from finlib.llm.context import build_context
+
+    composition = build_context(FULL_INN, db_conn).composition
+    extra = composition[composition.index("Сверх обязательных") :]
+    assert "участвует в стоп-факторе" in extra
+    assert "участвует в условии флага" in extra
+    assert "изменение за период" in extra
+    # Обязательные величины во второй перечень не дублируются.
+    head = composition[: composition.index("Сверх обязательных")]
+    assert "nwc" in head
+    assert "nwc" not in extra
+
+
+def test_extra_values_are_limited_to_the_declared_number(db_conn) -> None:
+    """Наибольших изменений столько, сколько объявила методика."""
+    from finlib.llm.context import build_context
+
+    composition = build_context(FULL_INN, db_conn).composition
+    extra = composition[composition.index("Сверх обязательных") :]
+    assert extra.count("изменение за период") <= POLICY.fact_base.top_changes
+
+
 def test_missing_fact_base_value_blocks_the_answer() -> None:
     """Раздел без обязательной величины отклоняется."""
     context = TextContext(fact_base=("1600", "nwc"))
@@ -222,11 +251,11 @@ def test_question_subjects_are_ranked_by_risk(db_conn) -> None:
     """Основания идут по убыванию связанного риска, надзорный сигнал первым."""
     from finlib.llm.context import build_context
 
-    context = build_context(STOPPED_INN, db_conn)
-    listed = context.composition
-    first = listed.index("надзорный сигнал")
-    stop = listed.index("стоп-фактор")
-    assert first < stop
+    composition = build_context(STOPPED_INN, db_conn).composition
+    # Смотреть надо перечень оснований, а не блок целиком: слово «стоп-фактор»
+    # встречается и выше, среди величин, которые надо назвать.
+    listed = composition[composition.index("Раздел 6") :]
+    assert listed.index("надзорный сигнал") < listed.index("стоп-фактор")
 
 
 def test_questions_are_limited_in_number() -> None:
@@ -436,19 +465,41 @@ def test_section_four_is_named_after_signals() -> None:
     assert f"### {SIGNALS_SECTION}. {SIGNALS_TITLE}" in load_prompt()
 
 
-def test_signal_basis_names_value_and_threshold(db_conn, tmp_path) -> None:
-    """У каждого сигнала приведены величина и отсечка, по которой он сработал."""
+@pytest.mark.parametrize("inn", [STOPPED_INN, NO_CLASS_INN, FULL_INN])
+def test_signal_basis_names_value_and_threshold(inn: str, db_conn, tmp_path) -> None:
+    """У каждого сигнала приведены величина и отсечка, по которой он сработал.
+
+    Отсечка приходит из деталей срабатывания, а не подбирается при выводе:
+    у структурного сдвига и интенсивности пересмотра её прежде не было,
+    и тезис в разделе о рисках оставался без порога.
+    """
     from docx import Document
 
     from finlib.report.document import build_report
 
+    data = load_report_data(inn, db_conn)
+    if not data.signals:  # pragma: no cover — зависит от данных пробы
+        pytest.skip("у организации сигналы не сработали")
+    for signal in data.signals:
+        assert (signal["details"] or {}).get("threshold"), signal["signal_code"]
+
     report = build_report(
-        STOPPED_INN, db_conn, directory=tmp_path, with_text=False, generated_at=LATE
+        inn, db_conn, directory=tmp_path, with_text=False, generated_at=LATE
     )
     text = "\n".join(item.text for item in Document(report.path).paragraphs)
-    assert "Расчётная величина" in text
-    assert "отсечка" in text
+    assert text.count("Расчётная величина") == len(data.signals)
+    assert text.count("отсечка") == len(data.signals)
     assert "предварительной" in text
+
+
+def test_signal_values_are_written_in_russian_form(db_conn, tmp_path) -> None:
+    """Разряды разделены пробелами, десятичный знак — запятая."""
+    from finlib.report.document import _number
+
+    assert _number("-41972.000") == "-41 972"
+    assert _number("107.1084") == "107,11"
+    assert _number("0.9122") == "0,91"
+    assert _number("13") == "13"
 
 
 def test_risk_thesis_without_a_value_is_a_warning() -> None:

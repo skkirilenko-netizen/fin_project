@@ -83,9 +83,10 @@ NO_MODEL = "не привлекалась"
 NO_TEXT_NOTICE = (
     "Текстовая часть заключения (разделы 2–6) не формировалась: документ "
     "подготовлен без привлечения языковой модели. Расчётная часть — класс, "
-    "показатели, контроли качества и приложение — полна и получена "
-    "детерминированным расчётом. Настоящий документ заключением не является "
-    "и служит расчётной справкой."
+    "показатели, надзорные сигналы, предложения по дальнейшим действиям, "
+    "контроли качества и приложение — полна и получена детерминированным "
+    "расчётом. Настоящий документ заключением не является и служит "
+    "расчётной справкой. Ниже приведены разделы, не зависящие от модели."
 )
 
 
@@ -157,12 +158,15 @@ def build_report(
     if sections:
         _write_sections(document, sections, data)
     else:
+        # Оговорка об отсутствии текстовой части идёт первой, а детерминированный
+        # раздел сигналов — после неё: иначе документ сначала печатал раздел 4,
+        # а затем сообщал, что разделов 2–6 нет.
+        _write_missing_text(document)
         # Сигналы детерминированы и от модели не зависят: в справке без
         # текстовой части они обязаны остаться.
         if data.signals:
             document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
             _write_signals(document, data)
-        _write_missing_text(document)
     # Предложения по дальнейшим действиям — следствие машинных признаков,
     # а не суждение модели, поэтому раздел собирается здесь и стоит
     # в документе всегда, с текстовой частью и без неё.
@@ -382,7 +386,7 @@ def _signal_basis(signal: dict) -> str:
     if value is None:
         return ""
     parts = [f"Расчётная величина: {_number(value)}"]
-    if threshold is not None and details.get("threshold") is not None:
+    if threshold is not None:
         parts.append(f"отсечка: {_number(threshold)}")
     return (
         "; ".join(parts)
@@ -391,15 +395,22 @@ def _signal_basis(signal: dict) -> str:
 
 
 def _number(value) -> str:
-    """Величина сигнала в читаемом виде: без хвостовых нулей, с запятой."""
+    """Величина сигнала в том же написании, что и остальные числа документа.
+
+    Разряды разделены пробелами, десятичный знак — запятая, хвостовые нули
+    сняты: «-41 972», а не «-41972,00».
+    """
     from decimal import Decimal, InvalidOperation
 
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError):  # pragma: no cover — величина уже число
         return str(value)
-    rounded = round_to(number, SIGNAL_SCALE)
-    return format(rounded.normalize(), "f").replace(".", ",")
+    rounded = round_to(number, SIGNAL_SCALE).normalize()
+    # normalize() у целых величин даёт показатель степени: 41972 → 4.1972E+4.
+    if rounded == rounded.to_integral_value():
+        rounded = rounded.quantize(Decimal(1))
+    return f"{rounded:,}".replace(",", " ").replace(".", ",")
 
 
 def _write_actions(

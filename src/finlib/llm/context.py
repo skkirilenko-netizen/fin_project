@@ -439,12 +439,11 @@ def _composition_block(
         row["metric_code"]: row["value"] for row in values if row["status"] == "ok"
     }
 
+    required = policy.fact_base.required(frozenset(disclosed), frozenset(calculated))
     lines = ["=== СОСТАВ РАЗДЕЛОВ ==="]
     lines.append("Раздел 2 «Фактическая база» обязан назвать эти величины,")
     lines.append("каждую с её кодом в скобках:")
-    for code in policy.fact_base.required(
-        frozenset(disclosed), frozenset(calculated)
-    ):
+    for code in required:
         if code in disclosed:
             line = lines_catalog.get(code, reporting_type)
             name = line.name if line is not None else "—"
@@ -455,6 +454,24 @@ def _composition_block(
             f"  {code}  «{metric.name}»  "
             f"{format_metric(calculated[code], metric.unit, catalog.scale_for(code))}"
         )
+
+    worth = _worth_naming(
+        values,
+        catalog,
+        lines_catalog,
+        scoring,
+        assessment,
+        reporting_type,
+        policy,
+        required,
+    )
+    if worth:
+        lines.append("")
+        lines.append(
+            "Сверх обязательных назови эти величины — они участвуют "
+            "в стоп-факторе, во флаге либо входят в число наибольших изменений:"
+        )
+        lines.extend(f"  {item}" for item in worth)
 
     subjects = _question_subjects(
         inn, conn, scoring, catalog, assessment, standard, policy
@@ -469,6 +486,82 @@ def _composition_block(
         lines.extend(f"  {number}. {text}" for number, text in enumerate(subjects, 1))
     _ = QuestionSubject
     return "\n".join(lines)
+
+
+def _worth_naming(
+    values: list[dict],
+    catalog: MetricsCatalog,
+    lines_catalog: LinesCatalog,
+    scoring: ScoringCatalog,
+    assessment: dict | None,
+    reporting_type: ReportingType,
+    policy,
+    required: tuple[str, ...],
+) -> list[str]:
+    """Величины сверх обязательных, отобранные машинно, а не на глаз.
+
+    Правило одно на всех: участие в сработавшем стоп-факторе, участие в условии
+    сработавшего флага, вхождение в число наибольших изменений за период.
+    Прежде состав раздела зависел от того, что модель сочтёт заслуживающим
+    упоминания, и в него попадало нераскрытие одной строки вместо долга.
+
+    Обязательные величины сюда не дублируются: они названы выше, и повторять
+    их со второй причиной значило бы удлинять перечень без нового сведения.
+    """
+    from finlib.metrics.derived import DerivedKind
+    from finlib.metrics.derived import parse as parse_derived
+    from finlib.metrics.formula import line_codes
+    from finlib.scoring.definitions import load_flags
+
+    found: dict[str, str] = dict.fromkeys(required, "")
+    if assessment is not None and assessment["stop_factor_code"]:
+        factor = next(
+            (
+                item
+                for item in scoring.stop_factors
+                if item.code == assessment["stop_factor_code"]
+            ),
+            None,
+        )
+        for code in factor.metrics if factor is not None else ():
+            metric = catalog.get(code)
+            if metric is not None and code not in found:
+                found[code] = f"{code}  «{metric.name}»  участвует в стоп-факторе"
+
+    flags_catalog = load_flags()
+    for row in assessment["flags"] if assessment else []:
+        flag = flags_catalog.get(row["flag_code"])
+        if flag is None:
+            continue
+        for condition in flag.conditions:
+            for code in sorted(line_codes(condition.tree)):
+                if code in found:
+                    continue
+                line = lines_catalog.get(code, reporting_type)
+                name = line.name if line is not None else "—"
+                found[code] = f"{code}  «{name}»  участвует в условии флага"
+
+    # Наибольшие изменения за период: темпы уже посчитаны, брать их модели
+    # неоткуда, кроме этого перечня.
+    changes = [
+        row
+        for row in values
+        if row["status"] == "ok"
+        and (parsed := parse_derived(row["metric_code"])) is not None
+        and parsed.kind is DerivedKind.CHANGE_PCT
+    ]
+    changes.sort(key=lambda row: abs(row["value"]), reverse=True)
+    for row in changes[: policy.fact_base.top_changes]:
+        parsed = parse_derived(row["metric_code"])
+        if parsed is None or parsed.base in found:  # pragma: no cover — разобрано выше
+            continue
+        found[parsed.base] = (
+            f"{parsed.base}  изменение за период "
+            f"{percent(row['value'])} %  ({row['metric_code']})"
+        )
+    # Пустые значения — обязательные величины, занятые как места: они названы
+    # выше, и в этом перечне им делать нечего.
+    return [item for item in found.values() if item]
 
 
 def _question_subjects(
