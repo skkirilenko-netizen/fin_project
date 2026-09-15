@@ -190,6 +190,77 @@ class DowngradeRule(BaseModel):
     threshold: Decimal | None = None
 
 
+class NoClassPolicy(BaseModel):
+    """Условия, при которых класс не присваивается вовсе."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_group_weight: Decimal = Field(gt=0, le=1)
+    max_group_weight_reason: str = Field(min_length=1)
+    min_metrics: int = Field(gt=0)
+    min_metrics_reason: str = Field(min_length=1)
+    min_groups: int = Field(gt=0)
+    min_groups_reason: str = Field(min_length=1)
+
+
+class BreadthLevel(BaseModel):
+    """Порог узости основания для одного уровня уверенности."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_metrics: int = Field(gt=0)
+    max_groups: int = Field(gt=0)
+    reason: str = Field(min_length=1)
+
+    def applies(self, metrics: int, groups: int) -> bool:
+        """Подпадает ли основание под этот порог."""
+        return metrics <= self.max_metrics or groups <= self.max_groups
+
+
+class BreadthConfidence(BaseModel):
+    """Понижение уверенности по узости основания."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    medium: BreadthLevel
+    low: BreadthLevel
+
+
+class SufficiencyPolicy(BaseModel):
+    """Достаточность основания для интегральной оценки."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    no_class: NoClassPolicy
+    confidence: BreadthConfidence
+
+    def blocking_reason(
+        self, metrics: int, groups: int, max_weight: Decimal
+    ) -> str | None:
+        """Причина, по которой класс не присваивается, если такая есть.
+
+        Доминирование одной группы проверяется первым: оно важнее числа
+        показателей, потому что четыре показателя в четырёх группах
+        информативнее шести в одной.
+        """
+        rules = self.no_class
+        if max_weight > rules.max_group_weight:
+            return " ".join(rules.max_group_weight_reason.split())
+        if groups < rules.min_groups:
+            return " ".join(rules.min_groups_reason.split())
+        if metrics < rules.min_metrics:
+            return " ".join(rules.min_metrics_reason.split())
+        return None
+
+    def breadth_reason(self, metrics: int, groups: int) -> tuple[str, str] | None:
+        """Уровень уверенности по узости основания и объяснение."""
+        if self.confidence.low.applies(metrics, groups):
+            return Confidence.LOW.value, self.confidence.low.reason
+        if self.confidence.medium.applies(metrics, groups):
+            return Confidence.MEDIUM.value, self.confidence.medium.reason
+        return None
+
+
 class ConfidencePolicy(BaseModel):
     """Правила уверенности в оценке."""
 
@@ -221,6 +292,7 @@ class ScoringCatalog(BaseModel):
     groups: dict[str, GroupPolicy]
     classes: tuple[ClassDef, ...] = Field(min_length=2)
     lowest_class: str = Field(min_length=1)
+    sufficiency: SufficiencyPolicy
     stop_factors: tuple[StopFactorPolicy, ...]
     confidence: ConfidencePolicy
 

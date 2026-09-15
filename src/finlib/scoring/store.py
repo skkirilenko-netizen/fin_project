@@ -12,18 +12,20 @@ logger = logging.getLogger(__name__)
 
 _UPSERT_ASSESSMENT = """
 INSERT INTO assessment (
-    inn, standard, report_date, total_score, class_code, class_name, class_before_stop,
-    stop_factor_code, stop_factor_effect, confidence, confidence_reasons,
+    inn, standard, report_date, total_score, class_code, class_name, no_class_reason,
+    class_before_stop, stop_factor_code, stop_factor_effect, confidence, confidence_reasons,
     metrics_version, scoring_version, flags_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_date)s, %(total_score)s, %(class_code)s, %(class_name)s,
-    %(class_before_stop)s, %(stop_factor_code)s, %(stop_factor_effect)s, %(confidence)s,
-    %(confidence_reasons)s, %(metrics_version)s, %(scoring_version)s, %(flags_version)s
+    %(no_class_reason)s, %(class_before_stop)s, %(stop_factor_code)s, %(stop_factor_effect)s,
+    %(confidence)s, %(confidence_reasons)s, %(metrics_version)s, %(scoring_version)s,
+    %(flags_version)s
 )
 ON CONFLICT (inn, standard, report_date) DO UPDATE SET
     total_score = EXCLUDED.total_score,
     class_code = EXCLUDED.class_code,
     class_name = EXCLUDED.class_name,
+    no_class_reason = EXCLUDED.no_class_reason,
     class_before_stop = EXCLUDED.class_before_stop,
     stop_factor_code = EXCLUDED.stop_factor_code,
     stop_factor_effect = EXCLUDED.stop_factor_effect,
@@ -75,6 +77,7 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
         "total_score": assessment.total_score,
         "class_code": assessment.class_code,
         "class_name": assessment.class_name,
+        "no_class_reason": assessment.no_class_reason,
         "class_before_stop": assessment.class_before_stop,
         "stop_factor_code": assessment.stop_factor_code,
         "stop_factor_effect": assessment.stop_factor_effect.value,

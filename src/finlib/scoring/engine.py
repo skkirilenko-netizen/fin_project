@@ -64,9 +64,10 @@ class Assessment:
     standard: Standard
     report_date: date
     total_score: Decimal | None
-    class_code: str
-    class_name: str
-    class_before_stop: str
+    class_code: str | None
+    class_name: str | None
+    no_class_reason: str | None
+    class_before_stop: str | None
     stop_factor_code: str | None
     stop_factor_effect: StopEffect
     confidence: Confidence
@@ -79,9 +80,14 @@ class Assessment:
     flags_version: str = ""
 
     @property
+    def has_class(self) -> bool:
+        """Присвоен ли класс."""
+        return self.class_code is not None
+
+    @property
     def limited_by_stop_factor(self) -> bool:
         """Изменил ли стоп-фактор класс, посчитанный по баллу."""
-        return self.class_code != self.class_before_stop
+        return self.has_class and self.class_code != self.class_before_stop
 
     def summary(self) -> str:
         """Однострочная сводка для CLI."""
@@ -89,7 +95,7 @@ class Assessment:
         parts = [
             f"ИНН {self.inn}, период {self.report_date:%d.%m.%Y}",
             f"балл {score}",
-            f"класс {self.class_code}",
+            f"класс {self.class_code}" if self.has_class else "класс не присвоен",
             f"уверенность {self.confidence.value}",
         ]
         if self.limited_by_stop_factor:
@@ -217,24 +223,50 @@ def _apply_stop_factor(
     return class_code
 
 
+def breadth(groups: list[GroupScore], metric_scores: list[MetricScore]) -> tuple[int, int, Decimal]:
+    """Ширина основания: показателей в балле, групп и доля веса крупнейшей группы."""
+    used_metrics = sum(1 for item in metric_scores if item.included and item.score is not None)
+    live = [item for item in groups if item.score is not None]
+    max_weight = max((item.effective_weight for item in live), default=Decimal(0))
+    return used_metrics, len(live), max_weight
+
+
 def _confidence(
     groups: list[GroupScore],
     confidences: dict[str, PeriodConfidence],
     flags: list[FlagHit],
     scoring: ScoringCatalog,
+    metric_scores: list[MetricScore] | None = None,
 ) -> tuple[Confidence, list[str]]:
     """Уверенность в оценке; на класс не влияет."""
     reasons: list[str] = []
     policy = scoring.confidence
+    floor: Confidence | None = None
+
+    if metric_scores is not None:
+        metrics_used, groups_used, _ = breadth(groups, metric_scores)
+        narrow = scoring.sufficiency.breadth_reason(metrics_used, groups_used)
+        if narrow is not None:
+            level, text = narrow
+            floor = Confidence(level)
+            reasons.append(
+                f"{text}: показателей в расчёте {metrics_used}, групп {groups_used}"
+            )
 
     rule = policy.rule("incomplete_group")
-    if rule is not None and rule.threshold is not None:
+    if rule is not None and rule.threshold is not None and metric_scores is not None:
+        # Считаются только показатели, выпавшие из-за отсутствия данных.
+        # Исключённые решением методики неполнотой отчётности не являются.
+        missing: dict[str, int] = defaultdict(int)
+        for item in metric_scores:
+            if not item.included and not item.excluded_by_methodology:
+                missing[item.group_code] += 1
         for group in groups:
-            total = group.metrics_used + group.metrics_excluded
-            if total and Decimal(group.metrics_excluded) / Decimal(total) > rule.threshold:
+            total = group.metrics_used + missing[group.code]
+            if total and Decimal(missing[group.code]) / Decimal(total) > rule.threshold:
                 reasons.append(
                     f"в группе «{group.name}» не рассчитано "
-                    f"{group.metrics_excluded} показателей из {total}"
+                    f"{missing[group.code]} показателей из {total}"
                 )
                 break
 
@@ -253,7 +285,12 @@ def _confidence(
     if lowering:
         reasons.append("сработали флаги: " + ", ".join(lowering))
 
-    return policy.level_after(len(reasons)), reasons
+    level = policy.level_after(len(reasons))
+    if floor is not None:
+        # Узость основания задаёт потолок уверенности: берётся худший уровень.
+        order = {Confidence.HIGH: 0, Confidence.MEDIUM: 1, Confidence.LOW: 2}
+        level = level if order[level] >= order[floor] else floor
+    return level, reasons
 
 
 def assess(
@@ -302,6 +339,11 @@ def assess(
     policy, triggered = _stop_factor(metric_scores, catalog, scoring)
     final_code = _apply_stop_factor(by_score.code, policy, scoring)
 
+    # Балл считается всегда, но класс присваивается только при достаточно
+    # широком основании. Доминирование одной группы важнее числа показателей.
+    metrics_used, groups_used, max_weight = breadth(groups, metric_scores)
+    blocked = scoring.sufficiency.blocking_reason(metrics_used, groups_used, max_weight)
+
     period_values = load_period_values(inn, conn, standard).get(target)
     flags = (
         evaluate_flags(period_values.values, thresholds.constants, flags_catalog)
@@ -309,16 +351,17 @@ def assess(
         else []
     )
 
-    confidence, reasons = _confidence(groups, confidences, flags, scoring)
+    confidence, reasons = _confidence(groups, confidences, flags, scoring, metric_scores)
 
     assessment = Assessment(
         inn=inn,
         standard=standard,
         report_date=target,
         total_score=total,
-        class_code=final_code,
-        class_name=scoring.require_class(final_code).name,
-        class_before_stop=by_score.code,
+        class_code=None if blocked else final_code,
+        class_name=None if blocked else scoring.require_class(final_code).name,
+        no_class_reason=blocked,
+        class_before_stop=None if blocked else by_score.code,
         stop_factor_code=policy.code if policy is not None else None,
         stop_factor_effect=policy.effect if policy is not None else StopEffect.NONE,
         confidence=confidence,

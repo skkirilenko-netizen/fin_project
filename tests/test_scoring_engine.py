@@ -21,6 +21,7 @@ from finlib.scoring.engine import (
     _group_scores,
     _stop_factor,
     _total_score,
+    breadth,
 )
 from finlib.scoring.metric_score import MetricScore, score_metric
 
@@ -271,13 +272,29 @@ def test_unverified_periods_lower_confidence() -> None:
 
 def test_two_reasons_give_low_confidence() -> None:
     """Два основания и более — низкая уверенность."""
-    scores = [built("cur_liq", "1.8", "1.8"), built("quick_liq"), built("abs_liq")]
+    # Из трёх балльных показателей ликвидности рассчитан один.
+    scores = [built("cur_liq", "1.8", "1.8"), built("nwc"), built("own_wc_ratio")]
     groups = _group_scores(scores, SCORING)
     level, reasons = _confidence(
-        groups, {"cur_liq": PeriodConfidence.COMPARATIVE_ONLY}, [], SCORING
+        groups, {"cur_liq": PeriodConfidence.COMPARATIVE_ONLY}, [], SCORING, scores
     )
     assert len(reasons) >= 2
     assert level is Confidence.LOW
+
+
+def test_methodology_exclusions_are_not_incompleteness() -> None:
+    """Показатель, исключённый методикой, неполнотой отчётности не считается.
+
+    Иначе сознательное решение не начислять балл читалось бы как нехватка
+    данных и понижало бы уверенность на ровном месте.
+    """
+    scores = [built("cur_liq", "1.8", "1.8"), built("quick_liq", "1.0", "1.0")]
+    assert scores[1].excluded_by_methodology
+    groups = _group_scores(scores, SCORING)
+    _, reasons = _confidence(
+        groups, {"cur_liq": PeriodConfidence.VERIFIED}, [], SCORING, scores
+    )
+    assert not any("не рассчитано" in reason for reason in reasons)
 
 
 def test_confidence_does_not_change_class() -> None:
@@ -305,3 +322,89 @@ def test_stop_factor_gradations_are_documented() -> None:
 def test_flags_never_change_class() -> None:
     """Ни один флаг не влияет на класс: инвариант 2."""
     assert all(not flag.affects_class for flag in load_flags().flags)
+
+
+# --- достаточность основания -------------------------------------------------
+
+
+def test_dominant_group_blocks_class() -> None:
+    """Если одна группа забирает больше половины веса, класс не присваивается.
+
+    Число показателей тут ни при чём: класс становится функцией одной группы.
+    """
+    scores = [
+        built("equity_ratio", "0.5", "0.5"),
+        built("net_margin", "0.2", "0.2"),
+        built("roa", "0.1", "0.1"),
+        built("roe", "0.15", "0.15"),
+    ]
+    groups = _group_scores(scores, SCORING)
+    metrics_used, groups_used, max_weight = breadth(groups, scores)
+
+    assert max_weight > Decimal("0.5")
+    reason = SCORING.sufficiency.blocking_reason(metrics_used, groups_used, max_weight)
+    assert reason is not None
+    assert "одной группой" in reason
+
+
+def test_broad_basis_allows_class() -> None:
+    """При широком основании класс присваивается."""
+    scores = [
+        built("cur_liq", "1.8", "1.8"),
+        built("nwc", "900", "900"),
+        built("own_wc_ratio", "0.3", "0.3"),
+        built("equity_ratio", "0.5", "0.5"),
+        built("interest_cover", "5", "5"),
+        built("net_margin", "0.2", "0.2"),
+    ]
+    groups = _group_scores(scores, SCORING)
+    metrics_used, groups_used, max_weight = breadth(groups, scores)
+
+    assert max_weight <= Decimal("0.5")
+    assert SCORING.sufficiency.blocking_reason(metrics_used, groups_used, max_weight) is None
+
+
+def test_too_few_metrics_blocks_class() -> None:
+    """Меньше четырёх показателей — класс не присваивается."""
+    reason = SCORING.sufficiency.blocking_reason(3, 3, Decimal("0.4"))
+    assert reason is not None
+    assert "недостаточно" in reason
+
+
+def test_single_group_blocks_class() -> None:
+    """Одна группа — интегральной оценки нет."""
+    reason = SCORING.sufficiency.blocking_reason(9, 1, Decimal("1"))
+    assert reason is not None
+
+
+def test_dominance_is_checked_before_count() -> None:
+    """Доминирование группы проверяется раньше числа показателей."""
+    reason = SCORING.sufficiency.blocking_reason(2, 2, Decimal("0.9"))
+    assert reason is not None
+    assert "одной группой" in reason
+
+
+def test_breadth_lowers_confidence_stepwise() -> None:
+    """Узость основания понижает уверенность ступенчато."""
+    assert SCORING.sufficiency.breadth_reason(10, 5) is None
+    assert SCORING.sufficiency.breadth_reason(8, 4)[0] == "medium"
+    assert SCORING.sufficiency.breadth_reason(9, 3)[0] == "medium"
+    assert SCORING.sufficiency.breadth_reason(5, 4)[0] == "low"
+    assert SCORING.sufficiency.breadth_reason(9, 2)[0] == "low"
+
+
+def test_narrow_basis_caps_confidence() -> None:
+    """Потолок уверенности по узости основания применяется даже без других оснований."""
+    scores = [
+        built("equity_ratio", "0.5", "0.5"),
+        built("net_margin", "0.2", "0.2"),
+        built("roa", "0.1", "0.1"),
+        built("roe", "0.15", "0.15"),
+    ]
+    groups = _group_scores(scores, SCORING)
+    confidences = dict.fromkeys(
+        ("equity_ratio", "net_margin", "roa", "roe"), PeriodConfidence.VERIFIED
+    )
+    level, reasons = _confidence(groups, confidences, [], SCORING, scores)
+    assert level is Confidence.LOW
+    assert any("узкое" in reason for reason in reasons)

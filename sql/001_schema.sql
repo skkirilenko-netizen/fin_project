@@ -217,8 +217,10 @@ CREATE TABLE IF NOT EXISTS assessment (
     standard            text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
     report_date         date NOT NULL,
     total_score         numeric(6, 2),
-    class_code          text NOT NULL,
+    -- Класса может не быть: основание оценки бывает слишком узким.
+    class_code          text,
     class_name          text,
+    no_class_reason     text,
     class_before_stop   text,
     stop_factor_code    text,
     stop_factor_effect  text CHECK (stop_factor_effect IN ('none', 'lowest_class', 'cap_at_class')),
@@ -228,11 +230,18 @@ CREATE TABLE IF NOT EXISTS assessment (
     scoring_version     text NOT NULL,
     flags_version       text NOT NULL,
     computed_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT assessment_uniq UNIQUE (inn, standard, report_date)
+    CONSTRAINT assessment_uniq UNIQUE (inn, standard, report_date),
+    -- Либо класс присвоен, либо названа причина, по которой он не присвоен.
+    -- Молчаливого отсутствия класса быть не может.
+    CONSTRAINT assessment_class_or_reason
+        CHECK ((class_code IS NOT NULL) <> (no_class_reason IS NOT NULL))
 );
 
 COMMENT ON TABLE assessment IS 'Класс финансового состояния; арифметика фиксирована методикой, модель его не определяет';
 COMMENT ON COLUMN assessment.class_before_stop IS 'Класс по баллу до применения стоп-фактора: видно, что именно изменил стоп-фактор';
+COMMENT ON COLUMN assessment.no_class_reason IS
+    'Почему класс не присвоен: основание оценки слишком узкое. Главный случай — одна группа '
+    'показателей забирает больше половины веса, и класс становится функцией этой группы';
 COMMENT ON COLUMN assessment.confidence IS 'Уверенность в оценке; считается отдельно от класса и на него не влияет';
 
 CREATE TABLE IF NOT EXISTS assessment_group (

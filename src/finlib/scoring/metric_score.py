@@ -33,6 +33,10 @@ class MetricScore:
     periods_used: int
     included: bool
     exclusion_reason: str | None = None
+    # Исключён решением методики (in_scoring: false), а не отсутствием данных.
+    # Для уверенности это разные вещи: сознательный выбор не означает неполноты
+    # отчётности.
+    excluded_by_methodology: bool = False
 
 
 def _clamp(value: Decimal, low: Decimal, high: Decimal) -> Decimal:
@@ -164,6 +168,7 @@ def score_metric(
             metric.code, metric.group, values[-1] if values else None, None, None, None,
             len(values), False,
             (metric.scoring_exclusion_reason or "").strip() or "исключён из балльной оценки",
+            excluded_by_methodology=True,
         )
     if not values:
         return MetricScore(
