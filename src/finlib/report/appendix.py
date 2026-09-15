@@ -8,8 +8,10 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
+from finlib.llm.context import format_metric
+from finlib.metrics.definitions import Unit, load_metrics
 from finlib.report.data import ReportData
 
 logger = logging.getLogger(__name__)
@@ -32,14 +34,6 @@ SEVERITY_NAMES: dict[str, str] = {
     "info": "справочный",
 }
 
-UNIT_SUFFIX: dict[str, str] = {
-    "thousand_rub": " тыс. руб.",
-    "days": " дн.",
-    "percent": " %",
-    "ratio": "",
-}
-
-
 @dataclass(frozen=True, slots=True)
 class Table:
     """Таблица приложения: заголовок, шапка и строки."""
@@ -52,6 +46,7 @@ class Table:
 
 def metrics_table(data: ReportData) -> Table:
     """Показатели за периоды с ролью каждого в оценке."""
+    catalog = load_metrics()
     periods = data.periods
     header = (
         "Код",
@@ -62,9 +57,9 @@ def metrics_table(data: ReportData) -> Table:
     )
     rows: list[tuple[str, ...]] = []
     for metric in data.metrics:
+        scale = catalog.scale_for(metric.code)
         cells = [
-            _value(metric.values.get(period), metric.unit, metric.reasons.get(period))
-            for period in periods
+            _value(metric.values.get(period), metric.unit, scale) for period in periods
         ]
         rows.append(
             (metric.code, metric.name, metric.group_name, *cells, _role(metric))
@@ -218,24 +213,15 @@ def _years(sources: list[dict]) -> str:
     )
 
 
-def _value(value: Decimal | None, unit: str, reason: str | None) -> str:
-    """Значение показателя в его единице измерения либо прочерк."""
+def _value(value: Decimal | None, unit: str, scale: int) -> str:
+    """Значение показателя в единице и разрядности методики.
+
+    Округление здесь не своё: оно одно на весь проект и приходит из
+    metrics.yaml. Своё дало бы расхождение текста заключения с приложением.
+    """
     if value is None:
         return "—"
-    _ = reason
-    if unit == "thousand_rub":
-        rendered = f"{value.quantize(Decimal(1), rounding=ROUND_HALF_UP):,}".replace(
-            ",", " "
-        )
-    elif unit in ("days", "percent"):
-        rendered = f"{value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}".replace(
-            ".", ","
-        )
-    else:
-        rendered = f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}".replace(
-            ".", ","
-        )
-    return f"{rendered}{UNIT_SUFFIX.get(unit, '')}"
+    return format_metric(value, Unit(unit), scale)
 
 
 def _role(metric) -> str:

@@ -16,6 +16,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from finlib.metrics.display import round_to
 from finlib.report.data import ReportData
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ def check_document(data: ReportData, limitations: str) -> list[Inconsistency]:
     found: list[Inconsistency] = []
     found.extend(_sources_agree(data, limitations))
     found.extend(_verdict_is_single(data))
+    found.extend(_deltas_match_levels(data))
     return found
 
 
@@ -86,6 +88,49 @@ def _sources_agree(data: ReportData, limitations: str) -> list[Inconsistency]:
                 f"но в «Ограничениях» об этом не сказано",
             )
         )
+    return found
+
+
+def _deltas_match_levels(data: ReportData) -> list[Inconsistency]:
+    """Изменение равно разности отображаемых уровней.
+
+    Прежде дельты считались по полной точности, а уровни отображались
+    округлёнными: «снизилась с 0,41 до 0,31 (изменение 0,11)» при разности
+    отображаемых уровней 0,10. Формально ошибки нет, документ арифметически
+    несогласован, и читатель правильно ему не доверяет.
+
+    После введения единой точки округления равенство выполняется
+    по построению, и контроль сторожит именно это построение.
+    """
+    from finlib.metrics.derived import DerivedKind, parse
+
+    by_code = {item.code: item for item in data.metrics}
+    found: list[Inconsistency] = []
+    for row in data.derived:
+        parsed = parse(row["metric_code"])
+        if parsed is None or parsed.kind is not DerivedKind.CHANGE_ABS:
+            continue
+        base = by_code.get(parsed.base)
+        if base is None or row["value"] is None:
+            continue
+        periods = sorted(value for value, item in base.values.items() if item is not None)
+        current = row["report_date"]
+        earlier = [item for item in periods if item < current]
+        if current not in base.values or not earlier:
+            continue
+        scale = data.scale_of(parsed.base)
+        difference = round_to(base.values[current], scale) - round_to(
+            base.values[earlier[-1]], scale
+        )
+        declared = round_to(row["value"], scale)
+        if declared != difference:
+            found.append(
+                Inconsistency(
+                    "delta_does_not_match_levels",
+                    f"«{parsed.base}»: заявленное изменение {declared} не равно "
+                    f"разности отображаемых уровней {difference}",
+                )
+            )
     return found
 
 

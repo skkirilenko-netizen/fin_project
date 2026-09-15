@@ -11,13 +11,14 @@
 import logging
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 from finlib.db import PgConnection, fetch_all, fetch_one
 from finlib.metrics.definitions import MetricsCatalog, Unit, load_metrics
 from finlib.metrics.derived import describe as describe_derived
 from finlib.metrics.derived import parse as parse_derived
 from finlib.metrics.derived import unit_of as derived_unit
+from finlib.metrics.display import round_to
 from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.periods import limitations as period_limitations
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
@@ -92,36 +93,47 @@ class ConclusionContext:
         )
 
 
+# Оформление единиц измерения. Разрядность приходит из методики
+# (metrics.yaml, блок display): округление в проекте одно на всех, иначе
+# текст заключения и приложение расходятся между собой.
+UNIT_SUFFIX: dict[Unit, str] = {
+    Unit.THOUSAND_RUB: " тыс. руб.",
+    Unit.DAYS: " дн.",
+    Unit.PERCENT: " %",
+    Unit.RATIO: "",
+}
+
+
+def _digits(value: Decimal, scale: int) -> str:
+    """Число с разделителями разрядов и запятой как десятичным знаком."""
+    return f"{round_to(value, scale):,}".replace(",", " ").replace(".", ",")
+
+
 def money(value: Decimal) -> str:
     """Денежная величина: целые тысячи рублей с разделителями разрядов."""
-    rounded = value.quantize(Decimal(1), rounding=ROUND_HALF_UP)
-    return f"{rounded:,}".replace(",", " ")
+    return _digits(value, 0)
 
 
 def ratio(value: Decimal) -> str:
     """Коэффициент: два знака после запятой."""
-    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}".replace(".", ",")
+    return _digits(value, 2)
 
 
 def days(value: Decimal) -> str:
     """Дни: один знак после запятой."""
-    return f"{value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}".replace(".", ",")
+    return _digits(value, 1)
 
 
 def percent(value: Decimal) -> str:
     """Процент: один знак после запятой, как и дни."""
-    return f"{value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}".replace(".", ",")
+    return _digits(value, 1)
 
 
-def format_metric(value: Decimal, unit: Unit) -> str:
-    """Значение показателя в его единице измерения."""
-    if unit is Unit.THOUSAND_RUB:
-        return f"{money(value)} тыс. руб."
-    if unit is Unit.DAYS:
-        return f"{days(value)} дн."
-    if unit is Unit.PERCENT:
-        return f"{percent(value)} %"
-    return ratio(value)
+def format_metric(value: Decimal, unit: Unit, scale: int | None = None) -> str:
+    """Значение показателя в его единице измерения и разрядности методики."""
+    if scale is None:
+        scale = load_metrics().display.scale_for(unit)
+    return f"{_digits(value, scale)}{UNIT_SUFFIX.get(unit, '')}"
 
 
 def _periods(inn: str, conn: PgConnection | None, standard: Standard) -> list[date]:

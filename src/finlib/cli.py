@@ -15,8 +15,9 @@ from typing import Annotated
 import typer
 
 from finlib.db import fetch_all
+from finlib.llm.context import format_metric
+from finlib.metrics.definitions import Unit
 from finlib.pipeline import PipelineError, StageResult, analyze
-from finlib.report.appendix import UNIT_SUFFIX
 from finlib.standards import Standard
 
 app = typer.Typer(
@@ -77,15 +78,11 @@ def _check_inn(inn: str) -> str:
     return inn
 
 
-def _render(value: Decimal | None, unit: str) -> str:
-    """Значение показателя в его единице измерения."""
+def _render(value: Decimal | None, unit: Unit, scale: int) -> str:
+    """Значение показателя в единице и разрядности методики."""
     if value is None:
         return "—"
-    if unit == "thousand_rub":
-        return f"{value.quantize(Decimal(1)):,}".replace(",", " ") + UNIT_SUFFIX[unit]
-    if unit in ("days", "percent"):
-        return f"{value.quantize(Decimal('0.1'))}".replace(".", ",") + UNIT_SUFFIX[unit]
-    return f"{value.quantize(Decimal('0.01'))}".replace(".", ",")
+    return format_metric(value, unit, scale)
 
 
 @app.command("analyze")
@@ -169,7 +166,7 @@ def show_command(
         for period in ordered:
             item = values.get(period)
             text = (
-                _render(item["value"], metric.unit.value)
+                _render(item["value"], metric.unit, catalog.scale_for(code))
                 if item and item["status"] == "ok"
                 else "—"
             )

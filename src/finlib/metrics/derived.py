@@ -21,6 +21,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from finlib.metrics.definitions import MetricDef, MetricsCatalog, Unit
+from finlib.metrics.display import displayed, round_to
 from finlib.metrics.engine import MetricResult, MetricStatus, PeriodValues
 from finlib.metrics.formula import NotCalculableReason
 from finlib.normalize.lines import LinesCatalog, ReportingType
@@ -118,7 +119,10 @@ def compute_derived(
     следующий в списке, то есть ближайший пригодный предыдущий период.
     """
     spec = catalog.derived
-    by_metric = _metric_values(metrics) if spec.change.metrics else {}
+    # Строки отчётности отображаются целыми тысячами рублей, и изменения
+    # считаются от них же: единая точка округления одна на весь слой.
+    line_scale = catalog.display.scale_for(Unit.THOUSAND_RUB)
+    by_metric = _metric_values(metrics, catalog) if spec.change.metrics else {}
 
     results: list[MetricResult] = []
     for index, report_date in enumerate(usable):
@@ -132,14 +136,16 @@ def compute_derived(
         confidence = _worse(confidences, report_date, previous_date)
 
         for code in spec.change.lines:
-            base = previous.get(code) if previous is not None else None
-            results += _change(code, current.get(code), base, report_date, confidence)
+            base = _line_value(previous, code, line_scale)
+            results += _change(
+                code, _line_value(current, code, line_scale), base, report_date, confidence
+            )
 
-        total = current.get(spec.share.denominator)
+        total = _line_value(current, spec.share.denominator, line_scale)
         for code in spec.share.lines:
             result = _share(
                 code,
-                current.get(code),
+                _line_value(current, code, line_scale),
                 total,
                 spec.share.denominator,
                 report_date,
@@ -156,12 +162,31 @@ def compute_derived(
     return results
 
 
-def _metric_values(metrics: Sequence[MetricResult]) -> dict[str, dict[date, Decimal]]:
-    """Рассчитанные значения показателей по коду и периоду."""
+def _line_value(
+    values: dict[str, Decimal | None] | None, code: str, scale: int
+) -> Decimal | None:
+    """Отображаемое значение строки отчётности."""
+    if values is None:
+        return None
+    return displayed(values.get(code), scale)
+
+
+def _metric_values(
+    metrics: Sequence[MetricResult], catalog: MetricsCatalog
+) -> dict[str, dict[date, Decimal]]:
+    """Рассчитанные значения показателей по коду и периоду, уже округлённые.
+
+    Изменение считается от отображаемых величин, а не от полных: иначе
+    заявленная дельта не равна разности отображаемых уровней, и документ
+    противоречит сам себе.
+    """
     found: dict[str, dict[date, Decimal]] = {}
     for item in metrics:
         if item.is_ok and item.value is not None:
-            found.setdefault(item.metric_code, {})[item.report_date] = item.value
+            scale = catalog.scale_for(item.metric_code)
+            found.setdefault(item.metric_code, {})[item.report_date] = round_to(
+                item.value, scale
+            )
     return found
 
 

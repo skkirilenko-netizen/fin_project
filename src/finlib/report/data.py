@@ -133,6 +133,7 @@ class ReportData:
     metrics: list[MetricRow] = field(default_factory=list)
     flags: list[dict] = field(default_factory=list)
     periods: list[date] = field(default_factory=list)
+    derived: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
 
@@ -140,6 +141,12 @@ class ReportData:
     def class_code(self) -> str | None:
         """Присвоенный класс; None — если основание оказалось недостаточным."""
         return self.assessment["class_code"] if self.assessment else None
+
+    def scale_of(self, code: str) -> int:
+        """Разрядность отображения показателя: одна на весь документ."""
+        from finlib.metrics.definitions import load_metrics
+
+        return load_metrics().scale_for(code)
 
     @property
     def breadth_reason(self) -> str | None:
@@ -283,6 +290,11 @@ def load_report_data(
         metrics=metrics,
         flags=flags,
         periods=periods,
+        derived=[
+            row
+            for row in values
+            if row["status"] == "ok" and catalog.get(row["metric_code"]) is None
+        ],
         checks=fetch_all(_CHECKS, params, conn=conn),
         sources=fetch_all(_SOURCES, params, conn=conn),
     )

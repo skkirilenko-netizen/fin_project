@@ -151,6 +151,9 @@ class MetricDef(BaseModel):
     # сдаёт полную отчётность. Проверяется тестом, а не соглашением.
     methodology_note: str | None = None
     zero_denominator_note: str | None = None
+    # Разрядность отображения, если она отличается от принятой для единицы.
+    # Обычно не задаётся: разрядность — свойство единицы измерения.
+    display_scale: int | None = Field(default=None, ge=0)
     stop_factor: StopFactor | None = None
 
     @cached_property
@@ -226,6 +229,38 @@ class MetricDef(BaseModel):
                 )
         _ = self.trees  # разбор формул на этапе загрузки, а не расчёта
         return self
+
+
+class DisplayPrecision(BaseModel):
+    """Разрядность отображения по единицам измерения.
+
+    Единая точка округления: дельты и темпы считаются от округлённых величин,
+    иначе документ арифметически несогласован — разность отображаемых уровней
+    не совпадает с отображаемой дельтой.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    by_unit: dict[Unit, int]
+    origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_units(self) -> Self:
+        """Разрядность объявлена для каждой единицы и неотрицательна."""
+        missing = set(Unit) - set(self.by_unit)
+        if missing:
+            raise ValueError(
+                f"разрядность отображения не задана для единиц: "
+                f"{sorted(item.value for item in missing)}"
+            )
+        for unit, scale in self.by_unit.items():
+            if scale < 0:
+                raise ValueError(f"отрицательная разрядность у единицы {unit}")
+        return self
+
+    def scale_for(self, unit: Unit) -> int:
+        """Разрядность отображения величины в этой единице."""
+        return self.by_unit[unit]
 
 
 class MaterialChangeCalibration(BaseModel):
@@ -322,6 +357,7 @@ class MetricsCatalog(BaseModel):
     # Блок обязателен: подобранные величины без указания происхождения
     # неотличимы от выдуманных.
     calibration: Calibration
+    display: DisplayPrecision
     derived: DerivedDef
     groups: dict[str, GroupDef]
     metrics: tuple[MetricDef, ...]
@@ -371,6 +407,15 @@ class MetricsCatalog(BaseModel):
     def stop_factors(self) -> tuple[MetricDef, ...]:
         """Показатели, у которых объявлен стоп-фактор."""
         return tuple(item for item in self.metrics if item.stop_factor is not None)
+
+    def scale_for(self, code: str) -> int:
+        """Разрядность отображения показателя: своя либо принятая для единицы."""
+        metric = self.get(code)
+        if metric is None:
+            return self.display.scale_for(Unit.RATIO)
+        if metric.display_scale is not None:
+            return metric.display_scale
+        return self.display.scale_for(metric.unit)
 
     def stop_factor_values(self) -> dict[str, frozenset[Decimal]]:
         """Пороги стоп-факторов по коду показателя.
