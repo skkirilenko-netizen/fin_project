@@ -57,13 +57,45 @@ def test_holding_text_matches_agreed_wording() -> None:
     assert HOLDING is not None
     hit = evaluate_flag(HOLDING, GAZPROM, CONSTANTS)
     assert hit is not None
-    # «может» распространяется на оба придаточных: «может быть сосредоточена…
-    # а отчётность… — отражать преимущественно».
-    assert "может быть сосредоточена" in hit.message
-    assert "отражать преимущественно" in hit.message
-    assert "отражает главным образом" not in hit.message
+    assert "проверить состав краткосрочных обязательств" in hit.message
+    assert "с дочерними и зависимыми обществами" in hit.message
     assert "может не составляться вовсе" in hit.message
     assert "непубличная" in hit.message
+
+
+def test_holding_flag_does_not_declare_metrics_inapplicable() -> None:
+    """Флаг указывает, что проверить, но группу показателей не отменяет.
+
+    Прежняя формулировка объявляла показатели ликвидности, оборачиваемости
+    и операционной рентабельности имеющими ограниченную применимость. Для
+    признака, построенного на доле финансовых вложений, это утверждение
+    слишком сильное: оно снимает с показателей доказательную силу, ничем
+    этого не обосновав.
+    """
+    assert HOLDING is not None
+    hit = evaluate_flag(HOLDING, GAZPROM, CONSTANTS)
+    assert hit is not None
+    assert "ограниченную применимость" not in hit.message
+    assert "неприменим" not in hit.message
+
+
+def test_holding_flag_declares_its_scope_and_conflict() -> None:
+    """Область действия объявлена, и сказано, чем грозит её пересечение.
+
+    Область — машинное поле: по нему опознаётся столкновение флага
+    со стоп-фактором, построенным на тех же показателях. Стоп-фактор при этом
+    не смягчается, иначе флаг стал бы путём обхода оценки.
+    """
+    from finlib.scoring.definitions import load_scoring
+
+    assert HOLDING is not None
+    assert HOLDING.scope
+    assert HOLDING.conflict_statement
+    coverage = next(
+        item for item in load_scoring().stop_factors if item.code == "weak_coverage"
+    )
+    assert HOLDING.conflicts_with(coverage) == ("nwc", "interest_cover")
+    assert "не смягчается" in " ".join(HOLDING.conflict_statement.split())
 
 
 def test_participation_phrase_handles_loss() -> None:

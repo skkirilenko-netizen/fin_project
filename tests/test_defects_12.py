@@ -201,8 +201,15 @@ def test_defect_5_reason_does_not_assert_a_fact_about_the_organisation() -> None
 
 
 def test_defect_5_table_names_the_kind(db_conn) -> None:
-    """Таблица причин называет вид причины отдельной графой."""
-    table = not_calculated_table(load_report_data(NO_CLASS_INN, db_conn))
+    """Таблица постоянных причин называет вид причины отдельной графой.
+
+    Задача 16 разделила таблицу надвое: постоянные причины исключения
+    по методике и периоды, за которые показатель не рассчитан. Вид причины
+    относится к первой — у периодной причины вида нет, есть период.
+    """
+    from finlib.report.appendix import exclusions_table
+
+    table = exclusions_table(load_report_data(NO_CLASS_INN, db_conn))
     assert table is not None
     assert "Вид причины" in table.header
 
@@ -252,9 +259,12 @@ def test_defect_6_accepted_year_called_excluded_is_caught(db_conn) -> None:
 @pytest.mark.parametrize("inn", [FULL_INN, STOPPED_INN, NO_CLASS_INN])
 def test_defect_7_table_titles_carry_no_numbers(inn: str, db_conn) -> None:
     """Номер в заголовке таблицы не зашит: его ставит сборщик документа."""
+    from finlib.report.appendix import exclusions_table
+
     data = load_report_data(inn, db_conn)
     tables = [
         metrics_table(data),
+        exclusions_table(data),
         not_calculated_table(data),
         groups_table(data),
         checks_table(data),
@@ -475,9 +485,11 @@ def test_footnote_does_not_point_at_a_missing_table(db_conn) -> None:
         data = load_report_data(inn, db_conn)
         note = metrics_table(data).note or ""
         if not_calculated_table(data) is None:
-            assert "в следующей таблице" not in note, inn
+            assert "Периоды, за которые" not in note, inn
         else:
-            assert "в следующей таблице" in note, inn
+            # Ссылка идёт по наименованию таблицы: её номер и место
+            # в приложении ставит сборщик, соседство не гарантировано.
+            assert "Периоды, за которые" in note, inn
 
 
 def test_prompt_makes_group_scores_conditional() -> None:

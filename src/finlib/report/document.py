@@ -19,9 +19,11 @@ from docx.shared import Pt
 from finlib.config import settings
 from finlib.db import PgConnection
 from finlib.llm.service import Conclusion, generate_conclusion
+from finlib.metrics.display import round_to
 from finlib.report.appendix import (
     Table,
     checks_table,
+    exclusions_table,
     groups_table,
     metrics_table,
     not_calculated_table,
@@ -30,6 +32,7 @@ from finlib.report.appendix import (
 from finlib.report.consistency import InconsistentReportError, check_document
 from finlib.report.data import ReportData, load_report_data
 from finlib.report.integrity import NumbersAlteredError, check_numbers
+from finlib.report.policy import ReportPolicy, Trigger, load_policy
 from finlib.report.sections import EXPECTED, Section, split_sections
 from finlib.report.summary import build_summary
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
@@ -146,10 +149,11 @@ def build_report(
     if problems:
         raise InconsistentReportError([item.message for item in problems])
 
+    written_at = generated_at or datetime.now()
     document = Document()
     _set_base_style(document)
-    _write_header(document, data, bool(sections))
-    _write_summary(document, data, scoring)
+    _write_header(document, data, bool(sections), written_at)
+    _write_summary(document, data, scoring, written_at)
     if sections:
         _write_sections(document, sections, data)
     else:
@@ -159,8 +163,12 @@ def build_report(
             document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
             _write_signals(document, data)
         _write_missing_text(document)
+    # Предложения по дальнейшим действиям — следствие машинных признаков,
+    # а не суждение модели, поэтому раздел собирается здесь и стоит
+    # в документе всегда, с текстовой частью и без неё.
+    _write_actions(document, data, written_at)
     model = conclusion.model if conclusion is not None else NO_MODEL
-    _write_appendix(document, data, model, generated_at or datetime.now())
+    _write_appendix(document, data, model, written_at)
 
     path = output_path(inn, data.report_date, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,9 +186,11 @@ def build_report(
                 extra=[
                     # Номера заголовков разделов.
                     *(f"{number}." for number, _ in EXPECTED),
-                    # Предписанные формулировки сигналов: они детерминированы
-                    # и в тексте модели отсутствуют по построению.
+                    # Предписанные формулировки сигналов и основания, по которым
+                    # они сработали: всё это детерминировано и в тексте модели
+                    # отсутствует по построению.
                     *(item["message"] for item in data.signals),
+                    *(_signal_basis(item) for item in data.signals),
                 ],
             )
         except NumbersAlteredError:
@@ -209,7 +219,11 @@ def _model_text_of(path: Path) -> str:
         text = paragraph.text.strip()
         if re.match(r"^2\.\s", text) or text.startswith("2–6"):
             inside = True
-        elif text.startswith("Приложение"):
+        # Раздел предложений и приложение написаны не моделью: сверять
+        # в них нечего, а их собственные числа выглядели бы приписками.
+        elif text.startswith("Приложение") or text.startswith(
+            f"{ACTIONS_SECTION}. {ACTIONS_TITLE}"
+        ):
             break
         if inside:
             collected.append(paragraph.text)
@@ -246,7 +260,9 @@ def _set_base_style(document: Document) -> None:
     style.font.size = Pt(11)
 
 
-def _write_header(document: Document, data: ReportData, with_text: bool) -> None:
+def _write_header(
+    document: Document, data: ReportData, with_text: bool, generated_at: datetime
+) -> None:
     """Шапка: наименование, реквизиты, период, дисклеймер."""
     organization = data.organization
     document.add_heading(TITLE if with_text else TITLE_NO_TEXT, level=0)
@@ -263,7 +279,15 @@ def _write_header(document: Document, data: ReportData, with_text: bool) -> None
         details.append(f"Основной вид деятельности (ОКВЭД): {organization['okved']}")
     if organization["region"]:
         details.append(f"Регион: {organization['region']}")
-    details.append(f"Отчётный период: {data.report_date:%d.%m.%Y}")
+    details.append(f"Отчётная дата: {data.report_date:%d.%m.%Y}")
+    # Дата формирования и разрыв стоят рядом с отчётной датой: документ,
+    # собранный через двадцать месяцев после отчётной даты, описывает
+    # состояние на неё, а не нынешнее, и читатель обязан видеть это сразу.
+    details.append(f"Дата формирования документа: {generated_at:%d.%m.%Y}")
+    details.append(
+        f"Разрыв между отчётной датой и формированием: "
+        f"{data.months_since_report(generated_at)} мес."
+    )
     for line in details:
         document.add_paragraph(line)
 
@@ -274,11 +298,14 @@ def _write_header(document: Document, data: ReportData, with_text: bool) -> None
 
 
 def _write_summary(
-    document: Document, data: ReportData, scoring: ScoringCatalog
+    document: Document,
+    data: ReportData,
+    scoring: ScoringCatalog,
+    generated_at: datetime,
 ) -> None:
     """Раздел 1 «Ключевой вывод»."""
     document.add_heading("1. Ключевой вывод", level=1)
-    for paragraph in build_summary(data, scoring):
+    for paragraph in build_summary(data, scoring, generated_at):
         written = document.add_paragraph()
         written.add_run(paragraph.text).bold = paragraph.bold
 
@@ -286,6 +313,13 @@ def _write_summary(
 # Раздел, в который выводятся надзорные сигналы, и его название.
 SIGNALS_SECTION = 4
 SIGNALS_TITLE = "Риски и надзорные сигналы"
+
+# Раздел предложений идёт после разделов модели: он подводит итог документу.
+ACTIONS_SECTION = 7
+ACTIONS_TITLE = "Предложения по дальнейшим действиям"
+
+# Разрядность величины и отсечки сигнала при выводе оснований.
+SIGNAL_SCALE = 2
 
 SIGNAL_LEVELS: dict[str, str] = {
     "supervisory": "надзорный сигнал",
@@ -314,7 +348,12 @@ def _write_sections(
 
 
 def _write_signals(document: Document, data: ReportData) -> None:
-    """Сработавшие сигналы с предписанными формулировками."""
+    """Сработавшие сигналы с предписанными формулировками.
+
+    К каждому сигналу приводится величина и порог, по которому он сработал:
+    тезис в этом разделе без числа и отсечки проверить нечем, а отсечки
+    экспертные и объявлены предварительными.
+    """
     if not data.signals:
         return
     heading = document.add_paragraph()
@@ -327,6 +366,91 @@ def _write_signals(document: Document, data: ReportData) -> None:
         paragraph = document.add_paragraph()
         paragraph.add_run(f"{signal['signal_name']} ({level}). ").bold = True
         paragraph.add_run(signal["message"])
+        basis = _signal_basis(signal)
+        if basis:
+            note = document.add_paragraph()
+            run = note.add_run(basis)
+            run.italic = True
+            run.font.size = Pt(9)
+
+
+def _signal_basis(signal: dict) -> str:
+    """Величина и порог, по которым сигнал сработал."""
+    details = signal["details"] or {}
+    value = details.get("value") or signal["value"]
+    threshold = details.get("threshold") or details.get("shift_points")
+    if value is None:
+        return ""
+    parts = [f"Расчётная величина: {_number(value)}"]
+    if threshold is not None and details.get("threshold") is not None:
+        parts.append(f"отсечка: {_number(threshold)}")
+    return (
+        "; ".join(parts)
+        + ". Отсечка задана методикой, объявлена экспертной и предварительной."
+    )
+
+
+def _number(value) -> str:
+    """Величина сигнала в читаемом виде: без хвостовых нулей, с запятой."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):  # pragma: no cover — величина уже число
+        return str(value)
+    rounded = round_to(number, SIGNAL_SCALE)
+    return format(rounded.normalize(), "f").replace(".", ",")
+
+
+def _write_actions(
+    document: Document, data: ReportData, generated_at: datetime
+) -> None:
+    """Раздел «Предложения по дальнейшим действиям».
+
+    Прежде документ содержал вопросы, но не содержал вывода о том, что
+    с организацией делать. Предложение выводится по машинным признакам —
+    сработал сигнал, сработал стоп-фактор, класс не присвоен, комплект
+    отбракован, данные устарели, — а формулировка берётся из методики.
+    """
+    policy = load_policy()
+    actions = policy.actions_for(_triggers(data, generated_at, policy))
+    if not actions:
+        return
+    document.add_heading(f"{ACTIONS_SECTION}. {ACTIONS_TITLE}", level=1)
+    intro = document.add_paragraph()
+    intro.add_run(
+        "Предложения следуют из признаков, установленных расчётом, "
+        "и приведены в предписанных методикой формулировках:"
+    ).bold = True
+    for action in actions:
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"{action.name}. ").bold = True
+        paragraph.add_run(action.message)
+
+
+def _triggers(
+    data: ReportData, generated_at: datetime, policy: ReportPolicy
+) -> set[Trigger]:
+    """Машинные признаки организации, по которым выводятся предложения."""
+    found: set[Trigger] = set()
+    levels = {item["level"] for item in data.signals}
+    if "supervisory" in levels:
+        found.add(Trigger.SUPERVISORY_SIGNAL)
+    if "attention" in levels:
+        found.add(Trigger.ATTENTION_SIGNAL)
+    if data.stop_factor_code:
+        found.add(Trigger.STOP_FACTOR)
+    if data.assessment is not None and not data.class_code:
+        found.add(Trigger.NO_CLASS)
+    if data.flag_conflict() is not None:
+        found.add(Trigger.FLAG_CONFLICT)
+    if policy.freshness.stale(data.months_since_report(generated_at)):
+        found.add(Trigger.STALE_DATA)
+    if data.quarantined_sources:
+        found.add(Trigger.QUARANTINED_SET)
+    if data.blocking_failures:
+        found.add(Trigger.BLOCKING_CHECK_FAILED)
+    return found
 
 
 def _write_appendix(
@@ -342,6 +466,7 @@ def _write_appendix(
     # сохраняла.
     tables = [
         metrics_table(data),
+        exclusions_table(data),
         not_calculated_table(data),
         groups_table(data),
         checks_table(data),

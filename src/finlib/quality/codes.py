@@ -72,6 +72,39 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.FACT_OVERWRITE: Severity.INFO,
 }
 
+# Наименования контролей для документа. Код — механизм, а не часть заключения:
+# в «Ключевом выводе» читатель видит наименование, а код остаётся в приложении
+# и в журнале. Словарь здесь, а не в сборке документа: свободных строк
+# с кодами контролей в коде быть не должно.
+CHECK_NAMES: dict[CheckCode, str] = {
+    CheckCode.BALANCE_EQUALITY: "равенство актива и пассива",
+    CheckCode.SECTION_SUM: "сходимость итога раздела",
+    CheckCode.PROFIT_CHAIN: "сходимость цепочки финансового результата",
+    CheckCode.PERIOD_REVISED: "пересмотр отчётности прошлых периодов",
+    CheckCode.MANDATORY_FIELDS: "раскрытие обязательных строк",
+    CheckCode.JUMP_DETECTION: "скачок величины между периодами",
+    CheckCode.RETAINED_EARNINGS_LINK: "связь нераспределённой прибыли с результатом",
+    CheckCode.UNIT_NOT_DETERMINED: "определение единицы измерения по форме",
+    CheckCode.BALANCE_MAGNITUDE: "правдоподобие валюты баланса",
+    CheckCode.PERIOD_MAGNITUDE_SHIFT: "кратное тысяче изменение величин",
+    CheckCode.CREDIT_ORGANIZATION: "организация вне периметра методики",
+    CheckCode.LINE_NOT_RECOGNIZED: "опознание строки по наименованию",
+    CheckCode.AMBIGUOUS_LINE_CODE: "неоднозначность кода строки",
+    CheckCode.MULTIPLE_SOURCE_CODES: "строка раскрыта несколькими кодами",
+    CheckCode.UNKNOWN_LINE_CODE: "код строки отсутствует в справочнике",
+    CheckCode.PERIOD_VALUE_MISMATCH: "расхождение сравнительного значения с отчётным",
+    CheckCode.FACT_OVERWRITE: "перезапись ранее загруженного значения",
+}
+
+
+def check_name(code: str) -> str:
+    """Наименование контроля по коду; неизвестный код возвращается как есть."""
+    try:
+        return CHECK_NAMES[CheckCode(code)]
+    except (ValueError, KeyError):  # pragma: no cover — код вне справочника
+        return code
+
+
 # Семейство кодов, которые контроли качества переписывают при каждом прогоне.
 # Записи загрузчика в это семейство не входят: они история, а не снимок.
 CHECK_CODES: frozenset[CheckCode] = frozenset(

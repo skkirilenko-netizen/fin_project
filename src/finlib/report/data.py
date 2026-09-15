@@ -8,7 +8,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from finlib.db import PgConnection, fetch_all, fetch_one
@@ -71,13 +71,27 @@ ORDER BY metric_code, report_date DESC
 
 # Контроли качества по комплектам организации. Считается каждый прогон
 # контроля, а не строка отчётности: приложение показывает, что выполнялось.
+#
+# Период и объект контроля выбираются вместе с исходом: без них по сводке
+# нельзя установить, какой период отбракован и какая строка не сошлась,
+# а именно это от сводки и требуется. Объект — строки отчётности, которых
+# контроль касался; контроль, применённый к комплекту целиком, их не имеет.
 _CHECKS = """
-SELECT d.check_code, d.severity, d.status, count(*) AS runs
+SELECT d.check_code, d.severity, d.status, d.report_date, count(*) AS runs,
+       array_remove(array_agg(DISTINCT d.line_code), NULL) AS line_codes
 FROM dq_log d
 JOIN src_file s ON s.id = d.src_file_id
 WHERE d.inn = %(inn)s AND s.standard = %(standard)s AND s.is_actual
-GROUP BY d.check_code, d.severity, d.status
-ORDER BY d.check_code, d.severity, d.status
+GROUP BY d.check_code, d.severity, d.status, d.report_date
+ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
+"""
+
+# Строки, раскрытые за отчётный период: по ним видно, какие из обязательных
+# величин раздела «Фактическая база» вообще существуют у этой организации.
+_DISCLOSED = """
+SELECT DISTINCT line_code FROM fact_report
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = %(d)s
+  AND value IS NOT NULL
 """
 
 # Комплекты отчётности вместе со статусом. Карантин отбирается здесь, а не
@@ -90,6 +104,18 @@ FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
 ORDER BY report_year DESC
 """
+
+
+@dataclass(frozen=True, slots=True)
+class FlagConflict:
+    """Флаг и стоп-фактор, построенные на одних и тех же показателях."""
+
+    flag_code: str
+    flag_name: str
+    stop_factor_code: str
+    stop_factor_name: str
+    metrics: tuple[str, ...]
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +171,7 @@ class ReportData:
     metric_rows: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
+    disclosed_lines: frozenset[str] = frozenset()
 
     @property
     def class_code(self) -> str | None:
@@ -160,6 +187,7 @@ class ReportData:
         """
         from finlib.llm.textcheck import TextContext
         from finlib.metrics.definitions import Unit
+        from finlib.report.policy import load_policy
 
         known = frozenset(
             code
@@ -175,11 +203,17 @@ class ReportData:
         days = frozenset(
             item.name for item in catalog.metrics if item.unit is Unit.DAYS
         )
+        conflict = self.flag_conflict()
         return TextContext(
             known_lines=known,
             refused_metrics=refused,
             days_metrics=days,
             forbidden_templates=self.forbidden_templates(catalog),
+            # Столкновение флага и стоп-фактора фиксируется в «Ключевом
+            # выводе» нами, а модели остаётся не противоречить ему.
+            flag_conflict=conflict.message if conflict is not None else None,
+            fact_base=self.fact_base_codes(),
+            questions=load_policy().questions,
         )
 
     def forbidden_templates(self, catalog) -> dict[str, str]:
@@ -261,6 +295,88 @@ class ReportData:
         комплект назван невключённым.
         """
         return [item for item in self.sources if item["status"] == "quarantine"]
+
+    @property
+    def blocking_failures(self) -> list[dict]:
+        """Провалившиеся блокирующие контроли.
+
+        Провал блокирующего контроля означает, что комплект в расчёт не пошёл,
+        и умолчать об этом в «Ключевом выводе» нельзя: читатель обязан знать,
+        что часть отчётности отбракована, а не просто отсутствует.
+        """
+        return [
+            item
+            for item in self.checks
+            if item["severity"] == "blocking" and item["status"] == "fail"
+        ]
+
+    def months_since_report(self, generated_at: datetime) -> int:
+        """Разрыв между отчётной датой и днём формирования документа."""
+        from finlib.report.policy import months_between
+
+        return months_between(self.report_date, generated_at.date())
+
+    def fact_base_codes(self, policy=None) -> tuple[str, ...]:
+        """Величины, обязательные в разделе «Фактическая база».
+
+        Состав задан методикой (`report.yaml`), а не выбором модели: разделы
+        интерпретации, рисков и вопросов строятся именно на них.
+        """
+        from finlib.report.policy import load_policy
+
+        policy = policy if policy is not None else load_policy()
+        calculated = {
+            row["metric_code"] for row in self.metric_rows if row["status"] == "ok"
+        }
+        return policy.fact_base.required(self.disclosed_lines, calculated)
+
+    def flag_conflict(self, flags_catalog=None, scoring=None) -> "FlagConflict | None":
+        """Столкновение флага и стоп-фактора, построенного на его показателях.
+
+        Стоп-фактор при этом не смягчается: флаг, отменяющий стоп-фактор, был бы
+        путём обхода оценки. Столкновение фиксируется отдельным абзацем
+        и требует ручной проверки.
+        """
+        from finlib.metrics.definitions import load_metrics
+        from finlib.scoring.definitions import load_flags, load_scoring
+
+        code = self.stop_factor_code
+        if not code or not self.flags:
+            return None
+        flags_catalog = flags_catalog if flags_catalog is not None else load_flags()
+        scoring = scoring if scoring is not None else load_scoring()
+        factor = next(
+            (item for item in scoring.stop_factors if item.code == code), None
+        )
+        if factor is None:
+            return None
+        catalog = load_metrics()
+        for row in self.flags:
+            flag = flags_catalog.get(row["flag_code"])
+            if flag is None or flag.conflict_statement is None:
+                continue
+            shared = flag.conflicts_with(factor)
+            if not shared:
+                continue
+            names = ", ".join(
+                f"«{catalog.require(item).name}»"
+                for item in shared
+                if catalog.get(item) is not None
+            )
+            message = (
+                " ".join(flag.conflict_statement.split())
+                .replace("{stop_factor}", factor.name)
+                .replace("{metrics}", names)
+            )
+            return FlagConflict(
+                flag_code=flag.code,
+                flag_name=flag.name,
+                stop_factor_code=factor.code,
+                stop_factor_name=factor.name,
+                metrics=shared,
+                message=message,
+            )
+        return None
 
     @property
     def missing_metrics(self) -> list[MetricRow]:
@@ -359,6 +475,10 @@ def load_report_data(
         ],
         checks=fetch_all(_CHECKS, params, conn=conn),
         sources=fetch_all(_SOURCES, params, conn=conn),
+        disclosed_lines=frozenset(
+            row["line_code"]
+            for row in fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn)
+        ),
     )
 
 

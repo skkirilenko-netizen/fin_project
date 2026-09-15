@@ -270,6 +270,10 @@ def test_blocking_rules_match_the_specification() -> None:
         TextRule.TEMPLATE_NOT_APPLICABLE,
         TextRule.FREE_INTERPRETATION,
         TextRule.QUESTION_OUT_OF_FORM_SET,
+        # Задача 16: состав обязательных величин и число вопросов заданы
+        # методикой и переданы модели перечнем — это не вкусовое расхождение.
+        TextRule.FACT_BASE_INCOMPLETE,
+        TextRule.QUESTION_COUNT,
     }
     assert {
         rule for rule, level in SEVERITY.items() if level is Severity.BLOCKING
@@ -279,7 +283,13 @@ def test_blocking_rules_match_the_specification() -> None:
 def test_warnings_do_not_block() -> None:
     """Предупреждения документ не отменяют."""
     warnings = {rule for rule, level in SEVERITY.items() if level is Severity.WARNING}
-    assert warnings == {TextRule.DAYS_DIRECTION, TextRule.FLAG_CONFLICT_NOT_STATED}
+    assert warnings == {
+        TextRule.DAYS_DIRECTION,
+        TextRule.FLAG_CONFLICT_NOT_STATED,
+        TextRule.QUESTION_DUPLICATE,
+        TextRule.QUESTION_ABOUT_DISCLOSURE,
+        TextRule.RISK_WITHOUT_VALUE,
+    }
 
 
 def test_verification_blocks_only_on_blocking_rules() -> None:

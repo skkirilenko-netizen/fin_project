@@ -65,6 +65,22 @@ SELECT DISTINCT report_date FROM metric_value
 WHERE inn = %(inn)s AND standard = %(standard)s ORDER BY report_date DESC LIMIT 3
 """
 
+# Сигналы передаются наименованием и уровнем, без величин: их формулировки
+# детерминированы и попадают в документ сами, а числа из них в блоках модели
+# не нужны — она обязана опираться на показатели, а не пересказывать сигнал.
+_SIGNALS = """
+SELECT signal_code, signal_name, level FROM assessment_signal
+WHERE assessment_id = %(id)s
+ORDER BY CASE level WHEN 'supervisory' THEN 0 ELSE 1 END, signal_code
+"""
+
+_QUARANTINED = """
+SELECT report_year FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
+  AND status = 'quarantine'
+ORDER BY report_year
+"""
+
 
 @dataclass
 class ConclusionContext:
@@ -78,18 +94,25 @@ class ConclusionContext:
     flags: str
     assessment: str
     limitations: str
+    # Состав разделов: какие величины обязаны быть названы в фактической базе
+    # и по каким основаниям задаются вопросы. Перечни машинные, порядок —
+    # из methodology/report.yaml, а не на усмотрение модели.
+    composition: str = ""
 
     def blocks(self) -> str:
         """Все блоки одной строкой — с ними же сверяется ответ модели."""
         return "\n\n".join(
-            [
+            item
+            for item in [
                 self.organization,
                 self.data,
                 self.metrics,
                 self.flags,
                 self.assessment,
+                self.composition,
                 self.limitations,
             ]
+            if item
         )
 
 
@@ -383,6 +406,157 @@ def _line_notes(
     return notes
 
 
+def _composition_block(
+    inn: str,
+    periods: list[date],
+    conn: PgConnection | None,
+    lines_catalog: LinesCatalog,
+    catalog: MetricsCatalog,
+    scoring: ScoringCatalog,
+    reporting_type: ReportingType,
+    assessment: dict | None,
+    standard: Standard,
+) -> str:
+    """Обязательный состав фактической базы и основания вопросов.
+
+    Состав раздела не может зависеть от того, что модель сочтёт заслуживающим
+    упоминания: по ПАО «Газпром» раздел не содержал ни совокупного долга,
+    ни выручки, зато содержал сведения о нераскрытии одной строки. Перечень
+    задан методикой, порядок оснований вопросов — тяжестью последствий.
+    """
+    from finlib.report.policy import QuestionSubject, load_policy
+
+    policy = load_policy()
+    target = periods[0]
+    facts = fetch_all(
+        _FACTS, {"inn": inn, "standard": standard.value, "dates": [target]}, conn=conn
+    )
+    disclosed = {row["line_code"]: row["value"] for row in facts}
+    values = fetch_all(
+        _METRICS, {"inn": inn, "standard": standard.value, "dates": [target]}, conn=conn
+    )
+    calculated = {
+        row["metric_code"]: row["value"] for row in values if row["status"] == "ok"
+    }
+
+    lines = ["=== СОСТАВ РАЗДЕЛОВ ==="]
+    lines.append("Раздел 2 «Фактическая база» обязан назвать эти величины,")
+    lines.append("каждую с её кодом в скобках:")
+    for code in policy.fact_base.required(
+        frozenset(disclosed), frozenset(calculated)
+    ):
+        if code in disclosed:
+            line = lines_catalog.get(code, reporting_type)
+            name = line.name if line is not None else "—"
+            lines.append(f"  {code}  «{name}»  {money(disclosed[code])} тыс. руб.")
+            continue
+        metric = catalog.require(code)
+        lines.append(
+            f"  {code}  «{metric.name}»  "
+            f"{format_metric(calculated[code], metric.unit, catalog.scale_for(code))}"
+        )
+
+    subjects = _question_subjects(
+        inn, conn, scoring, catalog, assessment, standard, policy
+    )
+    if subjects:
+        lines.append("")
+        lines.append(
+            f"Раздел 6 «Вопросы к организации»: основания перечислены в порядке "
+            f"убывания связанного риска, по одному вопросу на основание, "
+            f"не больше {policy.questions.max_count}:"
+        )
+        lines.extend(f"  {number}. {text}" for number, text in enumerate(subjects, 1))
+    _ = QuestionSubject
+    return "\n".join(lines)
+
+
+def _question_subjects(
+    inn: str,
+    conn: PgConnection | None,
+    scoring: ScoringCatalog,
+    catalog: MetricsCatalog,
+    assessment: dict | None,
+    standard: Standard,
+    policy,
+) -> list[str]:
+    """Основания вопросов в порядке, заданном методикой.
+
+    Ранжирование наше, а не модели: вопрос о нераскрытии строки стоял первым
+    при отрицательном оборотном капитале в 521 млрд руб., и перечень выглядел
+    случайным. Числа в основания не подставляются — они есть в блоках выше.
+    """
+    from finlib.report.policy import QuestionSubject
+    from finlib.scoring.definitions import load_flags
+
+    signals: list[dict] = []
+    if assessment is not None:
+        signals = fetch_all(_SIGNALS, {"id": assessment["id"]}, conn=conn)
+    quarantined = fetch_all(
+        _QUARANTINED, {"inn": inn, "standard": standard.value}, conn=conn
+    )
+    factor = None
+    if assessment is not None and assessment["stop_factor_code"]:
+        factor = next(
+            (
+                item
+                for item in scoring.stop_factors
+                if item.code == assessment["stop_factor_code"]
+            ),
+            None,
+        )
+
+    by_subject: dict[QuestionSubject, list[str]] = {}
+    for signal in signals:
+        kind = (
+            QuestionSubject.SUPERVISORY_SIGNAL
+            if signal["level"] == "supervisory"
+            else QuestionSubject.ATTENTION_SIGNAL
+        )
+        by_subject.setdefault(kind, []).append(
+            f"надзорный сигнал «{signal['signal_name']}»"
+            if kind is QuestionSubject.SUPERVISORY_SIGNAL
+            else f"обстоятельство, требующее внимания: «{signal['signal_name']}»"
+        )
+    if factor is not None:
+        by_subject.setdefault(QuestionSubject.STOP_FACTOR, []).append(
+            f"сработавший стоп-фактор «{factor.name}»"
+        )
+        flags_catalog = load_flags()
+        for row in assessment["flags"] if assessment else []:
+            flag = flags_catalog.get(row["flag_code"])
+            if flag is None or not flag.conflicts_with(factor):
+                continue
+            shared = ", ".join(
+                f"«{catalog.require(code).name}»"
+                for code in flag.conflicts_with(factor)
+                if catalog.get(code) is not None
+            )
+            by_subject.setdefault(QuestionSubject.FLAG_CONFLICT, []).append(
+                f"показатели, попавшие и под флаг «{flag.name}», "
+                f"и под стоп-фактор: {shared}"
+            )
+    for row in quarantined:
+        by_subject.setdefault(QuestionSubject.QUARANTINED_SET, []).append(
+            f"комплект отчётности за {row['report_year']} год, "
+            f"не прошедший контроли качества"
+        )
+    for metric in assessment["metrics"] if assessment else []:
+        if metric["included"] or metric["exclusion_kind"] != "no_data":
+            continue
+        definition = catalog.get(metric["metric_code"])
+        if definition is None:
+            continue
+        by_subject.setdefault(QuestionSubject.MISSING_METRIC, []).append(
+            f"показатель «{definition.name}», не рассчитанный из-за нехватки данных"
+        )
+
+    ordered: list[str] = []
+    for subject in policy.questions.subject_order:
+        ordered.extend(by_subject.get(subject, []))
+    return ordered[: policy.questions.max_count]
+
+
 def _limitations_block(
     inn: str,
     periods: list[date],
@@ -467,6 +641,17 @@ def build_context(
         ),
         flags=_flags_block(assessment),
         assessment=_assessment_block(assessment, scoring, metrics_catalog),
+        composition=_composition_block(
+            inn,
+            periods,
+            conn,
+            lines_catalog,
+            metrics_catalog,
+            scoring,
+            reporting_type,
+            assessment,
+            standard,
+        ),
         limitations=_limitations_block(
             inn,
             periods,

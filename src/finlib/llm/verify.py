@@ -342,10 +342,14 @@ def verify(
     # Правила текста применяются к очищенному тексту — тому, что увидит
     # читатель. Коды к этому моменту свою работу сделали: пара «число — код»
     # уже сверена выше.
+    raw_sections = _sections_of(text)
     statements = (
         check_text(
-            {number: strip_identifiers(body) for number, body in _sections_of(text).items()},
+            {number: strip_identifiers(body) for number, body in raw_sections.items()},
             text_context,
+            # Правило о составе «Фактической базы» смотрит в размеченный текст:
+            # коды показателей — механизм проверки, и очистка их уже сняла.
+            raw_sections=raw_sections,
         )
         if text_context is not None
         else []

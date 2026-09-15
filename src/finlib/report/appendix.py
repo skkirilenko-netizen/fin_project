@@ -54,7 +54,9 @@ def metrics_table(data: ReportData) -> Table:
     """Показатели за периоды с ролью каждого в оценке.
 
     Сноска о причинах ставится, только если таблица причин строится:
-    ссылаться на таблицу, которой в документе нет, нельзя.
+    ссылаться на таблицу, которой в документе нет, нельзя. Ссылка идёт
+    по наименованию, а не «в следующей таблице»: номер и место таблицы
+    ставит сборщик документа, и соседство не гарантировано.
     """
     catalog = load_metrics()
     periods = data.periods
@@ -80,7 +82,8 @@ def metrics_table(data: ReportData) -> Table:
         tuple(rows),
         (
             "«—» означает, что показатель за период не рассчитан; причина "
-            "указана в следующей таблице."
+            "по каждому периоду — в таблице «Периоды, за которые показатель "
+            "не рассчитан»."
             if not_calculated_table(data) is not None
             else "«—» означает, что показатель за период не рассчитан."
         ),
@@ -95,36 +98,74 @@ EXCLUSION_KIND_NAMES: dict[str, str] = {
 }
 
 
-def not_calculated_table(data: ReportData) -> Table | None:
-    """Почему показатель не рассчитан или не вошёл в балл.
+def exclusions_table(data: ReportData) -> Table | None:
+    """Постоянные причины исключения показателя из балльной оценки.
 
-    Порядок строк — фиксированная иерархия причин. Прежде причина была одним
-    статическим текстом на показатель и печаталась без проверки применимости:
-    у организации с положительным капиталом документ разъяснял, чем плох
-    отрицательный.
+    Это решение методики, действующее во всех периодах: стоп-фактор,
+    отсутствие шкалы уровня, дублирование другого показателя. Периодные
+    причины — в отдельной таблице: прежде они были слиты сюда в одну ячейку
+    без указания периода, и по такой таблице нельзя было сказать, к чему
+    причина относится.
+
+    Порядок строк — фиксированная иерархия причин.
     """
     ordered = sorted(
-        (item for item in data.metrics if not item.included),
+        (
+            item
+            for item in data.metrics
+            if not item.included and item.exclusion_reason and not item.missing_data
+        ),
         key=lambda item: (item.exclusion_rank, item.code),
     )
-    rows: list[tuple[str, ...]] = []
-    for metric in ordered:
-        kind = EXCLUSION_KIND_NAMES.get(metric.exclusion_kind or "", "—")
-        reasons = sorted({item for item in metric.reasons.values() if item})
-        text = (
-            "; ".join(reasons)
-            if reasons
-            else " ".join((metric.exclusion_reason or "").split())
+    rows = tuple(
+        (
+            metric.code,
+            metric.name,
+            EXCLUSION_KIND_NAMES.get(metric.exclusion_kind or "", "—"),
+            " ".join((metric.exclusion_reason or "").split()),
         )
-        if not text:
-            continue
-        rows.append((metric.code, metric.name, kind, text))
+        for metric in ordered
+    )
     if not rows:
         return None
     return Table(
-        "Показатели вне балльной оценки и причины",
+        "Показатели вне балльной оценки по методике",
         ("Код", "Показатель", "Вид причины", "Пояснение"),
         tuple(rows),
+        "Причина постоянна и от периода не зависит: это решение методики, "
+        "а не пробел в отчётности.",
+    )
+
+
+def not_calculated_table(data: ReportData) -> Table | None:
+    """Периоды, за которые показатель не рассчитан, и причина по каждому.
+
+    Графа «Период» обязательна: причина «нет предыдущего периода» верна
+    за самый ранний период и неверна за остальные, а в слитой ячейке они
+    были неразличимы.
+    """
+    rows: list[tuple[str, ...]] = []
+    for metric in sorted(data.metrics, key=lambda item: item.code):
+        for period in sorted(metric.reasons, reverse=True):
+            reason = metric.reasons[period]
+            if not reason:
+                continue
+            rows.append(
+                (
+                    metric.code,
+                    metric.name,
+                    f"{period:%d.%m.%Y}",
+                    " ".join(reason.split()),
+                )
+            )
+    if not rows:
+        return None
+    return Table(
+        "Периоды, за которые показатель не рассчитан",
+        ("Код", "Показатель", "Период", "Причина"),
+        tuple(rows),
+        "Нерассчитанный показатель — пробел в отчётности за этот период, "
+        "а не исключение по методике.",
     )
 
 
@@ -161,22 +202,46 @@ def groups_table(data: ReportData) -> Table | None:
 
 
 def checks_table(data: ReportData) -> Table:
-    """Выполненные контроли качества."""
+    """Выполненные контроли качества с периодом и объектом.
+
+    Без периода и объекта по сводке нельзя установить, какой период отбракован
+    и какая строка не сошлась, — а это от неё и требуется. Контроль, который
+    применяется к комплекту целиком, объекта не имеет.
+    """
     rows = tuple(
         (
             item["check_code"],
             SEVERITY_NAMES.get(item["severity"], item["severity"]),
             CHECK_STATUS_NAMES.get(item["status"], item["status"]),
+            f"{item['report_date']:%d.%m.%Y}" if item["report_date"] else "комплект",
+            _objects(item["line_codes"]),
             str(item["runs"]),
         )
         for item in data.checks
     )
     return Table(
         "Выполненные контроли качества",
-        ("Контроль", "Уровень", "Исход", "Срабатываний"),
+        ("Контроль", "Уровень", "Исход", "Период", "Объект контроля", "Срабатываний"),
         rows,
-        "Отчётность, не прошедшая блокирующий контроль, в расчёт не идёт.",
+        "Отчётность, не прошедшая блокирующий контроль, в расчёт не идёт. "
+        "Объект контроля — строки отчётности, которых он касался; "
+        "«комплект» означает контроль комплекта целиком.",
     )
+
+
+# Сколько кодов строк выводится в графе объекта; остальные считаются.
+OBJECTS_SHOWN = 6
+
+
+def _objects(codes: list[str] | None) -> str:
+    """Строки, которых касался контроль, в одной ячейке."""
+    if not codes:
+        return "комплект"
+    ordered = sorted(codes)
+    if len(ordered) <= OBJECTS_SHOWN:
+        return ", ".join(ordered)
+    listed = ", ".join(ordered[:OBJECTS_SHOWN])
+    return f"{listed} и ещё {len(ordered) - OBJECTS_SHOWN}"
 
 
 def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str]:

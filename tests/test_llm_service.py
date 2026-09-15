@@ -226,7 +226,10 @@ def test_prompt_forbids_writing_first_section() -> None:
     """Раздел «Ключевой вывод» и приложение модель не пишет."""
     prompt = load_prompt()
     assert "Ключевой вывод" in prompt
-    assert "формируются без тебя" in prompt
+    # Задача 16 добавила раздел «Предложения по дальнейшим действиям»:
+    # он тоже собирается расчётом, и запрет теперь перечисляет три места.
+    assert "формируются расчётом, без тебя" in prompt
+    assert "Предложения по дальнейшим" in prompt
 
 
 def test_model_never_sees_raw_file() -> None:

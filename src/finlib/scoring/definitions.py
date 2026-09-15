@@ -430,6 +430,13 @@ class FlagDef(BaseModel):
     combine: str = "all"
     conditions: tuple[FlagCondition, ...] = Field(min_length=1)
     calibration: str = Field(min_length=1)
+    # Показатели, прочтение которых флаг ставит под вопрос. Поле машинное:
+    # по нему опознаётся столкновение флага со стоп-фактором, построенным
+    # на тех же показателях. Неприменимыми показатели от этого не становятся.
+    scope: tuple[str, ...] = ()
+    # Предписанный абзац на случай такого столкновения. Стоп-фактор в нём
+    # не смягчается: флаг, отменяющий стоп-фактор, был бы путём обхода оценки.
+    conflict_statement: str | None = None
     text: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -442,9 +449,24 @@ class FlagDef(BaseModel):
             )
         if self.combine not in {"all", "any"}:
             raise ValueError(f"флаг {self.code}: combine должен быть all или any")
+        if self.scope and not (self.conflict_statement or "").strip():
+            raise ValueError(
+                f"флаг {self.code}: объявлена область действия, но не сказано, "
+                "что означает её пересечение со стоп-фактором"
+            )
+        if self.conflict_statement and not self.scope:
+            raise ValueError(
+                f"флаг {self.code}: формулировка о столкновении со стоп-фактором "
+                "задана, но область действия не объявлена — столкновение "
+                "не с чем сопоставить"
+            )
         for condition in self.conditions:
             _ = condition.tree
         return self
+
+    def conflicts_with(self, factor: "StopFactorPolicy") -> tuple[str, ...]:
+        """Показатели, на которых флаг и стоп-фактор сходятся."""
+        return tuple(code for code in factor.metrics if code in self.scope)
 
 
 class FlagsCatalog(BaseModel):

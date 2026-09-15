@@ -15,10 +15,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from finlib.llm.cleanup import has_identifiers
 from finlib.llm.direction import Direction, mentions_direction
 from finlib.metrics.display import round_to
+
+if TYPE_CHECKING:
+    from finlib.report.policy import Questions
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +43,13 @@ class TextRule(StrEnum):
     TEMPLATE_NOT_APPLICABLE = "template_not_applicable"
     FREE_INTERPRETATION = "free_interpretation"
     QUESTION_OUT_OF_FORM_SET = "question_out_of_form_set"
+    FACT_BASE_INCOMPLETE = "fact_base_incomplete"
+    QUESTION_COUNT = "question_count"
     DAYS_DIRECTION = "days_direction"
     FLAG_CONFLICT_NOT_STATED = "flag_conflict_not_stated"
+    QUESTION_DUPLICATE = "question_duplicate"
+    QUESTION_ABOUT_DISCLOSURE = "question_about_disclosure"
+    RISK_WITHOUT_VALUE = "risk_without_value"
 
 
 SEVERITY: dict[TextRule, Severity] = {
@@ -50,8 +59,19 @@ SEVERITY: dict[TextRule, Severity] = {
     TextRule.TEMPLATE_NOT_APPLICABLE: Severity.BLOCKING,
     TextRule.FREE_INTERPRETATION: Severity.BLOCKING,
     TextRule.QUESTION_OUT_OF_FORM_SET: Severity.BLOCKING,
+    # Состав фактической базы задан методикой и передан модели перечнем:
+    # пропуск обязательной величины — не вкусовое расхождение, а раздел,
+    # на который последующие опираться не могут.
+    TextRule.FACT_BASE_INCOMPLETE: Severity.BLOCKING,
+    TextRule.QUESTION_COUNT: Severity.BLOCKING,
     TextRule.DAYS_DIRECTION: Severity.WARNING,
     TextRule.FLAG_CONFLICT_NOT_STATED: Severity.WARNING,
+    # Дубль вопроса и вопрос о нераскрытии портят перечень, но документу
+    # не мешают: отклонять из-за них верное во всём остальном заключение
+    # дороже, чем оставить замечание в журнале и в повторной попытке.
+    TextRule.QUESTION_DUPLICATE: Severity.WARNING,
+    TextRule.QUESTION_ABOUT_DISCLOSURE: Severity.WARNING,
+    TextRule.RISK_WITHOUT_VALUE: Severity.WARNING,
 }
 
 
@@ -97,6 +117,10 @@ class TextContext:
     forbidden_templates: dict[str, str] = field(default_factory=dict)
     # Конфликт флага и стоп-фактора, который обязан быть зафиксирован.
     flag_conflict: str | None = None
+    # Коды величин, обязательных в разделе «Фактическая база».
+    fact_base: tuple[str, ...] = ()
+    # Правила вопросов к организации: сколько их и в каком порядке основания.
+    questions: "Questions | None" = None
 
 
 _CLASS_ASSIGNED = re.compile(r"\bкласс\w*\s*[«\"'(]?\s*([A-E])\b", re.IGNORECASE)
@@ -141,8 +165,57 @@ INTERPRETATION_WINDOW = 160
 _FASTER = re.compile(r"ускор\w+|быстрее", re.IGNORECASE)
 _SLOWER = re.compile(r"замедл\w+|медленнее", re.IGNORECASE)
 
+# Номера разделов, к которым привязаны правила. Заданы здесь, а не числами
+# по месту: разделы перечислены в prompts/conclusion.md, и расхождение
+# с ними должно быть видно в одном месте.
+FACT_BASE_SECTION = 2
+RISKS_SECTION = 4
+QUESTIONS_SECTION = 6
 
-def check_text(sections: dict[int, str], context: TextContext) -> list[TextIssue]:
+# Вопрос: всё до знака вопроса, начиная с предыдущего.
+_QUESTION = re.compile(r"[^?\n]+\?")
+
+# Вопрос о нераскрытии: ответа по существу у него нет.
+_NOT_DISCLOSED = re.compile(
+    r"не\s+раскрыт\w*|отсутств\w+\s+раскрыт\w*|почему\s+.{0,40}не\s+указан\w*",
+    re.IGNORECASE,
+)
+
+_HAS_DIGIT = re.compile(r"\d")
+
+# Строка раздела о рисках короче этой длины тезисом не считается: заголовок
+# или связка числа не требуют.
+RISK_PARAGRAPH_MIN = 80
+
+# Длина основы слова при сравнении вопросов: окончания отбрасываются.
+QUESTION_STEM = 5
+
+# Слова, по которым вопросы неразличимы.
+_STOP_WORDS = frozenset(
+    {
+        "какие",
+        "каким",
+        "какой",
+        "чего",
+        "чем",
+        "что",
+        "этой",
+        "этого",
+        "организации",
+        "организация",
+        "период",
+        "периода",
+        "отчётности",
+        "отчетности",
+    }
+)
+
+
+def check_text(
+    sections: dict[int, str],
+    context: TextContext,
+    raw_sections: dict[int, str] | None = None,
+) -> list[TextIssue]:
     """Проверяет разделы заключения по всем правилам.
 
     **Разделы передаются очищенными** — такими, какими их увидит читатель.
@@ -155,11 +228,16 @@ def check_text(sections: dict[int, str], context: TextContext) -> list[TextIssue
     проверяются только в нём: вопрос о строке вне набора форм плох именно
     в «Вопросах к организации», а не всюду.
 
+    raw_sections — те же разделы до снятия разметки. Нужны одному правилу:
+    состав «Фактической базы» задан кодами, а в очищенном тексте кодов
+    показателей уже нет. Остальные правила работают по очищенному тексту.
+
     Согласованность состава отчётности между «Ограничениями» и «Происхождением
     документа» проверяется не здесь, а в `report/consistency.py`: она о данных
     документа, а не о тексте модели, и нужна даже при `--no-llm`.
     """
     whole = "\n".join(sections.values())
+    marked = raw_sections if raw_sections is not None else sections
     found: list[TextIssue] = []
     found += _no_identifiers(sections)
     found += _class_is_stated_once(sections)
@@ -167,6 +245,9 @@ def check_text(sections: dict[int, str], context: TextContext) -> list[TextIssue
     found += _templates_are_applicable(whole, context)
     found += _no_free_interpretation(whole, context)
     found += _questions_stay_in_the_form_set(sections, context)
+    found += _fact_base_is_complete(marked, context)
+    found += _questions_are_sound(sections, context)
+    found += _risks_name_values(sections)
     found += _days_direction(whole, context)
     found += _flag_conflict_is_stated(whole, context)
     return found
@@ -318,6 +399,131 @@ def _questions_stay_in_the_form_set(
             )
         )
     return found
+
+
+def _fact_base_is_complete(
+    sections: dict[int, str], context: TextContext
+) -> list[TextIssue]:
+    """Раздел «Фактическая база» называет все обязательные величины.
+
+    Состав раздела задан методикой и передан модели перечнем: валюта баланса,
+    собственный капитал, выручка, финансовый результат, совокупный и чистый
+    долг, чистый оборотный капитал. Прежде раздел по ПАО «Газпром» не содержал
+    ни долга, ни выручки, зато содержал сведения о нераскрытии одной строки,
+    и разделы, на этих величинах построенные, опирались на не сказанное.
+
+    Смотрит в размеченный текст: коды показателей снимает очистка, и в том,
+    что увидит читатель, искать их поздно.
+    """
+    if not context.fact_base:
+        return []
+    text = sections.get(FACT_BASE_SECTION, "")
+    if not text:
+        return []
+    missing = [code for code in context.fact_base if code not in text]
+    if not missing:
+        return []
+    return [
+        TextIssue(
+            TextRule.FACT_BASE_INCOMPLETE,
+            f"в разделе «Фактическая база» не названы обязательные величины: "
+            f"{', '.join(missing)}",
+        )
+    ]
+
+
+def _questions_are_sound(
+    sections: dict[int, str], context: TextContext
+) -> list[TextIssue]:
+    """Вопросов столько, сколько задано методикой, и они не повторяются.
+
+    Вопрос о том, почему не раскрыта строка, содержательного ответа не имеет:
+    в упрощённой форме строки нет вовсе, а в полной нераскрытие само по себе
+    правомерно. Спрашивать нужно по существу обстоятельства.
+    """
+    policy = context.questions
+    text = sections.get(QUESTIONS_SECTION, "")
+    if policy is None or not text:
+        return []
+
+    questions = [item.strip() for item in _QUESTION.findall(text) if item.strip()]
+    found: list[TextIssue] = []
+    if not policy.min_count <= len(questions) <= policy.max_count:
+        found.append(
+            TextIssue(
+                TextRule.QUESTION_COUNT,
+                f"вопросов к организации {len(questions)}, а методика требует "
+                f"от {policy.min_count} до {policy.max_count}",
+            )
+        )
+
+    seen: dict[str, str] = {}
+    for question in questions:
+        key = _question_key(question)
+        if key and key in seen:
+            found.append(
+                TextIssue(
+                    TextRule.QUESTION_DUPLICATE,
+                    "вопросы повторяют друг друга",
+                    context=question[:120],
+                )
+            )
+            break
+        seen[key] = question
+
+    about_disclosure = [item for item in questions if _NOT_DISCLOSED.search(item)]
+    if about_disclosure:
+        found.append(
+            TextIssue(
+                TextRule.QUESTION_ABOUT_DISCLOSURE,
+                "вопрос о том, почему строка не раскрыта, содержательного "
+                "ответа не имеет: спрашивать нужно о существе обстоятельства",
+                context=about_disclosure[0][:120],
+            )
+        )
+    return found
+
+
+def _risks_name_values(sections: dict[int, str]) -> list[TextIssue]:
+    """Каждый тезис раздела о рисках привязан к величине.
+
+    Раздел называется «Риски и надзорные сигналы», и утверждение без числа
+    в нём неотличимо от общего рассуждения: проверить его нечем.
+    """
+    text = sections.get(RISKS_SECTION, "")
+    if not text:
+        return []
+    loose = [
+        line.strip()
+        for line in text.split("\n")
+        if len(line.strip()) >= RISK_PARAGRAPH_MIN and not _HAS_DIGIT.search(line)
+    ]
+    if not loose:
+        return []
+    return [
+        TextIssue(
+            TextRule.RISK_WITHOUT_VALUE,
+            f"в разделе о рисках {len(loose)} утверждений не опираются "
+            f"ни на одну величину",
+            context=loose[0][:120],
+        )
+    ]
+
+
+def _question_key(text: str) -> str:
+    """Огрублённый вид вопроса для поиска дублей.
+
+    Сравниваются значимые слова без окончаний: «чем объясняется рост
+    задолженности» и «чем объясняется рост задолженностей» — один вопрос.
+    """
+    words = sorted(
+        {
+            word[:QUESTION_STEM]
+            for word in re.findall(r"[а-яёa-z]{4,}", text.casefold())
+            if word not in _STOP_WORDS
+        }
+    )
+    return " ".join(words)
 
 
 def _days_direction(text: str, context: TextContext) -> list[TextIssue]:

@@ -11,8 +11,11 @@
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
+from finlib.quality.codes import check_name
 from finlib.report.data import ReportData
+from finlib.report.policy import load_policy
 from finlib.scoring.definitions import ScoringCatalog
 
 logger = logging.getLogger(__name__)
@@ -32,8 +35,17 @@ class Paragraph:
     bold: bool = False
 
 
-def build_summary(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
-    """Текст раздела «Ключевой вывод»."""
+def build_summary(
+    data: ReportData,
+    scoring: ScoringCatalog,
+    generated_at: datetime | None = None,
+) -> list[Paragraph]:
+    """Текст раздела «Ключевой вывод».
+
+    generated_at нужен для оговорки об актуальности данных: разрыв между
+    отчётной датой и днём формирования документа — обстоятельство документа,
+    а не расчёта, и вычислить его можно только здесь.
+    """
     if data.assessment is None:
         return [
             Paragraph(
@@ -44,7 +56,10 @@ def build_summary(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
         ]
 
     paragraphs = [*_verdict(data, scoring), *_stop_factors(data, scoring)]
-    paragraphs.extend(_confidence(data))
+    paragraphs.extend(_flag_conflict(data))
+    paragraphs.extend(_blocking_checks(data))
+    paragraphs.extend(_freshness(data, generated_at))
+    paragraphs.extend(_confidence(data, scoring))
     paragraphs.extend(_flags(data))
     return paragraphs
 
@@ -70,6 +85,11 @@ def _verdict(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
     if data.score_in_summary:
         verdict = f"{verdict} Балл: {_score(assessment['total_score'])} из 100."
     found = [Paragraph(verdict, bold=True)]
+    if data.score_in_summary:
+        # Класс ступенчат по своей природе, и рядом с ним приводится шкала:
+        # иначе читателю не видно, насколько балл далёк от соседней ступени.
+        found.append(Paragraph(f"Соответствие балла классу: {_scale(scoring)}."))
+    found.extend(_class_before_stop(data, scoring))
     if data.breadth_reason:
         # Класс присвоен стоп-фактором, а не баллом: узость основания
         # не отменяет стоп-фактор, но и балльной оценки не даёт. Два этих
@@ -165,18 +185,127 @@ def _stop_factors(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
     return [Paragraph(f"Сработал стоп-фактор «{name}». {statement}", bold=True)]
 
 
-def _confidence(data: ReportData) -> list[Paragraph]:
-    """Уверенность в оценке и чем она ограничена."""
+def _scale(scoring: ScoringCatalog) -> str:
+    """Шкала соответствия балла классу, как она задана методикой."""
+    parts = [f"{item.code} — от {_bound(item.min_score)}" for item in scoring.classes]
+    return ", ".join(parts) + " (граница относится к старшему классу)"
+
+
+def _bound(value) -> str:
+    """Граница класса без хвостовых нулей: «80», а не «80,00»."""
+    return format(value.normalize(), "f").replace(".", ",")
+
+
+def _class_before_stop(
+    data: ReportData, scoring: ScoringCatalog
+) -> list[Paragraph]:
+    """Класс до и после применения стоп-фактора.
+
+    Без этого не видно, что именно сделал стоп-фактор: класс E у организации,
+    набравшей по баллу класс B, и класс E у организации, набравшей E, — разные
+    сведения, а в документе выглядели одинаково.
+    """
+    assessment = data.assessment
+    if assessment is None or not data.stop_factor_code:
+        return []
+    before = assessment.get("class_before_stop")
+    if not before or before == data.class_code:
+        return []
+    name = scoring.require_class(before).name
+    return [
+        Paragraph(
+            f"До применения стоп-фактора расчёт давал класс {before} — "
+            f"{name.lower()}; стоп-фактор изменил его на {data.class_code}."
+        )
+    ]
+
+
+def _flag_conflict(data: ReportData) -> list[Paragraph]:
+    """Столкновение флага и стоп-фактора, построенного на его показателях.
+
+    Стоп-фактор не смягчается: флаг, отменяющий стоп-фактор, был бы путём
+    обхода оценки. Но и молчать о столкновении нельзя — оно означает, что
+    оценка построена на показателях, прочтение которых сам же расчёт
+    поставил под вопрос.
+    """
+    conflict = data.flag_conflict()
+    if conflict is None:
+        return []
+    return [Paragraph(conflict.message, bold=True)]
+
+
+def _blocking_checks(data: ReportData) -> list[Paragraph]:
+    """Провал блокирующего контроля качества.
+
+    Отбракованный комплект в расчёт не идёт, и читатель обязан узнать об этом
+    из «Ключевого вывода», а не из приложения.
+    """
+    failures = data.blocking_failures
+    if not failures:
+        return []
+    # В «Ключевом выводе» стоит наименование контроля, а не его код: код —
+    # механизм проверки, его место в приложении и в журнале качества.
+    listed = ", ".join(sorted({f"«{check_name(item['check_code'])}»" for item in failures}))
+    periods = sorted(
+        {
+            f"{item['report_date']:%d.%m.%Y}"
+            for item in failures
+            if item["report_date"] is not None
+        }
+    )
+    where = f" Затронутые отчётные даты: {', '.join(periods)}." if periods else ""
+    return [
+        Paragraph(
+            f"Блокирующие контроли качества дали отказ: {listed}. Отчётность, "
+            f"не прошедшая такой контроль, в расчёт не включена, и выводы "
+            f"опираются на оставшиеся периоды.{where}",
+            bold=True,
+        )
+    ]
+
+
+def _freshness(data: ReportData, generated_at: datetime | None) -> list[Paragraph]:
+    """Оговорка о разрыве между отчётной датой и днём формирования документа."""
+    if generated_at is None:
+        return []
+    policy = load_policy().freshness
+    months = data.months_since_report(generated_at)
+    if not policy.stale(months):
+        return []
+    return [Paragraph(policy.message(months), bold=True)]
+
+
+def _confidence(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
+    """Уверенность в оценке, порядок её определения и чем она ограничена."""
     assessment = data.assessment
     if assessment is None:
         return []
     level = CONFIDENCE_NAMES.get(assessment["confidence"], assessment["confidence"])
     paragraphs = [Paragraph(f"Уверенность в оценке: {level}.")]
+    paragraphs.append(Paragraph(_confidence_rule(scoring)))
     reasons = assessment["confidence_reasons"] or []
     if reasons:
         paragraphs.append(Paragraph("Что ограничивает уверенность:"))
         paragraphs.extend(Paragraph(f"— {reason}") for reason in reasons)
     return paragraphs
+
+
+def _confidence_rule(scoring: ScoringCatalog) -> str:
+    """Как получается уверенность: порядок, а не результат.
+
+    Прежде в документе стояло одно слово — «средняя», — и откуда оно взялось,
+    читателю было неоткуда узнать.
+    """
+    grounds = "; ".join(
+        " ".join(rule.description.split()).rstrip(".")
+        for rule in scoring.confidence.downgrade_on
+    )
+    return (
+        "Уверенность определяется числом оснований для понижения: без "
+        "оснований — высокая, при одном — средняя, при двух и более — низкая. "
+        f"Основания заданы методикой: {grounds}. Узость основания оценки "
+        "понижает уверенность отдельно, по числу показателей и групп."
+    )
 
 
 def _flags(data: ReportData) -> list[Paragraph]:
