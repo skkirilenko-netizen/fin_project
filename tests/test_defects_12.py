@@ -376,3 +376,73 @@ def test_magnitude_checks_ran_on_real_data(db_conn) -> None:
     )
     assert rows, "контроли правдоподобия не выполнялись"
     assert all(row["status"] == "pass" for row in rows), rows
+
+
+# --- 4 (продолжение). Узость основания видна при присвоенном классе --------
+
+
+def test_defect_4_breadth_is_stated_next_to_the_class(db_conn) -> None:
+    """Класс от стоп-фактора сопровождается фактом несформированной оценки.
+
+    Иначе читатель видит класс E и не знает, что расчёт возможен по двум
+    группам из пяти: противоречие устранено, но ценой потери сведений.
+    """
+    from finlib.report.summary import build_summary
+
+    data = load_report_data(STOPPED_INN, db_conn)
+    paragraphs = build_summary(data, SCORING)
+    text = "\n".join(item.text for item in paragraphs)
+
+    assert f"Класс финансового состояния: {data.class_code}" in paragraphs[0].text
+    assert "Класс определён стоп-фактором" in paragraphs[1].text
+    assert "Балльная оценка не формируется" in paragraphs[1].text
+    assert "группам показателей из" in paragraphs[1].text
+    # Сырой текст breadth_reason рядом с присвоенным классом читался бы
+    # как противоречие: он написан для случая, когда класса нет.
+    assert "интегральный класс не формируется" not in text
+
+
+def test_defect_4_group_count_is_not_repeated(db_conn) -> None:
+    """Счёт групп называется один раз, а не в двух абзацах подряд."""
+    from finlib.report.summary import build_summary
+
+    data = load_report_data(STOPPED_INN, db_conn)
+    text = "\n".join(item.text for item in build_summary(data, SCORING))
+    assert text.count("группам показателей из") == 1
+
+
+def test_defect_4_count_matches_the_methodology(db_conn) -> None:
+    """Числа в фразе взяты из разложения и методики, а не выдуманы."""
+    from finlib.report.summary import build_summary
+
+    data = load_report_data(STOPPED_INN, db_conn)
+    used = len([item for item in data.groups if item["score"] is not None])
+    text = "\n".join(item.text for item in build_summary(data, SCORING))
+    assert f"по {used} группам показателей из {len(SCORING.groups)}" in text
+
+
+# --- документ без модели не выглядит пустым ---------------------------------
+
+
+def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
+    """Документ без текстовой части объясняет своё содержимое сам."""
+    from docx import Document
+
+    from finlib.report.document import DISCLAIMER, DISCLAIMER_NO_TEXT, build_report
+
+    report = build_report(
+        NO_CLASS_INN, db_conn, directory=tmp_path, with_text=False
+    )
+    document = Document(report.path)
+    text = "\n".join(item.text for item in document.paragraphs)
+
+    # Дисклеймер контекстный: утверждать, что текст подготовлен моделью
+    # и проверен, в документе без модели — ложь.
+    assert DISCLAIMER_NO_TEXT in text
+    assert DISCLAIMER not in text
+    assert "не привлекалась" in text
+
+    # Пустым он при этом не выглядит: раздел 1 содержателен, приложение полно.
+    assert "Класс финансового состояния не присвоен" in text
+    assert "группам показателей из" in text
+    assert len(document.tables) >= 3

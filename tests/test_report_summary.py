@@ -124,7 +124,7 @@ def test_group_scores_are_withheld_without_class(without_class) -> None:
     for group in scored:
         rendered = f"{group['score']:.2f}".replace(".", ",")
         assert rendered not in text, group["group_name"]
-    assert "Расчёт оказался возможен только по группам" in text
+    assert "группам показателей из" in text
 
 
 def test_group_names_are_still_named(without_class) -> None:

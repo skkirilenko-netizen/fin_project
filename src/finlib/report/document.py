@@ -39,14 +39,32 @@ TITLE = "Заключение о финансовом состоянии"
 
 # Дисклеймер в шапке. Формулировка намеренно не смягчена: документ уходит
 # человеку, который будет принимать по нему решение.
-DISCLAIMER = (
+# Дисклеймер контекстный: он утверждает факт о конкретном документе,
+# а не описывает систему вообще. Шаблонная фраза «текстовая часть подготовлена
+# с применением языковой модели и прошла проверку» в документе, собранном
+# без модели, — ложное утверждение.
+_COMMON_HEAD = (
     "Документ сформирован автоматически. Расчётная часть — класс, балл, "
     "показатели и контроли качества — получена детерминированным расчётом "
-    "по данным бухгалтерской отчётности. Текстовая часть (разделы 2–6) "
-    "подготовлена с применением языковой модели и прошла автоматическую "
-    "проверку на соответствие расчётным данным. Документ подлежит проверке "
-    "ответственным сотрудником и самостоятельным основанием для принятия "
-    "решения не является."
+    "по данным бухгалтерской отчётности. "
+)
+_COMMON_TAIL = (
+    " Документ подлежит проверке ответственным сотрудником и самостоятельным "
+    "основанием для принятия решения не является."
+)
+
+DISCLAIMER = (
+    _COMMON_HEAD
+    + "Текстовая часть (разделы 2–6) подготовлена с применением языковой модели "
+    "и прошла автоматическую проверку на соответствие расчётным данным."
+    + _COMMON_TAIL
+)
+
+DISCLAIMER_NO_TEXT = (
+    _COMMON_HEAD
+    + "Текстовая часть (разделы 2–6) не формировалась: языковая модель "
+    "не привлекалась, и документ содержит только расчётную часть."
+    + _COMMON_TAIL
 )
 
 
@@ -113,7 +131,7 @@ def build_report(
 
     document = Document()
     _set_base_style(document)
-    _write_header(document, data)
+    _write_header(document, data, bool(sections))
     _write_summary(document, data, scoring)
     if sections:
         _write_sections(document, sections)
@@ -165,7 +183,7 @@ def _set_base_style(document: Document) -> None:
     style.font.size = Pt(11)
 
 
-def _write_header(document: Document, data: ReportData) -> None:
+def _write_header(document: Document, data: ReportData, with_text: bool) -> None:
     """Шапка: наименование, реквизиты, период, дисклеймер."""
     organization = data.organization
     document.add_heading(TITLE, level=0)
@@ -187,7 +205,7 @@ def _write_header(document: Document, data: ReportData) -> None:
         document.add_paragraph(line)
 
     warning = document.add_paragraph()
-    run = warning.add_run(DISCLAIMER)
+    run = warning.add_run(DISCLAIMER if with_text else DISCLAIMER_NO_TEXT)
     run.italic = True
     run.font.size = Pt(9)
 
