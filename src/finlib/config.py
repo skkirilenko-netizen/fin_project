@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str
+    # Заключение пишется большой моделью на локальной машине: минуты, не секунды.
+    llm_timeout_s: float = 600.0
     embed_model: str = "bge-m3"
 
     # Источник отчётности. Домен уже менялся, поэтому в коде его нет.
