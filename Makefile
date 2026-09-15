@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion report
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -18,3 +18,10 @@ fmt:  ## Отформатировать код
 	uv run ruff format .
 
 check: lint test  ## Линтер и тесты
+
+check-conclusion:  ## Прогнать модель на ИНН и разобрать постпроверку: make check-conclusion INN=7736050003
+	uv run python eval/conclusion_check.py $(INN) $(ARGS)
+
+report:  ## Сформировать заключение в docx: make report INN=7736050003
+	uv run python -c "from finlib.report.document import build_report; \
+	print(build_report('$(INN)').path)"

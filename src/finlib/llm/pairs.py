@@ -197,9 +197,10 @@ def find_anchor(text: str, span: tuple[int, int], index: AnchorIndex) -> Anchor 
                 distance = found - number_end
                 if after is None or distance < after[0]:
                     after = (distance, anchor)
-                if tag and _is_attached(window[number_end:found]) and (
-                    attached is None or distance < attached[0]
-                ):
+                closes = window[end_of_key : end_of_key + 1] in (")", "]")
+                if _is_attached(window[number_end:found], closes=closes) and (
+                    tag or closes
+                ) and (attached is None or distance < attached[0]):
                     attached = (distance, anchor)
 
     return (attached or before or after or (0, None))[1]
@@ -227,14 +228,17 @@ _TAIL = re.compile(
 
 
 def _is_tag(window: str, position: int, length: int) -> bool:
-    """Стоит ли код в скобках один — «(1600_chg_pct)», а не «(nwc_chg_abs -1 248)».
+    """Помечает ли код соседнее число — «(1600_chg_pct)» или «(2110_chg_abs: …)».
 
-    Код, за которым внутри тех же скобок идёт своё число, приписан к этому
-    числу, а не к соседнему, и тегом не является.
+    Двоеточие после кода — та же пометка: «увеличилась на 39 851 тыс. руб.
+    (2110_chg_abs: 39 851 тыс. руб.)» называет ту же величину дважды.
+    А код, за которым внутри тех же скобок идёт число без двоеточия —
+    «(nwc_chg_abs -1 248 224 574)», — приписан к этому числу, а не к соседнему,
+    и тегом не является.
     """
     before = window[position - 1] if position > 0 else " "
     after = window[position + length] if position + length < len(window) else " "
-    return before in "([" and after in ")]"
+    return before in "([" and (after in ")]" or after == ":")
 
 
 def _binds_to_number_before(window: str, position: int) -> bool:
@@ -249,19 +253,23 @@ def _binds_to_number_before(window: str, position: int) -> bool:
     return bool(trimmed) and trimmed[-1].isdigit()
 
 
-def _is_attached(gap: str) -> bool:
-    """Приписан ли код к самому числу — «1,6 % (1600_chg_pct)».
+def _is_attached(gap: str, *, closes: bool = False) -> bool:
+    """Приписан ли код к самому числу.
 
-    Признак приписки — открывающая скобка сразу перед кодом: по формату
-    `prompts/rules.md` код ставится в скобках. Без неё «16 432 222 886 тыс.
-    руб. Коэффициент автономии» тоже выглядел бы припиской, хотя это начало
+    Две формы приписки, обе встречались на живых ответах:
+    «1,6 % (1600_chg_pct)» — код открывает свои скобки, и «(27 019 тыс. руб.,
+    equity_chg_abs)» — число и код стоят в одних скобках, код вторым.
+    Вторую форму выдаёт закрывающая скобка сразу за кодом (`closes`).
+
+    Одного отсутствия слов между ними мало: «16 432 222 886 тыс. руб.
+    Коэффициент автономии» тоже выглядело бы припиской, хотя это начало
     нового предложения о другом показателе.
 
     Перевод строки разрывает связь всегда: в таблице блока ДАННЫЕ за
     значениями одной строки сразу идёт код следующей, и без этого правила
     величина приписывалась бы соседней строке отчётности.
     """
-    if not gap.endswith(("(", "[")):
+    if not (gap.endswith(("(", "[")) or closes):
         return False
     if "\n" in gap or len(gap) > MAX_ATTACHED_GAP:
         return False

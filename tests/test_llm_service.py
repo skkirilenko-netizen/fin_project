@@ -9,6 +9,7 @@ from finlib.db import execute, fetch_all, fetch_one
 from finlib.llm.client import LLMClient
 from finlib.llm.context import ConclusionContext
 from finlib.llm.service import (
+    MAX_ATTEMPTS,
     ConclusionRejectedError,
     build_prompt,
     generate_conclusion,
@@ -80,11 +81,11 @@ def test_verified_answer_is_returned() -> None:
     assert result.checked_numbers > 0
 
 
-def test_rejected_answer_is_retried_once_then_fails() -> None:
-    """Непрошедший ответ повторяется один раз, затем ошибка."""
+def test_rejected_answer_is_retried_then_fails() -> None:
+    """Непрошедший ответ повторяется, затем ошибка."""
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError) as info:
         generate_conclusion(INN, context=CONTEXT, client=client)
-    assert info.value.attempts == 2
+    assert info.value.attempts == MAX_ATTEMPTS
     assert any("37,4" in item for item in info.value.foreign)
 
 
@@ -140,7 +141,7 @@ def test_log_survives_rejection() -> None:
         generate_conclusion(INN, context=CONTEXT, client=client)
 
     rows = journal()
-    assert len(rows) == 2, "журнал по отклонённым ответам потерян"
+    assert len(rows) == MAX_ATTEMPTS, "журнал по отклонённым ответам потерян"
     assert all(row["verified"] is False for row in rows)
 
 

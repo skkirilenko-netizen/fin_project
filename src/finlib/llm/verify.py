@@ -15,6 +15,7 @@ from enum import StrEnum
 from finlib.llm.claims import FalseClaim, find_false_claims
 from finlib.llm.direction import agrees, stated_direction
 from finlib.llm.pairs import Anchor, AnchorIndex, build_index, find_anchor
+from finlib.llm.verdict import VerdictClaim, find_verdict_claims, parse_verdict
 from finlib.llm.wording import Wording, find_forbidden
 from finlib.utils import to_decimal
 
@@ -39,6 +40,9 @@ _NUMBER = re.compile(
 # скобкой, в том числе после решёток заголовка Markdown.
 _LIST_ITEM = re.compile(r"^[\s#>*-]*(\d{1,2})[.)]\s", re.MULTILINE)
 
+# Ссылка на раздел заключения: «см. раздел 5». Номером величины не является.
+_SECTION_REFERENCE = re.compile(r"\bраздел\w*\s+\d{1,2}", re.IGNORECASE)
+
 # Рассуждение модели: в заключение не идёт и в проверке не участвует.
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
@@ -61,8 +65,22 @@ _COMPARISON_LOOKBEHIND = 24
 # Код формы по ОКУД: ссылка на форму, а не величина.
 _FORM_CODE = re.compile(r"\b0\d{6}\b")
 
-# Номер нормативного документа: «приказ № 84н» — реквизит, а не величина.
-_DOC_NUMBER = re.compile(r"№\s?\d+[а-яёa-z]?", re.IGNORECASE)
+# Реквизит нормативного документа: «приказ № 84н», «приложение 5 к приказу
+# 66н». Величиной отчётности не является. Формулировка приходит из наших же
+# блоков — наименование набора форм содержит ссылку на приказ 66н.
+_DOC_NUMBER = re.compile(
+    r"№\s?\d+[а-яёa-z]?"
+    r"|приказ\w*\s+(?:от\s+[\d.]+\s+)?(?:№\s*)?\d+[а-яё]?"
+    r"|приложени\w+\s+\d+",
+    re.IGNORECASE,
+)
+
+# Ссылка на строку отчётности: «по строкам 1210, 1410, 1510». Это перечень
+# кодов, а не величин, и код может быть любым — в том числе отсутствующим
+# в блоках: именно об отсутствии строки модель и говорит.
+_LINE_REFERENCE = re.compile(
+    r"\bстрок\w*\s*[(\[]?\s*\d{4}(?:\s*(?:,|и|или)\s*\d{4})*", re.IGNORECASE
+)
 
 
 class Violation(StrEnum):
@@ -113,6 +131,7 @@ class VerificationResult:
     checked: int = 0
     wordings: list[Wording] = field(default_factory=list)
     claims: list[FalseClaim] = field(default_factory=list)
+    verdicts: list[VerdictClaim] = field(default_factory=list)
 
     @property
     def foreign_values(self) -> list[str]:
@@ -122,7 +141,10 @@ class VerificationResult:
     @property
     def problems(self) -> list[str]:
         """Все замечания одним перечнем, человеческими формулировками."""
-        return [item.describe() for item in (*self.foreign, *self.wordings, *self.claims)]
+        return [
+            item.describe()
+            for item in (*self.foreign, *self.wordings, *self.claims, *self.verdicts)
+        ]
 
     def summary(self) -> str:
         """Однострочная сводка."""
@@ -133,6 +155,8 @@ class VerificationResult:
             parts.append(f"отсылок к нормативу {len(self.wordings)}")
         if self.claims:
             parts.append(f"ложных утверждений о нерасчёте {len(self.claims)}")
+        if self.verdicts:
+            parts.append(f"расхождений с оценкой {len(self.verdicts)}")
         return f"проверка не пройдена: {'; '.join(parts)}"
 
 
@@ -231,6 +255,8 @@ def verify(
         + [match.span() for match in _DATE.finditer(text)]
         + [match.span() for match in _FORM_CODE.finditer(text)]
         + [match.span() for match in _DOC_NUMBER.finditer(text)]
+        + [match.span() for match in _LINE_REFERENCE.finditer(text)]
+        + [match.span() for match in _SECTION_REFERENCE.finditer(text)]
     )
 
     foreign: list[ForeignNumber] = []
@@ -296,15 +322,65 @@ def verify(
 
     wordings = find_forbidden(text)
     claims = find_false_claims(text, index, index.calculated_codes())
+    verdicts = find_verdict_claims(text, parse_verdict(blocks))
     result = VerificationResult(
-        verified=not (foreign or wordings or claims),
+        verified=not (foreign or wordings or claims or verdicts),
         foreign=foreign,
         checked=checked,
         wordings=wordings,
         claims=claims,
+        verdicts=verdicts,
     )
     logger.info("постпроверка: %s", result.summary())
     return result
+
+
+def classify_numbers(response: str, blocks: str) -> dict[str, int]:
+    """Раскладка всех чисел ответа по тому, как их видит постпроверка.
+
+    Диагностика, а не проверка: показывает, сколько чисел вообще подлежит
+    сверке и что отсеяно как дата, код или номер пункта. По ней видно,
+    выросло ли покрытие или просто изменился текст.
+    """
+    text = strip_reasoning(response)
+    index = build_index(blocks)
+    skips = {
+        "номер пункта или раздела": _list_item_spans(text),
+        "дата": [match.span() for match in _DATE.finditer(text)],
+        "код формы по ОКУД": [match.span() for match in _FORM_CODE.finditer(text)],
+        "реквизит документа": [match.span() for match in _DOC_NUMBER.finditer(text)],
+        "ссылка на строку": [match.span() for match in _LINE_REFERENCE.finditer(text)],
+        "ссылка на раздел": [
+            match.span() for match in _SECTION_REFERENCE.finditer(text)
+        ],
+    }
+    counts = dict.fromkeys(skips, 0)
+    counts["сам код строки или показателя"] = 0
+    counts["тривиальное (0, 1, 100, год)"] = 0
+    counts["подлежит сверке по паре «число + код»"] = 0
+
+    for match in _NUMBER.finditer(text):
+        span = match.span()
+        hit = next(
+            (
+                name
+                for name, spans in skips.items()
+                if any(start <= span[0] and span[1] <= end for start, end in spans)
+            ),
+            None,
+        )
+        if hit:
+            counts[hit] += 1
+            continue
+        if index.get(match.group()) is not None or text[span[1] : span[1] + 1] == "_":
+            counts["сам код строки или показателя"] += 1
+            continue
+        value = to_decimal(match.group())
+        if value is not None and (_is_year(value) or abs(value) in ALWAYS_ALLOWED):
+            counts["тривиальное (0, 1, 100, год)"] += 1
+            continue
+        counts["подлежит сверке по паре «число + код»"] += 1
+    return counts
 
 
 def _foreign(

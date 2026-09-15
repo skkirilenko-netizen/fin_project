@@ -14,3 +14,4 @@ data/*
 !data/raw/
 data/raw/*
 !data/raw/probe/
+eval/out/

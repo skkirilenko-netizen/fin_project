@@ -22,7 +22,11 @@ from finlib.standards import Standard
 logger = logging.getLogger(__name__)
 
 PROMPT_NAME = "conclusion"
-MAX_ATTEMPTS = 2
+# Попытки имеют смысл, пока модели сообщают, что было не так (with_corrections):
+# при нулевой температуре повтор с тем же промптом даёт тот же ответ.
+# Три попытки — по наблюдениям на пробах: формат «число со своим кодом»
+# модель выдерживает не с первого раза, но замечания отрабатывает.
+MAX_ATTEMPTS = 3
 
 _INSERT_LOG = """
 INSERT INTO llm_log (
@@ -70,6 +74,27 @@ def load_prompt(path: Path | None = None) -> str:
 def build_prompt(context: ConclusionContext, path: Path | None = None) -> str:
     """Подставляет блоки контекста в шаблон."""
     return load_prompt(path).replace("{blocks}", context.blocks())
+
+
+def with_corrections(prompt: str, problems: list[str]) -> str:
+    """Дописывает к инструкции перечень замечаний к прошлому ответу.
+
+    Без этого повторная попытка бессмысленна: температура нулевая, промпт
+    тот же — модель выдаёт тот же текст и отклоняется по той же причине.
+    Замечания формулируются как факты о прошлом ответе, а не как подсказка,
+    что написать: подсказывать содержание нельзя, это работа расчёта.
+    """
+    if not problems:
+        return prompt
+    listed = "\n".join(f"- {item}" for item in problems)
+    return (
+        f"{prompt}\n\n"
+        "## Предыдущий ответ отклонён\n\n"
+        "Автоматическая проверка нашла в нём следующее:\n\n"
+        f"{listed}\n\n"
+        "Перепиши заключение целиком, устранив перечисленное. Числа бери "
+        "из блоков без изменений, новых не вводи."
+    )
 
 
 def _log(
@@ -155,10 +180,11 @@ def generate_conclusion(
     last_foreign: list[str] = []
     try:
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            completion = client.complete(prompt)
+            asked = with_corrections(prompt, last_foreign)
+            completion = client.complete(asked)
             text = strip_reasoning(completion.text)
             result = verify(completion.text, blocks, thresholds=thresholds)
-            _log(context, prompt, completion, result, attempt)
+            _log(context, asked, completion, result, attempt)
 
             if result.verified:
                 logger.info(

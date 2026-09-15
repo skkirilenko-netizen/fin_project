@@ -295,20 +295,35 @@ def _assessment_block(
         )
     else:
         score = assessment["total_score"]
-        if score is not None:
+        # Балл подаётся только вместе с классом. Без класса он ничего
+        # не сообщает: «балл 74, класс не присвоен» читается как противоречие,
+        # а у организации с отрицательным капиталом — как оправдание.
+        if score is not None and assessment["class_code"]:
             lines.append(f"Общий балл: {ratio(score)} из 100")
 
     lines.append(f"Уверенность в оценке: {assessment['confidence']}")
     lines.append("")
-    lines.append("Баллы по группам:")
-    for group in assessment["groups"]:
-        if group["score"] is None:
-            continue
-        lines.append(
-            f"  {group['group_name']}: {ratio(group['score'])} из 100, "
-            f"вес в оценке {ratio(group['effective_weight'] * 100)} %, "
-            f"показателей в расчёте {group['metrics_used']}"
+    scored = [item for item in assessment["groups"] if item["score"] is not None]
+    if not assessment["class_code"]:
+        # Без класса баллы групп не подаются. Класс не присвоен именно потому,
+        # что основание узкое, и высокий балл единственной уцелевшей группы
+        # прочитался бы как оценка состояния, которой мы не даём.
+        listed = ", ".join(
+            f"{item['group_name']} (показателей {item['metrics_used']})"
+            for item in scored
         )
+        lines.append(
+            f"Расчёт оказался возможен только по группам: {listed or 'нет'}. "
+            "Баллы групп не приводятся: без класса они вводят в заблуждение."
+        )
+    else:
+        lines.append("Баллы по группам:")
+        for group in scored:
+            lines.append(
+                f"  {group['group_name']}: {ratio(group['score'])} из 100, "
+                f"вес в оценке {ratio(group['effective_weight'] * 100)} %, "
+                f"показателей в расчёте {group['metrics_used']}"
+            )
     _ = catalog
     return "\n".join(lines)
 
