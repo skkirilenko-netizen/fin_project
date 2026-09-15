@@ -229,11 +229,11 @@ def test_metric_without_values_is_excluded() -> None:
     assert "не рассчитан" in (result.exclusion_reason or "")
 
 
-def test_single_period_without_benchmark_is_excluded() -> None:
-    """Без ориентира и без второго периода оценивать нечем."""
-    result = score("asset_turnover", dec("0.5"))
+def test_metric_without_level_scale_is_out_of_scoring() -> None:
+    """Показатель без шкалы уровня в балл не идёт вовсе."""
+    result = score("asset_turnover", dec("0.5", "0.6"))
     assert not result.included
-    assert "недостаточно" in (result.exclusion_reason or "")
+    assert "Нет шкалы уровня" in (result.exclusion_reason or "")
 
 
 def test_score_is_decimal_in_range() -> None:

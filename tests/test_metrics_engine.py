@@ -188,6 +188,50 @@ def test_interest_cover_distinguishes_two_cases() -> None:
     assert "заёмные средства" not in (first.reason or "")
 
 
+def test_negative_denominator_is_not_calculable() -> None:
+    """Отрицательный капитал в знаменателе делает коэффициент неинтерпретируемым.
+
+    Случай ПК «Стройсервис»: капитал −442 тыс. руб. Отношение обязательств
+    к капиталу выходит отрицательным и для показателя «меньше — лучше»
+    читалось бы как отличный результат.
+    """
+    current = dict(CURRENT)
+    current["1300"] = Decimal("-442")
+    result = compute("debt_to_equity", current=current)
+    assert result is not None
+    assert result.status is MetricStatus.NOT_CALCULABLE
+    assert result.reason_code == "negative_denominator"
+    assert "не интерпретируется" in (result.reason or "")
+    assert "1300" in (result.reason or "")
+
+
+def test_negative_denominator_applies_to_averages() -> None:
+    """Проверяется и средняя величина в знаменателе."""
+    current = dict(CURRENT)
+    current["1300"] = Decimal("-1000")
+    previous = dict(PREVIOUS)
+    previous["1300"] = Decimal("-500")
+    result = compute("roe", current=current, previous=previous)
+    assert result is not None
+    assert result.reason_code == "negative_denominator"
+
+
+def test_positive_denominator_is_not_blocked() -> None:
+    """Признак не мешает обычному расчёту."""
+    result = compute("debt_to_equity")
+    assert result is not None and result.status is MetricStatus.OK
+
+
+def test_denominator_flag_is_declared_in_methodology() -> None:
+    """Признак задаётся в методике, а не списком в коде расчёта."""
+    catalog = load_metrics()
+    assert catalog.require("debt_to_equity").denominator_must_be_positive
+    assert catalog.require("roe").denominator_must_be_positive
+    # У абсолютных величин без деления признака нет.
+    assert not catalog.require("net_debt").denominator_must_be_positive
+    assert not catalog.require("equity").denominator_must_be_positive
+
+
 def test_disclosed_zero_is_not_missing_data() -> None:
     """Раскрытый ноль — это данные: показатель не определён, но данные полны."""
     current = dict(CURRENT)

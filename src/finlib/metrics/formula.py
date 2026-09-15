@@ -23,6 +23,7 @@ class NotCalculableReason(StrEnum):
     MISSING_LINES = "missing_lines"
     NO_PREVIOUS_PERIOD = "no_previous_period"
     ZERO_DENOMINATOR = "zero_denominator"
+    NEGATIVE_DENOMINATOR = "negative_denominator"
     NOT_IN_FORM = "not_in_form"
 
 
@@ -221,6 +222,18 @@ def constant_names(node: Node) -> set[str]:
     if isinstance(node, Neg):
         return constant_names(node.operand)
     return set()
+
+
+def denominator_of(node: Node) -> Node | None:
+    """Знаменатель формулы: правый операнд деления в корне дерева.
+
+    Все наши формулы-коэффициенты заканчиваются делением, поэтому корень
+    и есть деление. Если это не так, признак denominator_must_be_positive
+    к показателю неприменим, и методика такого сочетания не примет.
+    """
+    if isinstance(node, BinOp) and node.op == "/":
+        return node.right
+    return None
 
 
 class ZeroDenominatorError(ArithmeticError):

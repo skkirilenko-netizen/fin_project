@@ -12,6 +12,8 @@ from finlib.metrics.formula import (
     NotCalculableReason,
     ZeroDenominatorError,
     average_codes,
+    denominator_of,
+    describe,
     evaluate,
     line_codes,
 )
@@ -154,6 +156,24 @@ def compute_metric(
             reason="Не раскрыты строки: " + ", ".join(missing),
             reason_code=NotCalculableReason.MISSING_LINES.value,
         )
+
+    if metric.denominator_must_be_positive:
+        denominator = denominator_of(tree)
+        if denominator is not None:
+            computed = evaluate(denominator, current, previous, thresholds.constants)
+            if computed < 0:
+                return MetricResult(
+                    metric.code,
+                    report_date,
+                    None,
+                    MetricStatus.NOT_CALCULABLE,
+                    confidence,
+                    reason=(
+                        "Знаменатель отрицателен, коэффициент не интерпретируется: "
+                        f"{describe(denominator)} = {computed}"
+                    ),
+                    reason_code=NotCalculableReason.NEGATIVE_DENOMINATOR.value,
+                )
 
     try:
         value = evaluate(tree, current, previous, thresholds.constants)

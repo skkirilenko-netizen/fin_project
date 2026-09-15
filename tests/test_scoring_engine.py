@@ -176,13 +176,41 @@ def test_broken_group_weights_are_rejected() -> None:
 def test_metrics_excluded_from_scoring_are_named() -> None:
     """Исключённые из балла показатели объявлены с причиной и в балл не идут."""
     excluded = [item for item in CATALOG.metrics if not item.in_scoring]
-    assert {item.code for item in excluded} == {"equity", "fin_leverage"}
+    assert len(excluded) == 11
     for metric in excluded:
         assert metric.scoring_exclusion_reason
     result = built("fin_leverage", "1.5", "1.5")
     assert not result.included
     assert result.score is None
     assert "автономии" in (result.exclusion_reason or "")
+
+
+def test_every_scored_metric_has_a_level_scale() -> None:
+    """В балле не остаётся показателей без шкалы уровня.
+
+    Показатель с одной лишь динамикой награждал бы за улучшение того, чей
+    уровень мы оценить не умеем, и соотношение 0,6 к 0,4 соблюдалось бы
+    только на словах.
+    """
+    for metric in CATALOG.metrics:
+        if not metric.in_scoring:
+            continue
+        has_scale = (
+            metric.benchmark is not None
+            or SCORING.calibration_points.scale_for(metric.code) is not None
+        )
+        assert has_scale, f"{metric.code} участвует в балле без шкалы уровня"
+
+
+def test_level_share_is_as_declared() -> None:
+    """Фактическое соотношение уровня и динамики совпадает с объявленным."""
+    result = built("cur_liq", "1.8", "1.8", "1.8")
+    assert result.level is not None and result.dynamics is not None
+    expected = (
+        result.level * SCORING.metric_score.level_weight
+        + result.dynamics * SCORING.metric_score.dynamics_weight
+    )
+    assert result.score == expected
 
 
 def test_excluded_metrics_do_not_change_group_weight() -> None:

@@ -14,6 +14,7 @@ from finlib.metrics.formula import (
     Node,
     average_codes,
     constant_names,
+    denominator_of,
     line_codes,
     parse_formula,
 )
@@ -96,6 +97,12 @@ class MetricDef(BaseModel):
     # стоп-фактором, а не измерением.
     in_scoring: bool = True
     scoring_exclusion_reason: str | None = None
+    # Знаменатель по экономическому смыслу неотрицателен: капитал, активы,
+    # выручка, обязательства. Если фактически он отрицателен, коэффициент
+    # не интерпретируется — минус в знаменателе делает «меньше — лучше»
+    # похвалой за катастрофу. Признак задаётся здесь, а не списком в коде:
+    # есть показатели, где минус в знаменателе осмыслен.
+    denominator_must_be_positive: bool = False
     formula: str = Field(min_length=1)
     formulas: dict[ReportingType, str] = Field(default_factory=dict)
     applicable_to: tuple[ReportingType, ...] = Field(min_length=1)
@@ -128,6 +135,24 @@ class MetricDef(BaseModel):
     def is_applicable(self, reporting_type: ReportingType) -> bool:
         """Рассчитывается ли показатель для этого набора отчётности."""
         return reporting_type in self.applicable_to
+
+    def denominator_for(self, reporting_type: ReportingType) -> Node | None:
+        """Поддерево знаменателя формулы для набора отчётности."""
+        tree = self.tree_for(reporting_type)
+        return denominator_of(tree) if tree is not None else None
+
+    @model_validator(mode="after")
+    def _check_denominator_flag(self) -> Self:
+        """Признак знаменателя требует, чтобы знаменатель в формуле был."""
+        if not self.denominator_must_be_positive:
+            return self
+        for reporting_type in self.applicable_to:
+            if denominator_of(self.trees[reporting_type]) is None:
+                raise ValueError(
+                    f"показатель {self.code}: denominator_must_be_positive задан, "
+                    f"но формула для набора {reporting_type} делением не заканчивается"
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_scoring_exclusion(self) -> Self:

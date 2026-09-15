@@ -68,6 +68,7 @@ metrics:
     direction: higher_better
     material_change: "0.15"
     benchmark: "1"
+    denominator_must_be_positive: true
     formula: "1200 / 1500"
     formulas:
       simplified: "(1210 + 1240 + 1250) / (1510 + 1520 + 1550)"
@@ -79,6 +80,12 @@ metrics:
     unit: ratio
     direction: higher_better
     material_change: "0.20"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: бесспорного ориентира у показателя нет, а придумывать
+      отраслевой порог запрещено. Показатель с одной лишь динамикой награждал бы
+      за улучшение того, чей уровень мы оценить не умеем.
     formula: "(1230 + 1240 + 1250) / 1500"
     applicable_to: [full]
     note: >-
@@ -91,6 +98,11 @@ metrics:
     unit: ratio
     direction: higher_better
     material_change: "0.50"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: бесспорного ориентира у показателя нет, а придумывать
+      отраслевой порог запрещено.
     formula: "(1240 + 1250) / 1500"
     applicable_to: [full]
     note: >-
@@ -158,6 +170,7 @@ metrics:
     unit: ratio
     direction: higher_better
     material_change: "0.10"
+    denominator_must_be_positive: true
     formula: "1300 / 1700"
     applicable_to: [full, simplified]
     stop_factor:
@@ -173,6 +186,12 @@ metrics:
     unit: ratio
     direction: lower_better
     material_change: "0.40"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: бесспорного ориентира у показателя нет. Кроме того,
+      структура капитала уже измеряется коэффициентом автономии, у которого
+      шкала есть.
     formula: "(1400 + 1500) / 1300"
     formulas:
       simplified: "(1700 - 1300) / 1300"
@@ -185,6 +204,7 @@ metrics:
     direction: higher_better
     material_change: "0.70"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "(1300 - 1100) / 1200"
     formulas:
       simplified: "(1300 - 1150 - 1170) / (1210 + 1240 + 1250)"
@@ -196,6 +216,7 @@ metrics:
     unit: ratio
     direction: lower_better
     material_change: "0.10"
+    denominator_must_be_positive: true
     in_scoring: false
     scoring_exclusion_reason: >-
       Финансовый рычаг есть монотонная функция коэффициента автономии
@@ -213,6 +234,11 @@ metrics:
     unit: thousand_rub
     direction: lower_better
     material_change: "0.20"
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: это абсолютная величина в тысячах рублей, и бесспорного
+      ориентира у неё быть не может. Долговая нагрузка оценивается через
+      покрытие процентов, у которого ориентир есть.
     formula: "1410 + 1510"
     applicable_to: [full, simplified]
     note: >-
@@ -227,6 +253,10 @@ metrics:
     unit: thousand_rub
     direction: lower_better
     material_change: "0.15"
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: абсолютная величина в тысячах рублей, бесспорного
+      ориентира быть не может.
     formula: "1410 + 1510 - 1250"
     applicable_to: [full, simplified]
     note: >-
@@ -239,6 +269,11 @@ metrics:
     unit: ratio
     direction: lower_better
     material_change: "1.00"
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня. Бесспорного ориентира нет, а знаменатель — прибыль
+      от продаж — может быть отрицательным при убытке, и тогда отношение
+      читалось бы как низкая долговая нагрузка.
     formula: "(1410 + 1510 - 1250) / 2200"
     applicable_to: [full]
     note: >-
@@ -254,6 +289,7 @@ metrics:
     direction: higher_better
     material_change: "1.00"
     benchmark: "1"
+    denominator_must_be_positive: true
     formula: "2200 / 2330"
     applicable_to: [full]
     zero_denominator_note: >-
@@ -276,6 +312,7 @@ metrics:
     direction: higher_better
     material_change: "0.30"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "2100 / 2110"
     applicable_to: [full]
     note: >-
@@ -289,6 +326,7 @@ metrics:
     direction: higher_better
     material_change: "1.00"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "2200 / 2110"
     applicable_to: [full]
 
@@ -299,6 +337,7 @@ metrics:
     direction: higher_better
     material_change: "0.50"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "2400 / 2110"
     applicable_to: [full, simplified]
 
@@ -309,6 +348,7 @@ metrics:
     direction: higher_better
     material_change: "1.00"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "2400 / avg(1600)"
     applicable_to: [full, simplified]
 
@@ -319,6 +359,7 @@ metrics:
     direction: higher_better
     material_change: "1.00"
     benchmark: "0"
+    denominator_must_be_positive: true
     formula: "2400 / avg(1300)"
     applicable_to: [full, simplified]
 
@@ -330,6 +371,13 @@ metrics:
     unit: ratio
     direction: higher_better
     material_change: "0.20"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: бесспорного ориентира у оборачиваемости быть не может,
+      она целиком отраслевая. Показатель рассчитывается и приводится
+      в заключении, но балл по нему был бы наградой за рост без понимания
+      исходного положения.
     formula: "2110 / avg(1600)"
     applicable_to: [full, simplified]
 
@@ -339,6 +387,11 @@ metrics:
     unit: days
     direction: lower_better
     material_change: "0.15"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: сколько дней оборачиваемости дебиторки считать хорошим
+      результатом — вопрос отрасли, а отраслевых порогов у нас нет.
     formula: "DAYS * avg(1230) / 2110"
     applicable_to: [full]
     note: >-
@@ -351,6 +404,11 @@ metrics:
     unit: days
     direction: lower_better
     material_change: "0.20"
+    denominator_must_be_positive: true
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Нет шкалы уровня: нормальная оборачиваемость запасов у торговли
+      и у тяжёлого машиностроения различается на порядок.
     formula: "DAYS * avg(1210) / 2120"
     applicable_to: [full]
     note: >-
