@@ -50,6 +50,18 @@ DISCLAIMER = (
 )
 
 
+# Модель не привлекалась: документ собран только из расчётной части.
+NO_MODEL = "не привлекалась"
+
+NO_TEXT_NOTICE = (
+    "Текстовая часть заключения (разделы 2–6) не формировалась: документ "
+    "подготовлен без привлечения языковой модели. Расчётная часть — класс, "
+    "показатели, контроли качества и приложение — полна и получена "
+    "детерминированным расчётом. Настоящий документ заключением не является "
+    "и служит расчётной справкой."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RenderedReport:
     """Готовый документ и то, из чего он собран."""
@@ -77,6 +89,7 @@ def build_report(
     directory: Path | None = None,
     scoring: ScoringCatalog | None = None,
     generated_at: datetime | None = None,
+    with_text: bool = True,
 ) -> RenderedReport:
     """Готовит заключение и записывает docx.
 
@@ -87,11 +100,11 @@ def build_report(
     scoring = scoring if scoring is not None else load_scoring()
     data = load_report_data(inn, conn, report_date=report_date, standard=standard)
 
-    if conclusion is None:
+    if conclusion is None and with_text:
         conclusion = generate_conclusion(
             inn, conn, report_date=data.report_date, standard=standard
         )
-    sections = split_sections(conclusion.text)
+    sections = split_sections(conclusion.text) if conclusion is not None else []
 
     # Противоречие в документе хуже отсутствия сведений: проверяем до записи.
     problems = check_document(data, _limitations_text(inn, conn, data, standard))
@@ -102,8 +115,12 @@ def build_report(
     _set_base_style(document)
     _write_header(document, data)
     _write_summary(document, data, scoring)
-    _write_sections(document, sections)
-    _write_appendix(document, data, conclusion.model, generated_at or datetime.now())
+    if sections:
+        _write_sections(document, sections)
+    else:
+        _write_missing_text(document)
+    model = conclusion.model if conclusion is not None else NO_MODEL
+    _write_appendix(document, data, model, generated_at or datetime.now())
 
     path = output_path(inn, data.report_date, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +130,7 @@ def build_report(
         path=path,
         inn=inn,
         report_date=data.report_date,
-        model=conclusion.model,
+        model=model,
         sections=tuple(sections),
     )
 
@@ -126,6 +143,19 @@ def _limitations_text(
 
     context = build_context(inn, conn, report_date=data.report_date, standard=standard)
     return context.limitations
+
+
+def _write_missing_text(document: Document) -> None:
+    """Оговорка вместо разделов модели.
+
+    Расчётная часть не зависит от модели и остаётся полной, но документ
+    без разделов 2–6 — не заключение, и читатель обязан это видеть, а не
+    обнаруживать по отсутствию текста.
+    """
+    document.add_heading("2–6. Текстовая часть", level=1)
+    paragraph = document.add_paragraph()
+    run = paragraph.add_run(NO_TEXT_NOTICE)
+    run.bold = True
 
 
 def _set_base_style(document: Document) -> None:

@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -28,3 +28,6 @@ llm-stats:  ## Статистика обращений к модели по жу
 report:  ## Сформировать заключение в docx: make report INN=7736050003
 	uv run python -c "from finlib.report.document import build_report; \
 	print(build_report('$(INN)').path)"
+
+analyze:  ## Полный цикл по ИНН: make analyze INN=7736050003 ARGS=--no-llm
+	uv run fin-analysis analyze --inn $(INN) $(ARGS)

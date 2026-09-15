@@ -1,0 +1,308 @@
+"""Полный цикл обработки одной организации: от источника до заключения.
+
+Этапы вынесены сюда, а не в CLI, по двум причинам. Первая: цикл нужен и вне
+терминала — в регрессионном прогоне задачи 17. Вторая: CLI обязан сообщать,
+на каком этапе он стоит и почему остановился, а для этого этапы должны быть
+названными сущностями, а не строками кода.
+
+Каждый этап либо проходит, либо останавливает цикл с названной причиной.
+Молчаливого продолжения после неудачи нет: заключение по неполным данным
+хуже отсутствия заключения.
+"""
+
+import logging
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import date
+from enum import StrEnum
+from pathlib import Path
+
+from finlib.db import PgConnection, connection
+from finlib.llm.service import ConclusionRejectedError, generate_conclusion
+from finlib.metrics.engine import compute_all
+from finlib.metrics.store import save_results
+from finlib.normalize.loader import load_report_set
+from finlib.quality.runner import run_checks
+from finlib.report.consistency import InconsistentReportError
+from finlib.report.document import build_report
+from finlib.report.sections import MissingSectionError
+from finlib.scoring.engine import assess
+from finlib.scoring.store import save_assessment
+from finlib.sources.errors import (
+    CreditOrganizationError,
+    OrganizationNotFoundError,
+    ReportsNotPublishedError,
+    SourceUnavailableError,
+)
+from finlib.sources.girbo import GirboSource
+from finlib.standards import Standard
+
+logger = logging.getLogger(__name__)
+
+
+class Stage(StrEnum):
+    """Этап обработки; порядок значений — порядок выполнения."""
+
+    FETCH = "получение отчётности"
+    LOAD = "нормализация и загрузка"
+    QUALITY = "контроли качества"
+    METRICS = "расчёт показателей"
+    SCORING = "оценка и класс"
+    CONCLUSION = "текстовая часть"
+    DOCUMENT = "сборка документа"
+
+
+class PipelineError(RuntimeError):
+    """Цикл остановлен на названном этапе с названной причиной."""
+
+    def __init__(self, stage: Stage, reason: str) -> None:
+        super().__init__(f"остановлено на этапе «{stage.value}»: {reason}")
+        self.stage = stage
+        self.reason = reason
+
+
+@dataclass
+class StageResult:
+    """Итог одного этапа для вывода пользователю."""
+
+    stage: Stage
+    message: str
+    ok: bool = True
+
+
+@dataclass
+class PipelineResult:
+    """Итог цикла целиком."""
+
+    inn: str
+    report_date: date | None = None
+    document: Path | None = None
+    stages: list[StageResult] = field(default_factory=list)
+    quarantined: int = 0
+    with_llm: bool = True
+
+
+def analyze(
+    inn: str,
+    *,
+    year: int | None = None,
+    standard: Standard = Standard.RSBU,
+    with_llm: bool = True,
+    force_refresh: bool = False,
+    from_cache_only: bool = False,
+    directory: Path | None = None,
+    on_stage: Callable[[StageResult], None] | None = None,
+) -> PipelineResult:
+    """Проводит организацию через весь цикл и возвращает путь к заключению.
+
+    from_cache_only пропускает обращение к источнику: пересчёт идёт по уже
+    загруженным фактам. force_refresh, наоборот, заставляет источник ответить
+    заново, минуя кэш.
+    """
+    result = PipelineResult(inn=inn, with_llm=with_llm)
+
+    def report(stage: Stage, message: str, ok: bool = True) -> None:
+        item = StageResult(stage, message, ok)
+        result.stages.append(item)
+        if on_stage is not None:
+            on_stage(item)
+
+    with connection() as conn:
+        if not from_cache_only:
+            _fetch_and_load(inn, year, conn, force_refresh, standard, report, result)
+        else:
+            report(Stage.FETCH, "пропущено: пересчёт из ранее загруженных данных")
+            report(Stage.LOAD, "пропущено: пересчёт из ранее загруженных данных")
+
+        _compute(inn, conn, standard, report, result)
+
+    if with_llm:
+        result.document = _conclude(inn, result, standard, directory, report)
+    else:
+        result.document = _document_without_text(
+            inn, result, standard, directory, report
+        )
+    return result
+
+
+def _fetch_and_load(
+    inn: str,
+    year: int | None,
+    conn: PgConnection,
+    force_refresh: bool,
+    standard: Standard,
+    report: Callable[..., None],
+    result: PipelineResult,
+) -> None:
+    """Получает отчётность из источника и загружает комплекты."""
+    try:
+        with GirboSource() as source:
+            organization, sets = source.fetch_report_sets(
+                inn, force_refresh=force_refresh
+            )
+    except OrganizationNotFoundError as exc:
+        raise PipelineError(Stage.FETCH, f"организация не найдена: {exc}") from exc
+    except ReportsNotPublishedError as exc:
+        raise PipelineError(Stage.FETCH, f"отчётность не опубликована: {exc}") from exc
+    except CreditOrganizationError as exc:
+        raise PipelineError(
+            Stage.FETCH,
+            "кредитная организация: отчётность сдаётся в Банк России "
+            "по формам 0409 и методикой не разбирается",
+        ) from exc
+    except SourceUnavailableError as exc:
+        raise PipelineError(Stage.FETCH, f"источник недоступен: {exc}") from exc
+
+    chosen = [item for item in sets if year is None or item.report_year <= year]
+    if not chosen:
+        raise PipelineError(
+            Stage.FETCH, f"за {year} год и ранее опубликованных комплектов нет"
+        )
+    report(
+        Stage.FETCH,
+        f"{organization.short_name or inn}: комплектов {len(chosen)}, "
+        f"годы {min(i.report_year for i in chosen)}–{max(i.report_year for i in chosen)}",
+    )
+
+    loaded = 0
+    for item in sorted(chosen, key=lambda value: value.report_year):
+        loaded += 1
+        load_report_set(item, organization, conn, standard=standard)
+    report(Stage.LOAD, f"загружено комплектов: {loaded}")
+    _run_quality(inn, conn, standard, report, result)
+
+
+def _run_quality(
+    inn: str,
+    conn: PgConnection,
+    standard: Standard,
+    report: Callable[..., None],
+    result: PipelineResult,
+) -> None:
+    """Прогоняет контроли по всем комплектам организации."""
+    from finlib.db import fetch_all
+
+    rows = fetch_all(
+        "SELECT id FROM src_file WHERE inn = %(i)s AND standard = %(s)s AND is_actual "
+        "ORDER BY report_year",
+        {"i": inn, "s": standard.value},
+        conn=conn,
+    )
+    quarantined = 0
+    for row in rows:
+        if run_checks(row["id"], conn).quarantined:
+            quarantined += 1
+    result.quarantined = quarantined
+    message = f"проверено комплектов {len(rows)}, в карантине {quarantined}"
+    report(Stage.QUALITY, message, ok=quarantined < len(rows))
+    if rows and quarantined == len(rows):
+        raise PipelineError(
+            Stage.QUALITY,
+            "все комплекты отчётности отбракованы контролями качества, "
+            "расчёт невозможен",
+        )
+
+
+def _compute(
+    inn: str,
+    conn: PgConnection,
+    standard: Standard,
+    report: Callable[..., None],
+    result: PipelineResult,
+) -> None:
+    """Считает показатели и оценку."""
+    results = compute_all(inn, conn, standard=standard)
+    if not results:
+        raise PipelineError(
+            Stage.METRICS, "по загруженным данным не рассчитан ни один показатель"
+        )
+    saved = save_results(inn, results, conn, standard)
+    calculated = sum(1 for item in results if item.is_ok)
+    report(Stage.METRICS, f"значений записано {saved}, из них рассчитано {calculated}")
+
+    assessment = assess(inn, conn, standard=standard)
+    if assessment is None:
+        raise PipelineError(Stage.SCORING, "оценка не рассчитана: нет периодов")
+    save_assessment(assessment, conn)
+    result.report_date = assessment.report_date
+    verdict = (
+        f"класс {assessment.class_code}"
+        if assessment.class_code
+        else f"класс не присвоен ({assessment.no_class_reason})"
+    )
+    report(Stage.SCORING, f"{assessment.report_date:%d.%m.%Y}: {verdict}")
+
+
+def _conclude(
+    inn: str,
+    result: PipelineResult,
+    standard: Standard,
+    directory: Path | None,
+    report: Callable[..., None],
+) -> Path:
+    """Порождает текстовую часть и собирает документ."""
+    try:
+        conclusion = generate_conclusion(
+            inn, report_date=result.report_date, standard=standard
+        )
+    except ConclusionRejectedError as exc:
+        raise PipelineError(
+            Stage.CONCLUSION,
+            f"ответ модели отклонён постпроверкой. {'; '.join(exc.foreign[:5])}",
+        ) from exc
+    except OSError as exc:
+        raise PipelineError(Stage.CONCLUSION, f"модель недоступна: {exc}") from exc
+    report(
+        Stage.CONCLUSION,
+        f"принято с попытки {conclusion.attempt}, сверено чисел "
+        f"{conclusion.checked_numbers}",
+    )
+    return _write(inn, result, standard, directory, report, conclusion)
+
+
+def _document_without_text(
+    inn: str,
+    result: PipelineResult,
+    standard: Standard,
+    directory: Path | None,
+    report: Callable[..., None],
+) -> Path:
+    """Собирает документ без разделов модели.
+
+    Расчётная часть — класс, показатели, контроли — не зависит от модели
+    и остаётся полной. Отсутствие текстовых разделов в документе оговаривается
+    прямо, чтобы читатель не принял его за полное заключение.
+    """
+    report(Stage.CONCLUSION, "пропущено по требованию: документ без текстовой части")
+    return _write(inn, result, standard, directory, report, None)
+
+
+def _write(
+    inn: str,
+    result: PipelineResult,
+    standard: Standard,
+    directory: Path | None,
+    report: Callable[..., None],
+    conclusion,
+) -> Path:
+    """Собирает документ и сообщает путь."""
+    try:
+        rendered = build_report(
+            inn,
+            report_date=result.report_date,
+            standard=standard,
+            conclusion=conclusion,
+            directory=directory,
+            with_text=conclusion is not None,
+        )
+    except MissingSectionError as exc:
+        raise PipelineError(Stage.DOCUMENT, str(exc)) from exc
+    except InconsistentReportError as exc:
+        raise PipelineError(Stage.DOCUMENT, str(exc)) from exc
+    report(Stage.DOCUMENT, f"записано: {rendered.path}")
+    return rendered.path
+
+
+def stages_of(result: PipelineResult) -> Iterator[StageResult]:
+    """Этапы цикла по порядку — для вывода и для тестов."""
+    yield from result.stages
