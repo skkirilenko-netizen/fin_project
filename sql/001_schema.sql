@@ -206,6 +206,86 @@ COMMENT ON COLUMN metric_value.confidence IS
 COMMENT ON COLUMN metric_value.status IS 'not_calculable — нет входных данных, подстановка приближений запрещена';
 COMMENT ON COLUMN metric_value.reason IS 'Причина нерасчёта с указанием отсутствующего кода строки';
 
+-- Оценка финансового состояния -----------------------------------------------
+
+-- Класс без разложения защитить нельзя: на вопрос «почему класс такой» нужно
+-- отвечать запросом, а не пересчётом. Поэтому четыре таблицы, а не одна.
+
+CREATE TABLE IF NOT EXISTS assessment (
+    id                  bigserial PRIMARY KEY,
+    inn                 text NOT NULL,
+    standard            text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
+    report_date         date NOT NULL,
+    total_score         numeric(6, 2),
+    class_code          text NOT NULL,
+    class_name          text,
+    class_before_stop   text,
+    stop_factor_code    text,
+    stop_factor_effect  text CHECK (stop_factor_effect IN ('none', 'lowest_class', 'cap_at_class')),
+    confidence          text NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+    confidence_reasons  jsonb,
+    metrics_version     text NOT NULL,
+    scoring_version     text NOT NULL,
+    flags_version       text NOT NULL,
+    computed_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT assessment_uniq UNIQUE (inn, standard, report_date)
+);
+
+COMMENT ON TABLE assessment IS 'Класс финансового состояния; арифметика фиксирована методикой, модель его не определяет';
+COMMENT ON COLUMN assessment.class_before_stop IS 'Класс по баллу до применения стоп-фактора: видно, что именно изменил стоп-фактор';
+COMMENT ON COLUMN assessment.confidence IS 'Уверенность в оценке; считается отдельно от класса и на него не влияет';
+
+CREATE TABLE IF NOT EXISTS assessment_group (
+    id               bigserial PRIMARY KEY,
+    assessment_id    bigint NOT NULL REFERENCES assessment (id) ON DELETE CASCADE,
+    group_code       text NOT NULL,
+    group_name       text,
+    score            numeric(6, 2),
+    nominal_weight   numeric(6, 4) NOT NULL,
+    effective_weight numeric(6, 4) NOT NULL,
+    metrics_used     integer NOT NULL DEFAULT 0,
+    metrics_excluded integer NOT NULL DEFAULT 0,
+    CONSTRAINT assessment_group_uniq UNIQUE (assessment_id, group_code)
+);
+
+COMMENT ON COLUMN assessment_group.effective_weight IS
+    'Вес после исключения групп без единого рассчитанного показателя и нормировки остальных';
+
+CREATE TABLE IF NOT EXISTS assessment_metric (
+    id               bigserial PRIMARY KEY,
+    assessment_id    bigint NOT NULL REFERENCES assessment (id) ON DELETE CASCADE,
+    metric_code      text NOT NULL,
+    group_code       text NOT NULL,
+    value            numeric(30, 10),
+    score            numeric(6, 2),
+    level_score      numeric(6, 2),
+    dynamics_score   numeric(6, 2),
+    periods_used     integer NOT NULL DEFAULT 0,
+    included         boolean NOT NULL,
+    exclusion_reason text,
+    CONSTRAINT assessment_metric_uniq UNIQUE (assessment_id, metric_code)
+);
+
+COMMENT ON COLUMN assessment_metric.level_score IS
+    'Балл за положение относительно бесспорного ориентира; NULL — ориентира нет, балл строится на динамике';
+COMMENT ON COLUMN assessment_metric.exclusion_reason IS
+    'Почему показатель не участвовал: не рассчитан, недостаточно периодов, неприменим к форме';
+
+CREATE TABLE IF NOT EXISTS assessment_flag (
+    id            bigserial PRIMARY KEY,
+    assessment_id bigint NOT NULL REFERENCES assessment (id) ON DELETE CASCADE,
+    flag_code     text NOT NULL,
+    flag_name     text,
+    level         text NOT NULL,
+    affects_class boolean NOT NULL DEFAULT false,
+    message       text NOT NULL,
+    details       jsonb,
+    CONSTRAINT assessment_flag_uniq UNIQUE (assessment_id, flag_code)
+);
+
+COMMENT ON TABLE assessment_flag IS
+    'Сработавшие флаги с готовым текстом оговорки для раздела «Ограничения анализа»';
+
 -- Журнал обращений к языковой модели -----------------------------------------
 
 CREATE TABLE IF NOT EXISTS llm_log (

@@ -183,5 +183,6 @@ def test_enum_matches_schema_check() -> None:
     schema = (Path(__file__).resolve().parents[1] / "sql" / "001_schema.sql").read_text(
         encoding="utf-8"
     )
-    assert schema.count("standard IN ('rsbu', 'ifrs')") == 3
+    # src_file, fact_report, metric_value и assessment.
+    assert schema.count("standard IN ('rsbu', 'ifrs')") == 4
     assert {item.value for item in Standard} == {"rsbu", "ifrs"}

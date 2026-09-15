@@ -83,6 +83,19 @@ class MetricDef(BaseModel):
     group: str = Field(min_length=1)
     unit: Unit
     direction: Direction
+    # Относительное изменение, считающееся существенным. Задаётся у каждого
+    # показателя: для автономии 10 % — крупное движение, для рентабельности
+    # капитала — шум. Происхождение значений — в блоке calibration.
+    material_change: Decimal = Field(gt=0)
+    # Бесспорный ориентир: только знак или единица, ни одного отраслевого
+    # порога. Отсутствие означает, что балл строится на одной динамике.
+    benchmark: Decimal | None = None
+    # Участвует ли показатель в балльной оценке. Рассчитывается и попадает
+    # в заключение он в любом случае; false означает, что в балл он не идёт —
+    # например, потому что дублирует другой показатель или служит
+    # стоп-фактором, а не измерением.
+    in_scoring: bool = True
+    scoring_exclusion_reason: str | None = None
     formula: str = Field(min_length=1)
     formulas: dict[ReportingType, str] = Field(default_factory=dict)
     applicable_to: tuple[ReportingType, ...] = Field(min_length=1)
@@ -117,6 +130,15 @@ class MetricDef(BaseModel):
         return reporting_type in self.applicable_to
 
     @model_validator(mode="after")
+    def _check_scoring_exclusion(self) -> Self:
+        """Исключение из балла требует названной причины."""
+        if not self.in_scoring and not (self.scoring_exclusion_reason or "").strip():
+            raise ValueError(
+                f"показатель {self.code} исключён из балльной оценки без объяснения причины"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_formulas(self) -> Self:
         """Формулы разбираются, переопределения относятся к применимым наборам."""
         for reporting_type in self.formulas:
@@ -129,12 +151,34 @@ class MetricDef(BaseModel):
         return self
 
 
+class MaterialChangeCalibration(BaseModel):
+    """Происхождение отсечек существенного изменения."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    organizations: int = Field(gt=0)
+    observations: int = Field(gt=0)
+    source: str = Field(min_length=1)
+    note: str = Field(min_length=1)
+
+
+class Calibration(BaseModel):
+    """Блок происхождения подобранных величин методики."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    material_change: MaterialChangeCalibration
+
+
 class MetricsCatalog(BaseModel):
     """Справочник показателей."""
 
     model_config = ConfigDict(extra="forbid")
 
     version: str = Field(min_length=1)
+    # Блок обязателен: подобранные величины без указания происхождения
+    # неотличимы от выдуманных.
+    calibration: Calibration
     groups: dict[str, GroupDef]
     metrics: tuple[MetricDef, ...]
 
@@ -166,6 +210,10 @@ class MetricsCatalog(BaseModel):
     def for_type(self, reporting_type: ReportingType) -> tuple[MetricDef, ...]:
         """Показатели, применимые к набору отчётности."""
         return tuple(item for item in self.metrics if item.is_applicable(reporting_type))
+
+    def scored(self, reporting_type: ReportingType) -> tuple[MetricDef, ...]:
+        """Показатели, участвующие в балльной оценке."""
+        return tuple(item for item in self.for_type(reporting_type) if item.in_scoring)
 
     def by_group(self, group: str) -> tuple[MetricDef, ...]:
         """Показатели одной группы."""

@@ -1,13 +1,17 @@
 # Определения показателей финансового состояния.
 #
-# ОТРАСЛЕВЫХ И ЕДИНЫХ АБСОЛЮТНЫХ НОРМАТИВОВ ЗДЕСЬ НЕТ И НЕ ДОЛЖНО БЫТЬ.
-# Основа интерпретации — динамика показателя во времени: направление
-# изменения, темп, устойчивость тренда, разрывы. Сравнение с числом,
-# взятым неизвестно откуда, запрещено: поля «норматив» в определениях нет.
+# ПОЛЯ «НОРМАТИВ» ЗДЕСЬ НЕТ И НЕ БУДЕТ. Абсолютные опорные точки шкал
+# вынесены в scoring.yaml (секция calibration_points) и объявлены там
+# экспертной калибровкой, а не нормативом: они подлежат замене на отраслевые
+# перцентили по мере накопления базы отчётностей. В определении показателя
+# остаются только его смысл, формула и чувствительность к изменению.
 #
-# Единственное исключение — stop_factor: немногие пороги, имеющие
-# содержательный смысл вне отрасли (отрицательный собственный капитал,
-# покрытие процентов меньше единицы). Они помечены явно.
+# stop_factor — немногие пороги, содержательные вне отрасли (отрицательный
+# собственный капитал, покрытие процентов меньше единицы). Помечены явно.
+#
+# in_scoring: false — показатель рассчитывается и попадает в заключение,
+# но в балл не идёт: он либо дублирует другой, либо служит стоп-фактором,
+# а не измерением. Причина обязательна.
 #
 # Язык формул. Четырёхзначное число — код строки отчётности. avg(код) —
 # полусумма на начало и конец периода, требует предыдущего периода.
@@ -19,15 +23,35 @@
 # упрощённого набора в applicable_to для упрощённых форм не рассчитывается
 # и получает статус not_applicable_form.
 
-version: "1.0.0"
+version: "1.1.0"
+
+# Происхождение отсечек существенного изменения. Блок обязателен: без него
+# методика не загрузится, а текст уходит в раздел «Ограничения анализа».
+# Общий, а не копия у каждого из 21 показателя: происхождение у всех отсечек
+# одно, и двадцать одна копия разъехалась бы при первой правке.
+calibration:
+  material_change:
+    organizations: 3
+    observations: 159
+    source: Пробы ГИР БО в data/raw/probe
+    note: >-
+      Отсечки существенного изменения (material_change) округлены от медианы
+      относительных изменений каждого показателя между периодами. Калибровка
+      выполнена на трёх организациях и 159 наблюдениях и подлежит уточнению
+      на эталонном наборе задачи 11. Значения задают только масштаб
+      чувствительности к динамике и не являются нормативами.
+
+# benchmark — бесспорный ориентир: только знак или единица. Ни одного
+# отраслевого порога. Есть у 11 показателей из 21; у остальных уровень
+# не оценивается, и балл строится на одной динамике.
 
 groups:
   liquidity:
     name: Ликвидность
-  stability:
-    name: Финансовая устойчивость
-  debt:
-    name: Долговая нагрузка
+  capital_structure:
+    name: Структура капитала
+  debt_service:
+    name: Обслуживание долга
   profitability:
     name: Рентабельность
   turnover:
@@ -42,6 +66,8 @@ metrics:
     group: liquidity
     unit: ratio
     direction: higher_better
+    material_change: "0.15"
+    benchmark: "1"
     formula: "1200 / 1500"
     formulas:
       simplified: "(1210 + 1240 + 1250) / (1510 + 1520 + 1550)"
@@ -52,6 +78,7 @@ metrics:
     group: liquidity
     unit: ratio
     direction: higher_better
+    material_change: "0.20"
     formula: "(1230 + 1240 + 1250) / 1500"
     applicable_to: [full]
     note: >-
@@ -63,6 +90,7 @@ metrics:
     group: liquidity
     unit: ratio
     direction: higher_better
+    material_change: "0.50"
     formula: "(1240 + 1250) / 1500"
     applicable_to: [full]
     note: >-
@@ -74,6 +102,8 @@ metrics:
     group: liquidity
     unit: thousand_rub
     direction: higher_better
+    material_change: "0.40"
+    benchmark: "0"
     formula: "1200 - 1500"
     formulas:
       simplified: "(1210 + 1240 + 1250) - (1510 + 1520 + 1550)"
@@ -90,9 +120,17 @@ metrics:
 
   - code: equity
     name: Собственный капитал (строка 1300)
-    group: stability
+    group: capital_structure
     unit: thousand_rub
     direction: higher_better
+    material_change: "0.30"
+    benchmark: "0"
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Это стоп-фактор, а не измерение: отрицательный собственный капитал
+      опускает класс до низшего независимо от балла. Начислять за него ещё
+      и баллы значило бы учитывать одно обстоятельство дважды. Показатель
+      рассчитывается и приводится в заключении справочно.
     formula: "1300"
     applicable_to: [full, simplified]
     note: >-
@@ -110,11 +148,16 @@ metrics:
         Отрицательный собственный капитал — признак того, что обязательства
         превышают активы. Порог содержателен вне отрасли.
 
+  # Ориентира у автономии нет намеренно. «Больше нуля» дублирует ориентир
+  # собственного капитала: отрицательная автономия возможна только при
+  # отрицательном капитале. С таким ориентиром организация с автономией 5 %
+  # получала бы за уровень полный балл — ориентир не нёс бы информации.
   - code: equity_ratio
     name: Коэффициент автономии
-    group: stability
+    group: capital_structure
     unit: ratio
     direction: higher_better
+    material_change: "0.10"
     formula: "1300 / 1700"
     applicable_to: [full, simplified]
     stop_factor:
@@ -126,9 +169,10 @@ metrics:
 
   - code: debt_to_equity
     name: Отношение обязательств к собственному капиталу
-    group: stability
+    group: capital_structure
     unit: ratio
     direction: lower_better
+    material_change: "0.40"
     formula: "(1400 + 1500) / 1300"
     formulas:
       simplified: "(1700 - 1300) / 1300"
@@ -136,9 +180,11 @@ metrics:
 
   - code: own_wc_ratio
     name: Обеспеченность собственными оборотными средствами
-    group: stability
+    group: liquidity
     unit: ratio
     direction: higher_better
+    material_change: "0.70"
+    benchmark: "0"
     formula: "(1300 - 1100) / 1200"
     formulas:
       simplified: "(1300 - 1150 - 1170) / (1210 + 1240 + 1250)"
@@ -146,9 +192,16 @@ metrics:
 
   - code: fin_leverage
     name: Финансовый рычаг
-    group: stability
+    group: capital_structure
     unit: ratio
     direction: lower_better
+    material_change: "0.10"
+    in_scoring: false
+    scoring_exclusion_reason: >-
+      Финансовый рычаг есть монотонная функция коэффициента автономии
+      (1700 / 1300 против 1300 / 1700) и измеряет то же самое. Учитывать оба
+      в балле — значит удвоить вес структуры капитала. Показатель
+      рассчитывается и приводится в заключении справочно.
     formula: "1700 / 1300"
     applicable_to: [full, simplified]
 
@@ -156,9 +209,10 @@ metrics:
 
   - code: debt_total
     name: Совокупный долг
-    group: debt
+    group: debt_service
     unit: thousand_rub
     direction: lower_better
+    material_change: "0.20"
     formula: "1410 + 1510"
     applicable_to: [full, simplified]
     note: >-
@@ -169,9 +223,10 @@ metrics:
 
   - code: net_debt
     name: Чистый долг
-    group: debt
+    group: debt_service
     unit: thousand_rub
     direction: lower_better
+    material_change: "0.15"
     formula: "1410 + 1510 - 1250"
     applicable_to: [full, simplified]
     note: >-
@@ -180,9 +235,10 @@ metrics:
 
   - code: debt_to_op_profit
     name: Чистый долг к прибыли от продаж
-    group: debt
+    group: debt_service
     unit: ratio
     direction: lower_better
+    material_change: "1.00"
     formula: "(1410 + 1510 - 1250) / 2200"
     applicable_to: [full]
     note: >-
@@ -193,9 +249,11 @@ metrics:
 
   - code: interest_cover
     name: Покрытие процентов прибылью от продаж
-    group: debt
+    group: debt_service
     unit: ratio
     direction: higher_better
+    material_change: "1.00"
+    benchmark: "1"
     formula: "2200 / 2330"
     applicable_to: [full]
     zero_denominator_note: >-
@@ -216,6 +274,8 @@ metrics:
     group: profitability
     unit: ratio
     direction: higher_better
+    material_change: "0.30"
+    benchmark: "0"
     formula: "2100 / 2110"
     applicable_to: [full]
     note: >-
@@ -227,6 +287,8 @@ metrics:
     group: profitability
     unit: ratio
     direction: higher_better
+    material_change: "1.00"
+    benchmark: "0"
     formula: "2200 / 2110"
     applicable_to: [full]
 
@@ -235,6 +297,8 @@ metrics:
     group: profitability
     unit: ratio
     direction: higher_better
+    material_change: "0.50"
+    benchmark: "0"
     formula: "2400 / 2110"
     applicable_to: [full, simplified]
 
@@ -243,6 +307,8 @@ metrics:
     group: profitability
     unit: ratio
     direction: higher_better
+    material_change: "1.00"
+    benchmark: "0"
     formula: "2400 / avg(1600)"
     applicable_to: [full, simplified]
 
@@ -251,6 +317,8 @@ metrics:
     group: profitability
     unit: ratio
     direction: higher_better
+    material_change: "1.00"
+    benchmark: "0"
     formula: "2400 / avg(1300)"
     applicable_to: [full, simplified]
 
@@ -261,6 +329,7 @@ metrics:
     group: turnover
     unit: ratio
     direction: higher_better
+    material_change: "0.20"
     formula: "2110 / avg(1600)"
     applicable_to: [full, simplified]
 
@@ -269,6 +338,7 @@ metrics:
     group: turnover
     unit: days
     direction: lower_better
+    material_change: "0.15"
     formula: "DAYS * avg(1230) / 2110"
     applicable_to: [full]
     note: >-
@@ -280,6 +350,7 @@ metrics:
     group: turnover
     unit: days
     direction: lower_better
+    material_change: "0.20"
     formula: "DAYS * avg(1210) / 2120"
     applicable_to: [full]
     note: >-
