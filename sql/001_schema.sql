@@ -310,8 +310,15 @@ CREATE TABLE IF NOT EXISTS llm_log (
     foreign_numbers jsonb,
     attempt         integer NOT NULL DEFAULT 1,
     duration_ms     integer,
+    -- Запись сделана тестом, а не рабочим прогоном. Журнал обращений
+    -- к модели — доказательная база системы, и стирать его прогоном тестов
+    -- нельзя. Тесты помечают свои записи и убирают только их.
+    is_test         boolean NOT NULL DEFAULT false,
     created_at      timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS llm_log_real_idx ON llm_log (inn, created_at)
+    WHERE NOT is_test;
 
 CREATE INDEX IF NOT EXISTS llm_log_inn_idx ON llm_log (inn, report_date);
 

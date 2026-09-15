@@ -36,14 +36,21 @@ GOOD = (
 )
 BAD = "### 2. Фактическая база\nРентабельность (roa) достигла 37,4 процента."
 
+_CLEAN = "DELETE FROM llm_log WHERE inn = %(i)s AND is_test"
+
 
 @pytest.fixture(autouse=True)
 def clean_journal(db_conn):
-    """Убирает записи журнала по тестовому ИНН."""
-    execute("DELETE FROM llm_log WHERE inn = %(i)s", {"i": INN}, conn=db_conn)
+    """Убирает только тестовые записи журнала.
+
+    Боевые записи не трогаются ни при каких условиях: журнал обращений
+    к модели — доказательная база системы, и прогон pytest однажды её уже
+    уничтожил. Условие is_test стоит в обоих DELETE намеренно.
+    """
+    execute(_CLEAN, {"i": INN}, conn=db_conn)
     db_conn.commit()
     yield db_conn
-    execute("DELETE FROM llm_log WHERE inn = %(i)s", {"i": INN}, conn=db_conn)
+    execute(_CLEAN, {"i": INN}, conn=db_conn)
     db_conn.commit()
 
 
@@ -63,9 +70,9 @@ def client_returning(*answers: str) -> LLMClient:
 
 
 def journal(inn: str = INN) -> list[dict]:
-    """Записи журнала обращений к модели."""
+    """Тестовые записи журнала обращений к модели."""
     return fetch_all(
-        "SELECT * FROM llm_log WHERE inn = %(i)s ORDER BY id", {"i": inn}
+        "SELECT * FROM llm_log WHERE inn = %(i)s AND is_test ORDER BY id", {"i": inn}
     )
 
 
@@ -75,7 +82,7 @@ def journal(inn: str = INN) -> list[dict]:
 def test_verified_answer_is_returned() -> None:
     """Прошедший проверку ответ возвращается наверх."""
     with client_returning(GOOD) as client:
-        result = generate_conclusion(INN, context=CONTEXT, client=client)
+        result = generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
     assert result.text.startswith("### 2.")
     assert result.attempt == 1
     assert result.checked_numbers > 0
@@ -84,7 +91,7 @@ def test_verified_answer_is_returned() -> None:
 def test_rejected_answer_is_retried_then_fails() -> None:
     """Непрошедший ответ повторяется, затем ошибка."""
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError) as info:
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
     assert info.value.attempts == MAX_ATTEMPTS
     assert any("37,4" in item for item in info.value.foreign)
 
@@ -92,7 +99,7 @@ def test_rejected_answer_is_retried_then_fails() -> None:
 def test_second_attempt_can_succeed() -> None:
     """Если повтор прошёл проверку, он и возвращается."""
     with client_returning(BAD, GOOD) as client:
-        result = generate_conclusion(INN, context=CONTEXT, client=client)
+        result = generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
     assert result.attempt == 2
 
 
@@ -101,7 +108,7 @@ def test_rejected_text_is_not_returned() -> None:
     produced = None
     with client_returning(BAD, BAD) as client:
         try:
-            produced = generate_conclusion(INN, context=CONTEXT, client=client)
+            produced = generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
         except ConclusionRejectedError as exc:
             # В сообщении об ошибке — перечень посторонних чисел, но не сам текст.
             assert "Рентабельность достигла" not in str(exc)
@@ -113,7 +120,7 @@ def test_reasoning_is_stripped_from_result() -> None:
     """Черновик рассуждения в заключение не попадает."""
     answer = f"<think>прикину 12345</think>{GOOD}"
     with client_returning(answer) as client:
-        result = generate_conclusion(INN, context=CONTEXT, client=client)
+        result = generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
     assert "<think>" not in result.text
     assert "12345" not in result.text
 
@@ -124,7 +131,7 @@ def test_reasoning_is_stripped_from_result() -> None:
 def test_every_call_is_logged() -> None:
     """Каждое обращение к модели записывается, включая отклонённые."""
     with client_returning(BAD, GOOD) as client:
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
 
     rows = journal()
     assert len(rows) == 2
@@ -138,7 +145,7 @@ def test_every_call_is_logged() -> None:
 def test_log_survives_rejection() -> None:
     """Запись об отклонении переживает исключение и откат транзакции вызывающего."""
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError):
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
 
     rows = journal()
     assert len(rows) == MAX_ATTEMPTS, "журнал по отклонённым ответам потерян"
@@ -148,7 +155,7 @@ def test_log_survives_rejection() -> None:
 def test_foreign_numbers_are_logged_with_context() -> None:
     """В журнал попадают посторонние числа вместе с их окружением."""
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError):
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
 
     row = journal()[0]
     numbers = row["foreign_numbers"]["numbers"]
@@ -162,7 +169,7 @@ def test_forbidden_wording_is_logged_separately() -> None:
     """Отсылка к нормативу пишется в журнал своим разделом, а не среди чисел."""
     answer = "### 2. Фактическая база\nЛиквидность (cur_liq) — 0,82 при норме не менее."
     with client_returning(answer, answer) as client, pytest.raises(ConclusionRejectedError):
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
 
     row = journal()[0]
     assert row["foreign_numbers"]["numbers"] == []
@@ -173,7 +180,7 @@ def test_forbidden_wording_is_logged_separately() -> None:
 def test_prompt_and_response_are_logged() -> None:
     """Текст инструкции и ответа сохраняются целиком."""
     with client_returning(GOOD) as client:
-        generate_conclusion(INN, context=CONTEXT, client=client)
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
 
     row = journal()[0]
     assert "ОГРАНИЧЕНИЯ АНАЛИЗА" in row["prompt_text"]
@@ -217,7 +224,7 @@ def test_model_never_sees_raw_file() -> None:
 def test_log_is_written_for_other_organisation_independently() -> None:
     """Журнал ведётся по каждой организации отдельно."""
     other = "2100010824"
-    execute("DELETE FROM llm_log WHERE inn = %(i)s", {"i": other})
+    execute(_CLEAN, {"i": other})
     context = ConclusionContext(
         inn=other,
         report_date=date(2024, 12, 31),
@@ -229,10 +236,10 @@ def test_log_is_written_for_other_organisation_independently() -> None:
         limitations="=== ОГРАНИЧЕНИЯ АНАЛИЗА ===",
     )
     with client_returning("Текст без чисел.") as client:
-        generate_conclusion(other, context=context, client=client)
+        generate_conclusion(other, context=context, client=client, is_test=True)
 
     assert len(journal(other)) == 1
     assert fetch_one(
-        "SELECT count(*) AS n FROM llm_log WHERE inn = %(i)s", {"i": INN}
+        "SELECT count(*) AS n FROM llm_log WHERE inn = %(i)s AND is_test", {"i": INN}
     )["n"] == 0
-    execute("DELETE FROM llm_log WHERE inn = %(i)s", {"i": other})
+    execute(_CLEAN, {"i": other})

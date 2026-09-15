@@ -31,10 +31,11 @@ MAX_ATTEMPTS = 3
 _INSERT_LOG = """
 INSERT INTO llm_log (
     inn, report_date, model, prompt_name, prompt_text, response_text,
-    temperature, verified, foreign_numbers, attempt, duration_ms
+    temperature, verified, foreign_numbers, attempt, duration_ms, is_test
 ) VALUES (
     %(inn)s, %(report_date)s, %(model)s, %(prompt_name)s, %(prompt_text)s, %(response_text)s,
-    %(temperature)s, %(verified)s, %(foreign_numbers)s, %(attempt)s, %(duration_ms)s
+    %(temperature)s, %(verified)s, %(foreign_numbers)s, %(attempt)s, %(duration_ms)s,
+    %(is_test)s
 )
 """
 
@@ -103,6 +104,7 @@ def _log(
     completion: Completion | None,
     result: VerificationResult | None,
     attempt: int,
+    is_test: bool,
 ) -> None:
     """Пишет обращение к модели в журнал независимо от исхода.
 
@@ -151,6 +153,7 @@ def _log(
             else None,
             "attempt": attempt,
             "duration_ms": completion.duration_ms if completion else None,
+            "is_test": is_test,
         },
     )
 
@@ -163,8 +166,15 @@ def generate_conclusion(
     standard: Standard = Standard.RSBU,
     client: LLMClient | None = None,
     context: ConclusionContext | None = None,
+    is_test: bool = False,
 ) -> Conclusion:
-    """Готовит текстовую часть заключения с постпроверкой и повторной попыткой."""
+    """Готовит текстовую часть заключения с постпроверкой и повторной попыткой.
+
+    is_test помечает записи журнала как тестовые. Журнал обращений к модели —
+    доказательная база системы: он показывает, что именно было предъявлено
+    модели и что она ответила. Стирать его прогоном тестов нельзя, поэтому
+    тесты помечают свои записи и убирают только помеченные.
+    """
     context = context or build_context(
         inn, conn, report_date=report_date, standard=standard
     )
@@ -184,7 +194,7 @@ def generate_conclusion(
             completion = client.complete(asked)
             text = strip_reasoning(completion.text)
             result = verify(completion.text, blocks, thresholds=thresholds)
-            _log(context, asked, completion, result, attempt)
+            _log(context, asked, completion, result, attempt, is_test)
 
             if result.verified:
                 logger.info(

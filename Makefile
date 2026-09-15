@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion report
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -21,6 +21,9 @@ check: lint test  ## Линтер и тесты
 
 check-conclusion:  ## Прогнать модель на ИНН и разобрать постпроверку: make check-conclusion INN=7736050003
 	uv run python eval/conclusion_check.py $(INN) $(ARGS)
+
+llm-stats:  ## Статистика обращений к модели по журналу llm_log
+	uv run python eval/llm_stats.py
 
 report:  ## Сформировать заключение в docx: make report INN=7736050003
 	uv run python -c "from finlib.report.document import build_report; \
