@@ -105,12 +105,15 @@ def test_known_compositions(
 
 def test_expense_lines_are_subtracted(catalog: LinesCatalog) -> None:
     """Строки в круглых скобках входят в итог с минусом в обоих наборах."""
+    checked = 0
     for line in catalog.lines:
         for component in line.components:
             if catalog.require(component.code, line.reporting_type).in_brackets:
+                checked += 1
                 assert component.op is Operator.MINUS, (
                     f"{component.code} в составе {line.code} должна вычитаться"
                 )
+    assert checked >= 10, "проверять оказалось нечего: расходных строк в составах не найдено"
 
 
 def test_result_lines_allow_negative(catalog: LinesCatalog) -> None:

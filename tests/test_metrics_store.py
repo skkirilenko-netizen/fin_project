@@ -8,7 +8,7 @@ from probes import CORRECTED_BFO, FULL_BFO, read_probe
 
 from finlib.db import execute, fetch_all, fetch_one
 from finlib.metrics.engine import MetricStatus, compute_all
-from finlib.metrics.store import load_series, save_results
+from finlib.metrics.store import MetricSeries, SeriesPoint, load_series, save_results
 from finlib.normalize.loader import load_report_set
 from finlib.quality.periods import PeriodConfidence
 from finlib.quality.runner import run_checks
@@ -153,14 +153,49 @@ def test_series_warns_about_unverified_trend(db_conn) -> None:
     assert "не проверенные" in note
 
 
-def test_series_reports_impossible_trend(db_conn) -> None:
-    """Меньше двух точек — динамику оценить нельзя, и это сказано прямо."""
-    prepare(FULL_BFO, FULL_INN, db_conn, years=[2025])
-    save_results(FULL_INN, compute_all(FULL_INN, db_conn), db_conn)
+def test_series_reports_impossible_trend() -> None:
+    """Меньше двух рассчитанных точек — динамику оценить нельзя, и это сказано прямо.
 
-    series = load_series(FULL_INN, "roa", db_conn)
-    if not series.is_trend_possible:
-        assert "динамику оценить нельзя" in (series.trend_note() or "")
+    Проверка безусловная: ряд строится здесь же, а не берётся из базы,
+    где число точек зависит от загруженных комплектов.
+    """
+    single = MetricSeries(
+        metric_code="roa",
+        points=(
+            SeriesPoint(
+                report_date=date(2025, 12, 31),
+                value=Decimal("0.05"),
+                status=MetricStatus.OK,
+                confidence=PeriodConfidence.VERIFIED,
+            ),
+            SeriesPoint(
+                report_date=date(2024, 12, 31),
+                value=None,
+                status=MetricStatus.NOT_CALCULABLE,
+                confidence=PeriodConfidence.VERIFIED,
+            ),
+        ),
+    )
+    assert not single.is_trend_possible
+    assert "динамику оценить нельзя" in (single.trend_note() or "")
+
+
+def test_series_with_two_points_allows_trend() -> None:
+    """Две рассчитанные точки — динамика оценима, оговорки о её отсутствии нет."""
+    pair = MetricSeries(
+        metric_code="roa",
+        points=tuple(
+            SeriesPoint(
+                report_date=date(year, 12, 31),
+                value=Decimal("0.05"),
+                status=MetricStatus.OK,
+                confidence=PeriodConfidence.VERIFIED,
+            )
+            for year in (2025, 2024)
+        ),
+    )
+    assert pair.is_trend_possible
+    assert pair.trend_note() is None
 
 
 def test_values_stay_decimal(db_conn) -> None:

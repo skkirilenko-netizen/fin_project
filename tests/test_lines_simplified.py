@@ -72,22 +72,30 @@ def test_simplified_totals(
 
 def test_shared_codes_declare_meaning(catalog: LinesCatalog) -> None:
     """Для каждого кода, встречающегося в обоих наборах, смысл объявлен явно."""
+    checked = 0
     for line in catalog.for_type(ReportingType.SIMPLIFIED):
         if catalog.has(line.code, ReportingType.FULL):
+            checked += 1
             assert line.same_meaning_as_full is not None, line.code
+    assert checked == 20, "не нашлось общих кодов: проверять было нечего"
 
 
 def test_sets_do_not_overlap_in_meaning(catalog: LinesCatalog) -> None:
     """Строки с одинаковым кодом либо совпадают по смыслу, либо различаются наименованием."""
+    same, different = 0, 0
     for line in catalog.for_type(ReportingType.SIMPLIFIED):
         twin = catalog.get(line.code, ReportingType.FULL)
         if twin is None:
             continue
         if line.same_meaning_as_full:
+            same += 1
             assert tuple(line.aggregates) == (line.code,), line.code
         else:
+            different += 1
             assert normalize_name(line.name) != normalize_name(twin.name), line.code
             assert line.note, line.code
+    # Обе ветви обязаны быть пройдены: иначе половина правила не проверена.
+    assert same > 0 and different > 0, f"совпадающих {same}, отличающихся {different}"
 
 
 def test_simplified_expenses_are_not_cost_of_sales(catalog: LinesCatalog) -> None:

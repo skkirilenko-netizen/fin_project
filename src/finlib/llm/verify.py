@@ -10,7 +10,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 
+from finlib.llm.pairs import Anchor, build_index, find_anchor
 from finlib.utils import to_decimal
 
 logger = logging.getLogger(__name__)
@@ -37,14 +39,41 @@ _LIST_ITEM = re.compile(r"^[\s#>*-]*(\d{1,2})[.)]\s", re.MULTILINE)
 # Рассуждение модели: в заключение не идёт и в проверке не участвует.
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
+# Дата: числом отчётности не является, разбирать её на части нельзя.
+_DATE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+
+# Код формы по ОКУД: ссылка на форму, а не величина.
+_FORM_CODE = re.compile(r"\b0\d{6}\b")
+
+# Номер нормативного документа: «приказ № 84н» — реквизит, а не величина.
+_DOC_NUMBER = re.compile(r"№\s?\d+[а-яёa-z]?", re.IGNORECASE)
+
+
+class Violation(StrEnum):
+    """Чем именно плохо число в ответе."""
+
+    NOT_IN_BLOCKS = "not_in_blocks"
+    NO_ANCHOR = "no_anchor"
+    WRONG_ANCHOR = "wrong_anchor"
+
 
 @dataclass(frozen=True, slots=True)
 class ForeignNumber:
-    """Число из ответа, не найденное во входных блоках."""
+    """Число из ответа, не прошедшее проверку."""
 
     text: str
     value: Decimal
     context: str
+    violation: Violation = Violation.NOT_IN_BLOCKS
+    anchor: str | None = None
+
+    def describe(self) -> str:
+        """Человеческое объяснение, чем число плохо."""
+        if self.violation is Violation.NO_ANCHOR:
+            return f"{self.text} — приведено без кода показателя"
+        if self.violation is Violation.WRONG_ANCHOR:
+            return f"{self.text} — не является значением «{self.anchor}»"
+        return f"{self.text} — отсутствует во входных данных"
 
 
 @dataclass
@@ -120,12 +149,24 @@ def allowed_values(blocks: str) -> set[Decimal]:
     return {value for _, value in extract_numbers(blocks)}
 
 
-def verify(response: str, blocks: str) -> VerificationResult:
-    """Сверяет числа ответа с числами входных блоков."""
+def verify(response: str, blocks: str, *, require_anchor: bool = True) -> VerificationResult:
+    """Сверяет пары «число — код» в ответе с входными блоками.
+
+    Число обязано не только встречаться во входных данных, но и стоять при том
+    показателе, которому принадлежит: верное значение при чужом коде — ложное
+    утверждение, а не опечатка. При require_anchor число без кода рядом тоже
+    считается нарушением: проверить его не с чем.
+    """
     text = strip_reasoning(response)
     allowed = allowed_values(blocks)
     rounded = _rounded_forms(allowed)
-    skip = _list_item_spans(text)
+    index = build_index(blocks)
+    skip = (
+        _list_item_spans(text)
+        + [match.span() for match in _DATE.finditer(text)]
+        + [match.span() for match in _FORM_CODE.finditer(text)]
+        + [match.span() for match in _DOC_NUMBER.finditer(text)]
+    )
 
     foreign: list[ForeignNumber] = []
     checked = 0
@@ -136,30 +177,70 @@ def verify(response: str, blocks: str) -> VerificationResult:
         value = to_decimal(match.group())
         if value is None:
             continue
+        if index.get(match.group()) is not None:
+            continue  # это сам код строки, ссылка на показатель, а не величина
         checked += 1
-        if _is_allowed(value, match.group(), allowed, rounded):
+        if _is_trivial(value):
             continue
-        foreign.append(
-            ForeignNumber(
-                text=match.group(),
-                value=value,
-                context=_context_of(text, span),
+
+        if not _is_allowed(value, match.group(), allowed, rounded):
+            foreign.append(_foreign(text, match, value, Violation.NOT_IN_BLOCKS))
+            continue
+
+        anchor = find_anchor(text, span[0], index)
+        if anchor is None:
+            if require_anchor:
+                foreign.append(_foreign(text, match, value, Violation.NO_ANCHOR))
+            continue
+        if not _matches_anchor(value, match.group(), anchor):
+            foreign.append(
+                _foreign(text, match, value, Violation.WRONG_ANCHOR, anchor.key)
             )
-        )
 
     result = VerificationResult(verified=not foreign, foreign=foreign, checked=checked)
     logger.info("постпроверка: %s", result.summary())
     return result
 
 
+def _foreign(
+    text: str,
+    match: re.Match[str],
+    value: Decimal,
+    violation: Violation,
+    anchor: str | None = None,
+) -> ForeignNumber:
+    """Собирает запись о непрошедшем числе."""
+    return ForeignNumber(
+        text=match.group(),
+        value=value,
+        context=_context_of(text, match.span()),
+        violation=violation,
+        anchor=anchor,
+    )
+
+
+def _matches_anchor(value: Decimal, text: str, anchor: Anchor) -> bool:
+    """Принадлежит ли число тому показателю, при котором стоит."""
+    if value in anchor.values:
+        return True
+    places = _decimal_places(text)
+    quant = Decimal(1).scaleb(-places)
+    return value in {item.quantize(quant) for item in anchor.values}
+
+
+def _is_trivial(value: Decimal) -> bool:
+    """Число, не несущее сведений об организации: ноль, единица, сто, год."""
+    if abs(value) in ALWAYS_ALLOWED:
+        return True
+    return value == value.to_integral_value() and YEAR_MIN <= int(value) <= YEAR_MAX
+
+
 def _is_allowed(
     value: Decimal, text: str, allowed: set[Decimal], rounded: dict[int, set[Decimal]]
 ) -> bool:
-    """Разрешено ли число без привязки к конкретному коду."""
-    if value in allowed or abs(value) in ALWAYS_ALLOWED:
+    """Встречается ли число во входных блоках хотя бы где-нибудь."""
+    if value in allowed:
         return True
-    if value == value.to_integral_value() and YEAR_MIN <= int(value) <= YEAR_MAX:
-        return True  # номер года
     places = _decimal_places(text)
     return value in rounded.get(places, set())
 
