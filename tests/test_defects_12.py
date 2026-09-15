@@ -446,3 +446,44 @@ def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
     assert "Класс финансового состояния не присвоен" in text
     assert "группам показателей из" in text
     assert len(document.tables) >= 3
+
+
+# --- шаблонные тексты: условие вывода ---------------------------------------
+
+
+def test_document_title_matches_its_content(db_conn, tmp_path) -> None:
+    """Документ без текстовой части называется справкой, а не заключением.
+
+    Оговорка внутри прямо называет его расчётной справкой, и заголовок
+    «Заключение» ей противоречил бы.
+    """
+    from docx import Document
+
+    from finlib.report.document import TITLE, TITLE_NO_TEXT, build_report
+
+    report = build_report(FULL_INN, db_conn, directory=tmp_path, with_text=False)
+    text = "\n".join(item.text for item in Document(report.path).paragraphs)
+    assert TITLE_NO_TEXT in text
+    assert TITLE not in text
+
+
+def test_footnote_does_not_point_at_a_missing_table(db_conn) -> None:
+    """Сноска ссылается на следующую таблицу, только если та строится."""
+    from finlib.report.appendix import metrics_table, not_calculated_table
+
+    for inn in (FULL_INN, STOPPED_INN, NO_CLASS_INN):
+        data = load_report_data(inn, db_conn)
+        note = metrics_table(data).note or ""
+        if not_calculated_table(data) is None:
+            assert "в следующей таблице" not in note, inn
+        else:
+            assert "в следующей таблице" in note, inn
+
+
+def test_prompt_makes_group_scores_conditional() -> None:
+    """Инструкция не велит ссылаться на баллы групп, которых может не быть."""
+    from finlib.llm.service import load_prompt
+
+    prompt = load_prompt()
+    assert "Если баллы по группам" in prompt
+    assert "не приводятся, не ссылайся" in prompt

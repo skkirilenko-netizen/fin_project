@@ -35,7 +35,11 @@ from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
+# Название документа зависит от того, есть ли текстовая часть: оговорка
+# ниже прямо называет документ без неё расчётной справкой, и заголовок
+# «Заключение» ей противоречил бы.
 TITLE = "Заключение о финансовом состоянии"
+TITLE_NO_TEXT = "Расчётная справка о финансовом состоянии"
 
 # Дисклеймер в шапке. Формулировка намеренно не смягчена: документ уходит
 # человеку, который будет принимать по нему решение.
@@ -119,8 +123,19 @@ def build_report(
     data = load_report_data(inn, conn, report_date=report_date, standard=standard)
 
     if conclusion is None and with_text:
+        from finlib.metrics.definitions import load_metrics
+        from finlib.normalize.lines import ReportingType, load_lines
+
+        lines_catalog = load_lines()
+        reporting_type = ReportingType(data.organization["reporting_type"])
         conclusion = generate_conclusion(
-            inn, conn, report_date=data.report_date, standard=standard
+            inn,
+            conn,
+            report_date=data.report_date,
+            standard=standard,
+            text_context=data.text_context(
+                lines_catalog, reporting_type, load_metrics()
+            ),
         )
     sections = split_sections(conclusion.text) if conclusion is not None else []
 
@@ -186,7 +201,7 @@ def _set_base_style(document: Document) -> None:
 def _write_header(document: Document, data: ReportData, with_text: bool) -> None:
     """Шапка: наименование, реквизиты, период, дисклеймер."""
     organization = data.organization
-    document.add_heading(TITLE, level=0)
+    document.add_heading(TITLE if with_text else TITLE_NO_TEXT, level=0)
 
     name = organization["name"] or organization["short_name"] or data.inn
     heading = document.add_paragraph()

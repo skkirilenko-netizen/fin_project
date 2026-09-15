@@ -13,8 +13,10 @@ from pathlib import Path
 
 from finlib.config import settings
 from finlib.db import PgConnection, execute
+from finlib.llm.cleanup import strip_identifiers
 from finlib.llm.client import Completion, LLMClient
 from finlib.llm.context import ConclusionContext, build_context
+from finlib.llm.textcheck import TextContext
 from finlib.llm.verify import VerificationResult, strip_reasoning, verify
 from finlib.metrics.definitions import load_metrics
 from finlib.standards import Standard
@@ -146,6 +148,23 @@ def _log(
                         {"code": item.code, "text": item.text, "context": item.context}
                         for item in result.claims
                     ],
+                    "verdicts": [
+                        {
+                            "text": item.text,
+                            "violation": item.violation.value,
+                            "context": item.context,
+                        }
+                        for item in result.verdicts
+                    ],
+                    "statements": [
+                        {
+                            "rule": item.rule.value,
+                            "severity": item.severity.value,
+                            "message": item.message,
+                            "context": item.context,
+                        }
+                        for item in result.statements
+                    ],
                 },
                 ensure_ascii=False,
             )
@@ -166,6 +185,7 @@ def generate_conclusion(
     standard: Standard = Standard.RSBU,
     client: LLMClient | None = None,
     context: ConclusionContext | None = None,
+    text_context: TextContext | None = None,
     is_test: bool = False,
 ) -> Conclusion:
     """Готовит текстовую часть заключения с постпроверкой и повторной попыткой.
@@ -193,7 +213,12 @@ def generate_conclusion(
             asked = with_corrections(prompt, last_foreign)
             completion = client.complete(asked)
             text = strip_reasoning(completion.text)
-            result = verify(completion.text, blocks, thresholds=thresholds)
+            result = verify(
+                completion.text,
+                blocks,
+                thresholds=thresholds,
+                text_context=text_context,
+            )
             _log(context, asked, completion, result, attempt, is_test)
 
             if result.verified:
@@ -205,7 +230,9 @@ def generate_conclusion(
                 return Conclusion(
                     inn=context.inn,
                     report_date=context.report_date,
-                    text=text,
+                    # Коды снимаются после проверки: они механизм сверки,
+                    # а не часть заключения. Читатель их видеть не должен.
+                    text=strip_identifiers(text),
                     model=completion.model,
                     attempt=attempt,
                     checked_numbers=result.checked,

@@ -13,8 +13,10 @@ from decimal import Decimal
 from enum import StrEnum
 
 from finlib.llm.claims import FalseClaim, find_false_claims
+from finlib.llm.cleanup import strip_identifiers
 from finlib.llm.direction import agrees, stated_direction
 from finlib.llm.pairs import Anchor, AnchorIndex, build_index, find_anchor
+from finlib.llm.textcheck import TextContext, TextIssue, blocking, check_text
 from finlib.llm.verdict import VerdictClaim, find_verdict_claims, parse_verdict
 from finlib.llm.wording import Wording, find_forbidden
 from finlib.utils import to_decimal
@@ -132,6 +134,7 @@ class VerificationResult:
     wordings: list[Wording] = field(default_factory=list)
     claims: list[FalseClaim] = field(default_factory=list)
     verdicts: list[VerdictClaim] = field(default_factory=list)
+    statements: list[TextIssue] = field(default_factory=list)
 
     @property
     def foreign_values(self) -> list[str]:
@@ -143,7 +146,13 @@ class VerificationResult:
         """Все замечания одним перечнем, человеческими формулировками."""
         return [
             item.describe()
-            for item in (*self.foreign, *self.wordings, *self.claims, *self.verdicts)
+            for item in (
+                *self.foreign,
+                *self.wordings,
+                *self.claims,
+                *self.verdicts,
+                *self.statements,
+            )
         ]
 
     def summary(self) -> str:
@@ -157,6 +166,12 @@ class VerificationResult:
             parts.append(f"ложных утверждений о нерасчёте {len(self.claims)}")
         if self.verdicts:
             parts.append(f"расхождений с оценкой {len(self.verdicts)}")
+        if self.statements:
+            blocked = sum(1 for item in self.statements if item.blocking)
+            parts.append(
+                f"нарушений в утверждениях {len(self.statements)} "
+                f"(блокирующих {blocked})"
+            )
         return f"проверка не пройдена: {'; '.join(parts)}"
 
 
@@ -232,6 +247,7 @@ def verify(
     *,
     require_anchor: bool = True,
     thresholds: dict[str, frozenset[Decimal]] | None = None,
+    text_context: TextContext | None = None,
 ) -> VerificationResult:
     """Сверяет пары «число — код» в ответе с входными блоками.
 
@@ -323,13 +339,29 @@ def verify(
     wordings = find_forbidden(text)
     claims = find_false_claims(text, index, index.calculated_codes())
     verdicts = find_verdict_claims(text, parse_verdict(blocks))
+    # Правила текста применяются к очищенному тексту — тому, что увидит
+    # читатель. Коды к этому моменту свою работу сделали: пара «число — код»
+    # уже сверена выше.
+    statements = (
+        check_text(
+            {number: strip_identifiers(body) for number, body in _sections_of(text).items()},
+            text_context,
+        )
+        if text_context is not None
+        else []
+    )
+    # Предупреждение попадает в журнал и в замечания повторной попытки,
+    # но ответ не отменяет: блокирует только блокирующее.
     result = VerificationResult(
-        verified=not (foreign or wordings or claims or verdicts),
+        verified=not (
+            foreign or wordings or claims or verdicts or blocking(statements)
+        ),
         foreign=foreign,
         checked=checked,
         wordings=wordings,
         claims=claims,
         verdicts=verdicts,
+        statements=statements,
     )
     logger.info("постпроверка: %s", result.summary())
     return result
@@ -478,3 +510,23 @@ def _context_of(text: str, span: tuple[int, int], width: int = 40) -> str:
     start = max(0, span[0] - width)
     end = min(len(text), span[1] + width)
     return " ".join(text[start:end].split())
+
+
+# Заголовок раздела заключения: «### 3. Аналитическая интерпретация».
+_SECTION = re.compile(r"^#{1,6}\s*(\d)\.\s*.+?$", re.MULTILINE)
+
+
+def _sections_of(text: str) -> dict[int, str]:
+    """Разбивает ответ на разделы по их номерам.
+
+    Правила, привязанные к разделу, проверяются только в нём: вопрос о строке
+    вне набора форм плох именно в «Вопросах к организации».
+    """
+    matches = list(_SECTION.finditer(text))
+    if not matches:
+        return {0: text}
+    found: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        found[int(match.group(1))] = text[match.end() : end]
+    return found

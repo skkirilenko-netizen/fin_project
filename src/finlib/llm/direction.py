@@ -61,6 +61,22 @@ def stated_direction(text: str, position: int) -> Direction | None:
     return Direction.DECLINE
 
 
+def mentions_direction(text: str) -> Direction | None:
+    """Названо ли в тексте направление; берётся последнее упомянутое.
+
+    В отличие от stated_direction границы предложения не учитываются: здесь
+    вопрос не «к какому числу относится глагол», а «говорится ли о движении
+    вообще». Нужно там, где проверяется само наличие истолкования.
+    """
+    growth = _last(_GROWTH, text)
+    decline = _last(_DECLINE, text)
+    if growth is None and decline is None:
+        return None
+    if decline is None or (growth is not None and growth > decline):
+        return Direction.GROWTH
+    return Direction.DECLINE
+
+
 def agrees(value: Decimal, stated: Direction | None) -> bool:
     """Согласовано ли заявленное направление со знаком изменения.
 

@@ -56,7 +56,7 @@ WHERE inn = %(inn)s AND standard = %(standard)s ORDER BY report_date DESC LIMIT 
 """
 
 _METRIC_VALUES = """
-SELECT report_date, metric_code, value, status, confidence, reason
+SELECT report_date, metric_code, value, status, confidence, reason, reason_code
 FROM metric_value
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = ANY(%(dates)s)
 ORDER BY metric_code, report_date DESC
@@ -134,6 +134,7 @@ class ReportData:
     flags: list[dict] = field(default_factory=list)
     periods: list[date] = field(default_factory=list)
     derived: list[dict] = field(default_factory=list)
+    metric_rows: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
 
@@ -141,6 +142,55 @@ class ReportData:
     def class_code(self) -> str | None:
         """Присвоенный класс; None — если основание оказалось недостаточным."""
         return self.assessment["class_code"] if self.assessment else None
+
+    def text_context(self, lines_catalog, reporting_type, catalog):
+        """Собирает контекст для контроля утверждений текста.
+
+        Проверка опирается на расчёт, а не на то, как текст выглядит: строки
+        набора форм, показатели с отменённым знаменателем, показатели в днях
+        и неприменимые шаблонные блоки берутся отсюда.
+        """
+        from finlib.llm.textcheck import TextContext
+        from finlib.metrics.definitions import Unit
+
+        known = frozenset(
+            code
+            for code in {item.code for item in lines_catalog.lines}
+            if lines_catalog.has(code, reporting_type)
+        )
+        refused = {
+            row["metric_code"]: catalog.require(row["metric_code"]).name
+            for row in self.metric_rows
+            if row["reason_code"] in ("negative_denominator", "sign_change")
+            and catalog.get(row["metric_code"]) is not None
+        }
+        days = frozenset(
+            item.name for item in catalog.metrics if item.unit is Unit.DAYS
+        )
+        return TextContext(
+            known_lines=known,
+            refused_metrics=refused,
+            days_metrics=days,
+            forbidden_templates=self.forbidden_templates(catalog),
+        )
+
+    def forbidden_templates(self, catalog) -> dict[str, str]:
+        """Шаблонные блоки, условие применения которых не выполнено.
+
+        Оговорка показателя идёт в заключение, только если показатель
+        участвовал в расчёте. Прежде шаблонный блок печатался без проверки
+        применимости: у организации с положительным капиталом документ
+        разъяснял, чем плох отрицательный.
+        """
+        used = {item.code for item in self.metrics}
+        found: dict[str, str] = {}
+        for metric in catalog.metrics:
+            if metric.code in used or not metric.note:
+                continue
+            found[" ".join(metric.note.split())] = (
+                f"показатель «{metric.name}» в расчёте не участвовал"
+            )
+        return found
 
     def scale_of(self, code: str) -> int:
         """Разрядность отображения показателя: одна на весь документ."""
@@ -290,6 +340,7 @@ def load_report_data(
         metrics=metrics,
         flags=flags,
         periods=periods,
+        metric_rows=values,
         derived=[
             row
             for row in values
