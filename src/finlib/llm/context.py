@@ -15,6 +15,9 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from finlib.db import PgConnection, fetch_all, fetch_one
 from finlib.metrics.definitions import MetricsCatalog, Unit, load_metrics
+from finlib.metrics.derived import describe as describe_derived
+from finlib.metrics.derived import parse as parse_derived
+from finlib.metrics.derived import unit_of as derived_unit
 from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.periods import limitations as period_limitations
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
@@ -105,12 +108,19 @@ def days(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}".replace(".", ",")
 
 
+def percent(value: Decimal) -> str:
+    """Процент: один знак после запятой, как и дни."""
+    return f"{value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}".replace(".", ",")
+
+
 def format_metric(value: Decimal, unit: Unit) -> str:
     """Значение показателя в его единице измерения."""
     if unit is Unit.THOUSAND_RUB:
         return f"{money(value)} тыс. руб."
     if unit is Unit.DAYS:
         return f"{days(value)} дн."
+    if unit is Unit.PERCENT:
+        return f"{percent(value)} %"
     return ratio(value)
 
 
@@ -181,8 +191,15 @@ def _metrics_block(
     conn: PgConnection | None,
     catalog: MetricsCatalog,
     standard: Standard,
+    lines_catalog: LinesCatalog,
+    reporting_type: ReportingType,
 ) -> str:
-    """Рассчитанные показатели и причины, по которым остальные не рассчитаны."""
+    """Показатели, производные величины и причины, по которым остальные не рассчитаны.
+
+    Производные — изменения за период и доли в валюте баланса — идут отдельным
+    перечнем после показателей: иначе полторы сотни строк заслонили бы два
+    десятка собственно показателей.
+    """
     rows = fetch_all(
         _METRICS, {"inn": inn, "standard": standard.value, "dates": periods}, conn=conn
     )
@@ -191,29 +208,57 @@ def _metrics_block(
         by_metric.setdefault(row["metric_code"], []).append(row)
 
     lines = ["=== ПОКАЗАТЕЛИ ==="]
+    derived_lines: list[str] = []
     not_calculable: list[str] = []
     for code in sorted(by_metric):
+        parsed = parse_derived(code)
+        if parsed is not None:
+            name = describe_derived(parsed, lines_catalog, catalog, reporting_type)
+            if name is None:
+                continue
+            unit = derived_unit(parsed, catalog.get(parsed.base))
+            rendered = _series(by_metric[code], unit)
+            if rendered is None:
+                reason = by_metric[code][0]["reason"] or "причина не указана"
+                not_calculable.append(f"{code} «{name}»: {reason}")
+                continue
+            derived_lines.append(f"{code}  «{name}»  {rendered}")
+            continue
+
         metric = catalog.get(code)
         if metric is None:
             continue
-        points = by_metric[code]
-        calculated = [item for item in points if item["status"] == "ok"]
-        if not calculated:
-            reason = points[0]["reason"] or "причина не указана"
+        rendered = _series(by_metric[code], metric.unit)
+        if rendered is None:
+            reason = by_metric[code][0]["reason"] or "причина не указана"
             not_calculable.append(f"{code} «{metric.name}»: {reason}")
             continue
-        series = "  |  ".join(
-            f"{item['report_date']:%d.%m.%Y}: {format_metric(item['value'], metric.unit)}"
-            for item in calculated
-        )
         note = f"\n      оговорка: {' '.join(metric.note.split())}" if metric.note else ""
-        lines.append(f"{code}  «{metric.name}»  {series}{note}")
+        lines.append(f"{code}  «{metric.name}»  {rendered}{note}")
+
+    if derived_lines:
+        lines.append("")
+        lines.append("Изменения за период и структура баланса — величины готовы,")
+        lines.append("считать их заново не нужно:")
+        lines.extend(derived_lines)
+        lines.append(f"  {' '.join(catalog.derived.share.note.split())}")
 
     if not_calculable:
         lines.append("")
         lines.append("Не рассчитаны:")
         lines.extend(f"  {item}" for item in not_calculable)
     return "\n".join(lines)
+
+
+def _series(points: list[dict], unit: Unit) -> str | None:
+    """Ряд значений по периодам; None, если ни одно не рассчитано."""
+    calculated = [item for item in points if item["status"] == "ok"]
+    if not calculated:
+        return None
+    return "  |  ".join(
+        f"{item['report_date']:%d.%m.%Y}: {format_metric(item['value'], unit)}"
+        for item in calculated
+    )
 
 
 def _assessment_block(
@@ -343,7 +388,9 @@ def build_context(
         report_date=target,
         organization=_organization_block(inn, target, conn, lines_catalog),
         data=_data_block(inn, periods, conn, lines_catalog, standard, reporting_type),
-        metrics=_metrics_block(inn, periods, conn, metrics_catalog, standard),
+        metrics=_metrics_block(
+            inn, periods, conn, metrics_catalog, standard, lines_catalog, reporting_type
+        ),
         flags=_flags_block(assessment),
         assessment=_assessment_block(assessment, scoring, metrics_catalog),
         limitations=_limitations_block(

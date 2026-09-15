@@ -179,23 +179,30 @@ def verify(response: str, blocks: str, *, require_anchor: bool = True) -> Verifi
             continue
         if index.get(match.group()) is not None:
             continue  # это сам код строки, ссылка на показатель, а не величина
+        if text[span[1] : span[1] + 1] == "_":
+            continue  # начало кода производной величины: 1230 в 1230_chg_pct
         checked += 1
         if _is_trivial(value):
             continue
 
-        if not _is_allowed(value, match.group(), allowed, rounded):
-            foreign.append(_foreign(text, match, value, Violation.NOT_IN_BLOCKS))
+        # Якорь ищется первым: он задаёт, с чем именно сверять число.
+        # Общий набор чисел блоков — запасная проверка для числа без якоря.
+        anchor = find_anchor(text, span, index)
+        if anchor is not None:
+            if _matches_anchor(value, match.group(), anchor):
+                continue
+            violation = (
+                Violation.WRONG_ANCHOR
+                if _is_allowed(value, match.group(), allowed, rounded)
+                else Violation.NOT_IN_BLOCKS
+            )
+            foreign.append(_foreign(text, match, value, violation, anchor.key))
             continue
 
-        anchor = find_anchor(text, span[0], index)
-        if anchor is None:
-            if require_anchor:
-                foreign.append(_foreign(text, match, value, Violation.NO_ANCHOR))
-            continue
-        if not _matches_anchor(value, match.group(), anchor):
-            foreign.append(
-                _foreign(text, match, value, Violation.WRONG_ANCHOR, anchor.key)
-            )
+        if not _is_allowed(value, match.group(), allowed, rounded):
+            foreign.append(_foreign(text, match, value, Violation.NOT_IN_BLOCKS))
+        elif require_anchor:
+            foreign.append(_foreign(text, match, value, Violation.NO_ANCHOR))
 
     result = VerificationResult(verified=not foreign, foreign=foreign, checked=checked)
     logger.info("постпроверка: %s", result.summary())

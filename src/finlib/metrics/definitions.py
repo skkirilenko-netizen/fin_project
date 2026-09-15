@@ -35,6 +35,7 @@ class Unit(StrEnum):
     RATIO = "ratio"
     THOUSAND_RUB = "thousand_rub"
     DAYS = "days"
+    PERCENT = "percent"
 
 
 class Condition(StrEnum):
@@ -195,6 +196,72 @@ class Calibration(BaseModel):
     material_change: MaterialChangeCalibration
 
 
+# Окончания кодов производных величин. Живут здесь, а не в derived.py:
+# справочник обязан отвергнуть показатель, чей код с ними совпадает, ещё
+# при загрузке, иначе производная и показатель делили бы один код.
+DERIVED_SUFFIXES: tuple[str, ...] = ("_chg_abs", "_chg_pct", "_share")
+
+
+class ChangeDef(BaseModel):
+    """Какие величины получают изменение за период."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lines: tuple[str, ...] = Field(min_length=1)
+    metrics: bool
+
+    @model_validator(mode="after")
+    def _check_lines(self) -> Self:
+        """Коды строк четырёхзначны и не повторяются."""
+        _require_line_codes(self.lines, "derived.change.lines")
+        return self
+
+
+class ShareDef(BaseModel):
+    """Вертикальная структура: доля строки в итоге."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    denominator: str = Field(pattern=r"^\d{4}$")
+    lines: tuple[str, ...] = Field(min_length=1)
+    note: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_lines(self) -> Self:
+        """Коды строк четырёхзначны, не повторяются и не равны знаменателю."""
+        _require_line_codes(self.lines, "derived.share.lines")
+        if self.denominator in self.lines:
+            raise ValueError(
+                f"derived.share.lines: строка {self.denominator} — сам знаменатель, "
+                "её доля равна 100 по определению"
+            )
+        return self
+
+
+class DerivedDef(BaseModel):
+    """Производные величины: изменения за период и доли в итоге.
+
+    В балльную оценку не входят: динамика уже учтена слагаемым в балле
+    показателя, и повторный учёт того же изменения был бы двойным счётом.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    change: ChangeDef
+    share: ShareDef
+
+
+def _require_line_codes(codes: tuple[str, ...], where: str) -> None:
+    """Проверяет, что перечень — четырёхзначные коды строк без повторов."""
+    seen: set[str] = set()
+    for code in codes:
+        if not (len(code) == 4 and code.isdigit()):
+            raise ValueError(f"{where}: {code!r} не похож на код строки отчётности")
+        if code in seen:
+            raise ValueError(f"{where}: код {code} встречается дважды")
+        seen.add(code)
+
+
 class MetricsCatalog(BaseModel):
     """Справочник показателей."""
 
@@ -204,6 +271,7 @@ class MetricsCatalog(BaseModel):
     # Блок обязателен: подобранные величины без указания происхождения
     # неотличимы от выдуманных.
     calibration: Calibration
+    derived: DerivedDef
     groups: dict[str, GroupDef]
     metrics: tuple[MetricDef, ...]
 
@@ -217,6 +285,11 @@ class MetricsCatalog(BaseModel):
             if metric.group not in self.groups:
                 raise ValueError(
                     f"показатель {metric.code} ссылается на неизвестную группу {metric.group}"
+                )
+            if metric.code.endswith(DERIVED_SUFFIXES):
+                raise ValueError(
+                    f"код показателя {metric.code} оканчивается как производная величина: "
+                    "коды производных строятся из кодов показателей, и это дало бы совпадение"
                 )
             seen.add(metric.code)
         return self
@@ -249,7 +322,17 @@ class MetricsCatalog(BaseModel):
         return tuple(item for item in self.metrics if item.stop_factor is not None)
 
     def validate_against(self, catalog: LinesCatalog, constants: set[str]) -> None:
-        """Проверяет, что формулы опираются на существующие строки и константы."""
+        """Проверяет, что формулы и производные опираются на существующие строки."""
+        known = (
+            set(self.derived.change.lines)
+            | set(self.derived.share.lines)
+            | {self.derived.share.denominator}
+        )
+        for code in sorted(known):
+            if not any(catalog.has(code, item) for item in ReportingType):
+                raise ValueError(
+                    f"производные величины: строка {code} отсутствует в справочнике строк"
+                )
         for metric in self.metrics:
             for reporting_type in metric.applicable_to:
                 tree = metric.trees[reporting_type]

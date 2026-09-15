@@ -219,11 +219,16 @@ def compute_all(
     catalog: MetricsCatalog | None = None,
     thresholds: Thresholds | None = None,
     standard: Standard = Standard.RSBU,
+    with_derived: bool = True,
 ) -> list[MetricResult]:
     """Считает все применимые показатели по всем периодам организации.
 
     Расчёт всегда идёт в пределах одного стандарта: ряды по РСБУ и по МСФО
     несопоставимы и смешению не подлежат.
+
+    Следом считаются производные величины — изменения за период и доли
+    в валюте баланса. Они нужны модели готовыми: без них она вынуждена
+    считать проценты сама, а это нарушение инварианта 1.
     """
     catalog = catalog if catalog is not None else load_metrics()
     thresholds = thresholds if thresholds is not None else load_thresholds()
@@ -233,12 +238,16 @@ def compute_all(
     ordered = sorted(periods, reverse=True)
 
     results: list[MetricResult] = []
+    usable: list[date] = []
+    confidences: dict[date, PeriodConfidence] = {}
     for report_date in ordered:
         info = quality.get(report_date)
         if info is not None and not info.is_usable:
             logger.info("период %s в карантине, показатели не считаются", report_date)
             continue
         confidence = info.confidence if info is not None else PeriodConfidence.VERIFIED
+        usable.append(report_date)
+        confidences[report_date] = confidence
         reporting_type = reporting_type_of(inn, report_date, conn, standard)
         previous_date = _previous_usable(report_date, ordered, quality)
         previous = periods[previous_date].values if previous_date is not None else None
@@ -255,6 +264,13 @@ def compute_all(
             )
             if result is not None:
                 results.append(result)
+
+    if with_derived:
+        # Импорт внутри функции: derived.py опирается на типы этого модуля,
+        # и на уровне модуля вышел бы цикл.
+        from finlib.metrics.derived import compute_derived
+
+        results += compute_derived(periods, results, usable, confidences, catalog)
     return results
 
 

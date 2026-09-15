@@ -25,6 +25,7 @@ class NotCalculableReason(StrEnum):
     ZERO_DENOMINATOR = "zero_denominator"
     NEGATIVE_DENOMINATOR = "negative_denominator"
     NOT_IN_FORM = "not_in_form"
+    SIGN_CHANGE = "sign_change"
 
 
 @dataclass(frozen=True, slots=True)

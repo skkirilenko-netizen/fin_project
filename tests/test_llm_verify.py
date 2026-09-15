@@ -19,12 +19,16 @@ BLOCKS = """
 === ДАННЫЕ ОТЧЁТНОСТИ (тыс. руб.) ===
 1600  БАЛАНС (актив)  |  25 736 328 136
 1300  Итого по разделу III  |  16 432 222 886
+1230  Дебиторская задолженность  |  1 144 646 095
 2400  Чистая прибыль (убыток)  |  11 284 564
 
 === ПОКАЗАТЕЛИ ===
 cur_liq  «Коэффициент текущей ликвидности»  31.12.2025: 0,82  |  31.12.2024: 1,23
 equity_ratio  «Коэффициент автономии»  31.12.2025: 0,64
 nwc  «Чистый оборотный капитал»  31.12.2025: -521 415 920
+1230_chg_pct  «Дебиторская задолженность (1230), изменение в процентах»  31.12.2025: -59,6 %
+1600_chg_pct  «БАЛАНС (актив) (1600), изменение за период в процентах»  31.12.2025: -1,6 %
+1230_share  «Дебиторская задолженность (1230), доля в валюте баланса»  31.12.2025: 4,4 %
 
 === ОЦЕНКА ===
 Класс: C — Состояние с признаками напряжения
@@ -107,6 +111,76 @@ def test_preceding_code_wins_over_following_one() -> None:
     )
     result = verify(answer, BLOCKS)
     assert result.verified, result.foreign_values
+
+
+def test_code_in_brackets_after_the_number_wins() -> None:
+    """Код в скобках сразу за числом относится к нему, а не код слева.
+
+    «Валюта баланса (1600) снизилась на 1,6 % (1600_chg_pct)»: 1,6 стоит
+    ближе к 1600 слева, но приписан к нему код справа.
+    """
+    answer = "Валюта баланса (1600) снизилась на 1,6 % (1600_chg_pct) за период."
+    result = verify(answer, BLOCKS)
+    assert result.verified, result.foreign_values
+
+
+def test_tag_belongs_to_its_own_number_only() -> None:
+    """Код, приписанный к числу, не становится якорем следующему за ним числу.
+
+    «на 1,6 % (1600_chg_pct) до 25 736 328 136 тыс. руб.»: валюта баланса
+    должна привязаться к 1600, а не к коду процентного изменения.
+    """
+    answer = (
+        "Валюта баланса (1600) снизилась на 1,6 % (1600_chg_pct) "
+        "до 25 736 328 136 тыс. руб."
+    )
+    result = verify(answer, BLOCKS)
+    assert result.verified, result.foreign_values
+
+
+def test_code_with_its_own_value_in_brackets_is_not_a_tag() -> None:
+    """«(cur_liq_chg_pct -33,2 %)» относится к числу внутри скобок, а не снаружи."""
+    blocks = BLOCKS + "\ncur_liq_chg_pct  «Текущая ликвидность, изменение»  -33,2 %\n"
+    answer = "Ликвидность (cur_liq) снизилась с 1,23 до 0,82 (cur_liq_chg_pct -33,2 %)."
+    result = verify(answer, blocks)
+    assert result.verified, result.foreign_values
+
+
+def test_name_after_the_number_is_not_an_attached_code() -> None:
+    """Новое предложение о другом показателе припиской к числу не является."""
+    answer = (
+        "Собственный капитал (1300) — 16 432 222 886 тыс. руб. "
+        "Коэффициент автономии (equity_ratio) составил 0,64."
+    )
+    result = verify(answer, BLOCKS)
+    assert result.verified, result.foreign_values
+
+
+def test_change_may_be_quoted_without_sign() -> None:
+    """У изменения направление задаёт глагол: «сократилась на 59,6 %» — верно."""
+    answer = "Дебиторская задолженность (1230) сократилась на 59,6 % (1230_chg_pct)."
+    result = verify(answer, BLOCKS)
+    assert result.verified, result.foreign_values
+
+
+def test_change_magnitude_must_still_match() -> None:
+    """Послабление касается только знака: чужая величина изменения не проходит."""
+    answer = "Дебиторская задолженность (1230) сократилась на 59,7 % (1230_chg_pct)."
+    assert not verify(answer, BLOCKS).verified
+
+
+def test_share_must_keep_its_sign_rules() -> None:
+    """Доля — не изменение: её значение сверяется как есть."""
+    assert verify("Дебиторская задолженность (1230_share) — 4,4 %.", BLOCKS).verified
+    assert not verify("Дебиторская задолженность (1230_share) — 4,5 %.", BLOCKS).verified
+
+
+def test_percent_taken_from_wrong_derived_code_is_rejected() -> None:
+    """Доля, поданная при коде процентного изменения, отклоняется."""
+    result = verify("Валюта баланса снизилась на 4,4 % (1600_chg_pct).", BLOCKS)
+    assert not result.verified
+    assert result.foreign[0].violation is Violation.WRONG_ANCHOR
+    assert result.foreign[0].anchor == "1600_chg_pct"
 
 
 def test_computed_number_is_rejected() -> None:
