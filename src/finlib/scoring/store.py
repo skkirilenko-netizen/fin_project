@@ -72,6 +72,16 @@ INSERT INTO assessment_flag (
 """
 
 
+_INSERT_SIGNAL = """
+INSERT INTO assessment_signal (
+    assessment_id, signal_code, signal_name, level, value, message, details
+) VALUES (
+    %(assessment_id)s, %(signal_code)s, %(signal_name)s, %(level)s, %(value)s,
+    %(message)s, %(details)s
+)
+"""
+
+
 def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
     """Пишет оценку и всё разложение; повторный расчёт заменяет прежнее."""
     params = {
@@ -100,7 +110,12 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
     assessment_id = int(row[0])
 
     # Разложение переписывается целиком: это снимок расчёта, а не история.
-    for table in ("assessment_group", "assessment_metric", "assessment_flag"):
+    for table in (
+        "assessment_group",
+        "assessment_metric",
+        "assessment_flag",
+        "assessment_signal",
+    ):
         execute(f"DELETE FROM {table} WHERE assessment_id = %(id)s", {"id": assessment_id},
                 conn=conn)
 
@@ -154,6 +169,22 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
                 "details": json.dumps(item.details, ensure_ascii=False, default=str),
             }
             for item in assessment.flags
+        ],
+        conn=conn,
+    )
+    execute_many(
+        _INSERT_SIGNAL,
+        [
+            {
+                "assessment_id": assessment_id,
+                "signal_code": item.code,
+                "signal_name": item.name,
+                "level": item.level.value,
+                "value": item.value,
+                "message": " ".join(item.message.split()),
+                "details": json.dumps(item.details, ensure_ascii=False, default=str),
+            }
+            for item in assessment.signals
         ],
         conn=conn,
     )

@@ -338,3 +338,35 @@ def test_russian_number_formatting_is_parsed() -> None:
     assert TextRule.DELTA_MISMATCH in rules(broken), (
         "разбор крупных чисел не работает, правило выродилось"
     )
+
+
+def test_minus_of_the_value_survives_cleanup() -> None:
+    """Очистка не меняет знак величины.
+
+    Тире-разделитель после снятого кода убирается, но минус, слитный
+    с цифрой, — часть числа: съесть его значило бы поменять величину
+    на противоположную.
+    """
+    assert strip_identifiers(
+        "Снизилась с 0,75 до -1,06 (equity_ratio_chg_abs — -1,81)."
+    ) == "Снизилась с 0,75 до -1,06 (-1,81)."
+    assert strip_identifiers(
+        "Снизилась с 1,23 до 0,82 (cur_liq_chg_abs -0,41, или cur_liq_chg_pct -33,3 %)."
+    ) == "Снизилась с 1,23 до 0,82 (-0,41, или -33,3 %)."
+
+
+def test_cleanup_keeps_every_value_with_its_sign() -> None:
+    """Величины переживают очистку целиком, вместе со знаком.
+
+    Сравнивать перечни чисел сырого и очищенного текста напрямую нельзя:
+    в сыром цифры кодов («1230» в «1230_chg_pct») тоже выглядят числами.
+    Поэтому проверяются сами величины.
+    """
+    raw = (
+        "Автономия (equity_ratio) с 0,62 до 0,64 (equity_ratio_chg_abs 0,02), "
+        "рычаг (fin_leverage) -1,81, дебиторка (1230_chg_pct -59,6 %)."
+    )
+    cleaned = strip_identifiers(raw)
+    for value in ("0,62", "0,64", "0,02", "-1,81", "-59,6"):
+        assert value in cleaned, value
+    assert "1230" not in cleaned, "цифры кода в тексте остаться не должны"

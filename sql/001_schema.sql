@@ -305,6 +305,23 @@ CREATE TABLE IF NOT EXISTS assessment_flag (
 COMMENT ON TABLE assessment_flag IS
     'Сработавшие флаги с готовым текстом оговорки для раздела «Ограничения анализа»';
 
+CREATE TABLE IF NOT EXISTS assessment_signal (
+    id            bigserial PRIMARY KEY,
+    assessment_id bigint NOT NULL REFERENCES assessment (id) ON DELETE CASCADE,
+    signal_code   text NOT NULL,
+    signal_name   text,
+    level         text NOT NULL CHECK (level IN ('attention', 'supervisory')),
+    value         numeric(30, 10),
+    message       text NOT NULL,
+    details       jsonb,
+    CONSTRAINT assessment_signal_uniq UNIQUE (assessment_id, signal_code)
+);
+
+COMMENT ON TABLE assessment_signal IS
+    'Сработавшие надзорные сигналы с предписанной формулировкой для раздела '
+    '«Риски и надзорные сигналы». Сигнал — арифметика, а не интерпретация: '
+    'условие проверяется по формуле, формулировка берётся из methodology/signals.yaml';
+
 -- Журнал обращений к языковой модели -----------------------------------------
 
 CREATE TABLE IF NOT EXISTS llm_log (

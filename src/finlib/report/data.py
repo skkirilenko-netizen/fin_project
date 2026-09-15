@@ -50,6 +50,13 @@ ORDER BY group_code, metric_code
 
 _FLAGS = "SELECT * FROM assessment_flag WHERE assessment_id = %(id)s ORDER BY flag_code"
 
+# Сигналы упорядочены по весу: надзорные первыми. Порядок задан здесь, а не
+# в коде сборки документа: он свойство данных, а не оформления.
+_SIGNALS = """
+SELECT * FROM assessment_signal WHERE assessment_id = %(id)s
+ORDER BY CASE level WHEN 'supervisory' THEN 0 ELSE 1 END, signal_code
+"""
+
 _PERIODS = """
 SELECT DISTINCT report_date FROM metric_value
 WHERE inn = %(inn)s AND standard = %(standard)s ORDER BY report_date DESC LIMIT 3
@@ -132,6 +139,7 @@ class ReportData:
     groups: list[dict] = field(default_factory=list)
     metrics: list[MetricRow] = field(default_factory=list)
     flags: list[dict] = field(default_factory=list)
+    signals: list[dict] = field(default_factory=list)
     periods: list[date] = field(default_factory=list)
     derived: list[dict] = field(default_factory=list)
     metric_rows: list[dict] = field(default_factory=list)
@@ -308,11 +316,13 @@ def load_report_data(
     )
     groups: list[dict] = []
     flags: list[dict] = []
+    signals: list[dict] = []
     scored: dict[str, dict] = {}
     if header is not None:
         by_id = {"id": header["id"]}
         groups = fetch_all(_GROUPS, by_id, conn=conn)
         flags = fetch_all(_FLAGS, by_id, conn=conn)
+        signals = fetch_all(_SIGNALS, by_id, conn=conn)
         scored = {row["metric_code"]: row for row in fetch_all(_METRICS, by_id, conn=conn)}
 
     values = fetch_all(
@@ -339,6 +349,7 @@ def load_report_data(
         groups=groups,
         metrics=metrics,
         flags=flags,
+        signals=signals,
         periods=periods,
         metric_rows=values,
         derived=[

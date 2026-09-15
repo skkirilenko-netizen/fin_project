@@ -1,7 +1,8 @@
 """Разбор и вычисление формул показателей. Без eval.
 
 Язык формул умышленно беден: четырёхзначное число — код строки отчётности,
-avg(код) — полусумма на начало и конец периода, прописное имя — константа
+avg(код) — полусумма на начало и конец периода, prev(код) — значение
+за предыдущий период, прописное имя — константа
 из методики. Числовых литералов нет: любое число в формуле было бы магическим,
 а это запрещено.
 """
@@ -43,6 +44,18 @@ class AvgRef:
 
 
 @dataclass(frozen=True, slots=True)
+class PrevRef:
+    """Значение строки за предыдущий период.
+
+    Той же природы, что avg(): обе функции обращаются к началу периода.
+    Нужна надзорным сигналам, где сравнивается прирост величины
+    с финансовым результатом.
+    """
+
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
 class ConstRef:
     """Именованная константа из методики."""
 
@@ -65,7 +78,7 @@ class Neg:
     operand: "Node"
 
 
-Node = LineRef | AvgRef | ConstRef | BinOp | Neg
+Node = LineRef | AvgRef | PrevRef | ConstRef | BinOp | Neg
 
 _TOKEN = re.compile(
     r"""
@@ -170,18 +183,21 @@ class _Parser:
 
     def _name(self, token: _Token) -> Node:
         self.index += 1
-        if token.text == "avg":
+        if token.text in ("avg", "prev"):
             self._take("(")
             inner = self._peek()
             if inner is None or inner.kind != "number" or not _LINE_CODE.match(inner.text):
-                raise FormulaError(f"avg() принимает только код строки: {self.source}")
+                raise FormulaError(
+                    f"{token.text}() принимает только код строки: {self.source}"
+                )
             self.index += 1
             self._take(")")
-            return AvgRef(inner.text)
+            return AvgRef(inner.text) if token.text == "avg" else PrevRef(inner.text)
         if token.text.isupper():
             return ConstRef(token.text)
         raise FormulaError(
-            f"неизвестная функция {token.text!r}: допустима только avg() ({self.source})"
+            f"неизвестная функция {token.text!r}: допустимы avg() и prev() "
+            f"({self.source})"
         )
 
 
@@ -196,6 +212,8 @@ def line_codes(node: Node) -> set[str]:
     """Коды строк, нужные формуле за текущий период."""
     if isinstance(node, LineRef | AvgRef):
         return {node.code}
+    if isinstance(node, PrevRef):
+        return set()  # prev() обращается только к предыдущему периоду
     if isinstance(node, BinOp):
         return line_codes(node.left) | line_codes(node.right)
     if isinstance(node, Neg):
@@ -204,8 +222,8 @@ def line_codes(node: Node) -> set[str]:
 
 
 def average_codes(node: Node) -> set[str]:
-    """Коды строк, для которых нужна средняя величина, то есть предыдущий период."""
-    if isinstance(node, AvgRef):
+    """Коды строк, для которых нужен предыдущий период: avg() и prev()."""
+    if isinstance(node, AvgRef | PrevRef):
         return {node.code}
     if isinstance(node, BinOp):
         return average_codes(node.left) | average_codes(node.right)
@@ -279,6 +297,13 @@ def evaluate(
         if start is None or end is None:
             raise FormulaError(f"строка {node.code} не раскрыта в одном из периодов")
         return (start + end) / 2
+    if isinstance(node, PrevRef):
+        if previous is None:
+            raise FormulaError(f"нет предыдущего периода для prev({node.code})")
+        value = previous.get(node.code)
+        if value is None:
+            raise FormulaError(f"строка {node.code} не раскрыта за предыдущий период")
+        return value
     if isinstance(node, ConstRef):
         return constants[node.name]
     if isinstance(node, Neg):

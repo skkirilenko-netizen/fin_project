@@ -226,7 +226,12 @@ def _deltas_match(text: str) -> list[TextIssue]:
         delta = _DELTA.search(tail)
         if delta is None:
             continue
-        declared = _number(delta.group(1))
+        raw = delta.group(1).strip()
+        # Четырёхзначное целое в скобках — код строки отчётности, а не
+        # величина изменения: «(строка 1300)» дельтой не является.
+        if _LINE_CODE.fullmatch(raw.replace("\u00a0", "").replace(" ", "")):
+            continue
+        declared = _number(raw)
         if declared is None:
             continue
         scale = max(_places(match.group(1)), _places(match.group(2)))

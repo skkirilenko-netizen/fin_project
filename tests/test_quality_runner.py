@@ -183,14 +183,26 @@ def test_results_are_written_to_journal(db_conn) -> None:
     run_checks(src_file_id, db_conn)
 
     rows = fetch_all(
-        "SELECT check_code, status, severity FROM dq_log WHERE src_file_id = %(id)s",
+        "SELECT check_code, status, severity, report_date FROM dq_log "
+        "WHERE src_file_id = %(id)s ORDER BY check_code, report_date",
         {"id": src_file_id},
         conn=db_conn,
     )
     by_code = {row["check_code"] for row in rows}
     assert {"balance_equality", "section_sum", "profit_chain", "mandatory_fields"} <= by_code
-    blocking = [r for r in rows if r["check_code"] == "balance_equality" and r["status"] == "pass"]
-    assert blocking and blocking[0]["severity"] == "blocking"
+
+    # Уровень контроля зависит от периода: блокирующим он остаётся только
+    # за отчётный период комплекта, за сравнительные понижается. Строк
+    # поэтому несколько, и брать первую из неупорядоченной выборки нельзя —
+    # порядок в PostgreSQL не гарантирован, и тест мигал.
+    passed = [
+        row
+        for row in rows
+        if row["check_code"] == "balance_equality" and row["status"] == "pass"
+    ]
+    assert passed, "контроль равенства баланса не выполнялся"
+    severities = {row["severity"] for row in passed}
+    assert "blocking" in severities, "за отчётный период контроль обязан быть блокирующим"
 
 
 def test_quarantine_blocks_calculation_list(db_conn) -> None:

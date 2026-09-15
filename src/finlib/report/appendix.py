@@ -28,6 +28,12 @@ UNIT_SOURCE_NAMES: dict[str, str] = {
     "explicit": "указана источником",
 }
 
+# Наименование источника: в документ идёт название, а не машинный код.
+SOURCE_NAMES: dict[str, str] = {
+    "gir_bo": "Государственный информационный ресурс бухгалтерской отчётности (ГИР БО)",
+    "file": "файл отчётности, загруженный вручную",
+}
+
 SEVERITY_NAMES: dict[str, str] = {
     "blocking": "блокирующий",
     "warning": "предупреждающий",
@@ -188,7 +194,8 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
         f"Стандарт отчётности: {data.standard.value.upper()}.",
         f"Набор форм: {forms}.",
         f"Единица измерения: {data.unit_name} ({unit}).",
-        f"Источник данных: {organization['source']}.",
+        f"Источник данных: "
+        f"{SOURCE_NAMES.get(organization['source'], organization['source'])}.",
         f"Языковая модель текстовой части: {model}.",
     ]
     if assessment is not None:

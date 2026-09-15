@@ -487,3 +487,29 @@ def test_prompt_makes_group_scores_conditional() -> None:
     prompt = load_prompt()
     assert "Если баллы по группам" in prompt
     assert "не приводятся, не ссылайся" in prompt
+
+
+def test_document_contains_no_machine_codes(db_conn) -> None:
+    """Машинные коды не доходят до читателя ни из какого источника.
+
+    Разметка модели снимается `llm/cleanup.py`, но коды просачивались и из
+    нашей собственной детерминированной части: «Источник данных: gir_bo»
+    и «сработали флаги: holding_structure».
+    """
+    from datetime import datetime
+
+    from finlib.llm.cleanup import has_identifiers
+    from finlib.report.appendix import provenance
+    from finlib.report.summary import build_summary
+
+    for inn in (FULL_INN, STOPPED_INN, NO_CLASS_INN):
+        data = load_report_data(inn, db_conn)
+        text = "\n".join(
+            [
+                *(item.text for item in build_summary(data, SCORING)),
+                *provenance(data, "модель", datetime(2026, 1, 1)),
+            ]
+        )
+        assert has_identifiers(text) == [], inn
+        assert "gir_bo" not in text, inn
+        assert "holding_structure" not in text, inn

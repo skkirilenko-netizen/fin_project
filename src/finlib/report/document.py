@@ -149,8 +149,13 @@ def build_report(
     _write_header(document, data, bool(sections))
     _write_summary(document, data, scoring)
     if sections:
-        _write_sections(document, sections)
+        _write_sections(document, sections, data)
     else:
+        # Сигналы детерминированы и от модели не зависят: в справке без
+        # текстовой части они обязаны остаться.
+        if data.signals:
+            document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
+            _write_signals(document, data)
         _write_missing_text(document)
     model = conclusion.model if conclusion is not None else NO_MODEL
     _write_appendix(document, data, model, generated_at or datetime.now())
@@ -235,12 +240,50 @@ def _write_summary(
         written.add_run(paragraph.text).bold = paragraph.bold
 
 
-def _write_sections(document: Document, sections: list[Section]) -> None:
-    """Разделы 2–6, написанные моделью."""
+# Раздел, в который выводятся надзорные сигналы, и его название.
+SIGNALS_SECTION = 4
+SIGNALS_TITLE = "Риски и надзорные сигналы"
+
+SIGNAL_LEVELS: dict[str, str] = {
+    "supervisory": "надзорный сигнал",
+    "attention": "требует внимания",
+}
+
+
+def _write_sections(
+    document: Document, sections: list[Section], data: ReportData
+) -> None:
+    """Разделы 2–6: сигналы детерминированы, остальное пишет модель.
+
+    Сигналы выводятся первыми в своём разделе и дословно: их выявление
+    не может оставаться на усмотрение модели, а формулировка задана
+    методикой и пересказу не подлежит.
+    """
     for section in sections:
-        document.add_heading(f"{section.number}. {section.title}", level=1)
+        title = (
+            SIGNALS_TITLE if section.number == SIGNALS_SECTION else section.title
+        )
+        document.add_heading(f"{section.number}. {title}", level=1)
+        if section.number == SIGNALS_SECTION:
+            _write_signals(document, data)
         for text in section.paragraphs:
             document.add_paragraph(text)
+
+
+def _write_signals(document: Document, data: ReportData) -> None:
+    """Сработавшие сигналы с предписанными формулировками."""
+    if not data.signals:
+        return
+    heading = document.add_paragraph()
+    heading.add_run(
+        "Выявлены обстоятельства, требующие внимания. Формулировки заданы "
+        "методикой и получены расчётом, а не оценочным суждением:"
+    ).bold = True
+    for signal in data.signals:
+        level = SIGNAL_LEVELS.get(signal["level"], signal["level"])
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"{signal['signal_name']} ({level}). ").bold = True
+        paragraph.add_run(signal["message"])
 
 
 def _write_appendix(

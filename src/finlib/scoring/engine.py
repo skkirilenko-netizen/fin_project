@@ -26,6 +26,12 @@ from finlib.scoring.definitions import (
 )
 from finlib.scoring.flags import FlagHit, evaluate_flags
 from finlib.scoring.metric_score import MetricScore, score_metric
+from finlib.scoring.signals import (
+    SignalHit,
+    evaluate_signals,
+    revision_intensity,
+    structure_shifts,
+)
 from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
@@ -79,6 +85,7 @@ class Assessment:
     groups: list[GroupScore] = field(default_factory=list)
     metrics: list[MetricScore] = field(default_factory=list)
     flags: list[FlagHit] = field(default_factory=list)
+    signals: list[SignalHit] = field(default_factory=list)
     metrics_version: str = ""
     scoring_version: str = ""
     flags_version: str = ""
@@ -293,7 +300,10 @@ def _confidence(
             + ", ".join(unverified[:5])
         )
 
-    lowering = [item.code for item in flags if item.lowers_confidence]
+    # Наименование флага, а не его код: текст уходит в документ, который
+    # читает человек, и машинный код там такой же мусор, как «equity_ratio»
+    # в тексте модели.
+    lowering = [item.name or item.code for item in flags if item.lowers_confidence]
     if lowering:
         reasons.append("сработали флаги: " + ", ".join(lowering))
 
@@ -303,6 +313,74 @@ def _confidence(
         order = {Confidence.HIGH: 0, Confidence.MEDIUM: 1, Confidence.LOW: 2}
         level = level if order[level] >= order[floor] else floor
     return level, reasons
+
+
+_MISMATCHES = """
+SELECT count(*) AS n FROM dq_log
+WHERE inn = %(inn)s AND check_code = 'period_value_mismatch'
+"""
+
+_SETS = """
+SELECT count(*) AS n FROM src_file
+WHERE inn = %(inn)s AND standard = %(s)s AND is_actual
+"""
+
+
+def _signals(
+    inn: str,
+    conn: PgConnection | None,
+    target: date,
+    standard: Standard,
+    period_values,
+) -> list[SignalHit]:
+    """Надзорные сигналы: арифметика, а не интерпретация.
+
+    Выявление такого не может оставаться на усмотрение модели: по ПК
+    «Стройсервис» изъятие капитала в пользу участников на 42 млн руб.
+    в заключение не попало вовсе.
+    """
+    if period_values is None:
+        return []
+    periods = load_period_values(inn, conn, standard)
+    earlier = sorted((item for item in periods if item < target), reverse=True)
+    previous = periods[earlier[0]].values if earlier else {}
+
+    found = list(evaluate_signals(period_values.values, previous))
+    found += structure_shifts(
+        _shares(period_values.values),
+        _shares(previous),
+        _line_names(),
+    )
+    mismatches = fetch_all(_MISMATCHES, {"inn": inn}, conn=conn)
+    sets = fetch_all(_SETS, {"inn": inn, "s": standard.value}, conn=conn)
+    if mismatches and sets:
+        revision = revision_intensity(int(mismatches[0]["n"]), int(sets[0]["n"]))
+        if revision is not None:
+            found.append(revision)
+    return found
+
+
+def _shares(values: dict[str, Decimal | None]) -> dict[str, Decimal]:
+    """Доли укрупнённых статей в валюте баланса, в процентах."""
+    total = values.get("1600")
+    if total is None or total <= 0:
+        return {}
+    return {
+        code: values[code] / total * Decimal(100)
+        for code in ("1100", "1200", "1300", "1400", "1500")
+        if values.get(code) is not None
+    }
+
+
+def _line_names() -> dict[str, str]:
+    """Наименования укрупнённых статей для формулировок сигналов."""
+    return {
+        "1100": "Внеоборотные активы",
+        "1200": "Оборотные активы",
+        "1300": "Капитал и резервы",
+        "1400": "Долгосрочные обязательства",
+        "1500": "Краткосрочные обязательства",
+    }
 
 
 def assess(
@@ -369,6 +447,7 @@ def assess(
         else []
     )
 
+    signals = _signals(inn, conn, target, standard, period_values)
     confidence, reasons = _confidence(groups, confidences, flags, scoring, metric_scores)
 
     assessment = Assessment(
@@ -390,6 +469,7 @@ def assess(
         groups=groups,
         metrics=metric_scores,
         flags=flags,
+        signals=signals,
         metrics_version=catalog.version,
         scoring_version=scoring.version,
         flags_version=flags_catalog.version,
