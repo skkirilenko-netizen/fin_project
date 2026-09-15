@@ -1,6 +1,8 @@
 """Загрузка справочника строк форм РСБУ с проверкой целостности."""
 
 import re
+from collections.abc import Sequence
+from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -175,12 +177,52 @@ class IgnoredCode(BaseModel):
         return re.fullmatch(str(self.pattern), code) is not None
 
 
+class UnitSource(StrEnum):
+    """Откуда известна единица измерения комплекта."""
+
+    FORM_STANDARD = "form_standard"
+    EXPLICIT = "explicit"
+    UNKNOWN = "unknown"
+
+
+class UnitsDef(BaseModel):
+    """Единица измерения, определяемая формой отчётности.
+
+    Ответ ГИР БО единицы не содержит, и прежде она принималась как
+    предположение. Это дефект данных: ошибка в тысячу раз не ловится ни одним
+    контролем — баланс сойдётся, коэффициенты будут верны. Форма единицу задаёт
+    однозначно, поэтому определение идёт от неё, а не от полезной нагрузки.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    okei_code: str = Field(pattern=r"^\d{3}$")
+    name: str = Field(min_length=1)
+    multiplier: Decimal = Field(gt=0)
+    forms: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    def source_for(self, form_codes: Sequence[str]) -> UnitSource:
+        """Определена ли единица для набора форм комплекта.
+
+        Пустой перечень форм — не «определено по умолчанию», а неизвестность:
+        комплект без форм единицы не имеет.
+        """
+        if not form_codes:
+            return UnitSource.UNKNOWN
+        known = set(self.forms)
+        if all(code in known for code in form_codes):
+            return UnitSource.FORM_STANDARD
+        return UnitSource.UNKNOWN
+
+
 class LinesCatalog(BaseModel):
     """Справочник строк всех форм с индексами по коду и наименованию."""
 
     model_config = ConfigDict(extra="forbid")
 
     version: str = Field(min_length=1)
+    units: UnitsDef
     forms: dict[str, FormDef]
     reporting_types: dict[ReportingType, ReportingTypeDef]
     lines: tuple[LineDef, ...]

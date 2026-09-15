@@ -49,8 +49,6 @@ KND_TO_REPORTING_TYPE: dict[str, ReportingType] = {
 }
 
 # В ответе ГИР БО поля единицы измерения нет; значения приходят в тысячах рублей.
-ASSUMED_UNIT_CODE = "384"
-ASSUMED_UNIT_MULTIPLIER = Decimal(1)
 
 _VALUE_KEY = re.compile(r"^(current|previous|beforePrevious)(\d{4,6})$")
 _HIGHLIGHT = re.compile(r"</?strong>")

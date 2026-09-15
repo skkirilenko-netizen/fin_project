@@ -69,7 +69,19 @@ def _verdict(data: ReportData) -> list[Paragraph]:
     verdict = f"Класс финансового состояния: {data.class_code} — {assessment['class_name']}."
     if data.score_in_summary:
         verdict = f"{verdict} Балл: {_score(assessment['total_score'])} из 100."
-    return [Paragraph(verdict, bold=True)]
+    found = [Paragraph(verdict, bold=True)]
+    if data.breadth_reason:
+        # Класс присвоен стоп-фактором, а не баллом. Узость основания
+        # не отменяет стоп-фактор, но и балльной оценки не даёт: два этих
+        # утверждения стоят рядом, а не вместо друг друга.
+        found.append(
+            Paragraph(
+                f"Балльная оценка не формируется: {data.breadth_reason.lower()}. "
+                f"Класс присвоен по сработавшему стоп-фактору, а не по баллу."
+            )
+        )
+        found.extend(_missing(data))
+    return found
 
 
 def _missing(data: ReportData) -> list[Paragraph]:

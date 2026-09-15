@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
-from finlib.metrics.definitions import Direction, MetricDef
+from finlib.metrics.definitions import Direction, ExclusionKind, MetricDef
 from finlib.scoring.definitions import MetricScale, MetricScorePolicy
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class MetricScore:
     periods_used: int
     included: bool
     exclusion_reason: str | None = None
+    exclusion_kind: ExclusionKind | None = None
     # Исключён решением методики (in_scoring: false), а не отсутствием данных.
     # Для уверенности это разные вещи: сознательный выбор не означает неполноты
     # отчётности.
@@ -168,12 +169,14 @@ def score_metric(
             metric.code, metric.group, values[-1] if values else None, None, None, None,
             len(values), False,
             (metric.scoring_exclusion_reason or "").strip() or "исключён из балльной оценки",
+            metric.scoring_exclusion_kind,
             excluded_by_methodology=True,
         )
     if not values:
         return MetricScore(
             metric.code, metric.group, None, None, None, None, 0, False,
             "показатель не рассчитан ни за один период",
+            ExclusionKind.NO_DATA,
         )
 
     level = level_score(values, metric, policy, scale)

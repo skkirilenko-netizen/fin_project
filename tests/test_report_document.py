@@ -15,6 +15,7 @@ from finlib.report.sections import (
 
 FULL_INN = "7736050003"
 SIMPLE_INN = "2100010824"
+NO_CLASS_INN = "2522002003"
 
 ANSWER = """### 2. Фактическая база
 
@@ -186,7 +187,7 @@ def test_model_text_reaches_the_document(rendered) -> None:
 def test_document_without_class_renders(db_conn, tmp_path) -> None:
     """Организация без класса рендерится штатно, а не падает."""
     conclusion = Conclusion(
-        inn=SIMPLE_INN,
+        inn=NO_CLASS_INN,
         report_date=date(2024, 12, 31),
         text=ANSWER,
         model="тестовая-модель",
@@ -194,7 +195,7 @@ def test_document_without_class_renders(db_conn, tmp_path) -> None:
         checked_numbers=0,
     )
     report = build_report(
-        SIMPLE_INN, db_conn, conclusion=conclusion, directory=tmp_path
+        NO_CLASS_INN, db_conn, conclusion=conclusion, directory=tmp_path
     )
     text = document_text(Document(report.path))
     assert "Класс финансового состояния не присвоен" in text

@@ -148,9 +148,10 @@ def _organization_block(
         f"Отчётный период: {report_date:%d.%m.%Y}",
         f"Стандарт отчётности: {'РСБУ' if row['standard'] == 'rsbu' else 'МСФО'}",
         f"Набор форм: {catalog.reporting_types[kind].name}",
-        "Единица измерения: тысячи рублей"
-        + (" (принята по умолчанию, источником не указана)"
-           if row["unit_source"] == "assumed" else ""),
+        # Оговорки о предположении здесь нет: единица определена формой
+        # отчётности, а комплект с неопределённой единицей до расчёта
+        # не доходит — его останавливает контроль unit_not_determined.
+        f"Единица измерения: {catalog.units.name}",
     ]
     return "\n".join(lines)
 
@@ -277,6 +278,10 @@ def _assessment_block(
         lines.append(f"Класс: {assessment['class_code']} — {assessment['class_name']}")
     else:
         lines.append(f"Класс не присвоен. Причина: {assessment['no_class_reason']}")
+    if assessment.get("breadth_reason"):
+        lines.append(
+            f"Балльная оценка не формируется: {assessment['breadth_reason']}"
+        )
 
     stop = assessment["stop_factor_code"]
     if stop:
@@ -298,13 +303,13 @@ def _assessment_block(
         # Балл подаётся только вместе с классом. Без класса он ничего
         # не сообщает: «балл 74, класс не присвоен» читается как противоречие,
         # а у организации с отрицательным капиталом — как оправдание.
-        if score is not None and assessment["class_code"]:
+        if score is not None and assessment["class_code"] and not assessment.get("breadth_reason"):
             lines.append(f"Общий балл: {ratio(score)} из 100")
 
     lines.append(f"Уверенность в оценке: {assessment['confidence']}")
     lines.append("")
     scored = [item for item in assessment["groups"] if item["score"] is not None]
-    if not assessment["class_code"]:
+    if not assessment["class_code"] or assessment.get("breadth_reason"):
         # Без класса баллы групп не подаются. Класс не присвоен именно потому,
         # что основание узкое, и высокий балл единственной уцелевшей группы
         # прочитался бы как оценка состояния, которой мы не даём.
@@ -314,7 +319,7 @@ def _assessment_block(
         )
         lines.append(
             f"Расчёт оказался возможен только по группам: {listed or 'нет'}. "
-            "Баллы групп не приводятся: без класса они вводят в заблуждение."
+            "Баллы групп не приводятся: балльная оценка не сформирована."
         )
     else:
         lines.append("Баллы по группам:")

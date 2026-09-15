@@ -38,6 +38,35 @@ class Unit(StrEnum):
     PERCENT = "percent"
 
 
+class ExclusionKind(StrEnum):
+    """Почему показатель не участвует в балльной оценке.
+
+    Порядок значений — фиксированная иерархия причин: если применимы
+    несколько, называется первая. Прежде причина была одним статическим
+    текстом на показатель, и он печатался без проверки применимости:
+    у организации с капиталом 82 251 тыс. руб. документ разъяснял, чем плох
+    отрицательный капитал.
+    """
+
+    STOP_FACTOR = "stop_factor"
+    NO_LEVEL_SCALE = "no_level_scale"
+    DUPLICATE = "duplicate"
+    NO_DATA = "no_data"
+
+    @property
+    def rank(self) -> int:
+        """Место в иерархии причин; меньше значит важнее."""
+        return EXCLUSION_ORDER.index(self)
+
+
+EXCLUSION_ORDER: tuple[ExclusionKind, ...] = (
+    ExclusionKind.STOP_FACTOR,
+    ExclusionKind.NO_LEVEL_SCALE,
+    ExclusionKind.DUPLICATE,
+    ExclusionKind.NO_DATA,
+)
+
+
 class Condition(StrEnum):
     """Условие срабатывания стоп-фактора."""
 
@@ -98,6 +127,9 @@ class MetricDef(BaseModel):
     # стоп-фактором, а не измерением.
     in_scoring: bool = True
     scoring_exclusion_reason: str | None = None
+    # Машинный вид причины: по нему причины упорядочиваются по иерархии,
+    # а текст остаётся пояснением, а не признаком.
+    scoring_exclusion_kind: ExclusionKind | None = None
     # Знаменатель по экономическому смыслу неотрицателен: капитал, активы,
     # выручка, обязательства. Если фактически он отрицателен, коэффициент
     # не интерпретируется — минус в знаменателе делает «меньше — лучше»
@@ -167,10 +199,19 @@ class MetricDef(BaseModel):
 
     @model_validator(mode="after")
     def _check_scoring_exclusion(self) -> Self:
-        """Исключение из балла требует названной причины."""
+        """Исключение из балла требует названной причины и её вида."""
         if not self.in_scoring and not (self.scoring_exclusion_reason or "").strip():
             raise ValueError(
                 f"показатель {self.code} исключён из балльной оценки без объяснения причины"
+            )
+        if not self.in_scoring and self.scoring_exclusion_kind is None:
+            raise ValueError(
+                f"показатель {self.code} исключён из балльной оценки без указания вида "
+                "причины: без него причины не упорядочить по иерархии"
+            )
+        if self.in_scoring and self.scoring_exclusion_kind is not None:
+            raise ValueError(
+                f"показатель {self.code} участвует в балле, но объявляет причину исключения"
             )
         return self
 

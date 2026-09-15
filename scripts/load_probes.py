@@ -18,6 +18,8 @@ from finlib.metrics.engine import compute_all
 from finlib.metrics.store import save_results
 from finlib.normalize.loader import load_report_set
 from finlib.quality.runner import run_checks
+from finlib.scoring.engine import assess
+from finlib.scoring.store import save_assessment
 from finlib.sources.girbo import Organization, parse_report_sets
 from finlib.utils import json_loads_decimal
 
@@ -86,11 +88,24 @@ def load_probe(probe: Probe, conn, *, with_metrics: bool = True) -> dict[str, in
             quarantined += 1
 
     metrics = 0
+    graded = "нет"
     if with_metrics:
         results = compute_all(probe.inn, conn)
         metrics = save_results(probe.inn, results, conn)
+        # Оценка пересчитывается здесь же. Без этого набор данных расходится
+        # сам с собой: показатели свежие, а класс и разложение остаются
+        # от прежней версии методики.
+        assessment = assess(probe.inn, conn)
+        if assessment is not None:
+            save_assessment(assessment, conn)
+            graded = assessment.class_code or "без класса"
 
-    return {"комплектов": len(sets), "в карантине": quarantined, "показателей": metrics}
+    return {
+        "комплектов": len(sets),
+        "в карантине": quarantined,
+        "показателей": metrics,
+        "класс": graded,
+    }
 
 
 def wipe(conn) -> None:

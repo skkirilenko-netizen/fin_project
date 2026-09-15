@@ -222,7 +222,10 @@ def test_excluded_metrics_do_not_change_group_weight() -> None:
     liquidity = groups["liquidity"]
     assert liquidity.metrics_used == 1
     assert liquidity.metrics_excluded == 1
-    assert liquidity.nominal_weight == SCORING.groups["liquidity"].weight
+    # Номинальный вес хранится долей, как и фактический: два соседних поля
+    # в разных единицах давали в приложении 3000,0 % вместо 30,0 %.
+    total = sum(item.weight for item in SCORING.groups.values())
+    assert liquidity.nominal_weight == SCORING.groups["liquidity"].weight / total
 
 
 def test_no_metrics_at_all_gives_lowest_class() -> None:

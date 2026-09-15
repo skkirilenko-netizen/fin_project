@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 
 from finlib.db import PgConnection, fetch_all, fetch_one
+from finlib.metrics.definitions import EXCLUSION_ORDER, ExclusionKind
 from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
@@ -72,8 +73,12 @@ GROUP BY d.check_code, d.severity, d.status
 ORDER BY d.check_code, d.severity, d.status
 """
 
+# Комплекты отчётности вместе со статусом. Карантин отбирается здесь, а не
+# в запросе: приложение обязано назвать и принятые комплекты, и отбракованные,
+# иначе «Ограничения» и «Происхождение документа» противоречат друг другу.
 _SOURCES = """
-SELECT report_year, reporting_type, correction_version, status, knd, loaded_at
+SELECT report_year, reporting_type, correction_version, status, knd, loaded_at,
+       quarantine_reason
 FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
 ORDER BY report_year DESC
@@ -95,13 +100,23 @@ class MetricRow:
     level_score: Decimal | None
     dynamics_score: Decimal | None
     exclusion_reason: str | None
+    exclusion_kind: str | None
 
     @property
     def missing_data(self) -> bool:
         """Исключён из-за нехватки данных, а не решением методики."""
+        if self.exclusion_kind is not None:
+            return self.exclusion_kind == ExclusionKind.NO_DATA.value
         return bool(
             self.exclusion_reason and NOT_CALCULATED_MARK in self.exclusion_reason
         )
+
+    @property
+    def exclusion_rank(self) -> int:
+        """Место причины в иерархии: стоп-фактор, шкала, дублирование, данные."""
+        if self.exclusion_kind is None:
+            return len(EXCLUSION_ORDER)
+        return ExclusionKind(self.exclusion_kind).rank
 
 
 @dataclass
@@ -112,6 +127,7 @@ class ReportData:
     report_date: date
     standard: Standard
     organization: dict
+    unit_name: str
     assessment: dict | None
     groups: list[dict] = field(default_factory=list)
     metrics: list[MetricRow] = field(default_factory=list)
@@ -124,6 +140,11 @@ class ReportData:
     def class_code(self) -> str | None:
         """Присвоенный класс; None — если основание оказалось недостаточным."""
         return self.assessment["class_code"] if self.assessment else None
+
+    @property
+    def breadth_reason(self) -> str | None:
+        """Почему балльная оценка не формируется; None — основание достаточно."""
+        return self.assessment.get("breadth_reason") if self.assessment else None
 
     @property
     def stop_factor_code(self) -> str | None:
@@ -143,6 +164,11 @@ class ReportData:
         """
         if self.assessment is None or self.assessment["total_score"] is None:
             return False
+        # Класс, присвоенный стоп-фактором при узком основании, балла
+        # не раскрывает: балльной оценки просто нет, и число рядом с классом
+        # читалось бы как её итог.
+        if self.assessment.get("breadth_reason"):
+            return False
         return bool(self.class_code)
 
     @property
@@ -157,18 +183,38 @@ class ReportData:
         return self.score_in_appendix and not self.stop_factor_code
 
     @property
+    def accepted_sources(self) -> list[dict]:
+        """Комплекты, принятые в расчёт."""
+        return [item for item in self.sources if item["status"] != "quarantine"]
+
+    @property
+    def quarantined_sources(self) -> list[dict]:
+        """Комплекты, отбракованные контролями качества.
+
+        Прежде приложение перечисляло их среди принятых, и «Происхождение
+        документа» противоречило разделу «Ограничения анализа», где тот же
+        комплект назван невключённым.
+        """
+        return [item for item in self.sources if item["status"] == "quarantine"]
+
+    @property
     def missing_metrics(self) -> list[MetricRow]:
         """Показатели, не вошедшие в балл из-за нехватки данных."""
         return [item for item in self.metrics if item.missing_data]
 
     @property
     def excluded_by_methodology(self) -> list[MetricRow]:
-        """Показатели, исключённые решением методики, а не нехваткой данных."""
-        return [
+        """Показатели, исключённые решением методики, а не нехваткой данных.
+
+        Порядок — фиксированная иерархия причин: стоп-фактор, отсутствие шкалы
+        уровня, дублирование с другим показателем, отсутствие данных.
+        """
+        found = [
             item
             for item in self.metrics
             if not item.included and not item.missing_data and item.exclusion_reason
         ]
+        return sorted(found, key=lambda item: (item.exclusion_rank, item.code))
 
 
 def load_report_data(
@@ -182,6 +228,7 @@ def load_report_data(
 ) -> ReportData:
     """Читает из базы всё, что понадобится документу."""
     from finlib.metrics.definitions import load_metrics
+    from finlib.normalize.lines import load_lines
     from finlib.scoring.definitions import load_scoring
 
     catalog = catalog if catalog is not None else load_metrics()
@@ -230,6 +277,7 @@ def load_report_data(
         report_date=target,
         standard=standard,
         organization=dict(organization),
+        unit_name=load_lines().units.name,
         assessment=dict(header) if header is not None else None,
         groups=groups,
         metrics=metrics,
@@ -263,4 +311,5 @@ def _metric_row(
         level_score=scored["level_score"] if scored else None,
         dynamics_score=scored["dynamics_score"] if scored else None,
         exclusion_reason=scored["exclusion_reason"] if scored else None,
+        exclusion_kind=scored["exclusion_kind"] if scored else None,
     )

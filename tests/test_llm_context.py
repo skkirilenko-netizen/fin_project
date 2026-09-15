@@ -56,7 +56,7 @@ def test_organisation_block_has_requisites(context) -> None:
     assert INN in context.organization
     assert "ГАЗПРОМ" in context.organization
     assert "РСБУ" in context.organization
-    assert "тысячи рублей" in context.organization
+    assert "тыс. руб." in context.organization
 
 
 def test_data_block_ties_numbers_to_line_codes(context) -> None:
@@ -162,11 +162,17 @@ def test_invented_number_fails_against_context(context) -> None:
     assert not verify(answer, context.blocks()).verified
 
 
-def test_simplified_organisation_reports_no_class() -> None:
-    """Если класс не присвоен, в блоке ОЦЕНКА названа причина."""
+def test_simplified_organisation_reports_stop_factor() -> None:
+    """Стоп-фактор присваивает класс, но балльной оценки не даёт.
+
+    Прежде в блоке соседствовали два взаимоисключающих утверждения: класс
+    не присвоен и класс присвоен низший.
+    """
     context = build_context(SIMPLIFIED_INN)
-    assert "Класс не присвоен" in context.assessment
-    assert "одной группой" in context.assessment
+    assert "Класс не присвоен" not in context.assessment
+    assert "Сработал стоп-фактор" in context.assessment
+    assert "Балльная оценка не формируется" in context.assessment
+    assert "Баллы по группам" not in context.assessment
 
 
 def test_unknown_organisation_raises() -> None:

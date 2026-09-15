@@ -21,6 +21,11 @@ CHECK_STATUS_NAMES: dict[str, str] = {
     "info": "не выполнялся",
 }
 
+UNIT_SOURCE_NAMES: dict[str, str] = {
+    "form_standard": "определена формой отчётности",
+    "explicit": "указана источником",
+}
+
 SEVERITY_NAMES: dict[str, str] = {
     "blocking": "блокирующий",
     "warning": "предупреждающий",
@@ -53,7 +58,7 @@ def metrics_table(data: ReportData) -> Table:
         "Показатель",
         "Группа",
         *(f"{item:%d.%m.%Y}" for item in periods),
-        "В балле",
+        "Участвует в балле",
     )
     rows: list[tuple[str, ...]] = []
     for metric in data.metrics:
@@ -65,30 +70,51 @@ def metrics_table(data: ReportData) -> Table:
             (metric.code, metric.name, metric.group_name, *cells, _role(metric))
         )
     return Table(
-        "Таблица 1. Показатели за периоды",
+        "Показатели за периоды",
         header,
         tuple(rows),
         "«—» означает, что показатель за период не рассчитан; причина указана "
-        "в таблице 2.",
+        "в следующей таблице.",
     )
 
 
+EXCLUSION_KIND_NAMES: dict[str, str] = {
+    "stop_factor": "служит стоп-фактором",
+    "no_level_scale": "нет шкалы уровня",
+    "duplicate": "дублирует другой показатель",
+    "no_data": "нет данных",
+}
+
+
 def not_calculated_table(data: ReportData) -> Table | None:
-    """Почему показатель не рассчитан или не вошёл в балл."""
+    """Почему показатель не рассчитан или не вошёл в балл.
+
+    Порядок строк — фиксированная иерархия причин. Прежде причина была одним
+    статическим текстом на показатель и печаталась без проверки применимости:
+    у организации с положительным капиталом документ разъяснял, чем плох
+    отрицательный.
+    """
+    ordered = sorted(
+        (item for item in data.metrics if not item.included),
+        key=lambda item: (item.exclusion_rank, item.code),
+    )
     rows: list[tuple[str, ...]] = []
-    for metric in data.metrics:
+    for metric in ordered:
+        kind = EXCLUSION_KIND_NAMES.get(metric.exclusion_kind or "", "—")
         reasons = sorted({item for item in metric.reasons.values() if item})
-        if reasons:
-            rows.append((metric.code, metric.name, "; ".join(reasons)))
-        elif not metric.included and metric.exclusion_reason:
-            rows.append(
-                (metric.code, metric.name, " ".join(metric.exclusion_reason.split()))
-            )
+        text = (
+            "; ".join(reasons)
+            if reasons
+            else " ".join((metric.exclusion_reason or "").split())
+        )
+        if not text:
+            continue
+        rows.append((metric.code, metric.name, kind, text))
     if not rows:
         return None
     return Table(
-        "Таблица 2. Показатели вне балльной оценки и причины",
-        ("Код", "Показатель", "Причина"),
+        "Показатели вне балльной оценки и причины",
+        ("Код", "Показатель", "Вид причины", "Пояснение"),
         tuple(rows),
     )
 
@@ -113,8 +139,14 @@ def groups_table(data: ReportData) -> Table | None:
         for item in data.groups
     )
     return Table(
-        "Таблица 3. Балл по группам показателей",
-        ("Группа", "Балл из 100", "Вес номинальный", "Вес фактический", "Показателей"),
+        "Балл по группам показателей",
+        (
+            "Группа",
+            "Балл из 100",
+            "Вес номинальный",
+            "Вес фактический",
+            "Показателей в балле",
+        ),
         rows,
     )
 
@@ -131,7 +163,7 @@ def checks_table(data: ReportData) -> Table:
         for item in data.checks
     )
     return Table(
-        "Таблица 4. Выполненные контроли качества",
+        "Выполненные контроли качества",
         ("Контроль", "Уровень", "Исход", "Срабатываний"),
         rows,
         "Отчётность, не прошедшая блокирующий контроль, в расчёт не идёт.",
@@ -143,17 +175,16 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
     assessment = data.assessment
     organization = data.organization
     forms = "упрощённый" if organization["reporting_type"] == "simplified" else "полный"
-    unit = (
-        "принята как предположение"
-        if organization["unit_source"] == "assumed"
-        else "указана источником"
-    )
+    # Формулировки-предположения здесь нет и быть не может: комплект
+    # с неопределённой единицей останавливается контролем unit_not_determined
+    # и до документа не доходит.
+    unit = UNIT_SOURCE_NAMES.get(organization["unit_source"], organization["unit_source"])
     lines = [
         f"Дата формирования: {generated_at:%d.%m.%Y %H:%M}.",
         f"Отчётный период: {data.report_date:%d.%m.%Y}.",
         f"Стандарт отчётности: {data.standard.value.upper()}.",
         f"Набор форм: {forms}.",
-        f"Единица измерения: тыс. руб. ({unit}).",
+        f"Единица измерения: {data.unit_name} ({unit}).",
         f"Источник данных: {organization['source']}.",
         f"Языковая модель текстовой части: {model}.",
     ]
@@ -165,17 +196,26 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
                 f"Версия справочника флагов: {assessment['flags_version']}.",
             ]
         )
-    if data.sources:
-        listed = ", ".join(
-            f"{item['report_year']} год (корректировка {item['correction_version']})"
-            for item in data.sources
+    if data.accepted_sources:
+        lines.append(f"Комплекты отчётности в расчёте: {_years(data.accepted_sources)}.")
+    if data.quarantined_sources:
+        lines.append(
+            f"Комплекты, не прошедшие контроли качества и в расчёт не включённые: "
+            f"{_years(data.quarantined_sources)}."
         )
-        lines.append(f"Комплекты отчётности в расчёте: {listed}.")
     if data.score_in_appendix and data.stop_factor_code:
         lines.append(
             f"Балл до применения стоп-фактора: {_score(assessment['total_score'])} из 100."
         )
     return lines
+
+
+def _years(sources: list[dict]) -> str:
+    """Перечень комплектов по годам с номером корректировки."""
+    return ", ".join(
+        f"{item['report_year']} год (корректировка {item['correction_version']})"
+        for item in sources
+    )
 
 
 def _value(value: Decimal | None, unit: str, reason: str | None) -> str:

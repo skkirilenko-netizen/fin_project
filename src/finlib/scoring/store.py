@@ -13,11 +13,13 @@ logger = logging.getLogger(__name__)
 _UPSERT_ASSESSMENT = """
 INSERT INTO assessment (
     inn, standard, report_date, total_score, class_code, class_name, no_class_reason,
+    breadth_reason,
     class_before_stop, stop_factor_code, stop_factor_effect, confidence, confidence_reasons,
     metrics_version, scoring_version, flags_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_date)s, %(total_score)s, %(class_code)s, %(class_name)s,
-    %(no_class_reason)s, %(class_before_stop)s, %(stop_factor_code)s, %(stop_factor_effect)s,
+    %(no_class_reason)s, %(breadth_reason)s, %(class_before_stop)s,
+    %(stop_factor_code)s, %(stop_factor_effect)s,
     %(confidence)s, %(confidence_reasons)s, %(metrics_version)s, %(scoring_version)s,
     %(flags_version)s
 )
@@ -26,6 +28,7 @@ ON CONFLICT (inn, standard, report_date) DO UPDATE SET
     class_code = EXCLUDED.class_code,
     class_name = EXCLUDED.class_name,
     no_class_reason = EXCLUDED.no_class_reason,
+    breadth_reason = EXCLUDED.breadth_reason,
     class_before_stop = EXCLUDED.class_before_stop,
     stop_factor_code = EXCLUDED.stop_factor_code,
     stop_factor_effect = EXCLUDED.stop_factor_effect,
@@ -51,10 +54,11 @@ INSERT INTO assessment_group (
 _INSERT_METRIC = """
 INSERT INTO assessment_metric (
     assessment_id, metric_code, group_code, value, score, level_score, dynamics_score,
-    periods_used, included, exclusion_reason
+    periods_used, included, exclusion_reason, exclusion_kind
 ) VALUES (
     %(assessment_id)s, %(metric_code)s, %(group_code)s, %(value)s, %(score)s,
-    %(level_score)s, %(dynamics_score)s, %(periods_used)s, %(included)s, %(exclusion_reason)s
+    %(level_score)s, %(dynamics_score)s, %(periods_used)s, %(included)s,
+    %(exclusion_reason)s, %(exclusion_kind)s
 )
 """
 
@@ -78,6 +82,7 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
         "class_code": assessment.class_code,
         "class_name": assessment.class_name,
         "no_class_reason": assessment.no_class_reason,
+        "breadth_reason": assessment.breadth_reason,
         "class_before_stop": assessment.class_before_stop,
         "stop_factor_code": assessment.stop_factor_code,
         "stop_factor_effect": assessment.stop_factor_effect.value,
@@ -130,6 +135,7 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
                 "periods_used": item.periods_used,
                 "included": item.included,
                 "exclusion_reason": item.exclusion_reason,
+                "exclusion_kind": item.exclusion_kind.value if item.exclusion_kind else None,
             }
             for item in assessment.metrics
         ],

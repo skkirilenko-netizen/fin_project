@@ -130,6 +130,7 @@ metrics:
     material_change: "0.20"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: бесспорного ориентира у показателя нет, а придумывать
       отраслевой порог запрещено. Показатель с одной лишь динамикой награждал бы
@@ -148,6 +149,7 @@ metrics:
     material_change: "0.50"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: бесспорного ориентира у показателя нет, а придумывать
       отраслевой порог запрещено.
@@ -186,11 +188,12 @@ metrics:
     material_change: "0.30"
     benchmark: "0"
     in_scoring: false
+    scoring_exclusion_kind: stop_factor
     scoring_exclusion_reason: >-
-      Это стоп-фактор, а не измерение: отрицательный собственный капитал
-      опускает класс до низшего независимо от балла. Начислять за него ещё
-      и баллы значило бы учитывать одно обстоятельство дважды. Показатель
-      рассчитывается и приводится в заключении справочно.
+      Показатель служит стоп-фактором, а не измерением: его дело — установить
+      состояние, а не начислить баллы. Начислять за него ещё и баллы значило бы
+      учитывать одно обстоятельство дважды. Показатель рассчитывается
+      и приводится в заключении справочно.
     formula: "1300"
     applicable_to: [full, simplified]
     note: >-
@@ -236,6 +239,7 @@ metrics:
     material_change: "0.40"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: duplicate
     scoring_exclusion_reason: >-
       Нет шкалы уровня: бесспорного ориентира у показателя нет. Кроме того,
       структура капитала уже измеряется коэффициентом автономии, у которого
@@ -266,6 +270,7 @@ metrics:
     material_change: "0.10"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: duplicate
     scoring_exclusion_reason: >-
       Финансовый рычаг есть монотонная функция коэффициента автономии
       (1700 / 1300 против 1300 / 1700) и измеряет то же самое. Учитывать оба
@@ -283,6 +288,7 @@ metrics:
     direction: lower_better
     material_change: "0.20"
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: это абсолютная величина в тысячах рублей, и бесспорного
       ориентира у неё быть не может. Долговая нагрузка оценивается через
@@ -302,6 +308,7 @@ metrics:
     direction: lower_better
     material_change: "0.15"
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: абсолютная величина в тысячах рублей, бесспорного
       ориентира быть не может.
@@ -318,6 +325,7 @@ metrics:
     direction: lower_better
     material_change: "1.00"
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня. Бесспорного ориентира нет, а знаменатель — прибыль
       от продаж — может быть отрицательным при убытке, и тогда отношение
@@ -421,6 +429,7 @@ metrics:
     material_change: "0.20"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: бесспорного ориентира у оборачиваемости быть не может,
       она целиком отраслевая. Показатель рассчитывается и приводится
@@ -437,6 +446,7 @@ metrics:
     material_change: "0.15"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: сколько дней оборачиваемости дебиторки считать хорошим
       результатом — вопрос отрасли, а отраслевых порогов у нас нет.
@@ -454,6 +464,7 @@ metrics:
     material_change: "0.20"
     denominator_must_be_positive: true
     in_scoring: false
+    scoring_exclusion_kind: no_level_scale
     scoring_exclusion_reason: >-
       Нет шкалы уровня: нормальная оборачиваемость запасов у торговли
       и у тяжёлого машиностроения различается на порядок.

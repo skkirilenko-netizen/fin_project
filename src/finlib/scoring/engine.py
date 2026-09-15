@@ -67,6 +67,10 @@ class Assessment:
     class_code: str | None
     class_name: str | None
     no_class_reason: str | None
+    # Почему балльная оценка не формируется: основание слишком узкое.
+    # Заполняется независимо от того, присвоен класс или нет: при сработавшем
+    # стоп-факторе класс есть, а балльной оценки всё равно нет.
+    breadth_reason: str | None
     class_before_stop: str | None
     stop_factor_code: str | None
     stop_factor_effect: StopEffect
@@ -153,11 +157,19 @@ def _group_scores(
     live_weight = sum(
         scoring.groups[code].weight for code, score, _, _ in raw if score is not None
     )
+    # Веса групп в методике заданы процентами (сумма 100), а в оценке нужна
+    # доля: effective_weight сравнивается с 0,5 в правиле достаточности.
+    # Прежде nominal_weight хранился процентом, а effective_weight долей —
+    # два соседних поля в разных единицах, и приложение печатало 3000,0 %.
+    total_weight = sum(item.weight for item in scoring.groups.values())
     result: list[GroupScore] = []
     for code, score, used, excluded in raw:
-        nominal = scoring.groups[code].weight
+        weight = scoring.groups[code].weight
+        nominal = weight / total_weight if total_weight > 0 else Decimal(0)
+        # Фактический вес считается от исходных весов методики, а не от долей:
+        # делить долю на сумму процентов значило бы уменьшить её в сто раз.
         effective = (
-            nominal / live_weight if score is not None and live_weight > 0 else Decimal(0)
+            weight / live_weight if score is not None and live_weight > 0 else Decimal(0)
         )
         result.append(
             GroupScore(
@@ -342,7 +354,13 @@ def assess(
     # Балл считается всегда, но класс присваивается только при достаточно
     # широком основании. Доминирование одной группы важнее числа показателей.
     metrics_used, groups_used, max_weight = breadth(groups, metric_scores)
-    blocked = scoring.sufficiency.blocking_reason(metrics_used, groups_used, max_weight)
+    narrow = scoring.sufficiency.blocking_reason(metrics_used, groups_used, max_weight)
+
+    # Стоп-фактор старше правила достаточности. Отрицательный собственный
+    # капитал — состояние, установленное одним показателем, и узость основания
+    # его не отменяет. Иначе в заключении соседствовали два взаимоисключающих
+    # утверждения: класс не присвоен и класс присвоен низший.
+    blocked = None if policy is not None else narrow
 
     period_values = load_period_values(inn, conn, standard).get(target)
     flags = (
@@ -361,7 +379,10 @@ def assess(
         class_code=None if blocked else final_code,
         class_name=None if blocked else scoring.require_class(final_code).name,
         no_class_reason=blocked,
-        class_before_stop=None if blocked else by_score.code,
+        # Класс по баллу при узком основании не формируется даже тогда, когда
+        # класс присвоен стоп-фактором: балльной оценки просто нет.
+        class_before_stop=None if (blocked or narrow) else by_score.code,
+        breadth_reason=narrow,
         stop_factor_code=policy.code if policy is not None else None,
         stop_factor_effect=policy.effect if policy is not None else StopEffect.NONE,
         confidence=confidence,

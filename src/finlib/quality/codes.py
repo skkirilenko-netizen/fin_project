@@ -34,6 +34,10 @@ class CheckCode(StrEnum):
     MANDATORY_FIELDS = "mandatory_fields"
     JUMP_DETECTION = "jump_detection"
     RETAINED_EARNINGS_LINK = "retained_earnings_link"
+    # Единица измерения не определена формой комплекта. Ошибка в тысячу раз
+    # не ловится ни одним другим контролем: баланс сойдётся, коэффициенты
+    # будут верны, а все абсолютные величины окажутся неверны.
+    UNIT_NOT_DETERMINED = "unit_not_determined"
     # Записи получения и загрузки (задачи 3 и 4).
     CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
@@ -74,5 +78,6 @@ CHECK_CODES: frozenset[CheckCode] = frozenset(
         CheckCode.MANDATORY_FIELDS,
         CheckCode.JUMP_DETECTION,
         CheckCode.RETAINED_EARNINGS_LINK,
+        CheckCode.UNIT_NOT_DETERMINED,
     }
 )

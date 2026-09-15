@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS src_file (
     is_actual         boolean NOT NULL DEFAULT true,
     unit_code         text,
     unit_multiplier   numeric,
-    unit_source       text NOT NULL DEFAULT 'assumed'
-                      CHECK (unit_source IN ('declared', 'assumed')),
+    unit_source       text NOT NULL DEFAULT 'unknown'
+                      CHECK (unit_source IN ('form_standard', 'explicit', 'unknown')),
     status            text NOT NULL DEFAULT 'loaded'
                       CHECK (status IN ('loaded', 'processed', 'quarantine')),
     quarantine_reason text,
@@ -59,9 +59,11 @@ COMMENT ON TABLE src_file IS 'Загруженная отчётность как
 COMMENT ON COLUMN src_file.checksum IS 'sha256 сырого ответа источника';
 COMMENT ON COLUMN src_file.unit_code IS 'Единица измерения (ОКЕИ: 384 — тыс. руб., 385 — млн руб.)';
 COMMENT ON COLUMN src_file.unit_source IS
-    'declared — единица указана источником; assumed — принята по умолчанию. '
-    'В ответе ГИР БО поля единицы измерения нет вообще, значения приходят в тысячах рублей, '
-    'поэтому для него всегда assumed';
+    'form_standard — единица определена формой отчётности (перечень форм и код ОКЕИ '
+    'в methodology/lines.yaml, блок units); explicit — единица указана источником; '
+    'unknown — не определена, комплект уходит в карантин контролем unit_not_determined. '
+    'Значения assumed нет: принятая по умолчанию единица — дефект данных, ошибка '
+    'в тысячу раз не ловится ни одним контролем';
 COMMENT ON COLUMN src_file.standard IS
     'Стандарт отчётности: rsbu — РСБУ отдельного юридического лица, ifrs — консолидированная '
     'по МСФО. Входит в ключ уникальности: за один год организация может раскрыть и то, и другое. '
@@ -221,6 +223,10 @@ CREATE TABLE IF NOT EXISTS assessment (
     class_code          text,
     class_name          text,
     no_class_reason     text,
+    -- Почему балльная оценка не формируется: основание слишком узкое.
+    -- Заполняется независимо от класса: при сработавшем стоп-факторе класс
+    -- присвоен, а балльной оценки всё равно нет.
+    breadth_reason      text,
     class_before_stop   text,
     stop_factor_code    text,
     stop_factor_effect  text CHECK (stop_factor_effect IN ('none', 'lowest_class', 'cap_at_class')),
@@ -272,6 +278,10 @@ CREATE TABLE IF NOT EXISTS assessment_metric (
     periods_used     integer NOT NULL DEFAULT 0,
     included         boolean NOT NULL,
     exclusion_reason text,
+    -- Машинный вид причины исключения: по нему причины упорядочиваются
+    -- по фиксированной иерархии, а текст остаётся пояснением.
+    exclusion_kind   text CHECK (exclusion_kind IN
+                     ('stop_factor', 'no_level_scale', 'duplicate', 'no_data')),
     CONSTRAINT assessment_metric_uniq UNIQUE (assessment_id, metric_code)
 );
 

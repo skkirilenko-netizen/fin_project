@@ -31,7 +31,13 @@ def with_class(db_conn) -> ReportData:
 
 @pytest.fixture
 def without_class(db_conn) -> ReportData:
-    """Организация, которой класс не присвоен."""
+    """Организация, которой класс не присвоен: узкое основание без стоп-фактора."""
+    return load_report_data(CORRECTED_INN, db_conn)
+
+
+@pytest.fixture
+def stopped_and_narrow(db_conn) -> ReportData:
+    """Стоп-фактор при узком основании: класс присваивается, балла нет."""
     return load_report_data(SIMPLE_INN, db_conn)
 
 
@@ -192,15 +198,57 @@ def _now():
 def test_score_rule_is_a_pure_function_of_class_and_stop() -> None:
     """Правило раскрытия балла не зависит от значения самого балла."""
     base = dict(
-        inn="1", report_date=date(2025, 12, 31), standard=Standard.RSBU, organization={}
+        inn="1",
+        report_date=date(2025, 12, 31),
+        standard=Standard.RSBU,
+        organization={},
+        unit_name="тыс. руб.",
     )
-    high = {"total_score": Decimal("99.00"), "class_code": None, "stop_factor_code": None}
+    high = {
+        "total_score": Decimal("99.00"),
+        "class_code": None,
+        "stop_factor_code": None,
+        "breadth_reason": "основание узкое",
+    }
     assert not ReportData(**base, assessment=high).score_in_appendix
 
-    ok = {"total_score": Decimal("10.00"), "class_code": "E", "stop_factor_code": None}
+    ok = {
+        "total_score": Decimal("10.00"),
+        "class_code": "E",
+        "stop_factor_code": None,
+        "breadth_reason": None,
+    }
     data = ReportData(**base, assessment=ok)
     assert data.score_in_appendix and data.score_in_summary
 
-    stopped = {"total_score": Decimal("85.00"), "class_code": "E", "stop_factor_code": "x"}
+    stopped = {
+        "total_score": Decimal("85.00"),
+        "class_code": "E",
+        "stop_factor_code": "x",
+        "breadth_reason": None,
+    }
     data = ReportData(**base, assessment=stopped)
     assert data.score_in_appendix and not data.score_in_summary
+
+
+def test_stop_factor_outranks_sufficiency(stopped_and_narrow) -> None:
+    """При стоп-факторе класс присваивается, а узость основания — отдельной фразой.
+
+    Прежде в разделе стояли два взаимоисключающих утверждения: класс
+    не присвоен и класс присвоен низший.
+    """
+    data = stopped_and_narrow
+    assert data.class_code, "стоп-фактор обязан присвоить класс"
+    assert data.assessment["no_class_reason"] is None
+    assert data.assessment["breadth_reason"]
+
+    text = text_of(data)
+    assert "Класс финансового состояния не присвоен" not in text
+    assert "Сработал стоп-фактор" in text
+    assert "балльная оценка не формируется" in text.lower()
+
+
+def test_score_is_withheld_when_basis_is_narrow(stopped_and_narrow) -> None:
+    """Класс от стоп-фактора балла не раскрывает: балльной оценки нет."""
+    assert not stopped_and_narrow.score_in_summary
+    assert not stopped_and_narrow.score_in_appendix

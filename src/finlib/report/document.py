@@ -26,6 +26,7 @@ from finlib.report.appendix import (
     not_calculated_table,
     provenance,
 )
+from finlib.report.consistency import InconsistentReportError, check_document
 from finlib.report.data import ReportData, load_report_data
 from finlib.report.sections import Section, split_sections
 from finlib.report.summary import build_summary
@@ -92,6 +93,11 @@ def build_report(
         )
     sections = split_sections(conclusion.text)
 
+    # Противоречие в документе хуже отсутствия сведений: проверяем до записи.
+    problems = check_document(data, _limitations_text(inn, conn, data, standard))
+    if problems:
+        raise InconsistentReportError([item.message for item in problems])
+
     document = Document()
     _set_base_style(document)
     _write_header(document, data)
@@ -110,6 +116,16 @@ def build_report(
         model=conclusion.model,
         sections=tuple(sections),
     )
+
+
+def _limitations_text(
+    inn: str, conn: PgConnection | None, data: ReportData, standard: Standard
+) -> str:
+    """Раздел «Ограничения анализа» тем же составом, что уходит в документ."""
+    from finlib.llm.context import build_context
+
+    context = build_context(inn, conn, report_date=data.report_date, standard=standard)
+    return context.limitations
 
 
 def _set_base_style(document: Document) -> None:
@@ -171,24 +187,29 @@ def _write_appendix(
     document.add_page_break()
     document.add_heading("Приложение", level=1)
 
+    # Номер таблицы ставится здесь, а не в её заголовке: таблица может
+    # не строиться (разложение балла без класса), и захардкоженные номера
+    # оставляли в документе дыру — таблицы 3 не было, а таблица 4 номер
+    # сохраняла.
     tables = [
         metrics_table(data),
         not_calculated_table(data),
         groups_table(data),
         checks_table(data),
     ]
-    for table in tables:
-        if table is not None:
-            _write_table(document, table)
+    for number, table in enumerate(
+        (item for item in tables if item is not None), start=1
+    ):
+        _write_table(document, table, number)
 
     document.add_heading("Происхождение документа", level=2)
     for line in provenance(data, model, generated_at):
         document.add_paragraph(line)
 
 
-def _write_table(document: Document, table: Table) -> None:
-    """Одна таблица приложения."""
-    document.add_heading(table.title, level=2)
+def _write_table(document: Document, table: Table, number: int) -> None:
+    """Одна таблица приложения под сквозным номером."""
+    document.add_heading(f"Таблица {number}. {table.title}", level=2)
     written = document.add_table(rows=1, cols=len(table.header))
     written.style = "Table Grid"
     for cell, title in zip(written.rows[0].cells, table.header, strict=True):

@@ -7,7 +7,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from finlib.normalize.lines import LineDef, Operator, ReportingType
+from finlib.normalize.lines import LineDef, Operator, ReportingType, UnitSource
 from finlib.quality.codes import CheckCode, CheckStatus, Severity
 from finlib.quality.context import PeriodFacts, ReportContext
 from finlib.quality.values import as_addend
@@ -415,7 +415,42 @@ def retained_earnings_link(context: ReportContext) -> Iterator[CheckOutcome]:
             )
 
 
+def unit_not_determined(context: ReportContext) -> Iterator[CheckOutcome]:
+    """Единица измерения определена формой комплекта.
+
+    Прежде она принималась как предположение. Это дефект данных, а не
+    представления: ошибка в тысячу раз не ловится ни одним другим контролем —
+    баланс сойдётся, сходимость разделов сойдётся, коэффициенты будут верны,
+    а все абсолютные величины окажутся неверны в тысячу раз.
+
+    Контроль относится к комплекту целиком, а не к периоду: единицу задаёт
+    форма, а она у комплекта одна.
+    """
+    code = CheckCode.UNIT_NOT_DETERMINED
+    # Уровень берётся как есть, без понижения для сравнительных периодов:
+    # контроль относится к комплекту целиком, периода у него нет.
+    severity = context.thresholds.severity_of(code.value)
+    details = {
+        "unit_code": context.unit_code,
+        "unit_source": context.unit_source,
+    }
+    if context.unit_source == UnitSource.UNKNOWN.value:
+        yield CheckOutcome(
+            code, CheckStatus.FAIL, None, None, None,
+            "Единица измерения не определена: набор форм комплекта "
+            "не предусмотрен справочником",
+            details, severity,
+        )
+        return
+    yield CheckOutcome(
+        code, CheckStatus.PASS, None, None, None,
+        f"Единица измерения определена формой отчётности: код ОКЕИ {context.unit_code}",
+        details, severity,
+    )
+
+
 ALL_CHECKS = (
+    unit_not_determined,
     balance_equality,
     section_sum,
     profit_chain,

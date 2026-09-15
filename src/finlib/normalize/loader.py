@@ -21,8 +21,6 @@ from finlib.normalize.report import LoadReport
 from finlib.quality.codes import CheckCode, CheckStatus
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.sources.girbo import (
-    ASSUMED_UNIT_CODE,
-    ASSUMED_UNIT_MULTIPLIER,
     PERIOD_OFFSETS,
     Organization,
     ReportSet,
@@ -295,7 +293,9 @@ def load_report_set(
             conn=conn,
         )
 
-    src_file_id = _upsert_src_file(report, conn, raw_path, checksum, source_url, standard)
+    src_file_id = _upsert_src_file(
+        report, conn, raw_path, checksum, source_url, standard, catalog
+    )
     result.src_file_id = src_file_id
 
     built = build_facts(report, catalog)
@@ -373,8 +373,11 @@ def _upsert_src_file(
     checksum: str | None,
     source_url: str | None,
     standard: Standard,
+    catalog: LinesCatalog,
 ) -> int:
     """Пишет комплект как единицу обработки и возвращает его идентификатор."""
+    units = catalog.units
+    unit_source = units.source_for(report.form_codes)
     params: dict[str, Any] = {
         "inn": report.inn,
         "standard": standard.value,
@@ -389,9 +392,13 @@ def _upsert_src_file(
         "correction_version": report.correction_version,
         "is_actual": report.is_actual,
         "reporting_type": report.reporting_type.value,
-        "unit_code": ASSUMED_UNIT_CODE,
-        "unit_multiplier": ASSUMED_UNIT_MULTIPLIER,
-        "unit_source": "assumed",
+        # Единица определяется формой, а не ответом источника: ГИР БО её
+        # не сообщает, а ошибка в тысячу раз не ловится ни одним контролем.
+        # Комплект из неизвестных форм единицы не получает и уходит
+        # в карантин контролем unit_not_determined.
+        "unit_code": units.okei_code,
+        "unit_multiplier": units.multiplier,
+        "unit_source": unit_source.value,
         "meta": json.dumps({"period_depth": {f: len(d.values) for f, d in report.forms.items()}}),
     }
     with cursor(conn, dict_rows=False) as cur:
