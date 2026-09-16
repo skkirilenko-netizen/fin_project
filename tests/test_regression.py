@@ -267,6 +267,86 @@ def test_expected_refusal_counts_as_success() -> None:
     assert found["остановились"] == 1
 
 
+def _quarantine_entry(**changes):
+    """Запись состава организации, от которой ожидается отбраковка."""
+    base = {
+        "category_id": 13,
+        "category": "Организации без выручки по устройству",
+        "inn": "9707042940",
+        "expected_outcome": "quarantine_expected",
+        "reason": "СФО: выручки нет по устройству",
+    }
+    return entry(**{**base, **changes})
+
+
+def _quarantined_run(**changes):
+    """Итог организации, отчётность которой отбракована целиком."""
+    base = {
+        "inn": "9707042940",
+        "name": "СФО",
+        "category_id": 13,
+        "category": "Организации без выручки по устройству",
+        "expected": "quarantine_expected",
+        "ok": False,
+        "seconds": 0.1,
+        "stage": "расчёт показателей",
+        "reason": "по загруженным данным не рассчитан ни один показатель",
+        "sets": 2,
+        "quarantined": 2,
+    }
+    return RUN.OrgRun(**{**base, **changes})
+
+
+def test_expected_quarantine_counts_as_success() -> None:
+    """Отбраковка организации без выручки по устройству — ожидаемый исход.
+
+    Блокирующий контроль обязательных строк для неё и должен срабатывать:
+    выручки у специализированного финансового общества нет по устройству.
+    Ослаблять контроль ради таких организаций нельзя — нераскрытая выручка
+    у работающей организации остаётся серьёзным сигналом.
+    """
+    subset = RUN.RegressionSet(**raw()).with_organizations((_quarantine_entry(),))
+    found = [_quarantined_run()]
+    RUN._finalize(found, {"9707042940": {RUN.Feature.REVENUE_NOT_DISCLOSED}}, subset)
+    assert found[0].as_expected
+    assert found[0].category_confirmed
+
+
+def test_quarantine_expected_requires_full_quarantine() -> None:
+    """Ожидается не любая остановка, а именно отбраковка всех комплектов."""
+    subset = RUN.RegressionSet(**raw()).with_organizations((_quarantine_entry(),))
+    partial = [_quarantined_run(sets=2, quarantined=1)]
+    RUN._finalize(partial, {"9707042940": set()}, subset)
+    assert not partial[0].as_expected
+
+
+def test_organization_that_suddenly_passed_is_not_as_expected() -> None:
+    """Организация, прошедшая цикл вопреки ожиданию, успехом не считается.
+
+    Это сведение о том, что гипотеза устарела: выручку раскрыли. Молча
+    засчитать такое за совпадение значило бы потерять сигнал.
+    """
+    subset = RUN.RegressionSet(**raw()).with_organizations((_quarantine_entry(),))
+    passed = [_quarantined_run(ok=True, stage=None, reason=None, quarantined=0)]
+    RUN._finalize(passed, {"9707042940": set()}, subset)
+    assert not passed[0].as_expected
+
+
+def test_undisclosed_revenue_is_not_near_zero_turnover() -> None:
+    """Нераскрытая выручка и оборот около нуля — разные признаки.
+
+    Организация с оборотом около нуля его всё-таки показала; у организации
+    без выручки показывать нечего, и её отчётность отбраковывается целиком.
+    Смешение этих признаков делало категорию «нулевые обороты» непроверяемой.
+    """
+    assert RUN.Feature.REVENUE_NOT_DISCLOSED in RUN.FEATURE_NAMES
+    assert RUN.FEATURE_NAMES[RUN.Feature.REVENUE_NOT_DISCLOSED] != RUN.FEATURE_NAMES[
+        RUN.Feature.NEAR_ZERO_REVENUE
+    ]
+    category = next(item for item in SET.categories if item.id == 13)
+    assert category.feature is RUN.Feature.REVENUE_NOT_DISCLOSED
+
+
 def test_refusal_of_the_runner_itself_is_not_a_success() -> None:
     """Сбой прогонщика отказом методики не считается."""
     subset = RUN.RegressionSet(**raw()).with_organizations(

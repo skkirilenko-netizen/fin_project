@@ -380,9 +380,7 @@ def _compute(
     """Считает показатели и оценку."""
     results = compute_all(inn, conn, standard=standard)
     if not results:
-        raise PipelineError(
-            Stage.METRICS, "по загруженным данным не рассчитан ни один показатель"
-        )
+        raise PipelineError(Stage.METRICS, _no_metrics_reason(inn, conn, standard))
     saved = save_results(inn, results, conn, standard)
     calculated = sum(1 for item in results if item.is_ok)
     report(Stage.METRICS, f"значений записано {saved}, из них рассчитано {calculated}")
@@ -398,6 +396,33 @@ def _compute(
         else f"класс не присвоен ({assessment.no_class_reason})"
     )
     report(Stage.SCORING, f"{assessment.report_date:%d.%m.%Y}: {verdict}")
+
+
+def _no_metrics_reason(inn: str, conn: PgConnection, standard: Standard) -> str:
+    """Почему не рассчитан ни один показатель.
+
+    Причины две, и путать их нельзя: отчётности нет вовсе либо она есть,
+    но целиком отбракована контролями. Пересчёт из ранее загруженных данных
+    контролей не прогоняет, поэтому сказать об отбраковке может только этот
+    этап — иначе в отчёте остаётся «не рассчитан ни один показатель»
+    без причины.
+    """
+    from finlib.db import fetch_all
+
+    rows = fetch_all(
+        "SELECT count(*) AS total, count(*) FILTER (WHERE status = 'quarantine') AS "
+        "quarantined FROM src_file WHERE inn = %(i)s AND standard = %(s)s AND is_actual",
+        {"i": inn, "s": standard.value},
+        conn=conn,
+    )
+    total = int(rows[0]["total"]) if rows else 0
+    quarantined = int(rows[0]["quarantined"]) if rows else 0
+    if total and quarantined == total:
+        return (
+            f"все комплекты отчётности ({total}) отбракованы контролями качества, "
+            "расчёт невозможен"
+        )
+    return "по загруженным данным не рассчитан ни один показатель"
 
 
 def _conclude(

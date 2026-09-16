@@ -9,6 +9,7 @@ from enum import StrEnum
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.definitions import MetricDef, MetricsCatalog, load_metrics
 from finlib.metrics.formula import (
+    FormulaError,
     NotCalculableReason,
     ZeroDenominatorError,
     average_codes,
@@ -160,8 +161,14 @@ def compute_metric(
     if metric.denominator_must_be_positive:
         denominator = denominator_of(tree)
         if denominator is not None:
-            computed = evaluate(denominator, current, previous, thresholds.constants)
-            if computed < 0:
+            try:
+                computed = evaluate(denominator, current, previous, thresholds.constants)
+            except (ZeroDenominatorError, FormulaError):
+                # Знаменатель сам не вычислился: причину назовёт основной
+                # расчёт ниже, у него формулировки точнее. Проверка знака —
+                # уточнение, и падать на ней нельзя.
+                computed = None
+            if computed is not None and computed < 0:
                 return MetricResult(
                     metric.code,
                     report_date,

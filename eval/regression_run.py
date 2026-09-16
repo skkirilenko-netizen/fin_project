@@ -91,6 +91,13 @@ class ExpectedOutcome(StrEnum):
     ANALYSIS = "analysis"
     # Организация вне периметра методики: отказ по ней — правильный исход.
     REFUSAL = "refusal"
+    # Отчётность сдана, но контроли её отбраковывают, и это ожидаемо:
+    # у специализированного финансового общества или холдинговой компании
+    # выручки нет по устройству, а обязательность строки 2110 — правило
+    # для работающей организации. Отбраковка здесь подтверждает контроль,
+    # а не опровергает его; ослаблять контроль ради таких организаций нельзя:
+    # нераскрытая выручка у работающей организации — серьёзный сигнал.
+    QUARANTINE_EXPECTED = "quarantine_expected"
 
 
 class Feature(StrEnum):
@@ -106,6 +113,10 @@ class Feature(StrEnum):
     INCOMPLETE_DISCLOSURE = "incomplete_disclosure"
     SINGLE_REPORT_YEAR = "single_report_year"
     NEAR_ZERO_REVENUE = "near_zero_revenue"
+    # Выручка не раскрыта ни за один период: не «около нуля», а отсутствует.
+    # Отличать эти два признака обязательно — оборот около нуля организация
+    # всё-таки показала, а здесь показывать нечего.
+    REVENUE_NOT_DISCLOSED = "revenue_not_disclosed"
     QUARANTINED = "quarantined"
     OUT_OF_SCOPE = "out_of_scope"
 
@@ -121,6 +132,7 @@ FEATURE_NAMES: dict[Feature, str] = {
     Feature.INCOMPLETE_DISCLOSURE: "неполное раскрытие",
     Feature.SINGLE_REPORT_YEAR: "один отчётный год",
     Feature.NEAR_ZERO_REVENUE: "обороты около нуля",
+    Feature.REVENUE_NOT_DISCLOSED: "выручка не раскрыта",
     Feature.QUARANTINED: "отбракованный комплект",
     Feature.OUT_OF_SCOPE: "вне периметра методики",
 }
@@ -611,6 +623,16 @@ SELECT DISTINCT inn FROM src_file
 WHERE inn = ANY(%(inns)s) AND status = 'quarantine'
 """
 
+# Выручка не раскрыта ни за один загруженный период. Считается по фактам,
+# а не по показателям: организация, у которой все комплекты отбракованы,
+# до расчёта показателей не доходит вовсе, а признак у неё есть.
+_REVENUE_NOT_DISCLOSED = """
+SELECT inn FROM fact_report
+WHERE inn = ANY(%(inns)s)
+GROUP BY inn
+HAVING count(*) FILTER (WHERE line_code = '2110' AND value IS NOT NULL) = 0
+"""
+
 _SIGN_CHANGE = """
 SELECT DISTINCT inn FROM metric_value
 WHERE inn = ANY(%(inns)s) AND reason_code = %(reason)s
@@ -668,6 +690,7 @@ def features_of(regression_set: RegressionSet) -> dict[str, set[Feature]]:
         (Feature.NEGATIVE_EQUITY, _NEGATIVE_EQUITY, params),
         (Feature.LOSS_TWO_YEARS, _LOSS_TWO_YEARS, params),
         (Feature.QUARANTINED, _QUARANTINED, params),
+        (Feature.REVENUE_NOT_DISCLOSED, _REVENUE_NOT_DISCLOSED, params),
         (Feature.SINGLE_REPORT_YEAR, _SINGLE_YEAR, params),
         (
             Feature.HOLDING_STRUCTURE,
@@ -697,11 +720,13 @@ def features_of(regression_set: RegressionSet) -> dict[str, set[Feature]]:
     revenue = _latest_line(inns, "2110")
     for inn in inns:
         total = balance.get(inn)
-        if total is None or total <= 0:
-            continue
         got = revenue.get(inn)
-        share = (got / total) if got is not None else Decimal(0)
-        if share < regression_set.threshold("near_zero_revenue"):
+        if total is None or total <= 0 or got is None:
+            # Нераскрытая выручка — не нулевой оборот, а отсутствие сведений
+            # о нём. Признак у неё свой, и смешивать их нельзя: организация
+            # с оборотом около нуля его всё-таки показала.
+            continue
+        if got / total < regression_set.threshold("near_zero_revenue"):
             found[inn].add(Feature.NEAR_ZERO_REVENUE)
 
     for row in fetch_all(_NOT_CALCULABLE_SHARE, params):
@@ -903,6 +928,12 @@ def run_metrics(
     inns = regression_set.inns
     params = {"inns": inns}
     expected_refusal = [item for item in runs if item.expected == ExpectedOutcome.REFUSAL]
+    # Организации, у которых ожидается отбраковка, в долю остановок не входят:
+    # их остановка — подтверждение контроля, а не отказ методики. Считаются
+    # они отдельной графой, иначе доля дошедших до оценки занижалась бы на них.
+    expected_quarantine = [
+        item for item in runs if item.expected == ExpectedOutcome.QUARANTINE_EXPECTED
+    ]
     analysed = [item for item in runs if item.expected == ExpectedOutcome.ANALYSIS]
     finished = [item for item in analysed if item.ok]
     with_class = [item for item in finished if item.class_code]
@@ -917,6 +948,10 @@ def run_metrics(
         "в резерве": len(regression_set.organizations) - len(regression_set.running),
         "итог совпал с ожиданием": f"{len([i for i in runs if i.as_expected])} из {len(runs)}",
         "ожидался отказ": len(expected_refusal),
+        "ожидалась отбраковка": len(expected_quarantine),
+        "отбраковано, как и ожидалось": len(
+            [item for item in expected_quarantine if item.as_expected]
+        ),
         "прошли цикл": len(finished),
         "остановились": len(analysed) - len(finished),
         "остановки по этапам": _by_stage(analysed),
@@ -1116,7 +1151,13 @@ def render(report: Report) -> str:
     if stopped:
         lines += ["", "## Остановки", ""]
         for item in stopped:
-            mark = " (ожидался отказ)" if item["as_expected"] else ""
+            mark = ""
+            if item["as_expected"]:
+                mark = (
+                    " (ожидалась отбраковка)"
+                    if item["expected"] == ExpectedOutcome.QUARANTINE_EXPECTED.value
+                    else " (ожидался отказ)"
+                )
             lines.append(
                 f"- {item['inn']} {item['name']}{mark}: этап «{item['stage']}» — "
                 f"{item['reason']}"
@@ -1129,6 +1170,8 @@ def _outcome(item: dict) -> str:
     if item["ok"]:
         return "пройдено"
     if item["as_expected"]:
+        if item["expected"] == ExpectedOutcome.QUARANTINE_EXPECTED.value:
+            return "отбраковано, как и ожидалось"
         return "отказ, как и ожидался"
     return f"остановлено: {item['stage']}"
 
@@ -1194,6 +1237,18 @@ def _finalize(runs: list[OrgRun], measured: dict[str, set[Feature]], regression_
             # бы ожидаемым отказом по организации, до которой не дошёл.
             run.as_expected = (
                 run.attempted and not run.ok and run.stage != RUNNER_FAILURE
+            )
+        elif entry.expected_outcome is ExpectedOutcome.QUARANTINE_EXPECTED:
+            # Ожидается не любая остановка, а именно отбраковка: отчётность
+            # загружена, и все её комплекты отбракованы контролями. Организация,
+            # которая внезапно прошла цикл, ожиданию не соответствует — это
+            # сведение о том, что гипотеза устарела, а не успех.
+            run.as_expected = (
+                run.attempted
+                and not run.ok
+                and run.stage != RUNNER_FAILURE
+                and run.sets > 0
+                and run.quarantined == run.sets
             )
         else:
             run.as_expected = run.ok
