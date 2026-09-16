@@ -201,6 +201,18 @@ def test_withdrawal_message_names_both_values() -> None:
     assert "-41" not in hit.message
 
 
+def test_zero_balance_does_not_break_the_run() -> None:
+    """Нулевая валюта баланса сигнал не срабатывает, а не роняет расчёт.
+
+    У организации в конкурсном производстве баланс сведён к нулю, и доля
+    от нуля не определена. Прежде такая отчётность останавливала прогон
+    целиком: ошибка нулевого знаменателя уходила наверх.
+    """
+    now = {"1300": Decimal(0), "2400": Decimal(0), "2110": Decimal(0), "1600": Decimal(0)}
+    before = {"1300": Decimal(0), "2400": Decimal(0), "2110": Decimal(0), "1600": Decimal(0)}
+    assert codes(now, before) == set()
+
+
 def test_transit_structure_is_detected() -> None:
     """Оборот в сто раз выше валюты баланса — признак транзитной структуры."""
     assert "transit_structure" in codes(NOW, BEFORE)

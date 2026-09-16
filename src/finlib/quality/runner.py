@@ -26,6 +26,19 @@ _QUARANTINED = """
 SELECT id FROM src_file WHERE inn = %(inn)s AND status = 'quarantine'
 """
 
+# Блокирующие записи журнала, которые оставил не прогон контролей, а загрузчик.
+# Карантин ставится по блокирующему провалу, откуда бы он ни пришёл: строка,
+# не опознанная по наименованию и при этом несущая значение, — такая же
+# остановка, как несошедшийся итог.
+_LOADER_BLOCKING = """
+SELECT check_code, count(*) AS hits
+FROM dq_log
+WHERE src_file_id = %(id)s AND severity = 'blocking' AND status = 'fail'
+  AND NOT (check_code = ANY(%(codes)s))
+GROUP BY check_code
+ORDER BY check_code
+"""
+
 
 @dataclass
 class QualityReport:
@@ -112,10 +125,10 @@ def run_checks(
     )
     log_records([_to_record(context, outcome) for outcome in outcomes], conn=conn)
 
-    failures = report.blocking_failures
-    if failures:
+    reason = _reason(report.blocking_failures, _loader_blocking(src_file_id, conn))
+    if reason is not None:
         report.quarantined = True
-        report.quarantine_reason = _reason(failures)
+        report.quarantine_reason = reason
         execute(
             _SET_STATUS,
             {"id": src_file_id, "status": "quarantine", "reason": report.quarantine_reason},
@@ -129,11 +142,24 @@ def run_checks(
     return report
 
 
-def _reason(failures: list[CheckOutcome]) -> str:
-    """Короткая причина карантина из провалившихся контролей."""
+def _reason(failures: list[CheckOutcome], loader: dict[str, int]) -> str | None:
+    """Короткая причина карантина; None — блокирующих провалов нет."""
     by_check = Counter(outcome.check_code.value for outcome in failures)
+    by_check.update(loader)
+    if not by_check:
+        return None
     parts = [f"{code} ({count})" for code, count in sorted(by_check.items())]
     return "Провалены блокирующие контроли: " + ", ".join(parts)
+
+
+def _loader_blocking(src_file_id: int, conn: PgConnection) -> dict[str, int]:
+    """Блокирующие записи журнала, оставленные загрузчиком до прогона контролей."""
+    rows = fetch_all(
+        _LOADER_BLOCKING,
+        {"id": src_file_id, "codes": [code.value for code in CHECK_CODES]},
+        conn=conn,
+    )
+    return {row["check_code"]: int(row["hits"]) for row in rows}
 
 
 def _warn_on_unit_mismatch(context: ReportContext) -> None:

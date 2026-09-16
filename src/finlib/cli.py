@@ -17,7 +17,9 @@ import typer
 from finlib.db import fetch_all
 from finlib.llm.context import format_metric
 from finlib.metrics.definitions import Unit
-from finlib.pipeline import PipelineError, StageResult, analyze
+from finlib.pipeline import PipelineError, StageResult, analyze, load_inbox
+from finlib.sources.inbox import InboxScan, InboxSource
+from finlib.sources.model import SourceKind
 from finlib.standards import Standard
 
 app = typer.Typer(
@@ -95,6 +97,16 @@ def analyze_command(
     force_refresh: Annotated[
         bool, typer.Option("--force-refresh", help="Запросить источник, минуя кэш")
     ] = False,
+    from_inbox: Annotated[
+        bool,
+        typer.Option(
+            "--from-inbox",
+            help="Взять отчётность из поданных вручную файлов, а не из источника",
+        ),
+    ] = False,
+    inbox_dir: Annotated[
+        Path | None, typer.Option("--inbox", help="Каталог ручной подачи")
+    ] = None,
     output: Annotated[
         Path | None, typer.Option("--output", help="Каталог для документа")
     ] = None,
@@ -103,7 +115,9 @@ def analyze_command(
     """Полный цикл: получение, загрузка, контроли, расчёт, оценка, заключение."""
     _setup_logging(verbose)
     _check_inn(inn)
-    typer.echo(f"Анализ организации {inn}\n")
+    source = SourceKind.FILE if from_inbox or inbox_dir else SourceKind.GIR_BO
+    where = "по поданным файлам" if source is SourceKind.FILE else "по данным ГИР БО"
+    typer.echo(f"Анализ организации {inn} {where}\n")
     try:
         result = analyze(
             inn,
@@ -111,6 +125,8 @@ def analyze_command(
             with_llm=not no_llm,
             force_refresh=force_refresh,
             directory=output,
+            source=source,
+            inbox=InboxSource(inbox_dir) if source is SourceKind.FILE else None,
             on_stage=_echo_stage,
         )
     except PipelineError as exc:
@@ -127,6 +143,88 @@ def analyze_command(
                     fg=typer.colors.YELLOW,
                 )
             )
+
+
+@app.command("ingest")
+def ingest_command(
+    path: Annotated[
+        Path | None, typer.Option("--path", help="Каталог ручной подачи")
+    ] = None,
+    inn: Annotated[
+        str | None, typer.Option("--inn", help="Загрузить только одну организацию")
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Загружает поданные вручную файлы отчётности и прогоняет контроли качества.
+
+    Организация, период и единица измерения берутся из содержимого файла;
+    имя файла не значит ничего. Файл, у которого их определить нельзя,
+    не загружается, а причина называется здесь и — когда ИНН известен —
+    в журнале качества.
+    """
+    _setup_logging(verbose)
+    source = InboxSource(path)
+    scan = source.scan()
+    targets = [_check_inn(inn)] if inn else scan.inns
+    typer.echo(
+        f"Каталог подачи: {source.directory}\n"
+        f"Файлов: {len(scan.unattributed) + sum(len(v) for v in scan.by_inn.values())}, "
+        f"организаций: {len(scan.inns)}\n"
+    )
+    if inn and inn not in scan.by_inn:
+        _fail(f"в каталоге подачи нет файлов по ИНН {inn}")
+
+    loaded = quarantined = failed = 0
+    for target in targets:
+        typer.echo(typer.style(f"ИНН {target}", bold=True))
+        try:
+            result = load_inbox(target, inbox=source, on_stage=_echo_stage)
+        except PipelineError as exc:
+            failed += 1
+            typer.echo(
+                typer.style(
+                    f"  ! остановлено на этапе «{exc.stage.value}»: {exc.reason}",
+                    fg=typer.colors.RED,
+                )
+            )
+            continue
+        loaded += 1
+        quarantined += result.quarantined
+
+    _echo_rejected(source, scan)
+    typer.echo(
+        f"\nОрганизаций загружено {loaded}, остановлено {failed}; "
+        f"комплектов в карантине {quarantined}."
+    )
+
+
+def _echo_rejected(source: InboxSource, scan: InboxScan) -> None:
+    """Печатает файлы, которые разобрать не удалось.
+
+    Файл без определимого ИНН к организации не привязать, и в журнале качества
+    ему места нет: журнал ведётся по организациям. Поэтому он называется здесь
+    и только здесь.
+    """
+    rejected = source.rejections()
+    if rejected:
+        typer.echo(typer.style("\nОтклонённые файлы:", fg=typer.colors.YELLOW, bold=True))
+        for path, exc in rejected:
+            typer.echo(
+                typer.style(
+                    f"  {path.name}: {exc.check_code.value} — {exc}", fg=typer.colors.YELLOW
+                )
+            )
+    if scan.unattributed:
+        typer.echo(
+            typer.style(
+                "\nФайлы, у которых не определился ИНН (в журнал качества "
+                "не попадают — привязать их не к чему):",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+        )
+        for path in scan.unattributed:
+            typer.echo(typer.style(f"  {path.name}", fg=typer.colors.RED))
 
 
 @app.command("show")

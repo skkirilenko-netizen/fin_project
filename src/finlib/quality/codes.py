@@ -46,6 +46,14 @@ class CheckCode(StrEnum):
     # Записи получения и загрузки (задачи 3 и 4).
     CREDIT_ORGANIZATION = "credit_organization"
     LINE_NOT_RECOGNIZED = "line_not_recognized"
+    # Отказ разобрать поданный вручную файл. Организацию, период и единицу
+    # измерения определяет содержимое файла: имя файла ничего не значит,
+    # его может дать кто угодно. Не определилось — комплекта не возникает
+    # вовсе, и в расчёт попасть нечему.
+    FILE_INN_NOT_DETERMINED = "file_inn_not_determined"
+    FILE_PERIOD_NOT_DETERMINED = "file_period_not_determined"
+    FILE_REPORTING_TYPE_UNKNOWN = "file_reporting_type_unknown"
+    FILE_NOT_PARSED = "file_not_parsed"
     # Код не привязывается к строке: неполон справочник.
     AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
     # Несколько кодов раскрыли одну укрупнённую строку: аномалия самой отчётности.
@@ -57,12 +65,19 @@ class CheckCode(StrEnum):
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
 # по наименованию, в fact_report не попадает, поэтому запись обязана быть видна
-# в сводке качества; блокирующим её делает не факт неопознания, а последующее
-# несхождение итога раздела. Кредитная организация — вне периметра методики,
-# анализ по РСБУ для неё не проводится вовсе.
+# в сводке качества. Уровень у неё не один: пустая строка — пробел справочника
+# и повод его пополнить, строка с ненулевым значением — тихая потеря данных,
+# и она блокирующая. Уровень в таком случае передаётся записью явно, здесь
+# стоит умолчание. Кредитная организация — вне периметра методики, анализ
+# по РСБУ для неё не проводится вовсе. Файл, из которого не определить
+# организацию, период или тип отчётности, комплектом не становится.
 LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.CREDIT_ORGANIZATION: Severity.BLOCKING,
     CheckCode.LINE_NOT_RECOGNIZED: Severity.WARNING,
+    CheckCode.FILE_INN_NOT_DETERMINED: Severity.BLOCKING,
+    CheckCode.FILE_PERIOD_NOT_DETERMINED: Severity.BLOCKING,
+    CheckCode.FILE_REPORTING_TYPE_UNKNOWN: Severity.BLOCKING,
+    CheckCode.FILE_NOT_PARSED: Severity.BLOCKING,
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.MULTIPLE_SOURCE_CODES: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
@@ -89,6 +104,10 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.PERIOD_MAGNITUDE_SHIFT: "кратное тысяче изменение величин",
     CheckCode.CREDIT_ORGANIZATION: "организация вне периметра методики",
     CheckCode.LINE_NOT_RECOGNIZED: "опознание строки по наименованию",
+    CheckCode.FILE_INN_NOT_DETERMINED: "определение организации по содержимому файла",
+    CheckCode.FILE_PERIOD_NOT_DETERMINED: "определение отчётного периода по содержимому файла",
+    CheckCode.FILE_REPORTING_TYPE_UNKNOWN: "определение типа отчётности по содержимому файла",
+    CheckCode.FILE_NOT_PARSED: "разбор поданного файла отчётности",
     CheckCode.AMBIGUOUS_LINE_CODE: "неоднозначность кода строки",
     CheckCode.MULTIPLE_SOURCE_CODES: "строка раскрыта несколькими кодами",
     CheckCode.UNKNOWN_LINE_CODE: "код строки отсутствует в справочнике",
@@ -104,6 +123,22 @@ def check_name(code: str) -> str:
     except (ValueError, KeyError):  # pragma: no cover — код вне справочника
         return code
 
+
+# Записи загрузчика о сопоставлении строк со справочником. Они не событие,
+# а состояние комплекта: «эта строка не опознана», «этот код неизвестен».
+# Повторная загрузка того же комплекта даёт то же состояние, поэтому прежние
+# записи затираются — иначе повторные прогоны множили бы одинаковые строки
+# журнала, а исправленный справочник не снимал бы карантин, поставленный
+# по устаревшей записи. Перезапись значения и расхождение периодов сюда
+# не входят: это события, и они история.
+MAPPING_CODES: frozenset[CheckCode] = frozenset(
+    {
+        CheckCode.LINE_NOT_RECOGNIZED,
+        CheckCode.UNKNOWN_LINE_CODE,
+        CheckCode.AMBIGUOUS_LINE_CODE,
+        CheckCode.MULTIPLE_SOURCE_CODES,
+    }
+)
 
 # Семейство кодов, которые контроли качества переписывают при каждом прогоне.
 # Записи загрузчика в это семейство не входят: они история, а не снимок.

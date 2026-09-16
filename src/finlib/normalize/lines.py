@@ -41,6 +41,11 @@ def normalize_name(text: str) -> str:
     return " ".join(re.sub(r"[^0-9a-zа-я]+", " ", lowered).split())
 
 
+def _normalize_unit(text: str) -> str:
+    """Приводит подпись единицы измерения к виду, пригодному для сравнения."""
+    return normalize_name(text)
+
+
 class Component(BaseModel):
     """Слагаемое итоговой строки с оператором."""
 
@@ -48,6 +53,21 @@ class Component(BaseModel):
 
     code: str = Field(pattern=r"^\d{4}$")
     op: Operator = Operator.PLUS
+
+
+class NameMisprint(BaseModel):
+    """Написание строки, которое встречается в выгрузке из-за опечатки источника.
+
+    От `name_aliases` отличается сутью, а не механикой: алиас — законный
+    вариант наименования, опечатка — дефект шаблона выгрузки. Причина
+    обязательна: через год строку «Проценты по уплате» в справочнике иначе
+    не отличить от принятого наименования, и её примут за вариант нормы.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 class LineDef(BaseModel):
@@ -59,6 +79,9 @@ class LineDef(BaseModel):
     reporting_type: ReportingType = ReportingType.FULL
     name: str = Field(min_length=1)
     name_aliases: tuple[str, ...] = ()
+    # Опечатки шаблона источника: опознаются наравне с наименованием,
+    # но объявлены отдельно и с причиной.
+    name_misprints: tuple[NameMisprint, ...] = ()
     form: str = Field(pattern=r"^\d{7}$")
     section: str = Field(min_length=1)
     sign: Sign = Sign.POSITIVE
@@ -85,7 +108,11 @@ class LineDef(BaseModel):
     @property
     def match_names(self) -> tuple[str, ...]:
         """Нормализованные наименования, по которым строка опознаётся."""
-        names = (self.name, *self.name_aliases)
+        names = (
+            self.name,
+            *self.name_aliases,
+            *(item.name for item in self.name_misprints),
+        )
         return tuple(dict.fromkeys(normalize_name(name) for name in names))
 
     def accepts_code(self, code: str) -> bool:
@@ -202,6 +229,17 @@ class UnitsDef(BaseModel):
     forms: tuple[str, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
 
+    def matches_declared(self, declared: str | None) -> bool:
+        """Совпадает ли единица, объявленная источником, с единицей справочника.
+
+        Сравнение по написанию, а не по коду: ОКЕИ в выгрузке нет, есть
+        подпись «Тыс. руб.» в шапке. Несовпадение означает не другую единицу,
+        а неизвестную: сопоставить её с кодом ОКЕИ нечем, и угадывать нельзя.
+        """
+        if not declared:
+            return False
+        return _normalize_unit(declared) == _normalize_unit(self.name)
+
     def source_for(self, form_codes: Sequence[str]) -> UnitSource:
         """Определена ли единица для набора форм комплекта.
 
@@ -229,7 +267,9 @@ class LinesCatalog(BaseModel):
     ignored_codes: tuple[IgnoredCode, ...] = ()
 
     _index: dict[tuple[ReportingType, str], LineDef] = PrivateAttr(default_factory=dict)
-    _by_name: dict[tuple[ReportingType, str, str], LineDef] = PrivateAttr(default_factory=dict)
+    _by_name: dict[tuple[ReportingType, str, str], tuple[LineDef, ...]] = PrivateAttr(
+        default_factory=dict
+    )
 
     # --- проверки целостности ------------------------------------------------
 
@@ -265,25 +305,37 @@ class LinesCatalog(BaseModel):
             index[line.key] = line
         return index
 
-    def _build_name_index(self) -> dict[tuple[ReportingType, str, str], LineDef]:
-        """Индекс наименований упрощённого набора; внутри формы они не повторяются.
+    def _build_name_index(self) -> dict[tuple[ReportingType, str, str], tuple[LineDef, ...]]:
+        """Индекс наименований упрощённого набора.
 
         Для полного набора индекс не строится: там наименования неоднозначны
         («Заёмные средства» — и 1410, и 1510), а ключом служит код строки.
+
+        Одно наименование на две строки допускается в единственном случае:
+        когда перечни допустимых кодов у них не пересекаются и код разводит
+        тёзок однозначно. Так устроен «БАЛАНС» упрощённой формы — итог актива
+        и итог пассива печатаются одним словом, а различаются кодом 1600
+        и 1700. Пересекись перечни — выбор стал бы догадкой, и справочник
+        не загрузится.
         """
-        by_name: dict[tuple[ReportingType, str, str], LineDef] = {}
+        by_name: dict[tuple[ReportingType, str, str], tuple[LineDef, ...]] = {}
         for line in self.lines:
             if line.reporting_type is ReportingType.FULL:
                 continue
             for name in line.match_names:
                 key = (line.reporting_type, line.form, name)
-                existing = by_name.get(key)
-                if existing is not None and existing.code != line.code:
-                    raise ValueError(
-                        f"наименование «{name}» опознаёт сразу строки "
-                        f"{existing.code} и {line.code} формы {line.form}"
-                    )
-                by_name[key] = line
+                current = by_name.get(key, ())
+                for existing in current:
+                    if existing.code == line.code:
+                        continue
+                    shared = set(_allowed_codes(existing)) & set(_allowed_codes(line))
+                    if shared:
+                        raise ValueError(
+                            f"наименование «{name}» опознаёт сразу строки "
+                            f"{existing.code} и {line.code} формы {line.form}, "
+                            f"а коды {', '.join(sorted(shared))} допускают обе"
+                        )
+                by_name[key] = (*current, line)
         return by_name
 
     def _check_components_exist(self) -> None:
@@ -377,15 +429,31 @@ class LinesCatalog(BaseModel):
         return (reporting_type, code) in self._index
 
     def match_by_name(
-        self, name: str, reporting_type: ReportingType, form: str
+        self,
+        name: str,
+        reporting_type: ReportingType,
+        form: str,
+        source_code: str | None = None,
     ) -> LineDef | None:
-        """Опознаёт строку упрощённой формы по наименованию; неопознанное даёт None."""
+        """Опознаёт строку упрощённой формы по наименованию; неопознанное даёт None.
+
+        Код строки — подсказка, а не ключ: он берётся в расчёт только чтобы
+        развести строки-тёзки («БАЛАНС» актива и пассива). Когда наименование
+        опознаёт одну строку, код не спрашивается вовсе — в упрощённых формах
+        он меняется между периодами.
+        """
         if reporting_type is ReportingType.FULL:
             raise ValueError(
                 "опознание по наименованию определено только для упрощённых форм: "
                 "в полных формах наименования повторяются, ключом служит код строки"
             )
-        return self._by_name.get((reporting_type, form, normalize_name(name)))
+        found = self._by_name.get((reporting_type, form, normalize_name(name)), ())
+        if len(found) == 1:
+            return found[0]
+        if source_code is None:
+            return None
+        matching = [line for line in found if line.accepts_code(source_code)]
+        return matching[0] if len(matching) == 1 else None
 
     def is_ignored(self, code: str, form: str) -> bool:
         """Объявлен ли код заведомо игнорируемым.
@@ -453,6 +521,11 @@ class LinesCatalog(BaseModel):
     def codes(self, reporting_type: ReportingType = ReportingType.FULL) -> frozenset[str]:
         """Множество известных кодов строк набора."""
         return frozenset(code for kind, code in self._index if kind is reporting_type)
+
+
+def _allowed_codes(line: LineDef) -> tuple[str, ...]:
+    """Коды отчётности, которые строка допускает."""
+    return line.code_allowed or (line.code,)
 
 
 def _check_no_cycles(index: dict[tuple[ReportingType, str], LineDef]) -> None:

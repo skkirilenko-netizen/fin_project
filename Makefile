@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze regression regression-full
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest regression regression-full
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -24,6 +24,9 @@ check-conclusion:  ## Прогнать модель на ИНН и разобр�
 
 llm-stats:  ## Статистика обращений к модели по журналу llm_log
 	uv run python eval/llm_stats.py
+
+ingest:  ## Загрузить поданные вручную файлы из data/inbox: make ingest ARGS="--inn 7736050003"
+	uv run fin-analysis ingest $(ARGS)
 
 regression:  ## Регрессионный прогон набора без модели: make regression ARGS="--fetch"
 	uv run python eval/regression_run.py --contour fast $(ARGS)

@@ -207,11 +207,20 @@ def _evaluate(
     периода, четыре действия и скобки. Разбор идёт тем же интерпретатором,
     без eval.
     """
-    from finlib.metrics.formula import FormulaError, evaluate, parse_formula
+    from finlib.metrics.formula import (
+        FormulaError,
+        ZeroDenominatorError,
+        evaluate,
+        parse_formula,
+    )
 
     try:
         return evaluate(parse_formula(expression), current, previous, {})
-    except (FormulaError, KeyError, ZeroDivisionError):
+    except (FormulaError, KeyError, ZeroDivisionError, ZeroDenominatorError):
+        # Нулевой знаменатель у сигнала — не отказ методики, а отсутствие
+        # величины: доля от нулевой валюты баланса не определена. Сигнал
+        # просто не срабатывает. Проверено на организации в конкурсном
+        # производстве: у неё 1600 = 0, и прогон падал целиком.
         return None
 
 

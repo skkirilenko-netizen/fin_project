@@ -313,7 +313,33 @@ def test_broken_simplified_catalog_rejected(lines: list[dict[str, Any]], message
 
 
 def test_duplicate_names_within_form_rejected() -> None:
-    """Два наименования, опознающие разные строки одной формы, — ошибка справочника."""
+    """Тёзки, которых не развести кодом, — ошибка справочника.
+
+    Перечни допустимых кодов пересекаются, поэтому по коду 1190 выбрать
+    строку нельзя, а по наименованию — тем более. Молчаливый выбор запрещён.
+    """
+    lines = [
+        _full("1150", "Основные средства"),
+        _full("1190", "Прочие внеоборотные активы"),
+        _simplified(
+            "1150", "Материальные активы", code_allowed=["1150", "1190"],
+            same_meaning_as_full=False, note="п",
+        ),
+        _simplified(
+            "1190", "Другие активы", name_aliases=["Материальные активы"],
+            code_allowed=["1190"], same_meaning_as_full=False, note="п",
+        ),
+    ]
+    with pytest.raises(ValidationError, match="опознаёт сразу строки"):
+        LinesCatalog.model_validate(_catalog_dict(lines))
+
+
+def test_duplicate_names_resolved_by_code() -> None:
+    """Тёзки с непересекающимися кодами допускаются, и разводит их код.
+
+    Так устроен «БАЛАНС» упрощённой формы: итог актива и итог пассива
+    подписаны одним словом, а код у них свой.
+    """
     lines = [
         _full("1150", "Основные средства"),
         _full("1190", "Прочие внеоборотные активы"),
@@ -323,5 +349,40 @@ def test_duplicate_names_within_form_rejected() -> None:
             same_meaning_as_full=False, note="п",
         ),
     ]
-    with pytest.raises(ValidationError, match="опознаёт сразу строки"):
+    catalog = LinesCatalog.model_validate(_catalog_dict(lines))
+    simplified = ReportingType.SIMPLIFIED
+    by_own = catalog.match_by_name("Материальные активы", simplified, "0710001", "1150")
+    by_alias = catalog.match_by_name("Материальные активы", simplified, "0710001", "1190")
+    assert by_own is not None and by_own.code == "1150"
+    assert by_alias is not None and by_alias.code == "1190"
+    # Без кода тёзки неразличимы, и выбор не делается.
+    assert catalog.match_by_name("Материальные активы", simplified, "0710001") is None
+
+
+def test_misprint_requires_reason() -> None:
+    """Опечатка источника объявляется с причиной: иначе её примут за вариант нормы."""
+    lines = [
+        _full("1150", "Основные средства"),
+        _simplified(
+            "1150", "Материальные активы", same_meaning_as_full=False, note="п",
+            name_misprints=[{"name": "Материальные актив"}],
+        ),
+    ]
+    with pytest.raises(ValidationError):
         LinesCatalog.model_validate(_catalog_dict(lines))
+
+
+def test_misprint_recognizes_line() -> None:
+    """Объявленная опечатка опознаёт строку наравне с наименованием."""
+    lines = [
+        _full("1150", "Основные средства"),
+        _simplified(
+            "1150", "Материальные активы", same_meaning_as_full=False, note="п",
+            name_misprints=[
+                {"name": "Материальные актив", "reason": "опечатка шаблона выгрузки"}
+            ],
+        ),
+    ]
+    catalog = LinesCatalog.model_validate(_catalog_dict(lines))
+    found = catalog.match_by_name("Материальные актив", ReportingType.SIMPLIFIED, "0710001")
+    assert found is not None and found.code == "1150"

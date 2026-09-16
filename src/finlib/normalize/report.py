@@ -27,6 +27,9 @@ class LoadReport:
     ambiguous_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     line_conflicts: int = 0
     superseded_versions: int = 0
+    # Строки, не опознанные по наименованию: всего и из них несущие значение.
+    not_recognized: int = 0
+    not_recognized_with_value: int = 0
 
     @property
     def has_warnings(self) -> bool:
@@ -36,6 +39,7 @@ class LoadReport:
             or self.ambiguous_codes
             or self.line_conflicts
             or self.period_mismatches
+            or self.not_recognized
         )
 
     def summary(self) -> str:
@@ -60,4 +64,13 @@ class LoadReport:
             parts.append(f"неоднозначных кодов {total}")
         if self.line_conflicts:
             parts.append(f"спорных строк {self.line_conflicts}")
+        if self.not_recognized:
+            parts.append(
+                f"не опознано строк {self.not_recognized}"
+                + (
+                    f", из них со значением {self.not_recognized_with_value}"
+                    if self.not_recognized_with_value
+                    else ""
+                )
+            )
         return "; ".join(parts)

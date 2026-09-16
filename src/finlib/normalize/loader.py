@@ -9,28 +9,31 @@ from decimal import Decimal
 from typing import Any
 
 from finlib.db import PgConnection, cursor, execute, execute_many, fetch_all
-from finlib.normalize.lines import LinesCatalog, load_lines
+from finlib.normalize.lines import LinesCatalog, ReportingType, UnitSource, load_lines
 from finlib.normalize.mapper import (
     AmbiguousCode,
     Fact,
     LineConflict,
+    MappedLine,
     MappingResult,
+    UnrecognizedLine,
+    map_by_name,
     map_codes,
 )
 from finlib.normalize.report import LoadReport
-from finlib.quality.codes import CheckCode, CheckStatus
+from finlib.quality.codes import MAPPING_CODES, CheckCode, CheckStatus, Severity
 from finlib.quality.journal import CheckRecord, log_records
-from finlib.sources.girbo import (
+from finlib.sources.model import (
     PERIOD_OFFSETS,
+    FormData,
     Organization,
     ReportSet,
+    SourceKind,
 )
 from finlib.standards import Standard
 from finlib.utils import ValueStatus
 
 logger = logging.getLogger(__name__)
-
-SOURCE = "gir_bo"
 
 # Приоритет периода: отчётный старше сравнительных. Дублирует period_rank в схеме;
 # согласованность проверяется тестом.
@@ -56,22 +59,32 @@ _UPSERT_ORGANIZATION = """
 INSERT INTO organization (inn, girbo_id, name, short_name, ogrn, okpo, okved, region, meta)
 VALUES (%(inn)s, %(girbo_id)s, %(name)s, %(short_name)s, %(ogrn)s, %(okpo)s, %(okved)s,
         %(region)s, %(meta)s)
+-- Реквизит, которого источник не сообщил, не стирает ранее известный.
+-- Выгрузка XLSX не содержит идентификатора ГИР БО и короткого наименования,
+-- а у части организаций — и ОКВЭД; без COALESCE загрузка файла молча обнуляла
+-- бы то, что принёс живой прогон, и строки шапки документа исчезали бы.
 ON CONFLICT (inn) DO UPDATE SET
-    girbo_id = EXCLUDED.girbo_id,
-    name = EXCLUDED.name,
-    short_name = EXCLUDED.short_name,
-    ogrn = EXCLUDED.ogrn,
-    okpo = EXCLUDED.okpo,
-    okved = EXCLUDED.okved,
-    region = EXCLUDED.region,
-    meta = EXCLUDED.meta,
+    girbo_id = COALESCE(EXCLUDED.girbo_id, organization.girbo_id),
+    name = COALESCE(EXCLUDED.name, organization.name),
+    short_name = COALESCE(EXCLUDED.short_name, organization.short_name),
+    ogrn = COALESCE(EXCLUDED.ogrn, organization.ogrn),
+    okpo = COALESCE(EXCLUDED.okpo, organization.okpo),
+    okved = COALESCE(EXCLUDED.okved, organization.okved),
+    region = COALESCE(EXCLUDED.region, organization.region),
+    meta = COALESCE(organization.meta, '{}'::jsonb) || COALESCE(EXCLUDED.meta, '{}'::jsonb),
     updated_at = now()
 """
 
+# Актуальная версия года одна, и источник в это не входит. Одна и та же
+# отчётность, полученная ресурсом и поданная файлом, — две доставки одного
+# комплекта: ключ факта источника не содержит, и держать актуальными обе
+# значило бы иметь за год два комплекта, у которых факты общие. Прежние
+# версии остаются в базе историей, но в расчёт идёт последняя загруженная.
 _SUPERSEDE_OTHER_VERSIONS = """
 UPDATE src_file SET is_actual = false
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)s
-  AND source = %(source)s AND correction_version <> %(correction_version)s AND is_actual
+  AND NOT (source = %(source)s AND correction_version = %(correction_version)s)
+  AND is_actual
 """
 
 _UPSERT_SRC_FILE = """
@@ -100,6 +113,10 @@ ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE S
     meta = EXCLUDED.meta,
     loaded_at = now()
 RETURNING id
+"""
+
+_CLEAR_MAPPING_RECORDS = """
+DELETE FROM dq_log WHERE src_file_id = %(id)s AND check_code = ANY(%(codes)s)
 """
 
 _SELECT_EXISTING = """
@@ -165,6 +182,7 @@ class BuiltFacts:
     ambiguous: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     ambiguous_details: list[AmbiguousCode] = dc_field(default_factory=list)
     conflicts: list[LineConflict] = dc_field(default_factory=list)
+    not_recognized: list[UnrecognizedLine] = dc_field(default_factory=list)
 
 
 def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
@@ -185,7 +203,15 @@ def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
             for code, value in values.items()
             if value is not None
         }
-        mapping = map_codes(codes, filled, catalog, report.reporting_type, form_code)
+        if form.names and report.reporting_type is not ReportingType.FULL:
+            # Источник отдал наименования, а набор упрощённый: код в нём —
+            # подсказка, ключом служит наименование.
+            mapping = map_by_name(form.names, catalog, report.reporting_type, form_code)
+            built.not_recognized.extend(
+                _unrecognized(form, item) for item in mapping.not_recognized
+            )
+        else:
+            mapping = map_codes(codes, filled, catalog, report.reporting_type, form_code)
         if mapping.unknown:
             built.unknown[form_code] = tuple(item.source_code for item in mapping.unknown)
         if mapping.ignored:
@@ -234,6 +260,21 @@ def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
     return built
 
 
+def _unrecognized(form: FormData, item: MappedLine) -> UnrecognizedLine:
+    """Собирает неопознанную строку вместе со значениями, которые она несла."""
+    disclosed: list[tuple[date, Decimal]] = []
+    for report_date, values in sorted(form.values.items()):
+        value = values.get(item.source_code)
+        if value is not None:
+            disclosed.append((report_date, value))
+    return UnrecognizedLine(
+        form_code=form.form_code,
+        source_code=item.source_code,
+        name=item.source_name or "",
+        disclosed=tuple(disclosed),
+    )
+
+
 def _group_by_line(
     values: dict[str, Decimal | None], mapping: MappingResult
 ) -> dict[str, list[tuple[str, Decimal | None]]]:
@@ -265,12 +306,22 @@ def load_report_set(
     checksum: str | None = None,
     source_url: str | None = None,
     standard: Standard = Standard.RSBU,
+    source: SourceKind = SourceKind.GIR_BO,
+    unit_source: UnitSource | None = None,
+    meta_extra: dict[str, Any] | None = None,
 ) -> LoadReport:
     """Загружает один комплект отчётности целиком в переданной транзакции.
 
     Снятие признака актуальности с прежних версий, запись src_file и фактов
     происходят вместе: при падении посередине в базе не останется ни двух
     актуальных версий, ни комплекта без фактов.
+
+    `source` входит в ключ уникальности комплекта: одна и та же отчётность,
+    полученная ресурсом и поданная файлом, — два разных комплекта, и признак
+    актуальности снимается только внутри своего источника.
+
+    `unit_source` передаёт источник, который единицу измерения объявляет сам
+    (выгрузка XLSX её печатает). Умолчание — правило «форма задаёт единицу».
     """
     catalog = catalog if catalog is not None else load_lines()
     result = LoadReport(
@@ -287,14 +338,23 @@ def load_report_set(
                 "inn": report.inn,
                 "standard": standard.value,
                 "report_year": report.report_year,
-                "source": SOURCE,
+                "source": source.value,
                 "correction_version": report.correction_version,
             },
             conn=conn,
         )
 
     src_file_id = _upsert_src_file(
-        report, conn, raw_path, checksum, source_url, standard, catalog
+        report,
+        conn,
+        raw_path,
+        checksum,
+        source_url,
+        standard,
+        catalog,
+        source,
+        unit_source,
+        meta_extra,
     )
     result.src_file_id = src_file_id
 
@@ -305,6 +365,10 @@ def load_report_set(
     result.not_applicable_codes = built.not_applicable
     result.ambiguous_codes = built.ambiguous
     result.line_conflicts = len(built.conflicts)
+    result.not_recognized = len(built.not_recognized)
+    result.not_recognized_with_value = sum(
+        1 for line in built.not_recognized if line.lost is not None
+    )
     result.periods = tuple(
         sorted({d for form in report.forms.values() for d in form.values}, reverse=True)
     )
@@ -334,9 +398,41 @@ def load_report_set(
         )
     records.extend(_code_records(report, src_file_id, built.unknown, built.ambiguous_details))
     records.extend(_conflict_records(report, src_file_id, built.conflicts))
+    records.extend(_not_recognized_records(report, src_file_id, built.not_recognized))
+    # Записи о сопоставлении строк описывают состояние комплекта, а не событие:
+    # повторная загрузка снимает прежние и кладёт нынешние.
+    execute(
+        _CLEAR_MAPPING_RECORDS,
+        {"id": src_file_id, "codes": [code.value for code in MAPPING_CODES]},
+        conn=conn,
+    )
     log_records(records, conn=conn)
     logger.info("загрузка: %s", result.summary())
     return result
+
+
+def max_correction(
+    inn: str,
+    report_year: int,
+    source: SourceKind,
+    standard: Standard,
+    conn: PgConnection,
+) -> int | None:
+    """Наибольшая загруженная корректировка комплекта; None — комплектов нет."""
+    rows = fetch_all(
+        "SELECT max(correction_version) AS version FROM src_file "
+        "WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s "
+        "AND source = %(source)s",
+        {
+            "inn": inn,
+            "standard": standard.value,
+            "year": report_year,
+            "source": source.value,
+        },
+        conn=conn,
+    )
+    version = rows[0]["version"] if rows else None
+    return int(version) if version is not None else None
 
 
 def _fact_date(report: ReportSet, fact: Fact) -> date:
@@ -357,8 +453,17 @@ def _upsert_organization(organization: Organization, conn: PgConnection) -> None
             "okpo": organization.okpo,
             "okved": organization.okved,
             "region": organization.region,
+            # Пустые ключи в meta не пишутся: слияние jsonb затёрло бы ими
+            # ранее известные реквизиты.
             "meta": json.dumps(
-                {"kpp": organization.kpp, "okopf": organization.okopf},
+                {
+                    key: value
+                    for key, value in (
+                        ("kpp", organization.kpp),
+                        ("okopf", organization.okopf),
+                    )
+                    if value is not None
+                },
                 ensure_ascii=False,
             ),
         },
@@ -374,15 +479,20 @@ def _upsert_src_file(
     source_url: str | None,
     standard: Standard,
     catalog: LinesCatalog,
+    source: SourceKind,
+    declared_unit: UnitSource | None,
+    meta_extra: dict[str, Any] | None = None,
 ) -> int:
     """Пишет комплект как единицу обработки и возвращает его идентификатор."""
     units = catalog.units
-    unit_source = units.source_for(report.form_codes)
+    unit_source = declared_unit if declared_unit is not None else units.source_for(
+        report.form_codes
+    )
     params: dict[str, Any] = {
         "inn": report.inn,
         "standard": standard.value,
         "report_year": report.report_year,
-        "source": SOURCE,
+        "source": source.value,
         "source_url": source_url,
         "raw_path": raw_path,
         "checksum": checksum,
@@ -392,14 +502,23 @@ def _upsert_src_file(
         "correction_version": report.correction_version,
         "is_actual": report.is_actual,
         "reporting_type": report.reporting_type.value,
-        # Единица определяется формой, а не ответом источника: ГИР БО её
+        # Единица определяется формой, а не полезной нагрузкой: ГИР БО её
         # не сообщает, а ошибка в тысячу раз не ловится ни одним контролем.
         # Комплект из неизвестных форм единицы не получает и уходит
-        # в карантин контролем unit_not_determined.
+        # в карантин контролем unit_not_determined. Источник, печатающий
+        # единицу в самой выгрузке, объявляет её сам (unit_source = explicit),
+        # и в комплект попадает только та, что опознана справочником:
+        # неопознанная останавливает разбор до создания комплекта.
         "unit_code": units.okei_code,
         "unit_multiplier": units.multiplier,
         "unit_source": unit_source.value,
-        "meta": json.dumps({"period_depth": {f: len(d.values) for f, d in report.forms.items()}}),
+        "meta": json.dumps(
+            {
+                "period_depth": {f: len(d.values) for f, d in report.forms.items()},
+                **(meta_extra or {}),
+            },
+            ensure_ascii=False,
+        ),
     }
     with cursor(conn, dict_rows=False) as cur:
         cur.execute(_UPSERT_SRC_FILE, params)
@@ -590,6 +709,53 @@ def _conflict_records(
         )
         for conflict in conflicts
     ]
+
+
+def _not_recognized_records(
+    report: ReportSet, src_file_id: int, lines: list[UnrecognizedLine]
+) -> list[CheckRecord]:
+    """Записи о строках, которые справочник не опознал по наименованию.
+
+    Уровень зависит от того, что строка несла. Пустая строка — пробел
+    справочника: её стоит завести, но отчётность из-за неё не останавливается.
+    Строка с ненулевым значением — тихая потеря данных: величина есть
+    в отчётности, в расчёт она не попадёт, и никакой контроль сходимости её
+    не хватится, если строка не входит ни в один проверяемый итог. Такой
+    комплект в расчёт не идёт.
+    """
+    records: list[CheckRecord] = []
+    for line in lines:
+        lost = line.lost
+        records.append(
+            CheckRecord(
+                inn=report.inn,
+                check_code=CheckCode.LINE_NOT_RECOGNIZED,
+                status=CheckStatus.FAIL if lost else CheckStatus.WARNING,
+                severity=Severity.BLOCKING if lost else Severity.WARNING,
+                src_file_id=src_file_id,
+                report_date=lost[0] if lost else report.report_date,
+                form_code=line.form_code,
+                line_code=line.source_code,
+                new_value=lost[1] if lost else None,
+                message=(
+                    "Строка отчётности не опознана по наименованию и в расчёт не попала, "
+                    "а значение у неё раскрыто: данные были бы потеряны молча"
+                )
+                if lost
+                else (
+                    "Строка отчётности не опознана по наименованию и в расчёт не попала; "
+                    "значения она не несёт"
+                ),
+                details={
+                    "source_name": line.name,
+                    "reporting_type": report.reporting_type.value,
+                    "disclosed": {
+                        f"{period:%Y-%m-%d}": str(value) for period, value in line.disclosed
+                    },
+                },
+            )
+        )
+    return records
 
 
 def _code_records(

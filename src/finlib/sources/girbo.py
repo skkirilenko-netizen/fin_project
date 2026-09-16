@@ -7,12 +7,10 @@ previous1600, beforePrevious1600. Наименований строк в отв�
 
 import logging
 import re
-from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from finlib.normalize.lines import ReportingType
 from finlib.sources.cache import CachedResponse, RawCache
 from finlib.sources.errors import (
     CreditOrganizationError,
@@ -21,10 +19,19 @@ from finlib.sources.errors import (
     SourceError,
 )
 from finlib.sources.http import PoliteClient
+from finlib.sources.model import (
+    KND_TO_REPORTING_TYPE,
+    FormData,
+    Organization,
+    ReportSet,
+    period_date,
+)
 from finlib.utils import json_loads_decimal, to_decimal
 
 logger = logging.getLogger(__name__)
 
+# Имя каталога кэша сырых ответов: data/raw/girbo. С SourceKind.GIR_BO
+# не совпадает намеренно — это путь на диске, а не значение поля в базе.
 SOURCE_NAME = "girbo"
 
 SEARCH_PATH = "/advanced-search/organizations/search"
@@ -35,18 +42,9 @@ BFO_PATH = "/nbo/organizations/{org_id}/bfo/"
 # не заложен и не разбирается.
 FORM_BLOCKS: tuple[str, ...] = ("balance", "financialResult", "fundsMovement")
 
-# Сдвиг периода в годах назад от отчётного года.
-PERIOD_OFFSETS: dict[str, int] = {"current": 0, "previous": 1, "beforePrevious": 2}
-
 # Глубина истории у форм разная: третий период есть только в балансе.
 # Метрики задачи 6 обязаны считаться с этим, а не ожидать одинаковой глубины.
 FORM_PERIOD_DEPTH: dict[str, int] = {"0710001": 3, "0710002": 2, "0710005": 2}
-
-# Код налогового документа определяет набор строк отчётности.
-KND_TO_REPORTING_TYPE: dict[str, ReportingType] = {
-    "0710099": ReportingType.FULL,
-    "0710096": ReportingType.SIMPLIFIED,
-}
 
 # В ответе ГИР БО поля единицы измерения нет; значения приходят в тысячах рублей.
 
@@ -57,70 +55,6 @@ _HIGHLIGHT = re.compile(r"</?strong>")
 def strip_highlight(text: str | None) -> str | None:
     """Снимает подсветку совпадений, которой источник оборачивает найденное."""
     return None if text is None else _HIGHLIGHT.sub("", text)
-
-
-@dataclass(frozen=True, slots=True)
-class Organization:
-    """Реквизиты организации из карточки источника."""
-
-    inn: str
-    girbo_id: int
-    short_name: str | None = None
-    full_name: str | None = None
-    ogrn: str | None = None
-    kpp: str | None = None
-    okpo: str | None = None
-    okved: str | None = None
-    okopf: str | None = None
-    region: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class FormData:
-    """Значения одной формы по периодам: дата отчёта -> код строки -> значение."""
-
-    form_code: str
-    values: dict[date, dict[str, Decimal | None]]
-
-    @property
-    def report_dates(self) -> tuple[date, ...]:
-        """Периоды, за которые форма содержит данные, от свежего к старому."""
-        return tuple(sorted(self.values, reverse=True))
-
-    @property
-    def depth(self) -> int:
-        """Сколько периодов пришло по этой форме."""
-        return len(self.values)
-
-
-@dataclass(frozen=True, slots=True)
-class ReportSet:
-    """Один опубликованный комплект отчётности: одна организация, один год, одна корректировка."""
-
-    inn: str
-    girbo_bfo_id: int
-    report_year: int
-    report_date: date
-    knd: str
-    reporting_type: ReportingType
-    correction_version: int
-    is_actual: bool
-    forms: dict[str, FormData] = field(default_factory=dict)
-
-    @property
-    def form_codes(self) -> tuple[str, ...]:
-        """Коды форм, пришедших в комплекте."""
-        return tuple(sorted(self.forms))
-
-    def report_dates(self, form_code: str) -> tuple[date, ...]:
-        """Периоды, доступные по конкретной форме; у баланса их больше."""
-        form = self.forms.get(form_code)
-        return form.report_dates if form is not None else ()
-
-
-def _period_date(report_year: int, prefix: str) -> date:
-    """Дата отчёта для периода: 31 декабря соответствующего года."""
-    return date(report_year - PERIOD_OFFSETS[prefix], 12, 31)
 
 
 def parse_form(block: dict[str, Any], report_year: int) -> FormData | None:
@@ -136,7 +70,7 @@ def parse_form(block: dict[str, Any], report_year: int) -> FormData | None:
         if match is None:
             continue  # id, okud и ссылки на пояснения expl* значениями не являются
         prefix, line_code = match.group(1), match.group(2)
-        period = _period_date(report_year, prefix)
+        period = period_date(report_year, prefix)
         values.setdefault(period, {})[line_code] = to_decimal(raw)
     return FormData(form_code=str(form_code), values=values)
 

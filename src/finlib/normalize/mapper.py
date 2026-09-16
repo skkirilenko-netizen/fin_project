@@ -20,6 +20,9 @@ class MappingOutcome(StrEnum):
     IGNORED = "ignored"  # код объявлен неиспользуемым осознанно
     NOT_APPLICABLE = "not_applicable"  # код есть в полном наборе, но не в этом
     AMBIGUOUS = "ambiguous"  # претендентов несколько, выбрать нельзя
+    # Наименования нет в справочнике: строка упрощённой формы опознаётся
+    # по нему, и без опознания она в fact_report не попадёт.
+    NOT_RECOGNIZED = "not_recognized"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,9 @@ class MappedLine:
     outcome: MappingOutcome
     line: LineDef | None = None
     candidates: tuple[str, ...] = ()
+    # Наименование строки, как оно напечатано в отчётности; есть только
+    # у источников, которые наименования отдают.
+    source_name: str | None = None
 
     @property
     def line_code(self) -> str:
@@ -61,6 +67,27 @@ class AmbiguousCode:
 
 
 @dataclass(frozen=True, slots=True)
+class UnrecognizedLine:
+    """Строка, которую не опознал справочник: в fact_report она не попадёт.
+
+    Раскрытые значения хранятся вместе со строкой: нераскрытая строка — пробел
+    справочника и повод его пополнить, а вот строка с ненулевым значением —
+    тихая потеря данных, и уровень записи у неё другой.
+    """
+
+    form_code: str
+    source_code: str
+    name: str
+    disclosed: tuple[tuple[date, Decimal], ...] = ()
+
+    @property
+    def lost(self) -> tuple[date, Decimal] | None:
+        """Самый свежий период с ненулевым значением, если такой есть."""
+        found = [item for item in self.disclosed if item[1] != 0]
+        return max(found, key=lambda item: item[0]) if found else None
+
+
+@dataclass(frozen=True, slots=True)
 class LineConflict:
     """Несколько исходных кодов раскрыли значение для одной укрупнённой строки."""
 
@@ -79,6 +106,7 @@ class MappingResult:
     ignored: list[MappedLine] = field(default_factory=list)
     not_applicable: list[MappedLine] = field(default_factory=list)
     ambiguous: list[MappedLine] = field(default_factory=list)
+    not_recognized: list[MappedLine] = field(default_factory=list)
 
 
 def map_codes(
@@ -126,6 +154,45 @@ def map_codes(
                 MappingOutcome.AMBIGUOUS,
                 candidates=tuple(line.code for line in candidates),
             )
+        )
+    return result
+
+
+def map_by_name(
+    names: dict[str, str],
+    catalog: LinesCatalog,
+    reporting_type: ReportingType,
+    form: str,
+) -> MappingResult:
+    """Сопоставляет строки упрощённой формы со справочником по наименованию.
+
+    Для упрощённых форм код укрупнённой строки — подсказка: он указывается
+    по показателю с наибольшим удельным весом и между периодами меняется.
+    Поэтому ключом служит наименование, а код передаётся только затем, чтобы
+    развести строки-тёзки.
+
+    Игнорируемые коды отсекаются и здесь: решение методики не использовать
+    код не зависит от того, каким источником пришла отчётность.
+    """
+    if reporting_type is ReportingType.FULL:
+        raise ValueError(
+            "опознание по наименованию определено только для упрощённых форм: "
+            "в полных формах наименования повторяются, ключом служит код строки"
+        )
+    result = MappingResult()
+    for code in sorted(names):
+        name = names[code]
+        if catalog.is_ignored(code, form):
+            result.ignored.append(MappedLine(code, MappingOutcome.IGNORED, source_name=name))
+            continue
+        line = catalog.match_by_name(name, reporting_type, form, source_code=code)
+        if line is None:
+            result.not_recognized.append(
+                MappedLine(code, MappingOutcome.NOT_RECOGNIZED, source_name=name)
+            )
+            continue
+        result.mapped[code] = MappedLine(
+            code, MappingOutcome.MAPPED, line, source_name=name
         )
     return result
 

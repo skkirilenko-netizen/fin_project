@@ -12,7 +12,7 @@
 
 import logging
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
@@ -21,7 +21,10 @@ from finlib.db import PgConnection, connection
 from finlib.llm.service import ConclusionRejectedError, generate_conclusion
 from finlib.metrics.engine import compute_all
 from finlib.metrics.store import save_results
-from finlib.normalize.loader import load_report_set
+from finlib.normalize.lines import UnitSource
+from finlib.normalize.loader import load_report_set, max_correction
+from finlib.quality.codes import CheckStatus
+from finlib.quality.journal import log_check
 from finlib.quality.runner import run_checks
 from finlib.report.consistency import InconsistentReportError
 from finlib.report.document import build_report
@@ -35,6 +38,8 @@ from finlib.sources.errors import (
     SourceUnavailableError,
 )
 from finlib.sources.girbo import GirboSource
+from finlib.sources.inbox import InboxRejectedError, InboxSource, ParsedFile
+from finlib.sources.model import Organization, ReportSet, SourceKind
 from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
@@ -91,6 +96,8 @@ def analyze(
     force_refresh: bool = False,
     from_cache_only: bool = False,
     directory: Path | None = None,
+    source: SourceKind = SourceKind.GIR_BO,
+    inbox: InboxSource | None = None,
     on_stage: Callable[[StageResult], None] | None = None,
 ) -> PipelineResult:
     """Проводит организацию через весь цикл и возвращает путь к заключению.
@@ -98,6 +105,10 @@ def analyze(
     from_cache_only пропускает обращение к источнику: пересчёт идёт по уже
     загруженным фактам. force_refresh, наоборот, заставляет источник ответить
     заново, минуя кэш.
+
+    source выбирает, откуда берётся отчётность. Комплект, поданный файлом,
+    проходит те же этапы, что и полученный из источника: загрузку, контроли,
+    расчёт, оценку и сборку документа.
     """
     result = PipelineResult(inn=inn, with_llm=with_llm)
 
@@ -108,11 +119,13 @@ def analyze(
             on_stage(item)
 
     with connection() as conn:
-        if not from_cache_only:
-            _fetch_and_load(inn, year, conn, force_refresh, standard, report, result)
-        else:
+        if from_cache_only:
             report(Stage.FETCH, "пропущено: пересчёт из ранее загруженных данных")
             report(Stage.LOAD, "пропущено: пересчёт из ранее загруженных данных")
+        elif source is SourceKind.FILE:
+            _load_from_inbox(inn, year, conn, inbox, standard, report, result)
+        else:
+            _fetch_and_load(inn, year, conn, force_refresh, standard, report, result)
 
         _compute(inn, conn, standard, report, result)
 
@@ -172,14 +185,168 @@ def _fetch_and_load(
     _run_quality(inn, conn, standard, report, result)
 
 
+def load_inbox(
+    inn: str,
+    *,
+    standard: Standard = Standard.RSBU,
+    inbox: InboxSource | None = None,
+    on_stage: Callable[[StageResult], None] | None = None,
+) -> PipelineResult:
+    """Проводит поданные файлы организации через загрузку и контроли качества.
+
+    Расчёт показателей и оценка сюда не входят: подача пакетная, и считать
+    имеет смысл по всему поданному сразу, а не по каждой организации в момент
+    её загрузки. Этапы те же, что и в полном цикле, и останавливаются они
+    так же — с названной причиной.
+    """
+    result = PipelineResult(inn=inn, with_llm=False)
+
+    def report(stage: Stage, message: str, ok: bool = True) -> None:
+        item = StageResult(stage, message, ok)
+        result.stages.append(item)
+        if on_stage is not None:
+            on_stage(item)
+
+    with connection() as conn:
+        _load_from_inbox(
+            inn, None, conn, inbox, standard, report, result,
+            stop_if_all_quarantined=False,
+        )
+    return result
+
+
+def _load_from_inbox(
+    inn: str,
+    year: int | None,
+    conn: PgConnection,
+    inbox: InboxSource | None,
+    standard: Standard,
+    report: Callable[..., None],
+    result: PipelineResult,
+    *,
+    stop_if_all_quarantined: bool = True,
+) -> None:
+    """Загружает комплекты организации из поданных вручную файлов."""
+    source = inbox if inbox is not None else InboxSource()
+    try:
+        organization, files = source.fetch_report_sets(inn)
+    except InboxRejectedError as exc:
+        raise PipelineError(Stage.FETCH, str(exc)) from exc
+
+    _journal_rejections(source.rejections(inn), conn)
+    chosen = [item for item in files if year is None or item.report.report_year <= year]
+    if not chosen:
+        raise PipelineError(
+            Stage.FETCH, f"за {year} год и ранее поданных комплектов нет"
+        )
+    years = [item.report.report_year for item in chosen]
+    report(
+        Stage.FETCH,
+        f"{organization.full_name or inn}: файлов {len(chosen)}, "
+        f"годы {min(years)}–{max(years)}",
+    )
+
+    loaded = 0
+    for item in sorted(chosen, key=lambda value: value.report.report_year):
+        _load_file(item, organization, conn, standard)
+        loaded += 1
+    report(Stage.LOAD, f"загружено комплектов: {loaded}")
+    _run_quality(
+        inn,
+        conn,
+        standard,
+        report,
+        result,
+        stop_if_all_quarantined=stop_if_all_quarantined,
+    )
+
+
+def _load_file(
+    item: ParsedFile,
+    organization: Organization,
+    conn: PgConnection,
+    standard: Standard,
+) -> None:
+    """Загружает один разобранный файл как комплект отчётности."""
+    report_set = item.report
+    if report_set.is_actual:
+        report_set = _actual_against_loaded(report_set, conn, standard)
+    load_report_set(
+        report_set,
+        organization,
+        conn,
+        raw_path=str(item.path),
+        checksum=item.checksum,
+        standard=standard,
+        source=SourceKind.FILE,
+        # Выгрузка печатает единицу измерения в реквизитах, и она опознана
+        # справочником: это объявление источника, а не правило о форме.
+        unit_source=UnitSource.EXPLICIT,
+        meta_extra=item.meta,
+    )
+
+
+def _actual_against_loaded(
+    report: ReportSet, conn: PgConnection, standard: Standard
+) -> ReportSet:
+    """Снимает признак актуальности, если в базе уже лежит корректировка новее.
+
+    Номер актуальной корректировки сообщает только сам ресурс, а он недоступен.
+    По поданным файлам актуальной считается наибольшая из них, но подача старой
+    версии не должна отменять загруженную новую.
+    """
+    loaded = max_correction(report.inn, report.report_year, SourceKind.FILE, standard, conn)
+    if loaded is None or report.correction_version >= loaded:
+        return report
+    logger.info(
+        "комплект %s за %s год: корректировка %s не актуальнее загруженной %s",
+        report.inn,
+        report.report_year,
+        report.correction_version,
+        loaded,
+    )
+    return replace(report, is_actual=False)
+
+
+def _journal_rejections(
+    rejections: list[tuple[Path, InboxRejectedError]], conn: PgConnection
+) -> None:
+    """Пишет в журнал качества файлы, отклонённые разбором.
+
+    Комплекта у такого файла нет, поэтому запись идёт без src_file_id: карантин
+    ставится на комплект, а здесь его не возникло вовсе. Файл, у которого
+    не определился даже ИНН, в журнал попасть не может — его не к чему
+    привязать, и он остаётся в отчёте загрузки.
+    """
+    for path, exc in rejections:
+        if exc.inn is None:
+            continue
+        log_check(
+            inn=exc.inn,
+            check_code=exc.check_code,
+            status=CheckStatus.FAIL,
+            message=str(exc),
+            details={"file_name": path.name},
+            conn=conn,
+        )
+
+
 def _run_quality(
     inn: str,
     conn: PgConnection,
     standard: Standard,
     report: Callable[..., None],
     result: PipelineResult,
+    *,
+    stop_if_all_quarantined: bool = True,
 ) -> None:
-    """Прогоняет контроли по всем комплектам организации."""
+    """Прогоняет контроли по всем комплектам организации.
+
+    Полный цикл на сплошном карантине останавливается: считать нечего.
+    Пакетная загрузка — нет: отбракованный комплект обязан остаться в базе
+    вместе с причиной отбраковки, иначе journal отката не переживёт,
+    и сказать, почему организация выпала, будет нечем.
+    """
     from finlib.db import fetch_all
 
     rows = fetch_all(
@@ -195,7 +362,7 @@ def _run_quality(
     result.quarantined = quarantined
     message = f"проверено комплектов {len(rows)}, в карантине {quarantined}"
     report(Stage.QUALITY, message, ok=quarantined < len(rows))
-    if rows and quarantined == len(rows):
+    if rows and quarantined == len(rows) and stop_if_all_quarantined:
         raise PipelineError(
             Stage.QUALITY,
             "все комплекты отчётности отбракованы контролями качества, "
