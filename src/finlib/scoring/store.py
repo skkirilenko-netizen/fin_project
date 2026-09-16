@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import date
 
 from finlib.db import PgConnection, cursor, execute, execute_many, fetch_all, fetch_one
@@ -80,6 +81,17 @@ INSERT INTO assessment_signal (
     %(message)s, %(details)s
 )
 """
+
+
+# Перенос строки справочника сворачивается, неразрывный пробел — нет: он стоит
+# между разрядами числа, и обычное `" ".join(text.split())` его съедало.
+# Величина при этом печаталась в формулировке иначе, чем в основании сигнала.
+_FOLDED = re.compile(r"[^\S ]+")
+
+
+def _one_line(text: str) -> str:
+    """Свёртка многострочной формулировки в одну строку."""
+    return _FOLDED.sub(" ", text).strip()
 
 
 def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
@@ -181,7 +193,7 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
                 "signal_name": item.name,
                 "level": item.level.value,
                 "value": item.value,
-                "message": " ".join(item.message.split()),
+                "message": _one_line(item.message),
                 "details": json.dumps(item.details, ensure_ascii=False, default=str),
             }
             for item in assessment.signals

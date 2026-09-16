@@ -102,7 +102,9 @@ class Assessment:
 
     def summary(self) -> str:
         """Однострочная сводка для CLI."""
-        score = f"{self.total_score:.1f}" if self.total_score is not None else "—"
+        # Разрядность та же, что в документе, приложении и выводе CLI: балл,
+        # напечатанный в журнале иначе, чем в документе, читается как другой.
+        score = f"{self.total_score:.2f}" if self.total_score is not None else "—"
         parts = [
             f"ИНН {self.inn}, период {self.report_date:%d.%m.%Y}",
             f"балл {score}",

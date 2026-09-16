@@ -19,7 +19,6 @@ from docx.shared import Pt
 from finlib.config import settings
 from finlib.db import PgConnection
 from finlib.llm.service import Conclusion, generate_conclusion
-from finlib.metrics.display import round_to
 from finlib.report.appendix import (
     Table,
     checks_table,
@@ -322,9 +321,6 @@ SIGNALS_TITLE = "Риски и надзорные сигналы"
 ACTIONS_SECTION = 7
 ACTIONS_TITLE = "Предложения по дальнейшим действиям"
 
-# Разрядность величины и отсечки сигнала при выводе оснований.
-SIGNAL_SCALE = 2
-
 SIGNAL_LEVELS: dict[str, str] = {
     "supervisory": "надзорный сигнал",
     "attention": "требует внимания",
@@ -379,38 +375,33 @@ def _write_signals(document: Document, data: ReportData) -> None:
 
 
 def _signal_basis(signal: dict) -> str:
-    """Величина и порог, по которым сигнал сработал."""
+    """Величина и отсечка, по которым сигнал сработал.
+
+    Печатаются готовыми: обе набраны расчётом в тот же момент, что и сама
+    формулировка, и той же разрядностью. Прежде основание округляло само
+    и печатало знак, которого в формулировке нет, — рядом стояли
+    «изменение — 181,2 п. п.» и «Расчётная величина: -181,18».
+    """
     details = signal["details"] or {}
-    value = details.get("value") or signal["value"]
-    threshold = details.get("threshold") or details.get("shift_points")
+    value = details.get("value_shown")
     if value is None:
+        # Оценка посчитана прежней версией: набирать величину здесь заново
+        # значило бы печатать её иначе, чем она стоит в формулировке, —
+        # ровно тем расхождением, ради которого написано всё это место.
+        logger.warning(
+            "сигнал %s посчитан без готовой величины, основание не печатается; "
+            "пересчитайте оценку",
+            signal["signal_code"],
+        )
         return ""
-    parts = [f"Расчётная величина: {_number(value)}"]
+    parts = [f"Расчётная величина: {value}"]
+    threshold = details.get("threshold_shown")
     if threshold is not None:
-        parts.append(f"отсечка: {_number(threshold)}")
+        parts.append(f"отсечка: {threshold}")
     return (
         "; ".join(parts)
         + ". Отсечка задана методикой, объявлена экспертной и предварительной."
     )
-
-
-def _number(value) -> str:
-    """Величина сигнала в том же написании, что и остальные числа документа.
-
-    Разряды разделены пробелами, десятичный знак — запятая, хвостовые нули
-    сняты: «-41 972», а не «-41972,00».
-    """
-    from decimal import Decimal, InvalidOperation
-
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):  # pragma: no cover — величина уже число
-        return str(value)
-    rounded = round_to(number, SIGNAL_SCALE).normalize()
-    # normalize() у целых величин даёт показатель степени: 41972 → 4.1972E+4.
-    if rounded == rounded.to_integral_value():
-        rounded = rounded.quantize(Decimal(1))
-    return f"{rounded:,}".replace(",", " ").replace(".", ",")
 
 
 def _write_actions(

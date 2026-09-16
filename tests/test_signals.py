@@ -23,10 +23,15 @@ from finlib.scoring.signals import (
     evaluate_signals,
     load_signals,
     revision_intensity,
+    shown,
     structure_shifts,
 )
 
 CATALOG = load_signals()
+
+# Неразрывный пробел между разрядами: в документе число не должно рваться
+# по переносу строки.
+NBSP = " "
 
 # Все пороги методики: четыре сигнала-выражения и два, считаемые не формулой.
 # Требования к порогу одни и те же независимо от того, как получена величина.
@@ -329,6 +334,48 @@ def test_signal_wording_is_not_paraphrased(db_conn, tmp_path) -> None:
     text = "\n".join(item.text for item in Document(report.path).paragraphs)
     for signal in data.signals:
         assert signal["message"] in text, signal["signal_code"]
+
+
+def test_signal_value_is_written_in_russian_form() -> None:
+    """Разряды разделены неразрывным пробелом, десятичный знак — запятая.
+
+    Разрядность берётся у сигнала, а не у места вывода: кратность с одним
+    знаком, доля с двумя, денежная величина целыми тысячами.
+    """
+    assert shown(CATALOG.rule_for("equity_withdrawal"), Decimal("-41972.000")) == (
+        f"41{NBSP}972"
+    )
+    assert shown(CATALOG.rule_for("transit_structure"), Decimal("107.1084")) == "107,1"
+    assert shown(CATALOG.rule_for("extreme_margin"), Decimal("0.9122")) == "0,91"
+    assert shown(CATALOG.rule_for("structure_shift_1300"), Decimal("-181.1783")) == (
+        "181,2"
+    )
+
+
+def test_negative_value_keeps_the_typographic_minus() -> None:
+    """Знак у величины — математический минус, а не дефис.
+
+    Величина стоит в документе среди прозы, где дефис читается как тире,
+    а тире перед числом минусом не считается.
+    """
+    rule = CATALOG.rule_for("equity_contribution")
+    assert not rule.as_absolute
+    assert shown(rule, Decimal(-5)) == "−5"
+
+
+def test_unknown_signal_code_has_no_rule() -> None:
+    """Кода нет в справочнике — разрядности взять неоткуда, и это видно."""
+    assert CATALOG.rule_for("no_such_signal") is None
+
+
+def test_absolute_value_is_declared_by_the_methodology() -> None:
+    """Подстановка по модулю — решение методики, а не приём кода.
+
+    У структурного сдвига направление читается из долей на начало и на конец
+    периода, и модуль объявлен в справочнике, а не зашит в расчёт.
+    """
+    assert raw()["structure_shift"]["as_absolute"] is True
+    assert CATALOG.structure_shift.as_absolute
 
 
 def test_preliminary_threshold_is_marked_as_such() -> None:

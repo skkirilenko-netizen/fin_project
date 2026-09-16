@@ -27,6 +27,13 @@ from finlib.utils import safe_div
 
 logger = logging.getLogger(__name__)
 
+# Код сработавшего структурного сдвига несёт в себе код строки:
+# «structure_shift_1300». Свободных строк в коде быть не должно, поэтому
+# приставка и код второго сигнала без выражения объявлены здесь.
+STRUCTURE_SHIFT_PREFIX = "structure_shift_"
+REVISION_INTENSITY_CODE = "revision_intensity"
+
+
 class SignalLevel(StrEnum):
     """Вес сигнала для читателя."""
 
@@ -79,6 +86,14 @@ class SignalRule(BaseModel):
     name: str = Field(min_length=1)
     level: SignalLevel
     condition: Condition
+    # Разрядность подстановки величины в формулировку: денежные величины
+    # целыми тысячами, кратности с одним знаком, доли с двумя. Разрядность
+    # объявлена у сигнала, а не выбирается местом вывода: величина, набранная
+    # в разделе дважды и по-разному, читается как расхождение расчёта.
+    display_scale: int = Field(default=1, ge=0)
+    # Подставлять величину по модулю: знак уже выражен словами формулировки
+    # («не объясняется», «расхождение»), и минус читался бы как опечатка.
+    as_absolute: bool = False
     origin: str = Field(min_length=1)
     # Происхождение и зрелость порога — разные сведения: origin отвечает,
     # откуда взялась величина, статус — можно ли на неё опираться.
@@ -117,12 +132,6 @@ class SignalDef(SignalRule):
     # Порог задан долей этой строки, а не абсолютом: у крупной организации
     # расхождение в миллион — округление, у малой — вся деятельность.
     threshold_of: str | None = Field(default=None, pattern=r"^\d{4}$")
-    # Разрядность подстановки величины в формулировку: денежные величины
-    # целыми тысячами, кратности с одним знаком, доли с двумя.
-    display_scale: int = Field(default=1, ge=0)
-    # Подставлять величину по модулю: знак уже выражен словами формулировки
-    # («не объясняется», «расхождение»), и минус читался бы как опечатка.
-    as_absolute: bool = False
 
 
 class StructureShift(SignalRule):
@@ -156,6 +165,23 @@ class SignalsCatalog(BaseModel):
                 raise ValueError(f"код сигнала {item.code} встречается дважды")
             seen.add(item.code)
         return self
+
+    def rule_for(self, code: str) -> SignalRule | None:
+        """Правило, по которому сработал сигнал с этим кодом.
+
+        Нужно там, где величина печатается второй раз — в основании сигнала
+        в документе: разрядность и знак берутся из справочника, а не из места
+        вывода. Иначе одна и та же величина набирается в разделе дважды
+        и по-разному, и читатель видит расхождение расчёта там, где его нет.
+        """
+        for item in self.signals:
+            if item.code == code:
+                return item
+        if code.startswith(STRUCTURE_SHIFT_PREFIX):
+            return self.structure_shift
+        if code == REVISION_INTENSITY_CODE:
+            return self.revision_intensity
+        return None
 
 
 def default_path() -> Path:
@@ -220,6 +246,13 @@ def evaluate_signals(
                     "expression": signal.expression,
                     "value": str(value),
                     "threshold": str(threshold),
+                    # Величина и отсечка в том виде, в каком они напечатаны:
+                    # основание сигнала в документе печатает их как есть,
+                    # а не набирает заново. Формулировка и основание сделаны
+                    # в один момент и потому не могут разойтись — даже если
+                    # справочник потом поправят, а оценку не пересчитают.
+                    "value_shown": shown(signal, value),
+                    "threshold_shown": shown(signal, threshold),
                 },
             )
         )
@@ -246,15 +279,19 @@ def structure_shifts(
             continue
         found.append(
             SignalHit(
-                code=f"structure_shift_{code}",
+                code=f"{STRUCTURE_SHIFT_PREFIX}{code}",
                 name=rule.name,
                 level=rule.level,
                 value=shift,
                 message=rule.text.format(
                     line=names.get(code, code),
-                    value=_money(abs(shift), 1),
-                    before=f"{_money(before, 1)} %",
-                    after=f"{_money(after, 1)} %",
+                    value=shown(rule, shift),
+                    # Доли на начало и на конец периода приводятся со знаком:
+                    # у статьи пассива доля не ограничена диапазоном от нуля
+                    # до ста, и при отрицательном собственном капитале она
+                    # отрицательна. Модуль здесь исказил бы направление сдвига.
+                    before=f"{_money(before, rule.display_scale)} %",
+                    after=f"{_money(after, rule.display_scale)} %",
                 ),
                 details={
                     "line_code": code,
@@ -262,6 +299,8 @@ def structure_shifts(
                     # Отсечка идёт вместе с величиной: в документе тезис
                     # приводится с тем порогом, по которому он сработал.
                     "threshold": str(rule.threshold_points),
+                    "value_shown": shown(rule, shift),
+                    "threshold_shown": shown(rule, rule.threshold_points),
                 },
             )
         )
@@ -282,17 +321,35 @@ def revision_intensity(
     ):
         return None
     return SignalHit(
-        code="revision_intensity",
+        code=REVISION_INTENSITY_CODE,
         name=rule.name,
         level=rule.level,
         value=per_set,
-        message=rule.text.format(value=mismatches, sets=sets),
+        # Величина сигнала — расхождений на комплект, а в формулировку идут
+        # само число расхождений и число комплектов: это разные величины,
+        # и подстановки у них поэтому разные.
+        message=rule.text.format(mismatches=mismatches, sets=sets),
         details={
             "mismatches": str(mismatches),
             "sets": str(sets),
             "threshold": str(rule.threshold_per_set),
+            "value_shown": shown(rule, per_set),
+            "threshold_shown": shown(rule, rule.threshold_per_set),
         },
     )
+
+
+def shown(rule: SignalRule, value: Decimal) -> str:
+    """Величина сигнала в том виде, в каком она уходит в текст.
+
+    Единственная точка, где величина сигнала превращается в строку: и в
+    предписанную формулировку, и в основание сигнала в документе она попадает
+    отсюда, с разрядностью и знаком из справочника. Прежде основание печаталось
+    своей разрядностью и со своим знаком, и одна и та же величина стояла
+    в разделе дважды: «изменение — 181,2 п. п.» и рядом «Расчётная величина:
+    -181,18».
+    """
+    return _money(abs(value) if rule.as_absolute else value, rule.display_scale)
 
 
 def _format(
@@ -300,15 +357,19 @@ def _format(
 ) -> str:
     """Подставляет величины в предписанную формулировку."""
     profit = values.get("2400")
-    shown = abs(value) if signal.as_absolute else value
     return signal.text.format(
-        value=_money(shown, signal.display_scale),
+        value=shown(signal, value),
         profit=_money(profit, 0) if profit is not None else "—",
     )
 
 
 def _money(value: Decimal, scale: int) -> str:
-    """Величина в русском написании с разделителями разрядов."""
+    """Величина в русском написании с разделителями разрядов.
+
+    Знак — математический минус, а не дефис: величина стоит в документе
+    среди прозы, где дефис читается как тире.
+    """
     from finlib.metrics.display import round_to
 
-    return f"{round_to(value, scale):,}".replace(",", " ").replace(".", ",")
+    text = f"{round_to(value, scale):,}".replace(",", " ").replace(".", ",")
+    return text.replace("-", "−")

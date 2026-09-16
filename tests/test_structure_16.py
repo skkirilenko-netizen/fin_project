@@ -492,14 +492,31 @@ def test_signal_basis_names_value_and_threshold(inn: str, db_conn, tmp_path) -> 
     assert "предварительной" in text
 
 
-def test_signal_values_are_written_in_russian_form(db_conn, tmp_path) -> None:
-    """Разряды разделены пробелами, десятичный знак — запятая."""
-    from finlib.report.document import _number
+@pytest.mark.parametrize("inn", [STOPPED_INN, NO_CLASS_INN, FULL_INN])
+def test_signal_basis_repeats_the_value_of_the_wording(inn: str, db_conn) -> None:
+    """Величина основания набрана так же, как величина формулировки.
 
-    assert _number("-41972.000") == "-41 972"
-    assert _number("107.1084") == "107,11"
-    assert _number("0.9122") == "0,91"
-    assert _number("13") == "13"
+    Прежде основание округляло само и печатало знак, которого в формулировке
+    нет: рядом стояли «изменение — 181,2 п. п.» и «Расчётная величина:
+    -181,18». Каждое число по отдельности верно, вместе они читаются
+    как расхождение расчёта.
+    """
+    from decimal import Decimal
+
+    from finlib.report.document import _signal_basis
+    from finlib.scoring.signals import load_signals, shown
+
+    data = load_report_data(inn, db_conn)
+    if not data.signals:  # pragma: no cover — зависит от данных пробы
+        pytest.skip("у организации сигналы не сработали")
+    catalog = load_signals()
+    for signal in data.signals:
+        rule = catalog.rule_for(signal["signal_code"])
+        assert rule is not None, signal["signal_code"]
+        value = shown(rule, Decimal(str(signal["value"])))
+        assert value in _signal_basis(signal), signal["signal_code"]
+        if "{value}" in rule.text:
+            assert value in signal["message"], signal["signal_code"]
 
 
 def test_risk_thesis_without_a_value_is_a_warning() -> None:
