@@ -34,3 +34,60 @@ def scale_of(catalog: MetricsCatalog, code: str) -> int:
 def scale_of_unit(catalog: MetricsCatalog, unit: Unit) -> int:
     """Разрядность отображения величины в этой единице."""
     return catalog.display.scale_for(unit)
+
+
+# Оформление единиц измерения. Разрядность приходит из методики
+# (metrics.yaml, блок display): округление в проекте одно на всех, иначе
+# текст заключения и приложение расходятся между собой.
+#
+# Оформление живёт рядом с округлением, а не в сборке контекста модели:
+# одну и ту же величину набирают и блоки модели, и приложение документа,
+# и тезисы (scoring/theses.py), а импорт из llm/ в scoring/ замкнул бы
+# зависимости в кольцо.
+UNIT_SUFFIX: dict[Unit, str] = {
+    Unit.THOUSAND_RUB: " тыс. руб.",
+    Unit.DAYS: " дн.",
+    Unit.PERCENT: " %",
+    Unit.RATIO: "",
+}
+
+
+# Разряды разделяются неразрывным пробелом, а не обычным: число не должно
+# разрываться переносом ни в документе, ни в блоке модели. Константа заведена
+# затем, чтобы разделитель не пропал при правке — на вид он от обычного
+# пробела не отличается.
+DIGIT_SPACE = " "
+
+
+def digits(value: Decimal, scale: int) -> str:
+    """Число с разделителями разрядов и запятой как десятичным знаком."""
+    return f"{round_to(value, scale):,}".replace(",", DIGIT_SPACE).replace(".", ",")
+
+
+def money(value: Decimal) -> str:
+    """Денежная величина: целые тысячи рублей с разделителями разрядов."""
+    return digits(value, 0)
+
+
+def ratio(value: Decimal) -> str:
+    """Коэффициент: два знака после запятой."""
+    return digits(value, 2)
+
+
+def days(value: Decimal) -> str:
+    """Дни: один знак после запятой."""
+    return digits(value, 1)
+
+
+def percent(value: Decimal) -> str:
+    """Процент: один знак после запятой, как и дни."""
+    return digits(value, 1)
+
+
+def format_metric(value: Decimal, unit: Unit, scale: int | None = None) -> str:
+    """Значение показателя в его единице измерения и разрядности методики."""
+    if scale is None:
+        from finlib.metrics.definitions import load_metrics
+
+        scale = load_metrics().display.scale_for(unit)
+    return f"{digits(value, scale)}{UNIT_SUFFIX.get(unit, '')}"

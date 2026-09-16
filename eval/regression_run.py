@@ -50,6 +50,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finlib.config import settings
 from finlib.db import fetch_all
+from finlib.llm.service import DEFAULT_SCHEME, PromptScheme
+from finlib.llm.verify import Violation
 from finlib.metrics.formula import NotCalculableReason
 from finlib.pipeline import PipelineError, Stage, analyze
 from finlib.quality.codes import CheckCode
@@ -73,6 +75,17 @@ RUNNER_FAILURE = "сбой прогонщика"
 CONTOUR_NAMES: dict[Contour, str] = {
     Contour.FAST: "быстрый: расчётный слой без модели",
     Contour.FULL: "полный: расчётный слой и текстовая часть",
+}
+
+SCHEME_NAMES: dict[PromptScheme, str] = {
+    PromptScheme.FREE: "free: свободная генерация",
+    PromptScheme.THESES: "theses: сборка из предписанных тезисов",
+}
+
+# Короткое имя схемы для флага командной строки и для имени файла отчёта.
+SCHEME_KEYS: dict[str, PromptScheme] = {
+    "free": PromptScheme.FREE,
+    "theses": PromptScheme.THESES,
 }
 
 
@@ -466,6 +479,7 @@ LIMIT 1
 _ATTEMPTS = """
 SELECT attempt FROM llm_log
 WHERE inn = %(inn)s AND NOT is_test AND verified AND created_at >= %(since)s
+  AND prompt_name = %(scheme)s
 ORDER BY id DESC LIMIT 1
 """
 
@@ -478,7 +492,13 @@ FROM src_file WHERE inn = %(inn)s
 """
 
 
-def run_one(entry: SetEntry, contour: Contour, *, fetch: bool = False) -> OrgRun:
+def run_one(
+    entry: SetEntry,
+    contour: Contour,
+    *,
+    fetch: bool = False,
+    scheme: PromptScheme = DEFAULT_SCHEME,
+) -> OrgRun:
     """Проводит одну организацию через цикл и собирает её итог.
 
     Неудача одной организации прогон не останавливает: набор затем и нужен,
@@ -504,6 +524,7 @@ def run_one(entry: SetEntry, contour: Contour, *, fetch: bool = False) -> OrgRun
             entry.inn,
             with_llm=contour is Contour.FULL,
             from_cache_only=not fetch,
+            scheme=scheme,
         )
         document = str(result.document) if result.document else None
     except PipelineError as exc:
@@ -525,7 +546,7 @@ def run_one(entry: SetEntry, contour: Contour, *, fetch: bool = False) -> OrgRun
         reason=reason,
         document=document,
     )
-    _fill_from_db(run, contour, since)
+    _fill_from_db(run, contour, since, scheme)
     return run
 
 
@@ -559,7 +580,12 @@ def _is_loaded(inn: str) -> bool:
     return bool(found and int(found[0]["n"]))
 
 
-def _fill_from_db(run: OrgRun, contour: Contour, since: datetime) -> None:
+def _fill_from_db(
+    run: OrgRun,
+    contour: Contour,
+    since: datetime,
+    scheme: PromptScheme = DEFAULT_SCHEME,
+) -> None:
     """Дополняет итог тем, что записал расчёт."""
     params = {"inn": run.inn, "standard": Standard.RSBU.value}
     found = fetch_all(_ASSESSMENT, params)
@@ -577,7 +603,9 @@ def _fill_from_db(run: OrgRun, contour: Contour, since: datetime) -> None:
         run.sets = int(sets[0]["total"])
         run.quarantined = int(sets[0]["quarantined"])
     if contour is Contour.FULL:
-        attempts = fetch_all(_ATTEMPTS, {"inn": run.inn, "since": since})
+        attempts = fetch_all(
+            _ATTEMPTS, {"inn": run.inn, "since": since, "scheme": scheme.value}
+        )
         run.attempts = int(attempts[0]["attempt"]) if attempts else None
 
 
@@ -913,16 +941,23 @@ FROM src_file WHERE inn = ANY(%(inns)s)
 """
 
 # Замечания постпроверки по видам: считаются только отклонённые ответы
-# текущего прогона, то есть записанные после его начала.
+# текущего прогона, то есть записанные после его начала и по той же схеме.
+# Отбор по схеме обязателен: два замера подряд идут в один журнал, и без него
+# замечания свободной генерации попали бы в метрики схемы тезисов.
 _TEXT_FIRINGS = """
 SELECT foreign_numbers FROM llm_log
 WHERE inn = ANY(%(inns)s) AND NOT is_test AND NOT verified
   AND created_at >= %(since)s AND foreign_numbers IS NOT NULL
+  AND prompt_name = %(scheme)s
 """
 
 
 def run_metrics(
-    runs: list[OrgRun], regression_set: RegressionSet, contour: Contour, since: datetime
+    runs: list[OrgRun],
+    regression_set: RegressionSet,
+    contour: Contour,
+    since: datetime,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> dict:
     """Метрики прогона ровно теми величинами, которых требует задача 17."""
     inns = regression_set.inns
@@ -992,11 +1027,16 @@ def run_metrics(
         },
     }
     if contour is Contour.FULL:
-        metrics.update(_text_metrics(runs, inns, since))
+        metrics.update(_text_metrics(runs, inns, since, scheme))
     return metrics
 
 
-def _text_metrics(runs: list[OrgRun], inns: list[str], since: datetime) -> dict:
+def _text_metrics(
+    runs: list[OrgRun],
+    inns: list[str],
+    since: datetime,
+    scheme: PromptScheme = DEFAULT_SCHEME,
+) -> dict:
     """Метрики текстового слоя: они есть только у полного контура.
 
     Доля документов считается от тех организаций, что дошли до текстовой части:
@@ -1008,8 +1048,14 @@ def _text_metrics(runs: list[OrgRun], inns: list[str], since: datetime) -> dict:
     reached = [item for item in runs if item.ok or item.stage in after_text]
     documents = [item for item in runs if item.document]
     attempts = [item.attempts for item in runs if item.attempts is not None]
-    violations: dict[str, int] = {}
-    for row in fetch_all(_TEXT_FIRINGS, {"inns": inns, "since": since}):
+    # Виды нарушения привязки числа перечисляются всегда, в том числе нулями.
+    # Иначе отсутствие графы читалось бы как «не измерялось», тогда как
+    # сравнение схем держится ровно на этих числах: обнуление wrong_anchor
+    # при росте not_in_blocks означает, что числа пошли мимо тезисов.
+    violations: dict[str, int] = {item.value: 0 for item in Violation}
+    for row in fetch_all(
+        _TEXT_FIRINGS, {"inns": inns, "since": since, "scheme": scheme.value}
+    ):
         payload = row["foreign_numbers"]
         if not isinstance(payload, dict):
             continue
@@ -1061,13 +1107,18 @@ class Report:
 
 
 def parameters(
-    regression_set: RegressionSet, contour: Contour, started: datetime
+    regression_set: RegressionSet,
+    contour: Contour,
+    started: datetime,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> dict:
     """Контролируемые параметры прогона.
 
     Версия модели входит в их состав наравне с версиями справочников: смена
     модели меняет поведение текстового слоя целиком, и прогон, сделанный другой
-    моделью, с прежним несопоставим.
+    моделью, с прежним несопоставим. Схема текстовой части — тот же род
+    параметра: два прогона одной модели по разным схемам несопоставимы,
+    если схема не названа.
     """
     from finlib.metrics.definitions import load_metrics
     from finlib.normalize.lines import load_lines
@@ -1075,10 +1126,14 @@ def parameters(
     from finlib.report.policy import load_policy
     from finlib.scoring.definitions import load_flags, load_scoring
     from finlib.scoring.signals import load_signals
+    from finlib.scoring.theses import load_theses
 
     return {
         "прогон": f"{started:%d.%m.%Y %H:%M}",
         "контур": CONTOUR_NAMES[contour],
+        "схема текстовой части": (
+            SCHEME_NAMES[scheme] if contour is Contour.FULL else "не применялась"
+        ),
         "версия кода": code_version(),
         "модель": settings.llm_model if contour is Contour.FULL else "не привлекалась",
         "настройки набора": regression_set.version,
@@ -1088,6 +1143,7 @@ def parameters(
             "scoring": load_scoring().version,
             "flags": load_flags().version,
             "signals": load_signals().version,
+            "theses": load_theses().version,
             "report": load_policy().version,
             "lines": load_lines().version,
             "thresholds": load_thresholds().version,
@@ -1204,15 +1260,19 @@ def output_dir() -> Path:
     return settings.output_dir / "regression"
 
 
-def save(report: Report, contour: Contour) -> tuple[Path, Path]:
+def save(
+    report: Report, contour: Contour, scheme: PromptScheme = DEFAULT_SCHEME
+) -> tuple[Path, Path]:
     """Пишет отчёт машиночитаемым и читаемым видом рядом.
 
     JSON нужен для сравнения двух прогонов между собой — ради этого набор
-    и заводится; markdown нужен человеку.
+    и заводится; markdown нужен человеку. Схема входит в имя файла: два замера
+    подряд иначе различались бы только минутой в имени.
     """
     target = output_dir()
     target.mkdir(parents=True, exist_ok=True)
-    stem = f"{report.started:%Y-%m-%d_%H%M}_{contour.value}"
+    suffix = f"_{scheme.name.lower()}" if contour is Contour.FULL else ""
+    stem = f"{report.started:%Y-%m-%d_%H%M}_{contour.value}{suffix}"
     machine = target / f"{stem}.json"
     human = target / f"{stem}.md"
     machine.write_text(
@@ -1266,6 +1326,7 @@ def run(
     fetch: bool = False,
     regression_set: RegressionSet | None = None,
     only: list[str] | None = None,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> Report:
     """Прогоняет набор и собирает отчёт."""
     regression_set = regression_set if regression_set is not None else load_set()
@@ -1287,12 +1348,12 @@ def run(
     runs: list[OrgRun] = []
     for number, entry in enumerate(entries, start=1):
         logger.info("[%d/%d] %s %s", number, len(entries), entry.inn, entry.name)
-        runs.append(run_one(entry, contour, fetch=fetch))
+        runs.append(run_one(entry, contour, fetch=fetch, scheme=scheme))
 
     measured = features_of(subset)
     _finalize(runs, measured, subset)
 
-    found = parameters(subset, contour, started)
+    found = parameters(subset, contour, started, scheme)
     if only is not None:
         found["настройки набора"] = (
             f"{regression_set.version}, прогнана часть: "
@@ -1304,7 +1365,7 @@ def run(
         organizations=[asdict(item) for item in runs],
         coverage=[asdict(item) for item in coverage(subset, measured)],
         categories=[asdict(item) for item in categories_check(subset, measured, runs)],
-        metrics=run_metrics(runs, subset, contour, started),
+        metrics=run_metrics(runs, subset, contour, started, scheme),
     )
 
 
@@ -1328,12 +1389,20 @@ def main(argv: list[str] | None = None) -> int:
         metavar="ИНН",
         help="прогнать только названные организации набора",
     )
+    parser.add_argument(
+        "--prompt-scheme",
+        choices=sorted(SCHEME_KEYS),
+        default="free",
+        help="схема текстовой части: free — свободная генерация, "
+        "theses — сборка из предписанных тезисов; на быстрый контур не влияет",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     contour = Contour(args.contour)
-    report = run(contour, fetch=args.fetch, only=args.only)
-    machine, human = save(report, contour)
+    scheme = SCHEME_KEYS[args.prompt_scheme]
+    report = run(contour, fetch=args.fetch, only=args.only, scheme=scheme)
+    machine, human = save(report, contour, scheme)
     print(render(report))
     print(f"Отчёт: {human}")
     print(f"Машиночитаемый вид: {machine}")

@@ -5,9 +5,10 @@ from decimal import Decimal
 
 import pytest
 
-from finlib.llm.context import build_context, format_metric, money, ratio
+from finlib.llm.context import build_context
 from finlib.llm.verify import verify
 from finlib.metrics.definitions import Unit, load_metrics
+from finlib.metrics.display import format_metric, money, ratio
 
 INN = "7736050003"
 SIMPLIFIED_INN = "2100010824"

@@ -288,7 +288,14 @@ def _is_attached(gap: str, *, closes: bool = False) -> bool:
 
 
 def _overlaps_number(window: str, position: int, length: int) -> bool:
-    """Не является ли найденный «код» частью другого числа."""
+    """Не является ли найденный «код» частью другого числа или кода.
+
+    Подчёркивание рядом означает, что найденный ключ — кусок более длинного
+    кода: 1600 в «1600_chg_pct», 1300 в «structure_shift_1300». Кусок якорем
+    не является, и без этого правила он побеждал бы целый код по близости —
+    величина структурного сдвига привязывалась бы к строке баланса 1300,
+    у которой значения совсем другие.
+    """
     before = window[position - 1] if position > 0 else " "
     after = window[position + length] if position + length < len(window) else " "
-    return before.isdigit() or after.isdigit()
+    return before.isdigit() or after.isdigit() or "_" in (before, after)

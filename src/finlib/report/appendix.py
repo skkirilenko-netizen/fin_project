@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from finlib.llm.context import format_metric
 from finlib.metrics.definitions import Unit, load_metrics
+from finlib.metrics.display import format_metric
 from finlib.report.data import ReportData
 
 logger = logging.getLogger(__name__)

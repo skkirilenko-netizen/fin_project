@@ -9,6 +9,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 
 from finlib.config import settings
@@ -24,7 +25,24 @@ from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
 
-PROMPT_NAME = "conclusion"
+class PromptScheme(StrEnum):
+    """Схема, по которой порождается текстовая часть.
+
+    `free` — свободная генерация: модель сама формулирует утверждения
+    о показателях по переданным величинам. `theses` — сборка из предписанных
+    формулировок: утверждения выбирает расчёт, модель связывает их в текст
+    (задача 18).
+
+    Значение схемы совпадает с именем шаблона в `prompts/` и с именем промпта
+    в `llm_log`: замеры двух схем идут в один журнал, и различать их надо
+    по записи, а не по времени прогона.
+    """
+
+    FREE = "conclusion"
+    THESES = "conclusion_theses"
+
+
+DEFAULT_SCHEME = PromptScheme.FREE
 # Попытки имеют смысл, пока модели сообщают, что было не так (with_corrections):
 # при нулевой температуре повтор с тем же промптом даёт тот же ответ.
 # Три попытки — по наблюдениям на пробах: формат «число со своим кодом»
@@ -72,17 +90,28 @@ class Conclusion:
     verified_text: str = ""
 
 
-def load_prompt(path: Path | None = None) -> str:
-    """Читает шаблон инструкции вместе с общими правилами."""
+def load_prompt(
+    path: Path | None = None, scheme: PromptScheme = DEFAULT_SCHEME
+) -> str:
+    """Читает шаблон инструкции вместе с общими правилами.
+
+    Общие правила одни на обе схемы и подставляются в шаблон, а не
+    дублируются в нём: правило, разошедшееся между схемами, сделало бы
+    сравнение схем сравнением двух разных требований.
+    """
     prompts = settings.prompts_dir
-    template = (path or prompts / "conclusion.md").read_text(encoding="utf-8")
+    template = (path or prompts / f"{scheme.value}.md").read_text(encoding="utf-8")
     rules = (prompts / "rules.md").read_text(encoding="utf-8")
     return template.replace("{rules}", rules)
 
 
-def build_prompt(context: ConclusionContext, path: Path | None = None) -> str:
-    """Подставляет блоки контекста в шаблон."""
-    return load_prompt(path).replace("{blocks}", context.blocks())
+def build_prompt(
+    context: ConclusionContext,
+    path: Path | None = None,
+    scheme: PromptScheme = DEFAULT_SCHEME,
+) -> str:
+    """Подставляет блоки контекста в шаблон выбранной схемы."""
+    return load_prompt(path, scheme).replace("{blocks}", context.blocks())
 
 
 def with_corrections(prompt: str, problems: list[str]) -> str:
@@ -113,6 +142,7 @@ def _log(
     result: VerificationResult | None,
     attempt: int,
     is_test: bool,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> None:
     """Пишет обращение к модели в журнал независимо от исхода.
 
@@ -127,7 +157,7 @@ def _log(
             "inn": context.inn,
             "report_date": context.report_date,
             "model": completion.model if completion else settings.llm_model,
-            "prompt_name": PROMPT_NAME,
+            "prompt_name": scheme.value,
             "prompt_text": prompt,
             "response_text": completion.text if completion else None,
             "temperature": 0,
@@ -196,6 +226,7 @@ def generate_conclusion(
     context: ConclusionContext | None = None,
     text_context: TextContext | None = None,
     is_test: bool = False,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> Conclusion:
     """Готовит текстовую часть заключения с постпроверкой и повторной попыткой.
 
@@ -203,11 +234,19 @@ def generate_conclusion(
     доказательная база системы: он показывает, что именно было предъявлено
     модели и что она ответила. Стирать его прогоном тестов нельзя, поэтому
     тесты помечают свои записи и убирают только помеченные.
+
+    scheme выбирает схему текстовой части. Блок тезисов собирается только
+    для неё же: подавать готовые утверждения при свободной генерации значило
+    бы мерить не ту схему, ради сравнения с которой замер делается.
     """
     context = context or build_context(
-        inn, conn, report_date=report_date, standard=standard
+        inn,
+        conn,
+        report_date=report_date,
+        standard=standard,
+        with_theses=scheme is PromptScheme.THESES,
     )
-    prompt = build_prompt(context)
+    prompt = build_prompt(context, scheme=scheme)
     blocks = context.blocks()
     # Пороги стоп-факторов — единственные числа-ориентиры, которые методика
     # объявляет прямо; называть их модели разрешено. Всякий другой порог
@@ -228,7 +267,7 @@ def generate_conclusion(
                 thresholds=thresholds,
                 text_context=text_context,
             )
-            _log(context, asked, completion, result, attempt, is_test)
+            _log(context, asked, completion, result, attempt, is_test, scheme)
 
             if result.verified:
                 logger.info(

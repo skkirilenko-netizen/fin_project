@@ -18,7 +18,12 @@ from enum import StrEnum
 from pathlib import Path
 
 from finlib.db import PgConnection, connection
-from finlib.llm.service import ConclusionRejectedError, generate_conclusion
+from finlib.llm.service import (
+    DEFAULT_SCHEME,
+    ConclusionRejectedError,
+    PromptScheme,
+    generate_conclusion,
+)
 from finlib.metrics.engine import compute_all
 from finlib.metrics.store import save_results
 from finlib.normalize.lines import UnitSource
@@ -99,6 +104,7 @@ def analyze(
     source: SourceKind = SourceKind.GIR_BO,
     inbox: InboxSource | None = None,
     on_stage: Callable[[StageResult], None] | None = None,
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> PipelineResult:
     """Проводит организацию через весь цикл и возвращает путь к заключению.
 
@@ -109,6 +115,10 @@ def analyze(
     source выбирает, откуда берётся отчётность. Комплект, поданный файлом,
     проходит те же этапы, что и полученный из источника: загрузку, контроли,
     расчёт, оценку и сборку документа.
+
+    scheme выбирает схему текстовой части: свободную генерацию или сборку
+    из предписанных тезисов. На расчётный слой она не влияет — сравнение схем
+    затем и нужно, чтобы отличать поведение текстового слоя от расчётного.
     """
     result = PipelineResult(inn=inn, with_llm=with_llm)
 
@@ -130,7 +140,7 @@ def analyze(
         _compute(inn, conn, standard, report, result)
 
     if with_llm:
-        result.document = _conclude(inn, result, standard, directory, report)
+        result.document = _conclude(inn, result, standard, directory, report, scheme)
     else:
         result.document = _document_without_text(
             inn, result, standard, directory, report
@@ -431,11 +441,12 @@ def _conclude(
     standard: Standard,
     directory: Path | None,
     report: Callable[..., None],
+    scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> Path:
     """Порождает текстовую часть и собирает документ."""
     try:
         conclusion = generate_conclusion(
-            inn, report_date=result.report_date, standard=standard
+            inn, report_date=result.report_date, standard=standard, scheme=scheme
         )
     except ConclusionRejectedError as exc:
         raise PipelineError(

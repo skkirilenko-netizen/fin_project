@@ -18,7 +18,7 @@ from finlib.metrics.definitions import MetricsCatalog, Unit, load_metrics
 from finlib.metrics.derived import describe as describe_derived
 from finlib.metrics.derived import parse as parse_derived
 from finlib.metrics.derived import unit_of as derived_unit
-from finlib.metrics.display import round_to
+from finlib.metrics.display import format_metric, money, percent, ratio
 from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.periods import limitations as period_limitations
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
@@ -98,6 +98,10 @@ class ConclusionContext:
     # и по каким основаниям задаются вопросы. Перечни машинные, порядок —
     # из methodology/report.yaml, а не на усмотрение модели.
     composition: str = ""
+    # Предписанные тезисы. Блок собирается только для схемы theses: при
+    # свободной генерации утверждения о показателях пишет модель, и подавать
+    # ей готовые значило бы мерить не ту схему.
+    theses: str = ""
 
     def blocks(self) -> str:
         """Все блоки одной строкой — с ними же сверяется ответ модели."""
@@ -107,6 +111,7 @@ class ConclusionContext:
                 self.organization,
                 self.data,
                 self.metrics,
+                self.theses,
                 self.flags,
                 self.assessment,
                 self.composition,
@@ -114,49 +119,6 @@ class ConclusionContext:
             ]
             if item
         )
-
-
-# Оформление единиц измерения. Разрядность приходит из методики
-# (metrics.yaml, блок display): округление в проекте одно на всех, иначе
-# текст заключения и приложение расходятся между собой.
-UNIT_SUFFIX: dict[Unit, str] = {
-    Unit.THOUSAND_RUB: " тыс. руб.",
-    Unit.DAYS: " дн.",
-    Unit.PERCENT: " %",
-    Unit.RATIO: "",
-}
-
-
-def _digits(value: Decimal, scale: int) -> str:
-    """Число с разделителями разрядов и запятой как десятичным знаком."""
-    return f"{round_to(value, scale):,}".replace(",", " ").replace(".", ",")
-
-
-def money(value: Decimal) -> str:
-    """Денежная величина: целые тысячи рублей с разделителями разрядов."""
-    return _digits(value, 0)
-
-
-def ratio(value: Decimal) -> str:
-    """Коэффициент: два знака после запятой."""
-    return _digits(value, 2)
-
-
-def days(value: Decimal) -> str:
-    """Дни: один знак после запятой."""
-    return _digits(value, 1)
-
-
-def percent(value: Decimal) -> str:
-    """Процент: один знак после запятой, как и дни."""
-    return _digits(value, 1)
-
-
-def format_metric(value: Decimal, unit: Unit, scale: int | None = None) -> str:
-    """Значение показателя в его единице измерения и разрядности методики."""
-    if scale is None:
-        scale = load_metrics().display.scale_for(unit)
-    return f"{_digits(value, scale)}{UNIT_SUFFIX.get(unit, '')}"
 
 
 def _periods(inn: str, conn: PgConnection | None, standard: Standard) -> list[date]:
@@ -699,8 +661,14 @@ def build_context(
     lines_catalog: LinesCatalog | None = None,
     metrics_catalog: MetricsCatalog | None = None,
     scoring: ScoringCatalog | None = None,
+    with_theses: bool = False,
 ) -> ConclusionContext:
-    """Собирает контекст заключения по организации."""
+    """Собирает контекст заключения по организации.
+
+    with_theses добавляет блок предписанных тезисов. Он нужен только схеме
+    theses: при свободной генерации те же утверждения пишет модель, и подать
+    ей готовые значило бы сравнивать схему саму с собой.
+    """
     lines_catalog = lines_catalog if lines_catalog is not None else load_lines()
     metrics_catalog = metrics_catalog if metrics_catalog is not None else load_metrics()
     scoring = scoring if scoring is not None else load_scoring()
@@ -756,4 +724,14 @@ def build_context(
             assessment,
             standard,
         ),
+        theses=_theses_block(inn, target, conn, standard) if with_theses else "",
     )
+
+
+def _theses_block(
+    inn: str, target: date, conn: PgConnection | None, standard: Standard
+) -> str:
+    """Блок предписанных тезисов вместе со связью с надзорными сигналами."""
+    from finlib.scoring.theses import build_theses
+
+    return build_theses(inn, conn, report_date=target, standard=standard).block()

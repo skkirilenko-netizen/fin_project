@@ -11,9 +11,8 @@ from decimal import Decimal
 
 import pytest
 
-from finlib.llm.context import format_metric, money, ratio
 from finlib.metrics.definitions import Unit, load_metrics
-from finlib.metrics.display import displayed, round_to
+from finlib.metrics.display import displayed, format_metric, money, ratio, round_to
 from finlib.report.consistency import check_document
 from finlib.report.data import MetricRow, ReportData, load_report_data
 from finlib.standards import Standard

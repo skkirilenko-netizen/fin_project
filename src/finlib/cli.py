@@ -15,8 +15,9 @@ from typing import Annotated
 import typer
 
 from finlib.db import fetch_all
-from finlib.llm.context import format_metric
+from finlib.llm.service import PromptScheme
 from finlib.metrics.definitions import Unit
+from finlib.metrics.display import format_metric
 from finlib.pipeline import PipelineError, StageResult, analyze, load_inbox
 from finlib.sources.inbox import InboxScan, InboxSource
 from finlib.sources.model import SourceKind
@@ -80,6 +81,22 @@ def _check_inn(inn: str) -> str:
     return inn
 
 
+# Короткое имя схемы в терминале — не то же, что имя шаблона в prompts/:
+# в журнал идёт имя шаблона, а пользователю называется схема.
+_SCHEMES: dict[str, PromptScheme] = {
+    "free": PromptScheme.FREE,
+    "theses": PromptScheme.THESES,
+}
+
+
+def _scheme(name: str) -> PromptScheme:
+    """Схема текстовой части по имени из командной строки."""
+    found = _SCHEMES.get(name)
+    if found is None:
+        _fail(f"схема «{name}» неизвестна: допустимы {', '.join(sorted(_SCHEMES))}")
+    return found
+
+
 def _render(value: Decimal | None, unit: Unit, scale: int) -> str:
     """Значение показателя в единице и разрядности методики."""
     if value is None:
@@ -110,11 +127,20 @@ def analyze_command(
     output: Annotated[
         Path | None, typer.Option("--output", help="Каталог для документа")
     ] = None,
+    prompt_scheme: Annotated[
+        str,
+        typer.Option(
+            "--prompt-scheme",
+            help="Схема текстовой части: free — свободная генерация, "
+            "theses — сборка из предписанных тезисов",
+        ),
+    ] = "free",
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Полный цикл: получение, загрузка, контроли, расчёт, оценка, заключение."""
     _setup_logging(verbose)
     _check_inn(inn)
+    scheme = _scheme(prompt_scheme)
     source = SourceKind.FILE if from_inbox or inbox_dir else SourceKind.GIR_BO
     where = "по поданным файлам" if source is SourceKind.FILE else "по данным ГИР БО"
     typer.echo(f"Анализ организации {inn} {where}\n")
@@ -128,6 +154,7 @@ def analyze_command(
             source=source,
             inbox=InboxSource(inbox_dir) if source is SourceKind.FILE else None,
             on_stage=_echo_stage,
+            scheme=scheme,
         )
     except PipelineError as exc:
         _fail(f"Этап «{exc.stage.value}». {exc.reason}")
