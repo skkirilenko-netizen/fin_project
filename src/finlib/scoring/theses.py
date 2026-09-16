@@ -352,6 +352,10 @@ def _selectors(
 
     if current is None:
         return _MetricState(metric.code, selectors, values)
+    # Отчётный год: без него утверждение об отказе расчёта ложно, если
+    # за сравнительный период показатель посчитан. Год, а не дата: точка
+    # внутри даты рвёт предложение, по которому идёт проверка утверждений.
+    values["period"] = str(current["report_date"].year)
     if current["status"] != "ok" or current["value"] is None:
         selectors["status"] = "not_calculable"
         selectors["reason_code"] = current["reason_code"] or ""

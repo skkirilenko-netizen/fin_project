@@ -246,6 +246,29 @@ def test_block_numbers_are_anchored() -> None:
         )
         result = verify(answer, blocks, thresholds=load_metrics().stop_factor_values())
         assert result.foreign == [], [item.describe() for item in result.foreign]
+        assert result.wordings == [], [item.text for item in result.wordings]
+
+
+def test_refusal_thesis_names_the_period() -> None:
+    """Тезис об отказе расчёта называет отчётный год.
+
+    Показатель, не рассчитанный за отчётный период, бывает рассчитан
+    за сравнительный, и его значение стоит в блоке ПОКАЗАТЕЛИ. Проверено
+    на ПК «Стройсервис»: `fin_leverage` за 2024 год не рассчитан, за 2023 год
+    равен 1,33. Без года утверждение ложно, и постпроверка утверждений
+    отклоняет верный в остальном ответ — за наше нарушение, а не за её.
+    """
+    from finlib.llm.claims import find_false_claims
+    from finlib.llm.pairs import build_index as build_anchor_index
+
+    for inn in (SIMPLE, FULL):
+        found = build_theses(inn)
+        refusals = [item for item in found.theses if item.kind is ThesisKind.STATUS]
+        assert all(" год не рассчитан" in item.text for item in refusals)
+        index = build_anchor_index(build_context(inn, with_theses=True).blocks())
+        answer = "\n\n".join(item.text for item in found.theses)
+        claims = find_false_claims(answer, index, index.calculated_codes())
+        assert claims == [], [item.describe() for item in claims]
 
 
 def test_signal_value_is_anchored_to_its_own_code() -> None:
