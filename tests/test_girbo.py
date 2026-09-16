@@ -377,6 +377,32 @@ def test_end_to_end_on_probe(tmp_path: Path) -> None:
     assert latest(sets).forms["0710001"].values[date(2025, 12, 31)]["1600"] > 0
 
 
+def test_probe_loader_takes_details_from_the_search_probe() -> None:
+    """`make probes` восстанавливает реквизиты, а не обедняет организацию.
+
+    Прежде загрузчик проб собирал организацию из ИНН и наименования, а ОГРН,
+    ОКВЭД и регион оставлял пустыми. Загрузка идёт через `ON CONFLICT DO
+    UPDATE`, поэтому он не просто не давал эти сведения, а затирал загруженные
+    живым прогоном, и строки шапки документа молча исчезали.
+    """
+    import importlib.util
+
+    from finlib.config import settings
+
+    path = settings.base_dir / "scripts" / "load_probes.py"
+    spec = importlib.util.spec_from_file_location("load_probes", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for probe in module.PROBES:
+        organization = module._organization_of(probe)
+        assert organization.inn == probe.inn
+        assert organization.ogrn, probe.inn
+        assert organization.okved, probe.inn
+        assert organization.region, probe.inn
+
+
 def _source(handler, tmp_path: Path) -> GirboSource:
     """Источник поверх поддельного транспорта и временного кэша."""
     client = PoliteClient(

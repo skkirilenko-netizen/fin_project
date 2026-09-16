@@ -20,7 +20,12 @@ from finlib.normalize.loader import load_report_set
 from finlib.quality.runner import run_checks
 from finlib.scoring.engine import assess
 from finlib.scoring.store import save_assessment
-from finlib.sources.girbo import Organization, parse_report_sets
+from finlib.sources.girbo import (
+    Organization,
+    parse_organization,
+    parse_report_sets,
+    strip_highlight,
+)
 from finlib.utils import json_loads_decimal
 
 logger = logging.getLogger("load_probes")
@@ -30,9 +35,18 @@ PROBE_DIR = Path(__file__).resolve().parents[1] / "data" / "raw" / "probe"
 
 @dataclass(frozen=True, slots=True)
 class Probe:
-    """Проба: файл комплектов и реквизиты организации."""
+    """Проба: файл комплектов и файл ответа поиска с реквизитами организации.
+
+    Реквизиты берутся из сохранённого ответа поиска, а не собираются здесь
+    из наименования и идентификатора. Иначе `make probes` не просто не даёт
+    ОГРН, ОКВЭД и регион, а затирает их: загрузка идёт через
+    `ON CONFLICT DO UPDATE`, и организация теряет то, что успел загрузить
+    живой прогон. В документе строки шапки при этом молча исчезают —
+    они печатаются по условию.
+    """
 
     file_name: str
+    search_file: str
     inn: str
     girbo_id: int
     short_name: str
@@ -42,6 +56,7 @@ class Probe:
 PROBES: tuple[Probe, ...] = (
     Probe(
         "girbo_bfo_full_7736050003.json",
+        "girbo_search_7736050003.json",
         "7736050003",
         6622458,
         'ПАО "ГАЗПРОМ"',
@@ -49,6 +64,7 @@ PROBES: tuple[Probe, ...] = (
     ),
     Probe(
         "girbo_bfo_simplified_2100010824.json",
+        "girbo_search_2100010824.json",
         "2100010824",
         12283623,
         'ПК "СТРОЙСЕРВИС"',
@@ -56,12 +72,29 @@ PROBES: tuple[Probe, ...] = (
     ),
     Probe(
         "girbo_bfo_corrected_2522002003.json",
+        "girbo_search_2522002003.json",
         "2522002003",
         2422342,
         'ООО "МАГНИТ"',
         "корректировки отчётности, комплект 2025 года не проходит контроли",
     ),
 )
+
+
+def _organization_of(probe: Probe) -> Organization:
+    """Реквизиты организации из сохранённого ответа поиска.
+
+    Разбирает тот же `parse_organization`, что и живой источник: проба — это
+    настоящий ответ ГИР БО, и собирать из него реквизиты вручную незачем.
+    """
+    path = PROBE_DIR / probe.search_file
+    if not path.exists():
+        raise FileNotFoundError(f"проба поиска не найдена: {path}")
+    payload = json_loads_decimal(path.read_bytes())
+    for row in payload.get("content") or []:
+        if strip_highlight(str(row.get("inn"))) == probe.inn:
+            return parse_organization(row)
+    raise ValueError(f"в пробе поиска {path.name} нет организации с ИНН {probe.inn}")
 
 
 def load_probe(probe: Probe, conn, *, with_metrics: bool = True) -> dict[str, int]:
@@ -71,12 +104,7 @@ def load_probe(probe: Probe, conn, *, with_metrics: bool = True) -> dict[str, in
         raise FileNotFoundError(f"проба не найдена: {path}")
 
     sets = parse_report_sets(json_loads_decimal(path.read_bytes()), probe.inn)
-    organization = Organization(
-        inn=probe.inn,
-        girbo_id=probe.girbo_id,
-        short_name=probe.short_name,
-        full_name=probe.short_name,
-    )
+    organization = _organization_of(probe)
 
     quarantined = 0
     for report in sorted(sets, key=lambda item: item.report_year):

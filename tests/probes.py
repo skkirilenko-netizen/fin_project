@@ -12,6 +12,7 @@ CORRECTED_BFO = PROBE_DIR / "girbo_bfo_corrected_2522002003.json"
 ORG_CARD = PROBE_DIR / "girbo_org_7736050003.json"
 SEARCH_FOUND = PROBE_DIR / "girbo_search_7736050003.json"
 SEARCH_CORRECTED = PROBE_DIR / "girbo_search_2522002003.json"
+SEARCH_SIMPLIFIED = PROBE_DIR / "girbo_search_2100010824.json"
 SEARCH_EMPTY = PROBE_DIR / "girbo_search_empty.json"
 
 
