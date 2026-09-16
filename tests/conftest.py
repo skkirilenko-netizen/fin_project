@@ -18,33 +18,64 @@ def pytest_configure(config: pytest.Config) -> None:
         )
 
 
-def _real_log_rows() -> int | None:
-    """Сколько в журнале обращений к модели боевых записей; None — базы нет."""
+_REAL_ROWS = "SELECT count(*) AS n, coalesce(max(id), 0) AS last FROM llm_log WHERE NOT is_test"
+
+
+def _real_log_state() -> tuple[int, int] | None:
+    """Сколько боевых записей в журнале и какая последняя; None — базы нет."""
     try:
         with psycopg2.connect(**settings.dsn_kwargs) as conn, conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM llm_log WHERE NOT is_test")
-            return int(cur.fetchone()[0])
+            cur.execute(_REAL_ROWS)
+            found = cur.fetchone()
+            return int(found[0]), int(found[1])
     except psycopg2.Error:  # pragma: no cover
         return None
 
 
+def journal_problem(
+    before: tuple[int, int] | None, after: tuple[int, int] | None
+) -> str | None:
+    """Что прогон сделал с боевыми записями журнала; None — ничего.
+
+    Проверок две, и они разные. Число записей ловит удаление. Наибольший
+    идентификатор ловит добавление: тест, забывший `is_test=True`, пишет
+    боевую запись, и она навсегда остаётся в доказательной базе — так туда
+    попала запись модели `test-model`.
+    """
+    if before is None or after is None:
+        return None
+    if after[0] < before[0]:
+        return (
+            f"прогон тестов удалил боевые записи llm_log: было {before[0]}, "
+            f"стало {after[0]}. Тесты вправе удалять только записи с is_test = true"
+        )
+    if after[1] > before[1]:
+        return (
+            f"прогон тестов добавил боевые записи llm_log (после id {before[1]}): "
+            "запись, сделанная тестом, обязана помечаться is_test = true. "
+            "Передайте is_test=True в generate_conclusion или build_report"
+        )
+    return None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def journal_is_not_erased() -> Iterator[None]:
-    """Следит, чтобы прогон тестов не стёр боевые записи журнала.
+    """Следит, чтобы прогон тестов не трогал боевые записи журнала.
 
     `llm_log` — доказательная база системы: по ней видно, что предъявлялось
     модели и что она отвечала. Однажды прогон pytest её уже уничтожил.
     Тесты помечают свои записи `is_test` и вправе убирать только их; попытка
     убрать чужие роняет весь прогон, а не проходит незамеченной.
+
+    Добавление сторожится так же, как удаление: незапомеченная запись теста
+    неотличима от рабочего прогона и портит статистику отказов навсегда,
+    потому что понять задним числом, чем она сделана, уже нельзя.
     """
-    before = _real_log_rows()
+    before = _real_log_state()
     yield
-    after = _real_log_rows()
-    if before is not None and after is not None and after < before:
-        raise AssertionError(
-            f"прогон тестов удалил боевые записи llm_log: было {before}, стало {after}. "
-            "Тесты вправе удалять только записи с is_test = true"
-        )
+    problem = journal_problem(before, _real_log_state())
+    if problem is not None:
+        raise AssertionError(problem)
 
 
 @pytest.fixture

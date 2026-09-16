@@ -117,12 +117,18 @@ def build_report(
     scoring: ScoringCatalog | None = None,
     generated_at: datetime | None = None,
     with_text: bool = True,
+    is_test: bool = False,
 ) -> RenderedReport:
     """Готовит заключение и записывает docx.
 
     Текстовая часть берётся из готового Conclusion, если он передан, иначе
     порождается здесь. Отклонённый постпроверкой ответ до документа не доходит:
     generate_conclusion поднимает ConclusionRejectedError.
+
+    is_test передаётся в журнал обращений к модели. Признак нужен здесь,
+    а не только в `generate_conclusion`: тест, которому нужен полный путь
+    сборки, иначе не имеет способа пометить свою запись, и она навсегда
+    оседает в журнале как боевая.
     """
     scoring = scoring if scoring is not None else load_scoring()
     data = load_report_data(inn, conn, report_date=report_date, standard=standard)
@@ -141,6 +147,7 @@ def build_report(
             text_context=data.text_context(
                 lines_catalog, reporting_type, load_metrics()
             ),
+            is_test=is_test,
         )
     sections = split_sections(conclusion.text) if conclusion is not None else []
 

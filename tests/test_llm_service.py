@@ -261,3 +261,24 @@ def test_log_is_written_for_other_organisation_independently() -> None:
         "SELECT count(*) AS n FROM llm_log WHERE inn = %(i)s AND is_test", {"i": INN}
     )["n"] == 0
     execute(_CLEAN, {"i": other})
+
+
+def test_journal_guard_notices_added_rows() -> None:
+    """Сторож журнала ловит не только удаление боевых записей, но и добавление.
+
+    Запись, сделанная тестом без пометки, неотличима от рабочего прогона:
+    понять задним числом, чем она сделана, уже нельзя. Так в журнал попала
+    запись модели «test-model» — её оставил прогон тестов в тот день, когда
+    признак `is_test` только вводился, а колонка уже существовала со значением
+    по умолчанию. Сторож сравнивал тогда одно число записей и добавления
+    не видел.
+    """
+    from conftest import journal_problem
+
+    assert journal_problem((10, 100), (10, 100)) is None
+    assert "удалил" in journal_problem((10, 100), (9, 100))
+    assert "добавил" in journal_problem((10, 100), (11, 101))
+    # Тест, добавивший боевую запись и убравший чужую, оставляет счёт прежним:
+    # по одному числу записей такое не поймать.
+    assert "добавил" in journal_problem((10, 100), (10, 101))
+    assert journal_problem(None, (11, 101)) is None
