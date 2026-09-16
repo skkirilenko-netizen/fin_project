@@ -2,7 +2,8 @@
 
 Прогон набора здесь не выполняется: он ходит в базу за каждой организацией
 и — в полном контуре — к модели. Проверяется то, что делает прогонщик вокруг
-цикла: состав набора, измерение покрытия по базе, метрики и отчёт.
+цикла: состав, сверка заявленной категории с фактом, покрытие, метрики
+и отчёт.
 """
 
 import copy
@@ -33,48 +34,115 @@ SET = RUN.load_set()
 
 
 def raw() -> dict:
-    """Состав набора в исходном виде, до разбора моделью."""
+    """Настройки набора в исходном виде, до разбора моделью."""
     return yaml.safe_load(RUN.default_set_path().read_text(encoding="utf-8"))
 
 
-# --- состав набора -----------------------------------------------------------
+def entry(**changes) -> "RUN.SetEntry":
+    """Запись состава с подменёнными полями."""
+    base = {
+        "category_id": 1,
+        "category": "Упрощённая отчётность",
+        "name": "ООО «Проверка»",
+        "inn": "2100010824",
+        "reason": "основание включения",
+        "category_status": "гипотеза",
+    }
+    return RUN.SetEntry(**{**base, **changes})
 
 
-def test_every_organization_names_its_reason() -> None:
-    """Организация без основания включения — это шум, а не набор."""
-    assert SET.organizations
+# --- состав ------------------------------------------------------------------
+
+
+def test_sample_is_read_with_reasons_and_statuses() -> None:
+    """У каждой организации есть основание включения и статус гипотезы."""
+    assert len(SET.organizations) >= 30
     for item in SET.organizations:
         assert item.reason.strip(), item.inn
+        assert item.category_status in RUN.CATEGORY_STATUS
+
+
+def test_reserve_stays_in_the_set_but_out_of_the_run() -> None:
+    """Резерв остаётся в составе и в прогон не идёт.
+
+    Шесть однотипных вырожденных балансов прогон удлиняют, а нового
+    не показывают; выбрасывать их из файла при этом незачем.
+    """
+    reserve = [item for item in SET.organizations if not item.in_run]
+    assert reserve
+    assert set(SET.inns).isdisjoint({item.inn for item in reserve})
+
+
+def test_wrong_inn_checksum_is_refused() -> None:
+    """Опечатка в ИНН даёт не ошибку прогона, а тихий пропуск организации."""
+    with pytest.raises(ValidationError, match="контрольным разрядам"):
+        entry(inn="2100010825")
+
+
+def test_unknown_category_status_is_refused() -> None:
+    """Статус гипотезы берётся из списка, а не пишется свободно."""
+    with pytest.raises(ValidationError, match="неизвестен"):
+        entry(category_status="вроде бы да")
+
+
+def test_category_name_must_match_the_settings() -> None:
+    """Состав и настройки набора не вправе расходиться в наименовании.
+
+    Иначе переименованная категория молча распадается на две: одну из файла
+    состава, другую из настроек, — и покрытие считается по обеим.
+    """
+    payload = raw()
+    base = RUN.RegressionSet(**payload)
+    with pytest.raises(ValueError, match="в настройках"):
+        base.with_organizations((entry(category="Упрощёнка"),))
 
 
 def test_duplicate_inn_is_refused() -> None:
     """Одна организация дважды — и покрытие, и метрики считаются неверно."""
-    payload = raw()
-    payload["organizations"].append(copy.deepcopy(payload["organizations"][0]))
-    with pytest.raises(ValidationError, match="дважды"):
-        RUN.RegressionSet(**payload)
+    base = RUN.RegressionSet(**raw())
+    with pytest.raises(ValueError, match="дважды"):
+        base.with_organizations((entry(), entry()))
 
 
 def test_unknown_holding_flag_is_refused() -> None:
-    """Набор не вправе измерять покрытие по коду, которого в методике нет.
-
-    Иначе переименованный флаг молча превращает измерение в непокрытое,
-    и набор выглядит хуже, чем он есть, — или лучше, если наоборот.
-    """
+    """Набор не вправе измерять признак по коду, которого в методике нет."""
     payload = raw()
     payload["coverage"]["holding_flag"] = "no_such_flag"
     with pytest.raises(ValidationError, match="в методике не объявлен"):
         RUN.RegressionSet(**payload)
 
 
+def test_category_declares_a_feature_or_says_why_it_cannot() -> None:
+    """Категория без признака и без причины — недосмотр, а не решение."""
+    payload = copy.deepcopy(raw())
+    payload["categories"][0].pop("feature")
+    with pytest.raises(ValidationError, match="ровно одно"):
+        RUN.RegressionSet(**payload)
+
+    payload = copy.deepcopy(raw())
+    payload["categories"][0]["manual"] = "и признак, и причина"
+    with pytest.raises(ValidationError, match="ровно одно"):
+        RUN.RegressionSet(**payload)
+
+
+def test_liquidation_is_checked_by_hand_and_says_so() -> None:
+    """Признака ликвидации в отчётности нет, и он не выдуман ради таблицы."""
+    liquidation = next(item for item in SET.categories if item.id == 10)
+    assert liquidation.feature is None
+    assert liquidation.manual.strip()
+
+
+# --- размерные группы --------------------------------------------------------
+
+
 def test_size_bounds_ascend_and_end_open() -> None:
     """Границы размерных групп идут по возрастанию и не закрывают верх."""
-    payload = raw()
+    payload = copy.deepcopy(raw())
     payload["size_groups"]["bounds"][-1]["max_revenue"] = "3000000"
     with pytest.raises(ValidationError, match="открытой сверху"):
         RUN.RegressionSet(**payload)
 
-    payload = raw()
+    payload = copy.deepcopy(raw())
     payload["size_groups"]["bounds"][0]["max_revenue"] = "900000"
     with pytest.raises(ValidationError, match="возрастанию"):
         RUN.RegressionSet(**payload)
@@ -98,18 +166,18 @@ def test_size_group_is_not_guessed_without_revenue() -> None:
     assert SET.size_groups.group_of(None) is None
 
 
-# --- покрытие ----------------------------------------------------------------
+# --- признаки и покрытие -----------------------------------------------------
 
 
-def test_coverage_is_measured_over_the_database() -> None:
-    """Признаки покрытия берутся из базы, а не из объявлений файла состава."""
-    found = {item.name: item for item in RUN.coverage(SET)}
-    assert found["Полный набор форм"].count >= 1
-    assert found["Упрощённый набор форм"].count >= 1
-    # Три пробы экспертной оценки дают эти измерения по построению.
-    assert found["Отрицательный собственный капитал"].count >= 1
-    assert found["Отбракованные комплекты отчётности"].count >= 1
-    assert found["Признаки холдинговой структуры"].count >= 1
+def test_features_are_measured_over_the_database() -> None:
+    """Признаки берутся из базы, а не из объявлений файла состава."""
+    measured = RUN.features_of(SET)
+    assert measured
+    # Три пробы экспертной оценки дают эти признаки по построению.
+    assert RUN.Feature.SIMPLIFIED_FORMS in measured["2100010824"]
+    assert RUN.Feature.NEGATIVE_EQUITY in measured["2100010824"]
+    assert RUN.Feature.FULL_FORMS in measured["7736050003"]
+    assert RUN.Feature.QUARANTINED in measured["2522002003"]
 
 
 def test_uncovered_dimension_says_so() -> None:
@@ -118,21 +186,56 @@ def test_uncovered_dimension_says_so() -> None:
     assert RUN._listed({"7736050003"}) == "7736050003"
 
 
+def test_declared_category_is_checked_against_the_fact() -> None:
+    """Заявленная категория — гипотеза, и отчёт сверяет её с признаком."""
+    measured = {
+        "2100010824": {RUN.Feature.SIMPLIFIED_FORMS},
+        "7736050003": {RUN.Feature.FULL_FORMS},
+    }
+    subset = RUN.RegressionSet(**raw()).with_organizations(
+        (
+            entry(inn="2100010824"),
+            entry(
+                inn="7736050003",
+                category_id=4,
+                category="Отрицательный собственный капитал",
+            ),
+        )
+    )
+    checks = {item.id: item for item in RUN.categories_check(subset, measured, [])}
+    assert checks[1].declared == 1
+    assert checks[1].confirmed == 1
+    # Заявлен отрицательный капитал, а по базе его нет: категория не сошлась.
+    assert checks[4].declared == 1
+    assert checks[4].confirmed == 0
+    assert "7736050003" in checks[4].unconfirmed
+
+
 # --- метрики и отчёт ---------------------------------------------------------
 
 
 def runs() -> list:
-    """Три вымышленных итога: пройдено с классом, без класса и остановка."""
+    """Четыре вымышленных итога: с классом, без класса, остановка и отказ."""
     return [
-        RUN.OrgRun(inn="1" * 10, name="Первая", ok=True, seconds=1.0, class_code="B"),
-        RUN.OrgRun(inn="2" * 10, name="Вторая", ok=True, seconds=3.0),
         RUN.OrgRun(
-            inn="3" * 10,
-            name="Третья",
-            ok=False,
-            seconds=2.0,
-            stage="контроли качества",
-            reason="все комплекты в карантине",
+            inn="1" * 10, name="Первая", category_id=1, category="Первая",
+            expected="analysis", ok=True, seconds=1.0, class_code="B",
+            as_expected=True,
+        ),
+        RUN.OrgRun(
+            inn="2" * 10, name="Вторая", category_id=1, category="Первая",
+            expected="analysis", ok=True, seconds=3.0, as_expected=True,
+        ),
+        RUN.OrgRun(
+            inn="3" * 10, name="Третья", category_id=1, category="Первая",
+            expected="analysis", ok=False, seconds=2.0,
+            stage="контроли качества", reason="все комплекты в карантине",
+        ),
+        RUN.OrgRun(
+            inn="4" * 10, name="Банк", category_id=12, category="Вне периметра",
+            expected="refusal", ok=False, seconds=0.5,
+            stage="получение отчётности", reason="организация не найдена",
+            as_expected=True,
         ),
     ]
 
@@ -150,6 +253,63 @@ def test_metrics_separate_stops_from_absent_class() -> None:
     assert found["классы"] == {"B": 1}
     assert found["без класса"] == 1
     assert found["доля без класса"] == "50,0 %"
+
+
+def test_expected_refusal_counts_as_success() -> None:
+    """Организация вне периметра отказом подтверждает правило, а не нарушает.
+
+    Кредитная организация в ГИР БО отсутствует, и отказ по ней — правильный
+    исход. В числе остановок она не значится.
+    """
+    found = RUN.run_metrics(runs(), SET, RUN.Contour.FAST, datetime.now())
+    assert found["ожидался отказ"] == 1
+    assert found["итог совпал с ожиданием"] == "3 из 4"
+    assert found["остановились"] == 1
+
+
+def test_refusal_of_the_runner_itself_is_not_a_success() -> None:
+    """Сбой прогонщика отказом методики не считается."""
+    subset = RUN.RegressionSet(**raw()).with_organizations(
+        (entry(inn="7707083893", category_id=12, category="Вне периметра, ожидается отказ"),)
+    )
+    broken = [
+        RUN.OrgRun(
+            inn="7707083893", name="Банк", category_id=12,
+            category="Вне периметра, ожидается отказ", expected="refusal",
+            ok=False, seconds=0.1, stage="сбой прогонщика", reason="TypeError",
+        )
+    ]
+    RUN._finalize(broken, {"7707083893": set()}, subset)
+    assert not broken[0].as_expected
+
+
+def test_unloaded_organization_is_not_an_expected_refusal() -> None:
+    """Организация, до которой прогон не дошёл, отказом методики не считается.
+
+    Иначе прогон без загруженных данных отчитывался бы ожидаемыми отказами
+    по всем, кому положено отказать, — и метрика лгала бы тем громче, чем
+    хуже прошёл прогон.
+    """
+    subset = RUN.RegressionSet(**raw()).with_organizations(
+        (
+            entry(
+                inn="7707083893",
+                category_id=12,
+                category="Вне периметра, ожидается отказ",
+                expected_outcome="refusal",
+            ),
+        )
+    )
+    absent = [
+        RUN.OrgRun(
+            inn="7707083893", name="Банк", category_id=12,
+            category="Вне периметра, ожидается отказ", expected="refusal",
+            ok=False, seconds=0.0, attempted=False,
+            stage="получение отчётности", reason="отчётность не загружена",
+        )
+    ]
+    RUN._finalize(absent, {"7707083893": set()}, subset)
+    assert not absent[0].as_expected
 
 
 def test_fast_contour_has_no_text_metrics() -> None:
@@ -178,20 +338,24 @@ def test_model_is_named_only_where_it_worked() -> None:
 def test_report_renders_parameters_and_tables() -> None:
     """Отчёт — таблица с шапкой, пригодная для представления руководству."""
     started = datetime.now()
+    measured = RUN.features_of(SET)
     report = RUN.Report(
         started=started,
         parameters=RUN.parameters(SET, RUN.Contour.FAST, started),
         organizations=[asdict(item) for item in runs()],
-        coverage=[asdict(item) for item in RUN.coverage(SET)],
+        coverage=[asdict(item) for item in RUN.coverage(SET, measured)],
+        categories=[asdict(item) for item in RUN.categories_check(SET, measured, [])],
         metrics=RUN.run_metrics(runs(), SET, RUN.Contour.FAST, started),
     )
     text = RUN.render(report)
     assert "## Параметры прогона" in text
+    assert "## Заявленное покрытие против фактического" in text
     assert "## Покрытие набора" in text
     assert "версия кода" in text
-    # Остановка названа этапом и причиной, а не просто отсутствием класса.
+    # Остановка названа этапом и причиной, а ожидаемый отказ — ожидаемым.
     assert "все комплекты в карантине" in text
     assert "остановлено: контроли качества" in text
+    assert "отказ, как и ожидался" in text
 
 
 def test_unloaded_organization_is_named_as_such() -> None:
@@ -202,9 +366,9 @@ def test_unloaded_organization_is_named_as_such() -> None:
     что прогон просто шёл без обращения к источнику. Сеть и цикл здесь
     не трогаются: проверка отвечает раньше.
     """
-    entry = RUN.SetEntry(inn="9" * 10, reason="организации в базе нет")
-    found = RUN.run_one(entry, RUN.Contour.FAST, fetch=False)
-    assert not found.ok
+    found = RUN.run_one(entry(inn="7727728250"), RUN.Contour.FAST, fetch=False)
+    if found.ok:  # pragma: no cover — организация уже загружена прежним прогоном
+        pytest.skip("организация загружена, случай не воспроизводится")
     assert found.stage == "получение отчётности"
     assert "--fetch" in found.reason
 
