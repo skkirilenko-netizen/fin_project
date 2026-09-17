@@ -237,10 +237,22 @@ positions:
       - {name: Уставный и добавочный капитал, seen_at: Сегежа}
 
   - code: ifrs.share_premium
-    name: Добавочный капитал
+    name: Эмиссионный доход
     form: ifrs.statement_of_financial_position
     section: equity
     sign: any
+    # Наименование исправлено: код называет эмиссионный доход, а стояло
+    # «Добавочный капитал». Это не одно и то же — добавочный капитал шире
+    # и включает переоценку, — но в консолидированной отчётности по МСФО
+    # эмитенты называют одну и ту же строку и так и так: у Сегежи
+    # «Добавочный капитал», у ФосАгро «Эмиссионный доход». Раздельных
+    # кодов не заводим, пока не встретится эмитент, раскрывший обе строки
+    # сразу; синоним оставлен, а расхождение содержания — в оговорке.
+    note: >-
+      Эмиссионный доход приведён по строке, которую эмитент называет либо
+      эмиссионным доходом, либо добавочным капиталом. У эмитента, раскрывшего
+      переоценку внутри добавочного капитала, величина шире эмиссионного
+      дохода.
     aliases:
       - {name: Добавочный капитал, seen_at: ЛСР}
       - {name: Эмиссионный доход, seen_at: Норникель}
@@ -276,6 +288,39 @@ positions:
       - {name: Неконтролирующая доля, seen_at: Норникель}
       - {name: Доля неконтролирующих акционеров, seen_at: ЛСР}
 
+  - code: ifrs.treasury_shares
+    name: Собственные выкупленные акции
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    in_brackets: true
+    # Контр-статья капитала: величина хранится со знаком, нормальный знак —
+    # подсказка на случай печати без скобок. У ЛСР строка пришла с плюсом
+    # (+2 570 / +1 851), и капитал акционеров от этого не сходился.
+    normal_sign: -1
+    aliases:
+      - {name: "Собственные акции, выкупленные у акционеров", seen_at: ЛСР}
+      - {name: Собственные акции, seen_at: ЛСР}
+
+  - code: ifrs.equity_attributable_to_owners_of_parent
+    name: Капитал, приходящийся на акционеров материнской компании
+    form: ifrs.statement_of_financial_position
+    section: equity
+    is_total: true
+    # Правомерно отрицателен по той же причине, что и итог капитала.
+    sign: any
+    aliases:
+      - {name: "Итого капитал, приходящийся на долю акционеров", seen_at: ЛСР}
+      - {name: "Итого капитал, приходящийся на акционеров материнской компании",
+         seen_at: ФосАгро}
+      - {name: "Капитал, приходящийся на акционеров Компании", seen_at: Сегежа}
+    components:
+      - {code: ifrs.share_capital}
+      - {code: ifrs.share_premium}
+      - {code: ifrs.treasury_shares}
+      - {code: ifrs.retained_earnings}
+      - {code: ifrs.other_reserves}
+
   - code: ifrs.total_equity
     name: Итого капитал
     form: ifrs.statement_of_financial_position
@@ -296,6 +341,7 @@ positions:
     components:
       - {code: ifrs.share_capital}
       - {code: ifrs.share_premium}
+      - {code: ifrs.treasury_shares}
       - {code: ifrs.retained_earnings}
       - {code: ifrs.other_reserves}
       - {code: ifrs.non_controlling_interests}
@@ -494,6 +540,7 @@ positions:
       - {name: Себестоимость продаж, seen_at: ФосАгро}
       - {name: Себестоимость реализации, seen_at: Норникель}
       - {name: Себестоимость реализованной продукции, seen_at: Сегежа}
+      - {name: Себестоимость, seen_at: ЛСР}
 
   - code: ifrs.gross_profit
     name: Валовая прибыль
@@ -559,7 +606,9 @@ positions:
     aliases:
       - {name: Операционная прибыль, seen_at: ФосАгро}
       - {name: Операционная прибыль (убыток), seen_at: Сегежа}
+      - {name: Операционный убыток, seen_at: Сегежа}
       - {name: Прибыль от операционной деятельности, seen_at: Норникель}
+      - {name: Результаты операционной деятельности, seen_at: ЛСР}
     components:
       - {code: ifrs.gross_profit}
       - {code: ifrs.selling_expenses}
@@ -617,6 +666,7 @@ positions:
     aliases:
       - {name: Прибыль до налогообложения, seen_at: ФосАгро}
       - {name: Прибыль (убыток) до налогообложения, seen_at: Сегежа}
+      - {name: Убыток до налогообложения, seen_at: Сегежа}
       - {name: Прибыль до налога на прибыль, seen_at: Норникель}
     components:
       - {code: ifrs.operating_profit}
@@ -653,16 +703,42 @@ positions:
       - {name: Прибыль (убыток) за период, seen_at: Сегежа}
       - {name: Чистая прибыль, seen_at: Норникель}
       - {name: Чистая прибыль (убыток) за год, seen_at: ЛСР}
+      - {name: Прибыль за год, seen_at: ЛСР}
+      - {name: Чистый убыток и совокупный расход за год, seen_at: Сегежа}
     components:
       - {code: ifrs.profit_before_tax}
       - {code: ifrs.income_tax}
+
+  - code: ifrs.other_comprehensive_income
+    name: Прочий совокупный доход за период
+    form: ifrs.statement_of_profit_or_loss
+    section: comprehensive_income
+    sign: any
+    aliases:
+      - {name: Прочий совокупный доход за год, seen_at: ФосАгро}
+      - {name: Курсовые разницы при пересчёте из других валют, seen_at: ЛСР}
+      - {name: Прочий совокупный доход, seen_at: Норникель}
+
+  - code: ifrs.total_comprehensive_income
+    name: Общий совокупный доход за период
+    form: ifrs.statement_of_profit_or_loss
+    section: comprehensive_income
+    is_total: true
+    sign: any
+    aliases:
+      - {name: Общий совокупный доход за год, seen_at: ЛСР}
+      - {name: Итого совокупный доход за период, seen_at: ФосАгро}
+      - {name: Совокупный доход за год, seen_at: Норникель}
+    components:
+      - {code: ifrs.profit_for_period}
+      - {code: ifrs.other_comprehensive_income}
 
 # --- Отчёт о движении денежных средств ----------------------------------------
 
   - code: ifrs.cash_from_operations
     name: Чистый денежный поток от операционной деятельности
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: operating_cash_flow
     sign: any
     aliases:
       - {name: Чистые денежные средства от операционной деятельности, seen_at: ФосАгро}
@@ -672,7 +748,7 @@ positions:
   - code: ifrs.cash_from_investing
     name: Чистый денежный поток от инвестиционной деятельности
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: investing_cash_flow
     sign: any
     aliases:
       - {name: Чистые денежные средства от инвестиционной деятельности, seen_at: ФосАгро}
@@ -681,7 +757,7 @@ positions:
   - code: ifrs.cash_from_financing
     name: Чистый денежный поток от финансовой деятельности
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: financing_cash_flow
     sign: any
     aliases:
       - {name: Чистые денежные средства от финансовой деятельности, seen_at: ФосАгро}
@@ -690,7 +766,7 @@ positions:
   - code: ifrs.depreciation
     name: Амортизация основных средств и нематериальных активов
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: operating_cash_flow
     # Нужна для EBITDA. В отчёте о движении денежных средств она стоит
     # корректировкой к прибыли; если её там нет, берётся из сегментного
     # примечания. Нет ни там, ни там — Чистый долг / EBITDA не считается,
@@ -703,7 +779,7 @@ positions:
   - code: ifrs.interest_paid
     name: Проценты уплаченные
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: operating_cash_flow
     in_brackets: true
     # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
     # подсказка на случай, когда эмитент печатает расход без скобок.
@@ -712,10 +788,35 @@ positions:
       - {name: Проценты уплаченные, seen_at: ФосАгро}
       - {name: "Проценты, уплаченные по кредитам и займам", seen_at: Автодор}
 
+  - code: ifrs.interest_received
+    name: Проценты полученные
+    form: ifrs.statement_of_cash_flows
+    section: operating_cash_flow
+    sign: any
+    aliases:
+      - {name: Проценты полученные, seen_at: Сегежа}
+      - {name: Полученные проценты, seen_at: ФосАгро}
+
+  - code: ifrs.income_taxes_paid
+    name: Налог на прибыль уплаченный
+    form: ifrs.statement_of_cash_flows
+    section: operating_cash_flow
+    in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
+    # Не путать с `ifrs.income_tax`: там расход по налогу за период, здесь
+    # уплаченная сумма. Величины расходятся на изменение обязательств
+    # и отложенный налог, и подмена одного другим — ошибка по существу.
+    sign: any
+    aliases:
+      - {name: Налог на прибыль уплаченный, seen_at: Автодор}
+      - {name: Уплаченный налог на прибыль, seen_at: ФосАгро}
+
   - code: ifrs.capital_expenditure
     name: Приобретение основных средств и нематериальных активов
     form: ifrs.statement_of_cash_flows
-    section: cash_flows
+    section: investing_cash_flow
     in_brackets: true
     # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
     # подсказка на случай, когда эмитент печатает расход без скобок.
@@ -724,6 +825,84 @@ positions:
       - {name: Приобретение основных средств, seen_at: ФосАгро}
       - {name: Приобретение основных средств и нематериальных активов, seen_at: Норникель}
       - {name: Капитальные затраты, seen_at: Сегежа}
+      - {name: "Выплаты на приобретение основных средств, нематериальных активов",
+         seen_at: Сегежа}
+
+  - code: ifrs.proceeds_from_borrowings
+    name: Поступления от кредитов, займов и облигаций
+    form: ifrs.statement_of_cash_flows
+    section: financing_cash_flow
+    sign: any
+    aliases:
+      - {name: Поступления от кредитов и займов, seen_at: Сегежа}
+      - {name: Привлечение кредитов и займов, seen_at: ФосАгро}
+      - {name: Поступления от выпуска облигаций, seen_at: Сегежа}
+
+  - code: ifrs.repayment_of_borrowings
+    name: Погашение кредитов, займов и облигаций
+    form: ifrs.statement_of_cash_flows
+    section: financing_cash_flow
+    in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
+    sign: any
+    aliases:
+      - {name: Погашение основной суммы кредитов и займов, seen_at: Сегежа}
+      - {name: Погашение кредитов и займов, seen_at: ФосАгро}
+      - {name: Погашение облигаций, seen_at: Сегежа}
+
+  - code: ifrs.lease_payments
+    name: Погашение обязательств по аренде
+    form: ifrs.statement_of_cash_flows
+    section: financing_cash_flow
+    in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
+    sign: any
+    aliases:
+      - {name: Платежи по обязательствам по аренде, seen_at: Сегежа}
+      - {name: Погашение обязательств по аренде, seen_at: ФосАгро}
+
+  - code: ifrs.dividends_paid
+    name: Дивиденды выплаченные
+    form: ifrs.statement_of_cash_flows
+    section: financing_cash_flow
+    in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
+    sign: any
+    aliases:
+      - {name: Дивиденды выплаченные, seen_at: ФосАгро}
+      - {name: "Дивиденды, выплаченные акционерам", seen_at: ЛСР}
+
+  - code: ifrs.fx_effect_on_cash
+    name: Влияние изменения курсов валют на денежные средства
+    form: ifrs.statement_of_cash_flows
+    section: cash_reconciliation
+    sign: any
+    aliases:
+      - {name: "Влияние изменений курса иностранной валюты на остатки денежных\
+          \ средств в иностранной валюте", seen_at: Сегежа}
+      - {name: Влияние изменения курсов валют на денежные средства, seen_at: ФосАгро}
+
+  - code: ifrs.cash_at_beginning
+    name: Денежные средства и их эквиваленты на начало периода
+    form: ifrs.statement_of_cash_flows
+    section: cash_reconciliation
+    aliases:
+      - {name: Денежные средства и их эквиваленты на начало года, seen_at: Сегежа}
+      - {name: Денежные средства и их эквиваленты на начало периода, seen_at: ФосАгро}
+
+  - code: ifrs.cash_at_end
+    name: Денежные средства и их эквиваленты на конец периода
+    form: ifrs.statement_of_cash_flows
+    section: cash_reconciliation
+    aliases:
+      - {name: Денежные средства и их эквиваленты на конец года, seen_at: Сегежа}
+      - {name: Денежные средства и их эквиваленты на конец периода, seen_at: ФосАгро}
 
 # Существенность специфической статьи: доля валюты баланса, сверх которой
 # статья никогда не сворачивается в «прочее», а выносится отдельной позицией

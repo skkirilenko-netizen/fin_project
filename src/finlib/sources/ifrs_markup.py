@@ -272,7 +272,12 @@ def _for_issuer(
                 total_code=total_code,
                 total_gap=gap,
                 issuers=len(seen_by_name.get(normalize_name(row.source_name), {issuer.inn})),
-                hints=hints_for(row.source_name or row.previous_name, catalog),
+                hints=hints_for(
+                    row.source_name or row.previous_name,
+                    catalog,
+                    form=row.form,
+                    section=_section_of(total_code, catalog),
+                ),
                 previous_name=row.previous_name,
                 next_name=row.next_name,
             )
@@ -331,22 +336,48 @@ def _belongs_to(
     return best, same_form[best]
 
 
-def hints_for(name: str, catalog: IfrsCatalog) -> tuple[Hint, ...]:
-    """Ближайшие по написанию позиции ядра.
+def _section_of(code: str | None, catalog: IfrsCatalog) -> str | None:
+    """Раздел позиции по её коду; None — код неизвестен."""
+    if code is None:
+        return None
+    position = catalog.get(code)
+    return position.section if position is not None else None
+
+
+def hints_for(
+    name: str,
+    catalog: IfrsCatalog,
+    form: str | None = None,
+    section: str | None = None,
+) -> tuple[Hint, ...]:
+    """Ближайшие по написанию позиции ядра — из той же формы.
 
     Подсказка, а не решение: близость написания не означает совпадения
     смысла, и последнее слово за человеком.
+
+    **Форма отсекает, раздел упорядочивает.** Близость написания сама по себе
+    приводила к подсказкам не из той формы вовсе: для «Обязательства
+    по договорам, кредиторская задолженность» предлагалась дебиторская
+    задолженность, для «Результаты операционной деятельности» — потоки
+    денежных средств, для «Налог на прибыль уплаченный» в ОДДС — расход
+    по налогу из ОПУ. Это не близкий вариант, а заведомо неверный: строка
+    баланса кодом ОПУ не размечается никогда. Раздел мягче — статья
+    правомерно стоит не в том разделе, где её ждёшь, — поэтому он поднимает
+    подсказку в списке, но чужие не убирает.
     """
     target = normalize_name(name)
-    scored: list[Hint] = []
+    scored: list[tuple[bool, float, Hint]] = []
     for position in catalog.positions:
+        if form is not None and position.form != form:
+            continue
         ratio = max(
             SequenceMatcher(None, target, item).ratio() for item in position.match_names
         )
         if ratio >= HINT_MIN_RATIO:
-            scored.append(Hint(position.code, position.name, ratio))
-    scored.sort(key=lambda item: -item.ratio)
-    return tuple(scored[:HINT_COUNT])
+            same_section = section is not None and position.section == section
+            scored.append((same_section, ratio, Hint(position.code, position.name, ratio)))
+    scored.sort(key=lambda item: (not item[0], -item[1]))
+    return tuple(item[2] for item in scored[:HINT_COUNT])
 
 
 def apply_assignment(
