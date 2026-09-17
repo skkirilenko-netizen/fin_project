@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from finlib.db import PgConnection, execute, fetch_all
 from finlib.normalize.lines import LinesCatalog
 from finlib.quality.checks import ALL_CHECKS, CheckOutcome
-from finlib.quality.codes import CHECK_CODES, CheckStatus, Severity
+from finlib.quality.codes import CHECK_CODES, CheckCode, CheckStatus, Severity
 from finlib.quality.context import ReportContext, build_context
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.thresholds import Thresholds
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,24 @@ def run_checks(
     трогаются — это история.
     """
     context = build_context(src_file_id, conn, catalog=catalog, thresholds=thresholds)
+    if context.standard is not Standard.RSBU:
+        # Контроли этого модуля построены на формах и кодах строк РСБУ:
+        # равенство 1600 = 1700, состав разделов, цепочка прибыли. К комплекту
+        # МСФО они неприменимы, и прогнать их значило бы получить полтора
+        # десятка ложных провалов. Контроли МСФО выполняются на экране сверки
+        # (`sources/ifrs_review.py`) и пишутся в журнал при загрузке.
+        #
+        # Пропуск объявляется записью, а не молчанием: комплект без записей
+        # в журнале неотличим от проверенного и чистого.
+        skipped = _skipped_for_standard(context)
+        log_records([skipped], conn=conn)
+        logger.info(
+            "контроли РСБУ к комплекту %s не применяются: стандарт %s",
+            src_file_id,
+            context.standard,
+        )
+        return QualityReport(src_file_id=src_file_id, inn=context.inn)
+
     _warn_on_unit_mismatch(context)
 
     outcomes: list[CheckOutcome] = []
@@ -140,6 +159,27 @@ def run_checks(
 
     logger.info("контроли: %s", report.summary())
     return report
+
+
+def _skipped_for_standard(context: ReportContext) -> CheckRecord:
+    """Запись о том, что контроли РСБУ к комплекту другого стандарта не шли.
+
+    Молчание здесь было бы тем же «ноль срабатываний»: комплект без записей
+    в журнале выглядит проверенным и чистым.
+    """
+    return CheckRecord(
+        inn=context.inn,
+        check_code=CheckCode.LINE_MAPPING,
+        status=CheckStatus.INFO,
+        severity=Severity.INFO,
+        message=(
+            f"Контроли РСБУ не выполнялись: комплект стандарта "
+            f"{context.standard.value}. Контроли этого стандарта выполняются "
+            "при приёме документа и на экране сверки"
+        ),
+        src_file_id=context.src_file_id,
+        details={"standard": context.standard.value},
+    )
 
 
 def _reason(failures: list[CheckOutcome], loader: dict[str, int]) -> str | None:

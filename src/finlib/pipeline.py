@@ -275,10 +275,19 @@ class IfrsIntake:
     profile: object | None = None
     extraction: object | None = None
     review: object | None = None
+    # Итог записи комплекта в базу; None — запись не выполнялась, потому что
+    # организация не названа.
+    loaded: object | None = None
 
 
 def accept_ifrs_document(
-    text: str, on_stage: Callable[[StageResult], None] | None = None
+    text: str,
+    on_stage: Callable[[StageResult], None] | None = None,
+    *,
+    inn: str | None = None,
+    raw_path: str | None = None,
+    confirmed_by: str | None = None,
+    confirmations: dict[str, str] | None = None,
 ) -> IfrsIntake:
     """Проводит документ МСФО через приём, разбор форм и экран сверки.
 
@@ -314,9 +323,32 @@ def accept_ifrs_document(
         decision.describe(),
         ok=decision.automatic,
     )
-    return IfrsIntake(
-        True, profile=profile, extraction=extraction, review=decision
-    )
+
+    intake = IfrsIntake(True, profile=profile, extraction=extraction, review=decision)
+    if inn is None:
+        # Без организации комплект не записывается: привязать его не к чему.
+        # Это разбор ради разбора — им пользуется прогон приёма, который
+        # отвечает на вопрос о доле автоматического прохождения, а базу
+        # не трогает.
+        return intake
+
+    from finlib.normalize.ifrs_loader import load_extraction
+
+    with connection() as conn:
+        _check_schema(conn, report)
+        loaded = load_extraction(
+            inn,
+            extraction,
+            profile,
+            decision,
+            conn,
+            raw_path=raw_path,
+            confirmed_by=confirmed_by,
+            confirmations=confirmations,
+        )
+    report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
+    intake.loaded = loaded
+    return intake
 
 
 def _load_from_inbox(

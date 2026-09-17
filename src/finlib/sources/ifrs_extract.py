@@ -89,6 +89,11 @@ class ExtractedForm:
     notes_under_form: tuple[str, ...] = ()
     # Итоги, опознанные по структуре, а не по наименованию.
     totals_by_structure: tuple[str, ...] = ()
+    # Строк таблицы всего и сколько из них опознано. Счётчик именно строк:
+    # величин больше, потому что у строки столько величин, сколько периодов,
+    # и смешение единиц счёта — повторяющийся источник ошибок.
+    rows_total: int = 0
+    rows_recognised: int = 0
 
 
 @dataclass
@@ -111,8 +116,20 @@ class Extraction:
     def notes(self) -> tuple[str, ...]:
         """Весь текст, извлечённый из-под форм."""
         return tuple(
-            note for form in self.forms.values() for note in form.notes_under_form
+            dict.fromkeys(
+                note for form in self.forms.values() for note in form.notes_under_form
+            )
         )
+
+    @property
+    def rows_total(self) -> int:
+        """Строк таблиц всего — величин больше, и путать их нельзя."""
+        return sum(form.rows_total for form in self.forms.values())
+
+    @property
+    def rows_recognised(self) -> int:
+        """Строк, опознанных справочником."""
+        return sum(form.rows_recognised for form in self.forms.values())
 
     def totals(self, report_date: date) -> dict[str, Decimal]:
         """Итоговые величины за период — вход для проверки правдоподобия."""
@@ -211,11 +228,13 @@ def _extract_form(
 
     _name_totals_by_structure(rows, recognised, known, form)
 
+    form.rows_total = len(rows)
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
         if position is None:
             form.unrecognised.append(UnrecognisedRow(form_code, name.strip(), values))
             continue
+        form.rows_recognised += 1
         for report_date, value in zip(report_dates, values, strict=False):
             form.values.append(
                 ExtractedValue(position.code, report_date, value, name.strip())
@@ -337,9 +356,13 @@ def _matching_total(
 def _notes_after(lines: list[str]) -> tuple[str, ...]:
     """Текст под таблицей формы: сноски о составе статей.
 
-    Берутся содержательные строки, а не всё подряд: пустые строки и обрывки
-    вёрстки в заключение не нужны, а сноска о средствах на счетах эскроу
-    нужна обязательно — без неё ликвидность читается неверно.
+    Берутся только строки с маркером сноски, а не всякий текст под формой.
+    Первая редакция считала сноской любое предложение с заглавной буквы
+    и точкой — и на документе с колонтитулами насчитала восемьдесят четыре
+    «сноски» из повторов одной строки. Широкая эвристика здесь хуже узкой:
+    лишний текст уходит в заключение и выглядит содержательным.
+
+    Повторы снимаются: одна и та же сноска печатается на каждой странице.
     """
     found: list[str] = []
     for line in lines:
@@ -347,8 +370,6 @@ def _notes_after(lines: list[str]) -> tuple[str, ...]:
         if len(text) < 20:
             continue
         lowered = normalize_name(text)
-        if any(normalize_name(mark) in lowered for mark in _FOOTNOTE_MARKERS) or (
-            text[0].isupper() and "." in text
-        ):
+        if any(normalize_name(mark) in lowered for mark in _FOOTNOTE_MARKERS):
             found.append(text)
-    return tuple(found)
+    return tuple(dict.fromkeys(found))

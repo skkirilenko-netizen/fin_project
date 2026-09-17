@@ -124,13 +124,23 @@ REGISTRY: dict[CheckCode, Wiring] = {
     CheckCode.UNKNOWN_LINE_CODE: Wiring(
         WiringStatus.WIRED, date(2026, 8, 28), ("normalize/loader.py",)
     ),
+    # Сводка сопоставления пишется обоими загрузчиками, а прогонщик контролей
+    # той же записью сообщает, что к комплекту другого стандарта контроли
+    # РСБУ не применялись.
     CheckCode.LINE_MAPPING: Wiring(
-        WiringStatus.WIRED, date(2026, 9, 17), ("normalize/loader.py",)
+        WiringStatus.WIRED,
+        date(2026, 9, 17),
+        ("normalize/loader.py", "normalize/ifrs_loader.py", "quality/runner.py"),
     ),
     CheckCode.PERIOD_VALUE_MISMATCH: Wiring(
         WiringStatus.WIRED,
         date(2026, 8, 28),
-        ("normalize/loader.py", "quality/context.py", "scoring/engine.py"),
+        (
+            "normalize/loader.py",
+            "normalize/ifrs_loader.py",
+            "quality/context.py",
+            "scoring/engine.py",
+        ),
     ),
     CheckCode.FACT_OVERWRITE: Wiring(
         WiringStatus.WIRED, date(2026, 8, 26), ("normalize/loader.py",)

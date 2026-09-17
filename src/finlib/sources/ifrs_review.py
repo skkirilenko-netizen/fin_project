@@ -150,7 +150,9 @@ def review(
     )
     material = _material_items(extraction, report_date, catalog)
 
-    rows_total = len(extraction.values) + len(extraction.unrecognised)
+    # Считаются строки таблиц, а не величины: у строки столько величин,
+    # сколько периодов, и графа обязана считать то, как называется.
+    rows_total = extraction.rows_total
     reasons: list[ReviewReason] = []
     problems: list[str] = []
 
@@ -185,7 +187,7 @@ def review(
         totals_checked=totals_checked,
         totals_failed=tuple(failed),
         rows_total=rows_total,
-        rows_recognised=len(extraction.values),
+        rows_recognised=extraction.rows_recognised,
         material_items=tuple(material),
         plausibility=plausibility,
         problems=tuple(problems),

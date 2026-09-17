@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS src_file (
     -- разделителей разрядов нет вовсе. Для файла МСФО определяется по всему
     -- документу, и неопределённость означает карантин, а не выбор по умолчанию.
     digit_grouping    text CHECK (digit_grouping IN ('russian', 'english', 'plain')),
+    -- Вид отчётности по МСФО. Отдельно от reporting_type: тот описывает набор
+    -- форм РСБУ (полные или упрощённые по приложению 5 к приказу 66н)
+    -- и к консолидированной отчётности отношения не имеет. NULL у комплектов
+    -- РСБУ означает именно это — понятие к ним неприменимо.
+    reporting_kind    text CHECK (reporting_kind IN
+                      ('full', 'interim', 'special_purpose', 'disclosable')),
     status            text NOT NULL DEFAULT 'loaded'
                       CHECK (status IN ('loaded', 'processed', 'quarantine')),
     quarantine_reason text,
@@ -75,6 +81,7 @@ CREATE TABLE IF NOT EXISTS src_file (
 -- базу не принесёт. NULL означает «не определялась», и для источников,
 -- отдающих числа машиночитаемо, это верно — разделителей разрядов там нет.
 ALTER TABLE src_file ADD COLUMN IF NOT EXISTS digit_grouping text;
+ALTER TABLE src_file ADD COLUMN IF NOT EXISTS reporting_kind text;
 
 DO $$
 BEGIN
@@ -84,6 +91,14 @@ BEGIN
     ) THEN
         ALTER TABLE src_file ADD CONSTRAINT src_file_digit_grouping_check
             CHECK (digit_grouping IN ('russian', 'english', 'plain'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'src_file'::regclass AND conname = 'src_file_reporting_kind_check'
+    ) THEN
+        ALTER TABLE src_file ADD CONSTRAINT src_file_reporting_kind_check
+            CHECK (reporting_kind IN
+                   ('full', 'interim', 'special_purpose', 'disclosable'));
     END IF;
 END $$;
 
