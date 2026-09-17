@@ -19,6 +19,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finlib.config import settings
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -188,13 +189,28 @@ class FactBaseSection(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    intro: str = Field(min_length=1)
+    intro: dict[Standard, str]
     extra_intro: str = Field(min_length=1)
 
-    @property
-    def intro_text(self) -> str:
-        """Вступление раздела одной строкой."""
-        return " ".join(self.intro.split())
+    @model_validator(mode="after")
+    def _every_standard_has_its_wording(self) -> Self:
+        """Вступление объявлено для каждого стандарта отчётности.
+
+        Кодов строк, утверждённых нормативным актом, в консолидированной
+        отчётности нет, и обещать их читателю нельзя. Пропуск формулировки
+        для стандарта — не повод молча напечатать чужую.
+        """
+        missing = set(Standard) - set(self.intro)
+        if missing:
+            listed = ", ".join(sorted(item.value for item in missing))
+            raise ValueError(
+                f"вступление «Фактической базы» не задано для стандартов: {listed}"
+            )
+        return self
+
+    def intro_text(self, standard: Standard = Standard.RSBU) -> str:
+        """Вступление раздела одной строкой, по стандарту отчётности."""
+        return " ".join(self.intro[standard].split())
 
     @property
     def extra_intro_text(self) -> str:

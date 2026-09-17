@@ -54,10 +54,14 @@ def fact_base(
 
     Величина, которой у организации нет, из перечня выпадает: требовать назвать
     нераскрытую строку значило бы требовать выдумать число.
+
+    Вступление берётся по стандарту отчётности: кодов строк, утверждённых
+    нормативным актом, консолидированная отчётность не содержит, и обещать
+    их читателю нельзя.
     """
     facts = data.line_values
     required = data.fact_base_codes(policy)
-    found: list[str] = [policy.fact_base_section.intro_text]
+    found: list[str] = [policy.fact_base_section.intro_text(data.standard)]
     named: set[str] = set()
     for code in required:
         rendered = _render(code, data, lines, catalog, reporting_type, facts)

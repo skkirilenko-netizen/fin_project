@@ -10,6 +10,7 @@ from finlib.metrics.engine import MetricStatus, compute_metric
 from finlib.normalize.lines import ReportingType
 from finlib.quality.periods import PeriodConfidence
 from finlib.quality.thresholds import load_thresholds
+from finlib.standards import Standard
 
 PERIOD = date(2025, 12, 31)
 
@@ -49,17 +50,34 @@ PREVIOUS: dict[str, Decimal | None] = {
 DEFAULT = object()
 
 
-def compute(code: str, current=DEFAULT, previous=DEFAULT, reporting_type=ReportingType.FULL):
-    """Считает один показатель на подготовленных данных."""
+def compute(
+    code: str,
+    current=DEFAULT,
+    previous=DEFAULT,
+    reporting_type=ReportingType.FULL,
+    standards=None,
+):
+    """Считает один показатель на подготовленных данных.
+
+    Стандарт величин передаётся всегда: параметр обязателен намеренно —
+    контроль смешения, который можно молча не передать, неотличим
+    от невыполненного. По умолчанию все величины одного стандарта.
+    """
     metric = load_metrics().require(code)
+    values = CURRENT if current is DEFAULT else current
+    earlier = PREVIOUS if previous is DEFAULT else previous
+    if standards is None:
+        codes = set(values or {}) | set(earlier or {})
+        standards = dict.fromkeys(codes, Standard.RSBU.value)
     return compute_metric(
         metric,
         reporting_type,
         PERIOD,
-        CURRENT if current is DEFAULT else current,
-        PREVIOUS if previous is DEFAULT else previous,
+        values,
+        earlier,
         PeriodConfidence.VERIFIED,
         load_thresholds(),
+        standards,
     )
 
 

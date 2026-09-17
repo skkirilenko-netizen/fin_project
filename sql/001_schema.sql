@@ -322,6 +322,32 @@ COMMENT ON TABLE assessment_signal IS
     '«Риски и надзорные сигналы». Сигнал — арифметика, а не интерпретация: '
     'условие проверяется по формуле, формулировка берётся из methodology/signals.yaml';
 
+-- Связь разложения оценки с самой оценкой. В объявлениях таблиц выше ключ
+-- стоит, но в базах, созданных до его появления, CREATE TABLE IF NOT EXISTS
+-- его не принесёт — та же история, что с колонкой code_version. Связь здесь
+-- не формальность: стандарт отчётности разложение получает от оценки
+-- и вторым полем не дублируется, а без внешнего ключа это наследование
+-- ничем не обеспечено.
+DO $$
+DECLARE
+    part text;
+BEGIN
+    FOREACH part IN ARRAY ARRAY[
+        'assessment_metric', 'assessment_group', 'assessment_flag', 'assessment_signal'
+    ] LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = part::regclass AND contype = 'f'
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE %I ADD CONSTRAINT %I '
+                'FOREIGN KEY (assessment_id) REFERENCES assessment (id) ON DELETE CASCADE',
+                part, part || '_assessment_fk'
+            );
+        END IF;
+    END LOOP;
+END $$;
+
 -- Журнал обращений к языковой модели -----------------------------------------
 
 CREATE TABLE IF NOT EXISTS llm_log (

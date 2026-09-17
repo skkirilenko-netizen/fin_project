@@ -27,6 +27,9 @@ class NotCalculableReason(StrEnum):
     NEGATIVE_DENOMINATOR = "negative_denominator"
     NOT_IN_FORM = "not_in_form"
     SIGN_CHANGE = "sign_change"
+    # Величины показателя относятся к разным стандартам отчётности. Число
+    # при смешении получается, выглядит настоящим и не значит ничего.
+    MIXED_STANDARDS = "mixed_standards"
 
 
 @dataclass(frozen=True, slots=True)
