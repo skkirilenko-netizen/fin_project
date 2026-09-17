@@ -272,3 +272,61 @@ def test_pipeline_refuses_an_annual_report() -> None:
     found = accept_ifrs_document(annual)
     assert not found.accepted
     assert found.check_code == "file_not_statements"
+
+
+# --- шапка таблицы и склейки, выверенные на живых выгрузках --------------------
+
+HEADER_NOISE = """
+Консолидированный отчёт о финансовом положении
+Млн руб. Прим. 2025 2024
+Основные средства 12 700 000 650 000
+Итого внеоборотные активы 700 000 650 000
+Запасы 13 300 000 280 000
+Итого оборотные активы 300 000 280 000
+Итого активы 1 000 000 930 000
+"""
+
+
+def test_table_header_is_not_an_item() -> None:
+    """Шапка таблицы статьёй не становится.
+
+    «Млн руб. Прим. 2025 2024» — номер колонки и годы, и строка выглядела
+    статьёй: в очереди занимала место, а в недостаче итога давала слагаемое
+    из ниоткуда.
+    """
+    found = extraction_of(HEADER_NOISE)
+    balance = found.forms["ifrs.statement_of_financial_position"]
+    assert not any("Прим" in row.source_name for row in balance.unrecognised)
+    assert any(why == "auto_table_header" for _, _, why in balance.auto_dismissed)
+
+
+def test_note_number_glued_to_the_first_value_is_separated() -> None:
+    """Номер примечания, слипшийся с первой величиной, отделяется.
+
+    У Сегежи «Добавочный капитал 19 116 179 35 122» — это примечание 19
+    и величины 116 179 и 35 122. Отличие от «1 500 000 1 360 000» в том,
+    что там величины смежных лет сравнимы, а здесь различаются в пятьсот
+    сорок пять раз.
+    """
+    text = COMPLETE.replace(
+        "Акционерный капитал                     400 000        400 000",
+        "Акционерный капитал 19 116 179 35 122",
+    )
+    found = extraction_of(text)
+    assert found.value_of("ifrs.share_capital", DATES[0]) == Decimal(116_179)
+    assert found.value_of("ifrs.share_capital", DATES[1]) == Decimal(35_122)
+
+
+def test_neighbouring_years_are_not_mistaken_for_a_note_number() -> None:
+    """Величины смежных лет, различающиеся вдвое, не режутся.
+
+    «Прочие операционные доходы, нетто 1 393 49» — это 1 393 и 49, а правило
+    отсечения номера примечания превращало доход в 393.
+    """
+    text = COMPLETE.replace(
+        "Финансовые доходы                        10 000          8 000",
+        "Финансовые доходы 1 393 49",
+    )
+    found = extraction_of(text)
+    assert found.value_of("ifrs.finance_income", DATES[0]) == Decimal(1393)
+    assert found.value_of("ifrs.finance_income", DATES[1]) == Decimal(49)

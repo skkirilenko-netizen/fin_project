@@ -268,13 +268,27 @@ def _extract_form(
 
     _choose_reading_by_totals(rows, alternatives, recognised, catalog)
 
-    _name_totals_by_structure(rows, recognised, known, form)
+    # Отсев «не статья» идёт **прежде** опознания итогов структурой.
+    # Контрольная сумма без наименования равна сумме предшествующих строк
+    # ровно так же, как итог раздела, и опознавалась итогом: у Сегежи строка
+    # −88 378 под разбивкой убытка по акционерам становилась валовой
+    # прибылью, хотя валовой прибыли в её отчёте нет вовсе. Порядок здесь
+    # и есть правило: строка, дублирующая уже встреченную величину, итогом
+    # раздела быть не может.
+    dismissals = {
+        index: found
+        for index, (name, values, _) in enumerate(rows)
+        if index not in recognised
+        and (found := _auto_dismissal(name, values, rows[:index])) is not None
+    }
+
+    _name_totals_by_structure(rows, recognised, known, form, set(dismissals))
 
     form.rows_total = len(rows)
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
         if position is None:
-            dismissal = _auto_dismissal(name, values, rows[:position_index])
+            dismissal = dismissals.get(position_index)
             if dismissal is not None:
                 # Колонтитул и контрольная сумма — не статьи, и показывать их
                 # человеку незачем. Важнее другое: в метрике общности они
@@ -319,14 +333,21 @@ def _auto_dismissal(
 ) -> str | None:
     """Почему строку можно отсеять без человека; None — нельзя.
 
-    Два случая, и оба про строки без наименования. Одно число — колонтитул
+    Два случая про строки без наименования. Одно число — колонтитул
     или номер страницы. Два числа, повторяющие ранее встреченную строку, —
     контрольная сумма разбивки: у Сегежи убыток печатается ещё раз под
     разбивкой «неконтролирующим долям участия», и в итог он войти не должен.
 
-    Строка с наименованием так не отсеивается никогда: решение о ней
+    Третий случай — шапка самой таблицы: «Прим. 2025 2024», «Млн руб. Прим.»,
+    «ЗА ГОДЫ, ЗАКОНЧИВШИЕСЯ 31 ДЕКАБРЯ 2025, 2024 И 2023». Номер колонки
+    и год — числа, и строка выглядела статьёй; в очереди она занимала место,
+    а в недостаче итога давала слагаемое из ниоткуда.
+
+    Строка с наименованием статьи так не отсеивается никогда: решение о ней
     принимает человек.
     """
+    if _is_table_header(name):
+        return "auto_table_header"
     if name.strip():
         return None
     if len(values) == 1:
@@ -335,6 +356,52 @@ def _auto_dismissal(
         if previous_values == values and previous_name.strip():
             return f"duplicate_of:{previous_name.strip()}"
     return None
+
+
+# Из чего состоит шапка таблицы: подпись колонки примечаний, единица
+# измерения и объявление периода. Ничем другим строка шапки не бывает,
+# поэтому проверяется, что **всё** наименование сложено из этих кусков.
+_HEADER_WORDS = (
+    "прим",
+    "примечание",
+    "примечания",
+    "приме",
+    "чания",
+    "поясн",
+    "пояснение",
+    "пояснения",
+    "млн",
+    "тыс",
+    "руб",
+    "год",
+    "года",
+    "годы",
+    "году",
+    "за",
+    "в",
+    "и",
+    "на",
+    "по",
+    "состоянию",
+    "закончившиеся",
+    "закончившийся",
+    "декабря",
+    "долл",
+    "сша",
+)
+
+
+def _is_table_header(name: str) -> bool:
+    """Шапка таблицы, а не статья: наименование сложено только из её слов."""
+    words = [word for word in re.split(r"[^\w-]+", normalize_name(name)) if word]
+    if not words:
+        return False
+    # Числа в шапке — годы колонок и номер колонки примечаний, и они остаются
+    # в наименовании: «Млн руб. Прим. 2025», «Приме- чания 2025». Отсечение
+    # хвостовых чисел их не убирает — между ними стоят слова.
+    return all(
+        word.strip("-") in _HEADER_WORDS or word.isdigit() for word in words
+    )
 
 
 def _looks_like_note_number(value: Decimal) -> bool:
@@ -400,6 +467,10 @@ def _strip_note_column(texts: list[str], periods: int) -> list[str]:
     на восемь процентов, и отрезать там нечего; у Сегежи же 19 116 179
     против 35 122 — разница в пятьсот сорок пять раз, а после отсечения
     в три с половиной. Величина отчётности за смежные годы так не меняется.
+
+    Порог разницы — три десятичных разряда, а не два: при двух под правило
+    попадало «Прочие операционные доходы, нетто 1 393 49», где 1 393
+    и 49 — настоящие величины смежных лет, и доход превращался в 393.
     """
     if len(texts) != periods or periods < 2:
         return texts
@@ -410,7 +481,7 @@ def _strip_note_column(texts: list[str], periods: int) -> list[str]:
     whole = sum(len(group) for group in split[0])
     stripped = whole - len(split[0][0])
     neighbour = max(sum(len(group) for group in item) for item in split[1:])
-    if whole - neighbour < 2 or abs(stripped - neighbour) >= whole - neighbour:
+    if whole - neighbour < 3 or abs(stripped - neighbour) >= whole - neighbour:
         return texts
     return [split[0][0], " ".join(split[0][1:]), *texts[1:]]
 
@@ -629,6 +700,8 @@ def _choose_reading_by_totals(
                 )
                 rows[index] = (rows[index][0], other, rows[index][2])
 
+    _fix_overflowing_sections(rows, alternatives, by_code, catalog)
+
     # Тот же довод для строк, которых справочник не опознал. Итог раздела
     # для них неизвестен, но валюта баланса известна, и статья баланса больше
     # неё не бывает. У Сегежи «Текущая переплата по налогу на прибыль 160 123»
@@ -649,6 +722,73 @@ def _choose_reading_by_totals(
                 current,
             )
             rows[index] = (rows[index][0], other, rows[index][2])
+
+
+def _fix_overflowing_sections(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    alternatives: dict[int, tuple[Decimal, ...]],
+    by_code: dict[str, int],
+    catalog: IfrsCatalog,
+) -> None:
+    """Правит чтение там, где сумма неотрицательных слагаемых больше итога.
+
+    Утверждение жёсткое и потому пригодное для проверки: нераскрытое
+    слагаемое сумму только увеличивает, поэтому у итога, все слагаемые
+    которого неотрицательны, раскрытая часть больше итога не бывает.
+    У Сегежи «Гудвил 21 444» — это примечание 21 и величина 444, и при
+    чтении «двадцать один миллион четыреста сорок четыре» сумма
+    внеоборотных активов превышала свой итог на двадцать тысяч.
+
+    К отчёту о прибылях правило неприменимо: там слагаемые знаковые,
+    и превышение суммы над итогом — обычное дело.
+    """
+    for total in catalog.totals(form=None):
+        place = by_code.get(total.code)
+        if place is None:
+            continue
+        parts = [
+            by_code[component.code]
+            for component in total.components
+            if component.code in by_code
+        ]
+        if not parts or any(
+            value < 0 for index in parts for value in rows[index][1]
+        ):
+            continue
+        movable = [index for index in parts if index in alternatives]
+        for period in range(len(rows[place][1])):
+            for index in movable:
+                if not _overflows(rows, parts, place, period):
+                    break
+                keep = rows[index][1]
+                rows[index] = (rows[index][0], alternatives[index], rows[index][2])
+                if _overflows(rows, parts, place, period):
+                    rows[index] = (rows[index][0], keep, rows[index][2])
+                    continue
+                logger.info(
+                    "строка «%s» прочитана как %s: при чтении %s сумма раздела"
+                    " превышала итог %s",
+                    rows[index][0],
+                    alternatives[index],
+                    keep,
+                    total.code,
+                )
+
+
+def _overflows(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    parts: list[int],
+    place: int,
+    period: int,
+) -> bool:
+    """Больше ли сумма раскрытых слагаемых, чем итог, за этот период."""
+    if period >= len(rows[place][1]):
+        return False
+    computed = sum(
+        (rows[index][1][period] for index in parts if period < len(rows[index][1])),
+        Decimal(0),
+    )
+    return computed > rows[place][1][period]
 
 
 def _root_total(
@@ -727,6 +867,7 @@ def _name_totals_by_structure(
     recognised: dict[int, IfrsPosition],
     known: tuple[IfrsPosition, ...],
     form: ExtractedForm,
+    dismissed: set[int] | None = None,
 ) -> None:
     """Опознаёт неподписанные итоги разделов по равенству сумме предшествующих.
 
@@ -738,9 +879,10 @@ def _name_totals_by_structure(
     по одному периоду и не окажется по другому, это не итог, а совпадение.
     """
     totals = [item for item in known if item.is_total]
+    dismissed = dismissed or set()
     named: list[str] = []
     for index, (name, values, _) in enumerate(rows):
-        if index in recognised or not values:
+        if index in recognised or index in dismissed or not values:
             continue
         # Раздел — это строки между предыдущим итогом и этой строкой, и в него
         # входят строки, справочником не опознанные: у Норникеля из шести
