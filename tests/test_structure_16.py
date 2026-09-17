@@ -454,15 +454,25 @@ def test_blocking_failure_is_stated_in_the_summary(db_conn) -> None:
 # --- 9. Раздел 4 и привязка тезисов ------------------------------------------
 
 
-def test_section_four_is_named_after_signals() -> None:
-    """Раздел 4 называется «Риски и надзорные сигналы» всюду одинаково."""
+def test_section_four_is_built_by_calculation() -> None:
+    """Раздел 4 собирает расчёт, и модели он не поручается.
+
+    Прежде раздел писала модель поверх детерминированного перечня сигналов,
+    и замер 17.09.2026 показал, что он вырождается: по ООО «Магнит» весь
+    раздел свёлся к фразе «Надзорный сигнал имеет величину 20,8».
+    """
+    from finlib.llm.service import PromptScheme, load_prompt
     from finlib.report.document import SIGNALS_SECTION, SIGNALS_TITLE
+    from finlib.report.policy import load_policy
     from finlib.report.sections import EXPECTED
 
-    assert dict(EXPECTED)[SIGNALS_SECTION] == SIGNALS_TITLE
-    from finlib.llm.service import load_prompt
-
-    assert f"### {SIGNALS_SECTION}. {SIGNALS_TITLE}" in load_prompt()
+    assert SIGNALS_SECTION not in dict(EXPECTED)
+    for scheme in PromptScheme:
+        prompt = load_prompt(scheme=scheme)
+        assert f"### {SIGNALS_SECTION}. {SIGNALS_TITLE}" not in prompt
+        assert f"раздел {SIGNALS_SECTION}" in prompt.lower()
+    # Тексты раздела предписаны методикой, а не зашиты в сборку документа.
+    assert load_policy().risks.none_found_text
 
 
 @pytest.mark.parametrize("inn", [STOPPED_INN, NO_CLASS_INN, FULL_INN])

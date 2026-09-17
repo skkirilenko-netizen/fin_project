@@ -162,6 +162,32 @@ class Bands(BaseModel):
         return "middle"
 
 
+class DynamicsPolicy(BaseModel):
+    """Порог существенности изменения для словесного описания.
+
+    Свой, а не `material_change` показателя: тот откалиброван для балльной
+    оценки и там гасит шум, а для описания слишком груб — падение
+    рентабельности собственного капитала вдвое он считает несущественным.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    material_change: Decimal = Field(gt=0)
+    origin: str = Field(min_length=1)
+    calibration_status: str = Field(min_length=1)
+
+    def is_stable(self, change: Decimal, before: Decimal) -> bool:
+        """Считается ли изменение несущественным.
+
+        База — прежний уровень по модулю. Нулевой прежний уровень базы
+        не даёт: доли от нуля не существует, и изменение описывается
+        движением, а не устойчивостью.
+        """
+        if not before:
+            return False
+        return abs(change) / abs(before) < self.material_change
+
+
 class SignalRendering(BaseModel):
     """Как тезис сигнала печатается в перечне."""
 
@@ -192,6 +218,7 @@ class ThesesCatalog(BaseModel):
     selectors: dict[str, dict] = Field(min_length=1)
     cross_conditions: dict[str, str] = Field(min_length=1)
     bands: Bands
+    dynamics: DynamicsPolicy
     signals: SignalRendering
     verbs: dict[str, dict[str, str]] = Field(min_length=1)
     genders: dict[str, str] = Field(min_length=1)
@@ -267,6 +294,9 @@ class Thesis:
     subject: str
     kind: ThesisKind
     text: str
+    # Группа показателей методики. Порядок раздела задаём мы: оставленный
+    # модели, он дал семнадцать тезисов подряд одним абзацем.
+    group: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +323,23 @@ class TheseSet:
     def block(self) -> str:
         """Блок ТЕЗИСЫ для контекста модели."""
         return render_block(self)
+
+    def by_group(self) -> list[tuple[str, tuple[Thesis, ...]]]:
+        """Тезисы по группам показателей в порядке методики.
+
+        Порядок групп — тот, в котором они объявлены в metrics.yaml: он же
+        порядок абзацев раздела 3. Показатель без группы в перечень не попадёт,
+        потому что группа у показателя обязательна.
+        """
+        catalog = load_metrics()
+        grouped: dict[str, list[Thesis]] = {code: [] for code in catalog.groups}
+        for item in self.theses:
+            grouped.setdefault(item.group, []).append(item)
+        return [
+            (catalog.groups[code].name if code in catalog.groups else code, tuple(items))
+            for code, items in grouped.items()
+            if items
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +383,7 @@ def _selectors(
     catalog: MetricsCatalog,
     scoring: ScoringCatalog,
     bands: Bands,
+    dynamics: DynamicsPolicy,
     current: dict | None,
     previous: dict | None,
     derived: dict[str, dict],
@@ -400,10 +448,10 @@ def _selectors(
         values["change_pct"] = format_metric(percent["value"], Unit.PERCENT)
         values["change_pct_code"] = f"{metric.code}_chg_pct"
 
-    # Существенность считается от прежнего уровня: изменение меньше
-    # существенного — устойчивость, а не движение.
-    relative = abs(delta) / abs(before) if before else None
-    if relative is not None and relative < metric.material_change:
+    # Существенность считается от прежнего уровня порогом описания, а не
+    # порогом балльной оценки: `material_change` показателя откалиброван
+    # для балла и для слов слишком груб.
+    if dynamics.is_stable(delta, before):
         selectors["dynamics"] = "stable"
     elif delta > 0:
         selectors["dynamics"] = "grew"
@@ -543,6 +591,7 @@ def build_theses(
             catalog,
             scoring,
             theses_catalog.bands,
+            theses_catalog.dynamics,
             current.get(metric.code),
             previous.get(metric.code),
             current,
@@ -574,7 +623,7 @@ def build_theses(
             text = _render(rule, state, name, theses_catalog)
             if text is None:
                 continue
-            found.append(Thesis(rule.code, metric.code, kind, text))
+            found.append(Thesis(rule.code, metric.code, kind, text, metric.group))
 
     signals = _signal_theses(
         inn, target, conn, standard, catalog, reporting_type, found, states, theses_catalog
@@ -694,12 +743,17 @@ def render_block(found: TheseSet) -> str:
     rendering = catalog.signals
     lines = [
         "=== ТЕЗИСЫ ===",
-        "Готовые утверждения о показателях. Содержание задано методикой:",
-        "приводи их дословно, не меняя чисел, кодов и знаков. Порядок,",
-        "переходы и членение на абзацы — твоя работа.",
-        "",
+        "Готовые утверждения о показателях, разложенные по группам методики.",
+        "Содержание и порядок заданы расчётом: приводи тезисы дословно, не меняя",
+        "чисел, кодов и знаков, и в том порядке, в каком они стоят здесь.",
+        "Каждая группа — один абзац раздела 3. Наименования групп в текст",
+        "не переносятся: они показывают границы абзацев, а не служат",
+        "заголовками. Твоя работа — переходы между тезисами и между абзацами.",
     ]
-    lines.extend(f"- {item.text}" for item in found.theses)
+    for name, items in found.by_group():
+        lines.append("")
+        lines.append(f"{name}:")
+        lines.extend(f"- {item.text}" for item in items)
     if not found.signals:
         return "\n".join(lines)
 

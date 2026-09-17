@@ -102,6 +102,41 @@ class FactBase(BaseModel):
         )
 
 
+class Risks(BaseModel):
+    """Предписанные тексты раздела «Риски и надзорные сигналы».
+
+    Раздел собирается расчётом целиком. Тексты живут в методике, а не в коде:
+    свободных строк в документе быть не должно ровно по той же причине,
+    по какой их не должно быть в контролях качества.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    intro: str = Field(min_length=1)
+    none_found: str = Field(min_length=1)
+    stop_factor_intro: str = Field(min_length=1)
+
+    @staticmethod
+    def _folded(text: str) -> str:
+        """Складчатая формулировка справочника одной строкой."""
+        return " ".join(text.split())
+
+    @property
+    def intro_text(self) -> str:
+        """Вступление раздела."""
+        return self._folded(self.intro)
+
+    @property
+    def none_found_text(self) -> str:
+        """Оговорка при отсутствии срабатываний."""
+        return self._folded(self.none_found)
+
+    @property
+    def stop_factor_text(self) -> str:
+        """Вступление к стоп-фактору."""
+        return self._folded(self.stop_factor_intro)
+
+
 class Questions(BaseModel):
     """Сколько вопросов задавать и в каком порядке их основания."""
 
@@ -156,6 +191,7 @@ class ReportPolicy(BaseModel):
 
     version: str = Field(min_length=1)
     freshness: Freshness
+    risks: Risks
     fact_base: FactBase
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)

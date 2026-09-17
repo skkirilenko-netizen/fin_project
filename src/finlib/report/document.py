@@ -168,11 +168,10 @@ def build_report(
         # раздел сигналов — после неё: иначе документ сначала печатал раздел 4,
         # а затем сообщал, что разделов 2–6 нет.
         _write_missing_text(document)
-        # Сигналы детерминированы и от модели не зависят: в справке без
-        # текстовой части они обязаны остаться.
-        if data.signals:
-            document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
-            _write_signals(document, data)
+        # Раздел рисков детерминирован и от модели не зависит: в справке без
+        # текстовой части он обязан остаться целиком, вместе с оговоркой
+        # об отсутствии срабатываний.
+        _write_risks(document, data)
     # Предложения по дальнейшим действиям — следствие машинных признаков,
     # а не суждение модели, поэтому раздел собирается здесь и стоит
     # в документе всегда, с текстовой частью и без неё.
@@ -196,11 +195,6 @@ def build_report(
                 extra=[
                     # Номера заголовков разделов.
                     *(f"{number}." for number, _ in EXPECTED),
-                    # Предписанные формулировки сигналов и основания, по которым
-                    # они сработали: всё это детерминировано и в тексте модели
-                    # отсутствует по построению.
-                    *(item["message"] for item in data.signals),
-                    *(_signal_basis(item) for item in data.signals),
                 ],
             )
         except NumbersAlteredError:
@@ -217,10 +211,15 @@ def build_report(
 
 
 def _model_text_of(path: Path) -> str:
-    """Текст разделов 2–6 из записанного документа.
+    """Текст разделов, написанных моделью, из записанного документа.
 
     Читается с диска, а не из памяти: сверять надо то, что получит читатель,
     вместе с последствиями оформления и сериализации.
+
+    Раздел рисков в сверку не входит: он собран расчётом, и его числа
+    в тексте модели отсутствуют по построению. Прежде они передавались
+    в сверку перечнем исключений — теперь раздел просто пропускается,
+    и перечень не может разойтись с тем, что на самом деле напечатано.
     """
     document = Document(str(path))
     collected: list[str] = []
@@ -228,6 +227,10 @@ def _model_text_of(path: Path) -> str:
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if re.match(r"^2\.\s", text) or text.startswith("2–6"):
+            inside = True
+        elif text.startswith(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}"):
+            inside = False
+        elif re.match(r"^5\.\s", text):
             inside = True
         # Раздел предложений и приложение написаны не моделью: сверять
         # в них нечего, а их собственные числа выглядели бы приписками.
@@ -337,21 +340,57 @@ SIGNAL_LEVELS: dict[str, str] = {
 def _write_sections(
     document: Document, sections: list[Section], data: ReportData
 ) -> None:
-    """Разделы 2–6: сигналы детерминированы, остальное пишет модель.
+    """Разделы 2–6: раздел рисков собирается расчётом, остальное пишет модель.
 
-    Сигналы выводятся первыми в своём разделе и дословно: их выявление
-    не может оставаться на усмотрение модели, а формулировка задана
-    методикой и пересказу не подлежит.
+    Раздел 4 встаёт на своё место по номеру, а не приписывается в конец:
+    порядок разделов задаём мы, и разрыв в нумерации читатель принял бы
+    за пропавший раздел.
     """
+    written = False
     for section in sections:
-        title = (
-            SIGNALS_TITLE if section.number == SIGNALS_SECTION else section.title
-        )
-        document.add_heading(f"{section.number}. {title}", level=1)
-        if section.number == SIGNALS_SECTION:
-            _write_signals(document, data)
+        if not written and section.number > SIGNALS_SECTION:
+            _write_risks(document, data)
+            written = True
+        document.add_heading(f"{section.number}. {section.title}", level=1)
         for text in section.paragraphs:
             document.add_paragraph(text)
+    if not written:  # pragma: no cover — разделы 5 и 6 обязательны
+        _write_risks(document, data)
+
+
+def _write_risks(document: Document, data: ReportData) -> None:
+    """Раздел 4 «Риски и надзорные сигналы» целиком из расчёта.
+
+    Модели здесь делать нечего: формулировки сигналов предписаны методикой,
+    величины и отсечки набраны при оценке, стоп-фактор и его последствие
+    объявлены в scoring.yaml. Оставленный ей раздел вырождался — по ООО
+    «Магнит» он свёлся к фразе «Надзорный сигнал имеет величину 20,8».
+    """
+    policy = load_policy()
+    document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
+    if data.signals:
+        _write_signals(document, data)
+    _write_stop_factor_risk(document, data, policy)
+    if not data.signals and not data.stop_factor_code:
+        document.add_paragraph(policy.risks.none_found_text)
+
+
+def _write_stop_factor_risk(
+    document: Document, data: ReportData, policy: ReportPolicy
+) -> None:
+    """Стоп-фактор в картине рисков, формулировкой из методики."""
+    code = data.stop_factor_code
+    if not code:
+        return
+    scoring = load_scoring()
+    factor = next((item for item in scoring.stop_factors if item.code == code), None)
+    if factor is None:  # pragma: no cover — код приходит из той же методики
+        return
+    heading = document.add_paragraph()
+    heading.add_run(policy.risks.stop_factor_text).bold = True
+    paragraph = document.add_paragraph()
+    paragraph.add_run(f"{factor.name}. ").bold = True
+    paragraph.add_run(" ".join(factor.statement.split()))
 
 
 def _write_signals(document: Document, data: ReportData) -> None:
@@ -364,10 +403,7 @@ def _write_signals(document: Document, data: ReportData) -> None:
     if not data.signals:
         return
     heading = document.add_paragraph()
-    heading.add_run(
-        "Выявлены обстоятельства, требующие внимания. Формулировки заданы "
-        "методикой и получены расчётом, а не оценочным суждением:"
-    ).bold = True
+    heading.add_run(load_policy().risks.intro_text).bold = True
     for signal in data.signals:
         level = SIGNAL_LEVELS.get(signal["level"], signal["level"])
         paragraph = document.add_paragraph()

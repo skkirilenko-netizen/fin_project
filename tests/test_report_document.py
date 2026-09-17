@@ -65,10 +65,20 @@ def test_list_markers_become_dashes() -> None:
 
 def test_missing_section_is_an_error() -> None:
     """Пропущенный раздел — ошибка, а не повод отдать неполный документ."""
-    without_risks = ANSWER.replace("### 4. Риски", "### 9. Прочее")
+    without_limitations = ANSWER.replace("### 5. Ограничения", "### 9. Прочее")
     with pytest.raises(MissingSectionError) as info:
-        split_sections(without_risks)
-    assert 4 in info.value.missing
+        split_sections(without_limitations)
+    assert 5 in info.value.missing
+
+
+def test_risks_section_is_not_expected_from_the_model() -> None:
+    """Раздел 4 моделью не пишется: его собирает расчёт.
+
+    Ответ без него — не неполный ответ, а правильный: оставленный модели,
+    раздел вырождался до одной фразы, а добавить ей туда нечего.
+    """
+    without_risks = ANSWER.replace("### 4. Риски", "### 9. Прочее")
+    assert 4 not in {item.number for item in split_sections(without_risks)}
 
 
 def test_section_order_is_ours_not_the_model_s() -> None:
@@ -79,7 +89,7 @@ def test_section_order_is_ours_not_the_model_s() -> None:
             ANSWER[ANSWER.index("### 2.") : ANSWER.index("### 6.")],
         ]
     )
-    assert [item.number for item in split_sections(shuffled)] == [2, 3, 4, 5, 6]
+    assert [item.number for item in split_sections(shuffled)] == [2, 3, 5, 6]
 
 
 # --- повторная попытка ------------------------------------------------------
