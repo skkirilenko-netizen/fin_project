@@ -517,6 +517,77 @@ WHERE inn = %(inn)s AND report_date = %(date)s
 """
 
 
+@dataclass(frozen=True, slots=True)
+class SavedMarkup:
+    """Присвоение прежней сессии и что с ним стало после правок разбора."""
+
+    inn: str
+    form: str
+    source_name: str
+    code: str
+    relation: str
+    # Чем строка стала после правок: восстановлена как есть, опознана
+    # справочником самостоятельно (и тогда важно, тем ли кодом) или
+    # не найдена в разборе вовсе.
+    fate: str
+    catalog_code: str | None = None
+
+    def describe(self) -> str:
+        """Строка для отчёта."""
+        tail = f" → справочник даёт {self.catalog_code}" if self.catalog_code else ""
+        return f"{self.inn} «{self.source_name}» = {self.code} [{self.fate}]{tail}"
+
+
+def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
+    """Что стало с разметкой прежних сессий после правок разбора.
+
+    Проверка обязательна, а не любезна: правки разбора меняют и состав строк,
+    и их величины, и справочник. Присвоение, сделанное по прежнему разбору,
+    могло остаться верным, могло перестать находиться, а могло разойтись
+    с тем, что теперь даёт справочник сам. Молча оставить любой из трёх
+    случаев значило бы потерять работу человека либо принять её за проверку.
+    """
+    from finlib.db import fetch_all
+
+    by_inn = {item.inn: item for item in issuers}
+    if not by_inn:
+        return []
+    catalog = load_ifrs_lines()
+    found: list[SavedMarkup] = []
+    for row in fetch_all(_SAVED, {"inns": list(by_inn)}, conn=conn):
+        issuer = by_inn.get(row["inn"])
+        if issuer is None:
+            continue
+        position = catalog.match_by_name(row["source_name"])
+        if position is not None and position.form == row["form_code"]:
+            found.append(
+                SavedMarkup(
+                    row["inn"],
+                    row["form_code"],
+                    row["source_name"],
+                    row["code"],
+                    row["relation"] or Relation.EXACT.value,
+                    "опознано справочником"
+                    if position.code == row["code"]
+                    else "справочник даёт другой код",
+                    position.code,
+                )
+            )
+            continue
+        key = _restore_key(issuer, row)
+        found.append(
+            SavedMarkup(
+                row["inn"],
+                row["form_code"],
+                row["source_name"],
+                row["code"],
+                row["relation"] or Relation.EXACT.value,
+                "восстановлено" if key is not None else "строки нет в разборе",
+            )
+        )
+    return found
+
+
 def restore(issuers: list[IssuerMarkup], conn=None) -> int:
     """Возвращает присвоения, сделанные в прежние присесты.
 

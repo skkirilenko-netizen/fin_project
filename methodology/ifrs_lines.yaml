@@ -219,6 +219,7 @@ positions:
       - {name: Итого активы, seen_at: ФосАгро}
       - {name: Итого активов, seen_at: ЛСР}
       - {name: Всего активы, seen_at: Автодор}
+      - {name: Всего активов, seen_at: Автодор}
       - {name: Итого сумма активов, seen_at: Норникель}
     components:
       - {code: ifrs.total_non_current_assets}
@@ -509,6 +510,8 @@ positions:
       - {name: Итого капитал и обязательства, seen_at: ФосАгро}
       - {name: Итого капитала и обязательств, seen_at: ЛСР}
       - {name: Всего капитал и обязательства, seen_at: Автодор}
+      - {name: Всего собственного капитала и обязательств, seen_at: ЛСР}
+      - {name: Всего капитала и обязательств, seen_at: Автодор}
     components:
       - {code: ifrs.total_equity}
       - {code: ifrs.total_liabilities}

@@ -629,6 +629,50 @@ def _choose_reading_by_totals(
                 )
                 rows[index] = (rows[index][0], other, rows[index][2])
 
+    # Тот же довод для строк, которых справочник не опознал. Итог раздела
+    # для них неизвестен, но валюта баланса известна, и статья баланса больше
+    # неё не бывает. У Сегежи «Текущая переплата по налогу на прибыль 160 123»
+    # при валюте баланса 141 745 — это 160 и 123 за два года.
+    root = _root_total(rows, by_code, catalog)
+    if root is None:
+        return
+    for index, other in alternatives.items():
+        if index in recognised:
+            continue
+        current = rows[index][1]
+        if _exceeds(current, root) and not _exceeds(other, root):
+            logger.info(
+                "строка «%s» прочитана как %s: при чтении %s величина больше"
+                " валюты баланса",
+                rows[index][0],
+                other,
+                current,
+            )
+            rows[index] = (rows[index][0], other, rows[index][2])
+
+
+def _root_total(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    by_code: dict[str, int],
+    catalog: IfrsCatalog,
+) -> tuple[Decimal, ...] | None:
+    """Величины корневого итога формы — валюты баланса, если он раскрыт.
+
+    Корневым считается итог, состоящий из одних итогов: «Итого активы»
+    и «Итого капитал и обязательства». У отчёта о прибылях такого итога нет,
+    и границы правдоподобия там нет тоже — выручка итогом не является.
+    """
+    for code, index in by_code.items():
+        position = catalog.get(code)
+        if position is None or not position.components:
+            continue
+        if all(
+            (item := catalog.get(component.code)) is not None and item.is_total
+            for component in position.components
+        ):
+            return rows[index][1]
+    return None
+
 
 def _exceeds(values: tuple[Decimal, ...], limits: tuple[Decimal, ...]) -> bool:
     """Превышает ли хоть одна величина итог своего периода по модулю."""
@@ -698,10 +742,20 @@ def _name_totals_by_structure(
     for index, (name, values, _) in enumerate(rows):
         if index in recognised or not values:
             continue
+        # Раздел — это строки между предыдущим итогом и этой строкой, и в него
+        # входят строки, справочником не опознанные: у Норникеля из шести
+        # строк внеоборотных активов две справочнику неизвестны, и сумма
+        # одних опознанных с итогом не сходилась. Начало отсчёта — первая
+        # опознанная строка формы: до неё идут остатки шапки, у которых
+        # величины взяты из подписи колонок.
+        opened = _section_start(rows, recognised, index)
+        if opened is None:
+            continue
         preceding = [
             rows[earlier][1]
-            for earlier in range(index)
-            if earlier in recognised and not recognised[earlier].is_total
+            for earlier in range(opened, index)
+            if not (earlier in recognised and recognised[earlier].is_total)
+            and rows[earlier][1]
         ]
         if len(preceding) < 2:
             continue
@@ -716,6 +770,23 @@ def _name_totals_by_structure(
             name or "отсутствует",
         )
     form.totals_by_structure = tuple(named)
+
+
+def _section_start(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    recognised: dict[int, IfrsPosition],
+    index: int,
+) -> int | None:
+    """С какой строки идёт раздел, кончающийся этой; None — раздел не начат."""
+    closed = [
+        earlier
+        for earlier in range(index)
+        if earlier in recognised and recognised[earlier].is_total
+    ]
+    if closed:
+        return closed[-1] + 1
+    opened = [earlier for earlier in range(index) if earlier in recognised]
+    return opened[0] if opened else None
 
 
 def _matching_total(
