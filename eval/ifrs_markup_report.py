@@ -20,7 +20,7 @@ from finlib.cli import _load_issuers
 from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.quality.totals import TotalVerdict
 from finlib.sources.ifrs_commonality import commonality, without_atypical
-from finlib.sources.ifrs_markup import candidates, review_saved
+from finlib.sources.ifrs_markup import candidates, restore, review_saved
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     catalog = load_ifrs_lines()
-    print("СОСТАВ РАЗМЕТКИ")
+    # Разметка прежних сессий участвует в замере: без неё очередь выстроилась
+    # бы по недостаче, которой уже нет, а общность считалась бы по одному
+    # лишь автоматическому опознанию.
+    try:
+        restored = restore(issuers)
+    except Exception as failure:  # noqa: BLE001 — замер не должен падать из-за базы
+        print(f"разметка прежних сессий не восстановлена: {failure}")
+    else:
+        print(f"восстановлено присвоений прежних сессий: {restored}")
+
+    print("\nСОСТАВ РАЗМЕТКИ")
     for issuer in issuers:
         profile = issuer.profile
         print(
