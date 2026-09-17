@@ -66,11 +66,18 @@ class UnrecognisedRow:
 
     Не теряется: экран сверки обязан показать её человеку, а до
     подтверждения комплект автоматически не проходит.
+
+    Соседи хранятся рядом с наименованием: «Прочие» или «Итого» без контекста
+    не опознать, а в форме такая строка стоит внутри раздела, и раздел виден
+    по соседним строкам. У семи строк наименования нет вовсе — только
+    величины, — и соседи для них единственная опора.
     """
 
     form: str
     source_name: str
     values: tuple[Decimal, ...]
+    previous_name: str = ""
+    next_name: str = ""
 
     @property
     def largest(self) -> Decimal:
@@ -214,11 +221,18 @@ def _extract_form(
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
     tail_from = 0
 
+    pending: list[str] = []
     for index, line in enumerate(lines):
         name, values = _split_row(line, grouping, len(report_dates))
         if not values:
+            # Строка без величин — либо заголовок раздела, либо начало
+            # наименования, перенесённого вёрсткой. Какая именно, станет
+            # видно на следующей строке с величинами.
+            if name:
+                pending.append(name)
             continue
-        rows.append((name, values, index))
+        rows.append((_joined(pending, name), values, index))
+        pending.clear()
         tail_from = index + 1
 
     known = catalog.for_form(form_code)
@@ -234,7 +248,19 @@ def _extract_form(
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
         if position is None:
-            form.unrecognised.append(UnrecognisedRow(form_code, name.strip(), values))
+            form.unrecognised.append(
+                UnrecognisedRow(
+                    form_code,
+                    name.strip(),
+                    values,
+                    previous_name=rows[position_index - 1][0].strip()
+                    if position_index
+                    else "",
+                    next_name=rows[position_index + 1][0].strip()
+                    if position_index + 1 < len(rows)
+                    else "",
+                )
+            )
             continue
         form.rows_recognised += 1
         for report_date, value in zip(report_dates, values, strict=False):
@@ -250,6 +276,38 @@ def _extract_form(
 def _cells_pattern(grouping: Grouping) -> re.Pattern[str]:
     """Как выглядит ячейка с величиной при этой конвенции записи чисел."""
     return re.compile(_CELL_BY_GROUPING[grouping])
+
+
+def _joined(pending: list[str], name: str) -> str:
+    """Склеивает наименование, разорванное переносом строки.
+
+    Вёрстка переносит длинные наименования, и величины остаются во второй
+    части: «Авансы, выданные под строительство и» / «приобретение основных
+    средств 7 083 8 818». Без склейки справочник получает обрывок —
+    «приобретение основных средств», — а первая часть теряется вовсе.
+
+    Продолжением считается строка, начинающаяся со строчной буквы либо
+    оставляющая незакрытую скобку: заголовок раздела так не выглядит.
+    Чужие строки к наименованию не липнут — заголовок «Активы» отбрасывается.
+    """
+    if not pending:
+        return name
+    parts: list[str] = []
+    for item in reversed(pending):
+        if not _CONTINUES.match(item) and not (parts or name[:1].islower()):
+            break
+        parts.append(item)
+        if _CONTINUES.match(item):
+            continue
+        break
+    if not parts:
+        return name
+    return " ".join([*reversed(parts), name]).strip()
+
+
+# Строка выглядит незавершённой: кончается союзом, запятой, предлогом или
+# открытой скобкой. Заголовок раздела так не кончается.
+_CONTINUES = re.compile(r".*(?:[,(]|\bи|\bили|\bпо|\bна|\bв|\bот|\bдля|\bс)\s*$", re.I)
 
 
 def _split_row(
@@ -301,15 +359,23 @@ def _split_row(
         parsed = parsed[-periods:]
         tail = tail[-periods:]
     name = stripped[: tail[0].start()].strip()
-    # Номер примечания стоит между наименованием и величинами и в наименование
-    # не входит: «Денежные средства и их эквиваленты 18» справочник не опознает,
-    # хотя «Денежные средства и их эквиваленты» опознаёт.
-    return _NOTE_NUMBER.sub("", name).strip(), parsed
+    # К наименованию липнут номер примечания, знак сноски и прочерк «нет
+    # значения». Каждый из них ломает опознание целиком: «Денежные средства
+    # и их эквиваленты 18» справочник не узнаёт, хотя без номера узнаёт.
+    for pattern in (_NOTE_NUMBER, _FOOTNOTE_MARK, _TRAILING_DASH):
+        name = pattern.sub("", name).strip()
+    return name, parsed
 
 
 # Хвостовое короткое число наименования — номер примечания, а не часть
 # названия статьи. Четырёхзначное не трогаем: оно может быть годом в названии.
 _NOTE_NUMBER = re.compile(r"[\s,]*\b\d{1,3}\s*$")
+
+# Знак сноски: звёздочка или крестик, приклеенные к наименованию.
+_FOOTNOTE_MARK = re.compile(r"[*†‡]+\s*$")
+
+# Прочерк на месте величины: «Приобретение дочерних предприятий   -».
+_TRAILING_DASH = re.compile(r"\s+[-–—]\s*$")
 
 
 def _name_totals_by_structure(

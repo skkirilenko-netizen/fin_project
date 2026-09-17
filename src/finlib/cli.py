@@ -461,62 +461,172 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         Decision,
         apply_assignment,
         candidates,
+        check_part_of,
+        code_is_taken,
+        forget,
         known_codes,
+        last_confirmation,
+        restore,
     )
 
     catalog = load_ifrs_lines()
     codes = known_codes(catalog)
     by_inn = {item.inn: item for item in issuers}
+
+    # Разметка идёт в несколько присестов: сделанное прежде не показывается
+    # повторно, а присвоенные коды участвуют в суммах — без них итоги
+    # считались бы незакрытыми, и очередь выстроилась бы по недостаче,
+    # которой уже нет.
+    already = restore(issuers)
+    left = len(candidates(issuers, catalog))
+    typer.echo(
+        typer.style(
+            f"\nРазмечено прежде: {already}. Осталось строк: {left}. "
+            f"Эмитентов: {len(issuers)}.",
+            bold=True,
+        )
+    )
+
+    history: list[tuple[str, str]] = []
+    skipped: set[tuple[str, str]] = set()
     saved = 0
 
     while True:
-        queue = candidates(issuers, catalog)
+        queue = [
+            item
+            for item in candidates(issuers, catalog)
+            if (item.inn, item.source_name) not in skipped
+        ]
         if not queue:
-            typer.echo(typer.style("\nНеразмеченных строк не осталось.", bold=True))
+            typer.echo(typer.style("\nОчередь пуста.", bold=True))
             break
         if limit and saved >= limit:
-            typer.echo(f"\nПоказано {limit} строк, как просили. Осталось {len(queue)}.")
+            typer.echo(f"\nРазмечено {limit} строк, как просили. Осталось {len(queue)}.")
             break
 
         item = queue[0]
         issuer = by_inn[item.inn]
-        typer.echo("")
-        typer.echo(typer.style("─" * 72, dim=True))
-        typer.echo(
-            f"Осталось {len(queue)}. ИНН {item.inn}, форма {item.form}, "
-            f"очередь: {item.priority.name}"
-        )
-        typer.echo(typer.style(f"  «{item.source_name}»", bold=True))
-        values = ", ".join(str(value) for value in item.values)
-        share = f"{item.share_of_assets:.2%}" if item.share_of_assets else "—"
-        typer.echo(f"  величины: {values}; доля активов: {share}")
-        if item.total_code:
-            typer.echo(
-                f"  входит в незакрытый итог {item.total_code}, "
-                f"недостача {item.total_gap}"
-            )
-        if item.issuers > 1:
-            typer.echo(f"  встречается у {item.issuers} эмитентов")
-        if item.hints:
-            typer.echo("  подсказки справочника:")
-            for number, hint in enumerate(item.hints, start=1):
-                typer.echo(f"    {number}) {hint.code} — {hint.name}")
+        _show_candidate(item, len(queue))
 
         answer = typer.prompt(
-            "  код позиции, номер подсказки, «н» — не статья, «с» — специфическая, "
-            "«в» — выход",
+            "  код, номер подсказки, «д» — детализация, «а» — агрегат, "
+            "«с» — специфическая, «н» — не статья, «п» — пропустить, "
+            "«о» — отменить, «в» — выход",
             default="в",
         ).strip()
 
         if answer in ("в", "q", ""):
             break
+        if answer == "п":
+            skipped.add((item.inn, item.source_name))
+            continue
+        if answer == "о":
+            # Отмена не ограничена присестом: ошибку замечают и через день,
+            # а править журнал руками неудобно и опасно.
+            if history:
+                inn, name = history.pop()
+                code = issuer.assignments.get(name, "")
+            else:
+                found = last_confirmation(issuers)
+                if found is None:
+                    typer.echo("  отменять нечего")
+                    continue
+                inn, name, code = found
+            forget(by_inn[inn], name)
+            saved = max(0, saved - 1)
+            typer.echo(
+                typer.style(
+                    f"  отменено: «{name}» ({code})", fg=typer.colors.YELLOW
+                )
+            )
+            continue
         if answer == "н":
             issuer.dismissed[item.source_name] = Decision.NOT_A_LINE
             continue
-        if answer == "с":
-            issuer.dismissed[item.source_name] = Decision.SPECIFIC
-            _save_confirmation(issuer, item, f"ifrs.specific_{item.inn}", who)
+        if answer == "д":
+            # Детализация: строка вместе с соседними даёт позицию. Гипотеза
+            # принимается только тогда, когда сумма сошлась с величиной
+            # позиции; не сошлось — разметка сохраняется непроверенной,
+            # и об этом сказано прямо.
+            code = _ask_code("  код позиции, которую строка детализирует", codes)
+            if code is None:
+                continue
+            issuer.parts[item.source_name] = code
+            matched, total = check_part_of(issuer, code, catalog)
+            _save_confirmation(
+                issuer, item, code, who, relation="part_of", confirmed=matched
+            )
+            history.append((item.inn, item.source_name))
             saved += 1
+            if matched is True:
+                typer.echo(
+                    typer.style(
+                        f"  сумма детализации {total} сошлась с {code}",
+                        fg=typer.colors.GREEN,
+                    )
+                )
+            elif matched is False:
+                typer.echo(
+                    typer.style(
+                        f"  сумма детализации {total} не равна величине {code}: "
+                        "гипотеза не подтверждена",
+                        fg=typer.colors.RED,
+                    )
+                )
+            else:
+                typer.echo("  проверить нечем: сама позиция у эмитента не раскрыта")
+            continue
+        if answer == "а":
+            # Агрегат: строка укрупняет несколько позиций. Перечень объявляется
+            # при разметке — без него неизвестно, что именно она покрывает.
+            listed = typer.prompt(
+                "  коды позиций через запятую, которые строка укрупняет", default=""
+            ).strip()
+            parts = tuple(item.strip() for item in listed.split(",") if item.strip())
+            unknown = [code for code in parts if code not in codes]
+            if len(parts) < 2 or unknown:
+                typer.echo(
+                    typer.style(
+                        "  нужны два и более кода из справочника"
+                        + (f"; неизвестны: {', '.join(unknown)}" if unknown else ""),
+                        fg=typer.colors.RED,
+                    )
+                )
+                continue
+            issuer.aggregates[item.source_name] = parts
+            _save_confirmation(
+                issuer,
+                item,
+                parts[0],
+                who,
+                relation="aggregate_of",
+                related=parts,
+            )
+            history.append((item.inn, item.source_name))
+            saved += 1
+            typer.echo(
+                typer.style(
+                    f"  сохранено как агрегат {len(parts)} позиций",
+                    fg=typer.colors.GREEN,
+                )
+            )
+            continue
+        if answer == "с":
+            code = typer.prompt(
+                "  код специфической статьи, например ifrs.principal_receivable",
+                default="",
+            ).strip()
+            if not code:
+                continue
+            taken = code_is_taken(code, catalog)
+            if taken is not None:
+                typer.echo(typer.style(f"  код занят: {taken}", fg=typer.colors.RED))
+                continue
+            issuer.dismissed[item.source_name] = Decision.SPECIFIC
+            _save_confirmation(issuer, item, code, who)
+            history.append((item.inn, item.source_name))
+            saved += 1
+            typer.echo(typer.style(f"  сохранено как {code}", fg=typer.colors.GREEN))
             continue
         if answer.isdigit() and 1 <= int(answer) <= len(item.hints):
             answer = item.hints[int(answer) - 1].code
@@ -528,6 +638,7 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
 
         closed, total = apply_assignment(issuer, item, answer, catalog)
         _save_confirmation(issuer, item, answer, who)
+        history.append((item.inn, item.source_name))
         saved += 1
         if closed:
             typer.echo(
@@ -539,11 +650,83 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         else:
             typer.echo("  итог пока не сошёлся: не хватает других строк")
 
-    typer.echo(f"\nПрисвоений сохранено: {saved}.")
+    _show_skipped(skipped, issuers, catalog)
+    typer.echo(f"\nПрисвоений за присест: {saved}.")
 
 
-def _save_confirmation(issuer, candidate, code: str, who: str) -> None:
-    """Пишет присвоение в ifrs_line_confirmation."""
+def _show_candidate(item, left: int) -> None:
+    """Печатает строку со всем, что нужно для решения."""
+    typer.echo("")
+    typer.echo(typer.style("─" * 72, dim=True))
+    typer.echo(
+        f"Осталось {left}. ИНН {item.inn}, форма {item.form}, "
+        f"очередь: {item.priority.name}"
+    )
+    # Соседи печатаются вокруг строки: «Прочие» или «Итого» без контекста
+    # не опознать, а раздел виден по тому, что стоит рядом.
+    if item.previous_name:
+        typer.echo(typer.style(f"    ↑ {item.previous_name}", dim=True))
+    shown = item.source_name or "(наименования нет, только величины)"
+    typer.echo(typer.style(f"  «{shown}»", bold=True))
+    if item.next_name:
+        typer.echo(typer.style(f"    ↓ {item.next_name}", dim=True))
+
+    values = ", ".join(str(value) for value in item.values)
+    share = f"{item.share_of_assets:.2%}" if item.share_of_assets else "—"
+    typer.echo(f"  величины: {values}; доля активов: {share}")
+    if item.total_code:
+        typer.echo(
+            f"  входит в незакрытый итог {item.total_code}, недостача {item.total_gap}"
+        )
+    if item.issuers > 1:
+        typer.echo(f"  встречается у {item.issuers} эмитентов")
+    if item.hints:
+        typer.echo("  подсказки справочника:")
+        for number, hint in enumerate(item.hints, start=1):
+            typer.echo(f"    {number}) {hint.code} — {hint.name}")
+
+
+def _show_skipped(skipped: set, issuers: list, catalog) -> None:
+    """Пропущенные строки — отдельной очередью в конце присеста."""
+    if not skipped:
+        return
+    from finlib.sources.ifrs_markup import candidates
+
+    typer.echo("")
+    typer.echo(typer.style(f"Пропущено строк: {len(skipped)}", bold=True))
+    for item in candidates(issuers, catalog):
+        if (item.inn, item.source_name) in skipped:
+            typer.echo(f"  {item.inn}  {item.describe()}")
+
+
+def _ask_code(question: str, codes: dict) -> str | None:
+    """Спрашивает код позиции и проверяет, что он есть в справочнике."""
+    answer = typer.prompt(question, default="").strip()
+    if not answer:
+        return None
+    if answer not in codes:
+        typer.echo(typer.style(f"  кода {answer} нет в справочнике", fg=typer.colors.RED))
+        return None
+    return answer
+
+
+def _save_confirmation(
+    issuer,
+    candidate,
+    code: str,
+    who: str,
+    *,
+    relation: str = "exact",
+    related: tuple[str, ...] | None = None,
+    confirmed: bool | None = None,
+) -> None:
+    """Пишет разметку в ifrs_line_confirmation.
+
+    Вид разметки хранится рядом с кодом: детализация, агрегат и точное
+    соответствие проверяются по-разному, и по одному коду их не различить.
+    Подтверждение арифметикой пишется третьим состоянием — «не проверялось»
+    не то же, что «не сошлось».
+    """
     from finlib.db import connection, execute
 
     with connection() as conn:
@@ -554,11 +737,15 @@ def _save_confirmation(issuer, candidate, code: str, who: str) -> None:
         )
         execute(
             "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
-            "form_code, value, share_of_assets, confirmed_by) VALUES (%(code)s, "
-            "%(inn)s, %(date)s, %(name)s, %(form)s, %(value)s, %(share)s, %(who)s) "
+            "form_code, value, share_of_assets, confirmed_by, relation, related_codes, "
+            "arithmetic_confirmed) VALUES (%(code)s, %(inn)s, %(date)s, %(name)s, "
+            "%(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, %(related)s, "
+            "%(confirmed)s) "
             "ON CONFLICT (code, inn, report_date, source_name) DO UPDATE SET "
             "value = EXCLUDED.value, share_of_assets = EXCLUDED.share_of_assets, "
-            "confirmed_by = EXCLUDED.confirmed_by, confirmed_at = now()",
+            "confirmed_by = EXCLUDED.confirmed_by, relation = EXCLUDED.relation, "
+            "related_codes = EXCLUDED.related_codes, "
+            "arithmetic_confirmed = EXCLUDED.arithmetic_confirmed, confirmed_at = now()",
             {
                 "code": code,
                 "inn": issuer.inn,
@@ -568,6 +755,9 @@ def _save_confirmation(issuer, candidate, code: str, who: str) -> None:
                 "value": candidate.amount,
                 "share": candidate.share_of_assets or 0,
                 "who": who,
+                "relation": relation,
+                "related": list(related) if related else None,
+                "confirmed": confirmed,
             },
             conn=conn,
         )

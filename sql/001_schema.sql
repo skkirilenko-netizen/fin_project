@@ -493,6 +493,20 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     form_code      text NOT NULL,
     value          numeric(20, 3),
     share_of_assets numeric(10, 6) NOT NULL,
+    -- Вид разметки: чем строка приходится позиции справочника. От него
+    -- зависит, как разметка проверяется арифметикой, и смешивать виды
+    -- нельзя. exact — строка и есть позиция; part_of — строка вместе
+    -- с соседними даёт позицию, и сумма таких строк обязана ей равняться;
+    -- aggregate_of — строка укрупняет несколько позиций, перечень
+    -- в related_codes; specific — содержание не укладывается ни в одну
+    -- позицию и не раскладывается на существующие.
+    relation       text NOT NULL DEFAULT 'exact'
+                   CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific')),
+    related_codes  text[],
+    -- Подтвердилась ли разметка арифметикой: сумма сошлась с величиной
+    -- позиции. NULL — проверить было нечем, и это не то же самое, что
+    -- «не сошлось».
+    arithmetic_confirmed boolean,
     confirmed_by   text NOT NULL,
     confirmed_at   timestamptz NOT NULL DEFAULT now(),
     note           text,
@@ -501,6 +515,26 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     -- иначе признак кандидата в ядро набирался бы повторами одного случая.
     CONSTRAINT ifrs_line_confirmation_uniq UNIQUE (code, inn, report_date, source_name)
 );
+
+-- Колонки заведены позже таблицы; правило догонки действует с 17.09.2026.
+ALTER TABLE ifrs_line_confirmation
+    ADD COLUMN IF NOT EXISTS relation text NOT NULL DEFAULT 'exact';
+ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS related_codes text[];
+ALTER TABLE ifrs_line_confirmation
+    ADD COLUMN IF NOT EXISTS arithmetic_confirmed boolean;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ifrs_line_confirmation'::regclass
+          AND conname = 'ifrs_line_confirmation_relation_check'
+    ) THEN
+        ALTER TABLE ifrs_line_confirmation
+            ADD CONSTRAINT ifrs_line_confirmation_relation_check
+            CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific'));
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
     ON ifrs_line_confirmation (code);

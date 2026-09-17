@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from difflib import SequenceMatcher
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import Path
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
@@ -59,6 +59,21 @@ class Decision(IntEnum):
     SPECIFIC = 3
 
 
+class Relation(StrEnum):
+    """Чем строка приходится позиции справочника.
+
+    Вид разметки — не оттенок, а разное отношение к справочнику, и от него
+    зависит, как разметка проверяется арифметикой. Смешивать виды нельзя:
+    детализация обязана суммироваться в позицию, агрегат — раскладываться
+    на перечень, специфическая статья не сводится ни к чему.
+    """
+
+    EXACT = "exact"
+    PART_OF = "part_of"
+    AGGREGATE_OF = "aggregate_of"
+    SPECIFIC = "specific"
+
+
 @dataclass(frozen=True, slots=True)
 class Hint:
     """Подсказка: позиция ядра, близкая по написанию."""
@@ -83,6 +98,10 @@ class Candidate:
     total_gap: Decimal | None = None
     issuers: int = 1
     hints: tuple[Hint, ...] = ()
+    # Соседние строки формы: без них «Прочие» и «Итого» не опознать,
+    # а у строк без наименования это единственная опора.
+    previous_name: str = ""
+    next_name: str = ""
 
     @property
     def amount(self) -> Decimal:
@@ -106,6 +125,12 @@ class IssuerMarkup:
     extraction: Extraction
     assignments: dict[str, str] = field(default_factory=dict)
     dismissed: dict[str, Decision] = field(default_factory=dict)
+    # Строки, помеченные детализацией: наименование → код позиции, которую
+    # они вместе составляют. Держатся отдельно от точных присвоений: в сумму
+    # позиции они входят, а самой позицией не являются.
+    parts: dict[str, str] = field(default_factory=dict)
+    # Строки-агрегаты: наименование → позиции, которые строка укрупняет.
+    aggregates: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def report_date(self) -> date:
@@ -116,10 +141,18 @@ class IssuerMarkup:
         """Величины по кодам с учётом присвоенного человеком."""
         found = dict(self.extraction.totals(self.report_date))
         for row in self.extraction.unrecognised:
-            code = self.assignments.get(row.source_name)
-            if code is None or not row.values:
+            if not row.values:
                 continue
-            found[code] = found.get(code, Decimal(0)) + row.values[0]
+            # Точное присвоение задаёт величину позиции; детализация к ней
+            # прибавляется. Агрегат в сумму не идёт: он покрывает несколько
+            # позиций сразу, и подставлять его в одну значило бы удвоить.
+            code = self.assignments.get(row.source_name)
+            if code is not None:
+                found[code] = found.get(code, Decimal(0)) + row.values[0]
+                continue
+            part = self.parts.get(row.source_name)
+            if part is not None and part not in found:
+                found[part] = found.get(part, Decimal(0)) + row.values[0]
         return found
 
     def totals_state(self, catalog: IfrsCatalog) -> dict[str, TotalVerdict]:
@@ -210,7 +243,9 @@ def _for_issuer(
                 total_code=total_code,
                 total_gap=gap,
                 issuers=len(seen_by_name.get(normalize_name(row.source_name), {issuer.inn})),
-                hints=hints_for(row.source_name, catalog),
+                hints=hints_for(row.source_name or row.previous_name, catalog),
+                previous_name=row.previous_name,
+                next_name=row.next_name,
             )
         )
     return found
@@ -312,6 +347,133 @@ def apply_assignment(
     return False, candidate.total_code
 
 
+def check_part_of(
+    issuer: IssuerMarkup, code: str, catalog: IfrsCatalog
+) -> tuple[bool | None, Decimal | None]:
+    """Сходится ли сумма строк, помеченных детализацией, с величиной позиции.
+
+    Проверка обязательна и определяет, принята ли гипотеза: если эмитент
+    раскрывает статью подробнее модели, сумма его строк обязана равняться
+    величине позиции. Не сошлось — гипотеза не подтверждена.
+
+    `None` означает, что проверять нечем: сама позиция у эмитента
+    не раскрыта, и сравнивать сумму не с чем. Это не то же, что «не сошлось».
+    """
+    declared = issuer.extraction.value_of(code, issuer.report_date)
+    if declared is None:
+        return None, None
+    parts = [
+        row.values[0]
+        for row in issuer.extraction.unrecognised
+        if issuer.parts.get(row.source_name) == code and row.values
+    ]
+    if not parts:
+        return None, None
+    total = sum(parts, start=Decimal(0))
+    tolerance = abs(declared) * TOLERANCE_SHARE + Decimal(1)
+    return abs(total - declared) <= tolerance, total
+
+
 def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition]:
     """Коды ядра по коду — для проверки ввода."""
     return {item.code: item for item in catalog.positions}
+
+
+_SAVED = """
+SELECT code, inn, source_name FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
+"""
+
+_TAKEN = """
+SELECT code, inn, source_name FROM ifrs_line_confirmation WHERE code = %(code)s
+"""
+
+_FORGET = """
+DELETE FROM ifrs_line_confirmation
+WHERE inn = %(inn)s AND source_name = %(name)s AND report_date = %(date)s
+"""
+
+
+def restore(issuers: list[IssuerMarkup], conn=None) -> int:
+    """Возвращает присвоения, сделанные в прежние присесты.
+
+    Разметка идёт в несколько заходов, и показывать размеченное повторно
+    нельзя. Восстановление не только убирает строку из очереди: присвоенный
+    код участвует в суммах, и без него итоги считались бы незакрытыми —
+    очередь выстроилась бы по недостаче, которой уже нет.
+    """
+    from finlib.db import fetch_all
+
+    by_inn = {item.inn: item for item in issuers}
+    if not by_inn:
+        return 0
+    rows = fetch_all(_SAVED, {"inns": list(by_inn)}, conn=conn)
+    restored = 0
+    for row in rows:
+        issuer = by_inn.get(row["inn"])
+        if issuer is None:
+            continue
+        issuer.assignments[row["source_name"]] = row["code"]
+        restored += 1
+    if restored:
+        logger.info("восстановлено присвоений прежних присестов: %d", restored)
+    return restored
+
+
+def code_is_taken(code: str, catalog: IfrsCatalog, conn=None) -> str | None:
+    """Занят ли код; возвращает объяснение, чем именно занят.
+
+    Код ядра для специфической статьи брать нельзя: ядро описывает то,
+    что есть у всех, а специфическая статья — то, чего нет ни у кого
+    другого. Код, уже присвоенный другой статье, тоже занят — иначе две
+    разные вещи окажутся под одним кодом, и поднять их в ядро будет нельзя.
+    """
+    from finlib.db import fetch_all
+
+    position = catalog.get(code)
+    if position is not None:
+        return f"это код ядра: {position.name}"
+    rows = fetch_all(_TAKEN, {"code": code}, conn=conn)
+    names = {row["source_name"] for row in rows}
+    if len(names) > 1 or (names and code not in {item for item in names}):
+        listed = ", ".join(sorted(names)[:3])
+        return f"код уже присвоен статье: {listed}"
+    return None
+
+
+_LAST = """
+SELECT inn, source_name, code FROM ifrs_line_confirmation
+WHERE inn = ANY(%(inns)s) ORDER BY confirmed_at DESC, id DESC LIMIT 1
+"""
+
+
+def last_confirmation(issuers: list[IssuerMarkup], conn=None) -> tuple[str, str, str] | None:
+    """Последнее присвоение по журналу: эмитент, наименование, код.
+
+    Отмена не ограничена текущим присестом: ошибку замечают и через день,
+    а править журнал руками неудобно и опасно.
+    """
+    from finlib.db import fetch_all
+
+    rows = fetch_all(_LAST, {"inns": [item.inn for item in issuers]}, conn=conn)
+    if not rows:
+        return None
+    row = rows[0]
+    return row["inn"], row["source_name"], row["code"]
+
+
+def forget(issuer: IssuerMarkup, source_name: str, conn=None) -> None:
+    """Отменяет присвоение: убирает из памяти и из журнала подтверждений.
+
+    Ошибка на двух сотнях строк неизбежна, а править потом в базе руками
+    неудобно и опасно — исправление тем и отличается от второго наблюдения,
+    что старую запись надо убрать, а не добавить рядом.
+    """
+    from finlib.db import execute
+
+    issuer.assignments.pop(source_name, None)
+    issuer.dismissed.pop(source_name, None)
+    execute(
+        _FORGET,
+        {"inn": issuer.inn, "name": source_name, "date": issuer.report_date},
+        conn=conn,
+    )
