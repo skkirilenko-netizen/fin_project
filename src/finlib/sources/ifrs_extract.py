@@ -300,7 +300,16 @@ def _split_row(
     if periods and len(parsed) > periods:
         parsed = parsed[-periods:]
         tail = tail[-periods:]
-    return stripped[: tail[0].start()].strip(), parsed
+    name = stripped[: tail[0].start()].strip()
+    # Номер примечания стоит между наименованием и величинами и в наименование
+    # не входит: «Денежные средства и их эквиваленты 18» справочник не опознает,
+    # хотя «Денежные средства и их эквиваленты» опознаёт.
+    return _NOTE_NUMBER.sub("", name).strip(), parsed
+
+
+# Хвостовое короткое число наименования — номер примечания, а не часть
+# названия статьи. Четырёхзначное не трогаем: оно может быть годом в названии.
+_NOTE_NUMBER = re.compile(r"[\s,]*\b\d{1,3}\s*$")
 
 
 def _name_totals_by_structure(

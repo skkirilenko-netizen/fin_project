@@ -396,6 +396,183 @@ def reprocess_command(
         )
 
 
+@app.command("ifrs-markup")
+def ifrs_markup_command(
+    path: Annotated[
+        Path, typer.Option("--path", help="Каталог с документами МСФО по ИНН")
+    ] = Path("data/raw/ifrs"),
+    who: Annotated[
+        str, typer.Option("--who", help="Кто размечает: попадёт в подтверждение")
+    ] = "",
+    limit: Annotated[
+        int, typer.Option("--limit", help="Сколько строк показать за присест")
+    ] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Разметка неопознанных строк МСФО: присвоение кодов позициям модели.
+
+    Строки показываются не по частоте, а по влиянию на арифметику: сначала
+    те, без которых не сходится итог раздела. Это даёт двойную проверку —
+    присвоил код, итог сошёлся, значит опознал верно.
+    """
+    _setup_logging(verbose)
+    if not who.strip():
+        _fail("укажите --who: подтверждение без автора в журнале бесполезно")
+
+    issuers, skipped = _load_issuers(path)
+    if not issuers:
+        _fail(f"в каталоге {path} нет документов, прошедших приём")
+    for name, reason in skipped:
+        typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
+
+    _markup_loop(issuers, who.strip(), limit)
+
+
+def _load_issuers(path: Path) -> tuple[list, list[tuple[str, str]]]:
+    """Готовит эмитентов к разметке; непринятые документы называются отдельно."""
+    from finlib.sources.ifrs_inbox import Rejection
+    from finlib.sources.ifrs_markup import load_issuer
+
+    issuers, skipped = [], []
+    for folder in sorted(p for p in path.iterdir() if p.is_dir()):
+        documents = [
+            item
+            for item in sorted(folder.iterdir())
+            if item.suffix.lower() in (".pdf", ".txt", ".md")
+        ]
+        chosen = next(
+            (item for item in documents if item.suffix.lower() == ".pdf"),
+            documents[0] if documents else None,
+        )
+        if chosen is None:
+            continue
+        found = load_issuer(chosen, folder.name)
+        if isinstance(found, Rejection):
+            skipped.append((chosen.name, found.reason))
+            continue
+        issuers.append(found)
+    return issuers, skipped
+
+
+def _markup_loop(issuers: list, who: str, limit: int) -> None:
+    """Разговор с человеком: список, ввод кода, подсказки, пересчёт итогов."""
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.sources.ifrs_markup import (
+        Decision,
+        apply_assignment,
+        candidates,
+        known_codes,
+    )
+
+    catalog = load_ifrs_lines()
+    codes = known_codes(catalog)
+    by_inn = {item.inn: item for item in issuers}
+    saved = 0
+
+    while True:
+        queue = candidates(issuers, catalog)
+        if not queue:
+            typer.echo(typer.style("\nНеразмеченных строк не осталось.", bold=True))
+            break
+        if limit and saved >= limit:
+            typer.echo(f"\nПоказано {limit} строк, как просили. Осталось {len(queue)}.")
+            break
+
+        item = queue[0]
+        issuer = by_inn[item.inn]
+        typer.echo("")
+        typer.echo(typer.style("─" * 72, dim=True))
+        typer.echo(
+            f"Осталось {len(queue)}. ИНН {item.inn}, форма {item.form}, "
+            f"очередь: {item.priority.name}"
+        )
+        typer.echo(typer.style(f"  «{item.source_name}»", bold=True))
+        values = ", ".join(str(value) for value in item.values)
+        share = f"{item.share_of_assets:.2%}" if item.share_of_assets else "—"
+        typer.echo(f"  величины: {values}; доля активов: {share}")
+        if item.total_code:
+            typer.echo(
+                f"  входит в незакрытый итог {item.total_code}, "
+                f"недостача {item.total_gap}"
+            )
+        if item.issuers > 1:
+            typer.echo(f"  встречается у {item.issuers} эмитентов")
+        if item.hints:
+            typer.echo("  подсказки справочника:")
+            for number, hint in enumerate(item.hints, start=1):
+                typer.echo(f"    {number}) {hint.code} — {hint.name}")
+
+        answer = typer.prompt(
+            "  код позиции, номер подсказки, «н» — не статья, «с» — специфическая, "
+            "«в» — выход",
+            default="в",
+        ).strip()
+
+        if answer in ("в", "q", ""):
+            break
+        if answer == "н":
+            issuer.dismissed[item.source_name] = Decision.NOT_A_LINE
+            continue
+        if answer == "с":
+            issuer.dismissed[item.source_name] = Decision.SPECIFIC
+            _save_confirmation(issuer, item, f"ifrs.specific_{item.inn}", who)
+            saved += 1
+            continue
+        if answer.isdigit() and 1 <= int(answer) <= len(item.hints):
+            answer = item.hints[int(answer) - 1].code
+        if answer not in codes:
+            typer.echo(
+                typer.style(f"  кода {answer} нет в справочнике", fg=typer.colors.RED)
+            )
+            continue
+
+        closed, total = apply_assignment(issuer, item, answer, catalog)
+        _save_confirmation(issuer, item, answer, who)
+        saved += 1
+        if closed:
+            typer.echo(
+                typer.style(
+                    f"  итог {total} сошёлся — присвоение подтверждено арифметикой",
+                    fg=typer.colors.GREEN,
+                )
+            )
+        else:
+            typer.echo("  итог пока не сошёлся: не хватает других строк")
+
+    typer.echo(f"\nПрисвоений сохранено: {saved}.")
+
+
+def _save_confirmation(issuer, candidate, code: str, who: str) -> None:
+    """Пишет присвоение в ifrs_line_confirmation."""
+    from finlib.db import connection, execute
+
+    with connection() as conn:
+        execute(
+            "INSERT INTO organization (inn) VALUES (%(inn)s) ON CONFLICT DO NOTHING",
+            {"inn": issuer.inn},
+            conn=conn,
+        )
+        execute(
+            "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
+            "form_code, value, share_of_assets, confirmed_by) VALUES (%(code)s, "
+            "%(inn)s, %(date)s, %(name)s, %(form)s, %(value)s, %(share)s, %(who)s) "
+            "ON CONFLICT (code, inn, report_date, source_name) DO UPDATE SET "
+            "value = EXCLUDED.value, share_of_assets = EXCLUDED.share_of_assets, "
+            "confirmed_by = EXCLUDED.confirmed_by, confirmed_at = now()",
+            {
+                "code": code,
+                "inn": issuer.inn,
+                "date": issuer.report_date,
+                "name": candidate.source_name,
+                "form": candidate.form,
+                "value": candidate.amount,
+                "share": candidate.share_of_assets or 0,
+                "who": who,
+            },
+            conn=conn,
+        )
+
+
 def main() -> int:
     """Запуск приложения."""
     app()
