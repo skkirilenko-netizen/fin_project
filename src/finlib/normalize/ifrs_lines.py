@@ -208,24 +208,33 @@ class IfrsCatalog(BaseModel):
                 )
 
     def _check_aliases_do_not_overlap(self) -> None:
-        """Одно наименование не может принадлежать двум позициям.
+        """Наименование не может принадлежать двум позициям одного раздела.
 
-        Опознание идёт по наименованию, и пересечение синонимов означает,
-        что статья ляжет в ту позицию, которая встретилась раньше, — то есть
-        произвольно. Это не дефект отчётности, а дефект справочника,
-        и находиться он должен при загрузке, а не при разборе файла эмитента.
+        Опознание идёт по наименованию, и пересечение синонимов внутри
+        раздела означает, что статья ляжет в ту позицию, которая встретилась
+        раньше, — то есть произвольно. Это дефект справочника, и находиться
+        он должен при загрузке, а не при разборе файла эмитента.
+
+        **Между разделами повтор правомерен и неизбежен.** «Кредиты и займы»
+        стоят в балансе дважды — в долгосрочных обязательствах и
+        в краткосрочных, — и называются одинаково; в РСБУ их различает код
+        строки (1410 и 1510), в МСФО кода нет, и различает раздел. Прежде
+        справочник такого не допускал, поэтому обе строки опознавались одной
+        позицией, и краткосрочный долг затирал долгосрочный: у ЛСР вместо
+        328 256 выходило 35 876, и то же у Норникеля и Сегежи.
         """
-        owners: dict[str, list[str]] = {}
+        owners: dict[tuple[str, str, str], list[str]] = {}
         for position in self.positions:
             for name in position.match_names:
-                owners.setdefault(name, []).append(position.code)
+                key = (position.form, position.section, name)
+                owners.setdefault(key, []).append(position.code)
         overlapping = {
-            name: codes for name, codes in owners.items() if len(codes) > 1
+            key: codes for key, codes in owners.items() if len(codes) > 1
         }
         if overlapping:
             listed = "; ".join(
-                f"«{name}» — {', '.join(sorted(codes))}"
-                for name, codes in sorted(overlapping.items())
+                f"«{name}» в разделе {section} — {', '.join(sorted(codes))}"
+                for (_, section, name), codes in sorted(overlapping.items())
             )
             raise ValueError(f"наименования принадлежат нескольким позициям: {listed}")
 
@@ -240,15 +249,33 @@ class IfrsCatalog(BaseModel):
             raise KeyError(f"позиции {code} нет в справочнике МСФО")
         return found
 
-    def match_by_name(self, name: str) -> IfrsPosition | None:
+    def match_by_name(self, name: str, section: str | None = None) -> IfrsPosition | None:
         """Позиция по наименованию из отчётности; None — не опознана.
 
         Неопознанная статья не теряется: её обязан записать разбор файла,
         и она же требует ручного подтверждения на экране сверки (задача 23).
+
+        `section` нужен наименованиям, которые повторяются в разных разделах
+        («Кредиты и займы» — и в долгосрочных обязательствах, и
+        в краткосрочных). Без него такое наименование не опознаётся вовсе:
+        отдать первую попавшуюся позицию значит отдать произвольную.
         """
         normalized = normalize_name(name)
-        return next(
-            (item for item in self.positions if normalized in item.match_names), None
+        found = [item for item in self.positions if normalized in item.match_names]
+        if not found:
+            return None
+        if len(found) == 1:
+            return found[0]
+        if section is None:
+            return None
+        in_section = [item for item in found if item.section == section]
+        return in_section[0] if len(in_section) == 1 else None
+
+    def ambiguous_name(self, name: str) -> bool:
+        """Повторяется ли наименование в нескольких разделах справочника."""
+        normalized = normalize_name(name)
+        return (
+            sum(1 for item in self.positions if normalized in item.match_names) > 1
         )
 
     def match_form(self, name: str) -> str | None:

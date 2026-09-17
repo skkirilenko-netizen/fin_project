@@ -81,6 +81,12 @@ class DocumentProfile:
     report_dates: tuple[date, ...]
     reporting_kind: ReportingKind
     grouping_detection: GroupingDetection
+    # Страницы без текстового слоя, попавшие внутрь форм. Не пустые страницы,
+    # а страницы, содержимого которых мы не видим: у Автодора так потерялась
+    # вся сторона пассива — баланс занимает страницы 8 и 9, слой есть только
+    # у восьмой. Актив при этом сошёлся сам с собой, и ни один контроль
+    # пропажи не заметил.
+    pages_without_text: tuple[int, ...] = ()
 
     @property
     def accepted(self) -> bool:
@@ -148,6 +154,7 @@ def identify(
     policy: ParsingPolicy | None = None,
     grouping: Grouping | None = None,
     any_currency: bool = False,
+    document: PdfDocument | None = None,
 ) -> DocumentProfile | Rejection:
     """Определяет параметры документа либо отказывается его принимать.
 
@@ -159,6 +166,10 @@ def identify(
     целиком. Это выход для документа, у которого разметка чисел не читается
     ни голосованием, ни арифметикой; способ называется в журнале, потому что
     доверие к нему иное — за него отвечает человек, а не документ.
+
+    `document` нужен одной проверке, которую по плоскому тексту сделать
+    нельзя: не потеряна ли страница внутри форм. Страница без текстового
+    слоя в плоском тексте неотличима от её отсутствия.
 
     `any_currency` принимает отчётность в любой валюте. Валюта относится
     к **оценке**, а не к разбору: состав статей от неё не зависит, и разметка
@@ -307,9 +318,42 @@ def identify(
         report_dates=dates,
         reporting_kind=_reporting_kind(lowered, policy),
         grouping_detection=detection,
+        pages_without_text=_lost_pages(document, text, headings, policy),
     )
     logger.info("документ принят: %s", profile.describe())
+    if profile.pages_without_text:
+        logger.warning(
+            "внутри форм потеряны страницы без текстового слоя: %s",
+            ", ".join(str(number) for number in profile.pages_without_text),
+        )
     return profile
+
+
+def _lost_pages(
+    document: PdfDocument | None,
+    text: str,
+    headings: dict[str, int],
+    policy: ParsingPolicy,
+) -> tuple[int, ...]:
+    """Страницы без текстового слоя, попавшие внутрь форм.
+
+    Считаются только страницы между первой и последней формой: аудиторское
+    заключение сканом — обычное дело и разбору не мешает, а страница
+    посреди баланса означает потерю половины формы.
+    """
+    if document is None or not headings:
+        return ()
+    empty = set(document.pages_without_text)
+    if not empty:
+        return ()
+    blocks = form_blocks(text, headings, policy)
+    ends = [
+        start + sum(len(line) + 1 for line in blocks.get(code, ()))
+        for code, start in headings.items()
+    ]
+    first = document.page_at(min(headings.values()))
+    last = document.page_at(max(ends) if ends else min(headings.values()))
+    return tuple(sorted(number for number in empty if first <= number <= last))
 
 
 def form_headings(

@@ -117,19 +117,39 @@ def test_total_without_components_is_rejected() -> None:
 # --- синонимы -----------------------------------------------------------------
 
 
-def test_aliases_do_not_overlap_between_positions() -> None:
-    """Одно наименование принадлежит одной позиции.
+def test_aliases_do_not_overlap_inside_a_section() -> None:
+    """Наименование принадлежит одной позиции раздела.
 
-    Опознание идёт по наименованию: пересечение синонимов означает, что
-    статья ляжет в ту позицию, которая встретилась раньше, — то есть
-    произвольно.
+    Опознание идёт по наименованию: пересечение синонимов внутри раздела
+    означает, что статья ляжет в ту позицию, которая встретилась раньше, —
+    то есть произвольно.
     """
-    owners: dict[str, list[str]] = {}
+    owners: dict[tuple[str, str], list[str]] = {}
     for position in CATALOG.positions:
         for name in position.match_names:
-            owners.setdefault(name, []).append(position.code)
-    overlapping = {name: codes for name, codes in owners.items() if len(codes) > 1}
+            owners.setdefault((position.section, name), []).append(position.code)
+    overlapping = {key: codes for key, codes in owners.items() if len(codes) > 1}
     assert not overlapping, overlapping
+
+
+def test_same_name_in_two_sections_is_allowed_and_resolved() -> None:
+    """«Кредиты и займы» стоят в балансе дважды, и различает их раздел.
+
+    В РСБУ ту же работу делает код строки — 1410 и 1510. В МСФО кода нет,
+    и запрет на повтор наименования заставлял опознавать обе строки одной
+    позицией: краткосрочный долг затирал долгосрочный, и у ЛСР вместо
+    328 256 выходило 35 876.
+    """
+    assert CATALOG.ambiguous_name("Кредиты и займы")
+    assert CATALOG.match_by_name("Кредиты и займы") is None
+    assert (
+        CATALOG.match_by_name("Кредиты и займы", section="non_current_liabilities").code
+        == "ifrs.long_term_borrowings"
+    )
+    assert (
+        CATALOG.match_by_name("Кредиты и займы", section="current_liabilities").code
+        == "ifrs.short_term_borrowings"
+    )
 
 
 def test_overlapping_aliases_break_loading() -> None:

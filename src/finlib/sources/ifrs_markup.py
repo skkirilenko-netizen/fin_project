@@ -216,10 +216,17 @@ def load_issuer(
         from finlib.quality.codes import CheckCode
 
         return Rejection(CheckCode.FILE_NOT_PARSED, f"файл не прочитан: {document.error}")
-    profile = identify(document.text, grouping=grouping, any_currency=True)
+    profile = identify(
+        document.text, grouping=grouping, any_currency=True, document=document
+    )
     if isinstance(profile, Rejection):
         return profile
-    extraction = extract(document.text, profile.report_dates, profile.grouping)
+    extraction = extract(
+        document.text,
+        profile.report_dates,
+        profile.grouping,
+        columns=document.columns_of,
+    )
     return IssuerMarkup(inn, path, profile, extraction)
 
 

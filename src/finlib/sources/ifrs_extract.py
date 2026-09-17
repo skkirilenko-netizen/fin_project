@@ -19,6 +19,7 @@
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -194,12 +195,20 @@ def extract(
     report_dates: tuple[date, ...],
     grouping: Grouping,
     catalog: IfrsCatalog | None = None,
+    columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
 ) -> Extraction:
     """Разбирает документ по формам справочника.
 
     report_dates и grouping приходят от приёма файла: разбирать числа,
     не зная конвенции, нельзя, а раскладывать их по периодам, не зная дат,
     не во что.
+
+    `columns` отдаёт ячейки строки по координатам PDF. Это **свидетельство,
+    а не догадка**: в плоском тексте разделитель разрядов и разделитель
+    колонок — один и тот же пробел, а в координатах между «737» и «562»
+    семьдесят три пункта, а внутри «737» девять. Там, где координаты есть,
+    они решают, где кончается величина; где их нет — работают правила
+    строения числа, и они остаются для текстовых выгрузок.
     """
     catalog = catalog or load_ifrs_lines()
     blocks = _split_by_forms(text, catalog)
@@ -207,7 +216,7 @@ def extract(
     result = Extraction()
     for form_code, lines in blocks.items():
         result.forms[form_code] = _extract_form(
-            form_code, lines, report_dates, grouping, catalog
+            form_code, lines, report_dates, grouping, catalog, columns
         )
     logger.info("разбор документа: %s", result.describe())
     return result
@@ -236,9 +245,11 @@ def _extract_form(
     report_dates: tuple[date, ...],
     grouping: Grouping,
     catalog: IfrsCatalog,
+    columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
 ) -> ExtractedForm:
     """Разбирает один блок формы: величины, неопознанные строки, сноски."""
     form = ExtractedForm(form_code)
+    by_column = _columns_of_form(lines, report_dates, grouping, columns)
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
     alternatives: dict[int, tuple[Decimal, ...]] = {}
     tail_from = 0
@@ -246,6 +257,11 @@ def _extract_form(
     pending: list[str] = []
     for index, line in enumerate(lines):
         name, values, alternative = _split_row(line, grouping, len(report_dates))
+        # Координаты старше правил строения числа: они говорят, где кончается
+        # колонка, а правила об этом только догадываются.
+        by_coordinates = by_column.get(index)
+        if by_coordinates:
+            values, alternative = by_coordinates, ()
         if not values:
             # Строка без величин — либо заголовок раздела, либо начало
             # наименования, перенесённого вёрсткой. Какая именно, станет
@@ -266,6 +282,8 @@ def _extract_form(
         if found is not None and found.form == form_code:
             recognised[position_index] = found
 
+    _resolve_by_section(rows, recognised, catalog, form_code)
+
     _choose_reading_by_totals(rows, alternatives, recognised, catalog)
 
     # Отсев «не статья» идёт **прежде** опознания итогов структурой.
@@ -283,6 +301,7 @@ def _extract_form(
     }
 
     _name_totals_by_structure(rows, recognised, known, form, set(dismissals))
+    _retract_wrong_section(rows, recognised, form_code)
 
     form.rows_total = len(rows)
     for position_index, (name, values, _) in enumerate(rows):
@@ -577,6 +596,79 @@ def _joined(pending: list[str], name: str) -> str:
 # Строка выглядит незавершённой: кончается союзом, запятой, предлогом или
 # открытой скобкой. Заголовок раздела так не кончается.
 _CONTINUES = re.compile(r".*(?:[,(]|\bи|\bили|\bпо|\bна|\bв|\bот|\bдля|\bс)\s*$", re.I)
+
+
+# Насколько правые края ячеек одной колонки расходятся между строками.
+# Величины выровнены по правому краю, но округление ширины знака и знак
+# скобки дают разброс в несколько пунктов.
+_COLUMN_SPREAD = 12.0
+
+
+def _columns_of_form(
+    lines: list[str],
+    report_dates: tuple[date, ...],
+    grouping: Grouping,
+    columns: Callable[[str], tuple[tuple[str, float], ...]] | None,
+) -> dict[int, tuple[Decimal, ...]]:
+    """Величины строк формы, разложенные по колонкам периодов, — по координатам.
+
+    Колонка опознаётся по правому краю: величины выровнены по нему, и края
+    ячеек одной колонки сходятся у всех строк формы. Колонок берётся столько,
+    сколько периодов, и берутся **самые правые** — левее них стоит колонка
+    примечаний, которая величиной не является.
+
+    Строка, у которой ячейки не легли ни в одну колонку, здесь не возвращается
+    вовсе: тогда работает разбор по строению числа. Молчаливой подстановки
+    нет — есть либо свидетельство, либо его отсутствие.
+    """
+    if columns is None or len(report_dates) < 1:
+        return {}
+
+    cells: dict[int, list[tuple[Decimal, float]]] = {}
+    for index, line in enumerate(lines):
+        found = [
+            (parsed, right)
+            for text, right in columns(line)
+            if (parsed := parse_amount(text, grouping)) is not None
+        ]
+        if found:
+            cells[index] = found
+    if not cells:
+        return {}
+
+    edges = _column_edges(
+        [right for row in cells.values() for _, right in row], len(report_dates)
+    )
+    if len(edges) < len(report_dates):
+        return {}
+
+    placed: dict[int, tuple[Decimal, ...]] = {}
+    for index, row in cells.items():
+        values: list[Decimal | None] = [None] * len(edges)
+        for amount, right in row:
+            nearest = min(range(len(edges)), key=lambda spot: abs(edges[spot] - right))
+            if abs(edges[nearest] - right) <= _COLUMN_SPREAD and values[nearest] is None:
+                values[nearest] = amount
+        # Пропуск в середине разложить по периодам нечем: сдвиг влево отдал бы
+        # величину чужому году. Такая строка остаётся разбору по строению.
+        kept = [item for item in values if item is not None]
+        if kept and values[: len(kept)] == kept:
+            placed[index] = tuple(kept)
+    return placed
+
+
+def _column_edges(rights: list[float], periods: int) -> tuple[float, ...]:
+    """Правые края колонок величин: самые правые скопления из всех."""
+    clusters: list[list[float]] = []
+    for right in sorted(rights):
+        if clusters and right - clusters[-1][-1] <= _COLUMN_SPREAD:
+            clusters[-1].append(right)
+            continue
+        clusters.append([right])
+    # Колонка периода встречается у многих строк, случайное число — у одной.
+    solid = [group for group in clusters if len(group) > 1] or clusters
+    chosen = solid[-periods:]
+    return tuple(sum(group) / len(group) for group in chosen)
 
 
 def _split_row(
@@ -901,7 +993,12 @@ def _name_totals_by_structure(
         ]
         if len(preceding) < 2:
             continue
-        candidate = _matching_total(values, preceding, totals, recognised)
+        inside = {
+            recognised[earlier].code
+            for earlier in range(opened, index)
+            if earlier in recognised
+        }
+        candidate = _matching_total(values, preceding, totals, recognised, inside)
         if candidate is None:
             continue
         recognised[index] = candidate
@@ -912,6 +1009,92 @@ def _name_totals_by_structure(
             name or "отсутствует",
         )
     form.totals_by_structure = tuple(named)
+
+
+# Разделы баланса, в которых статья стоит и не стоит нигде больше: оборотный
+# актив не бывает внеоборотным, долгосрочное обязательство — краткосрочным.
+# Прочие разделы (итоги, капитал, ОПУ, потоки) так не противопоставлены.
+_EXCLUSIVE_SECTIONS = frozenset(
+    {"non_current_assets", "current_assets", "non_current_liabilities", "current_liabilities"}
+)
+
+
+def _resolve_by_section(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    recognised: dict[int, IfrsPosition],
+    catalog: IfrsCatalog,
+    form_code: str,
+) -> None:
+    """Опознаёт строки, чьё наименование повторяется в разных разделах.
+
+    «Кредиты и займы» стоят в балансе дважды, и различает их раздел: строка
+    выше итога долгосрочных обязательств — долгосрочная, выше итога
+    краткосрочных — краткосрочная. Раздел берётся от ближайшего итога **ниже**
+    строки, по тому же правилу, по которому строится иерархия итогов:
+    в МСФО слагаемые стоят над своим итогом.
+
+    Проход второй, а не первый, потому что итоги разделов опознаются
+    однозначно и должны быть уже на местах.
+    """
+    closings = sorted(
+        index
+        for index, position in recognised.items()
+        if position.is_total and position.form == form_code
+    )
+    for index, (name, _, _) in enumerate(rows):
+        if index in recognised or not name or not catalog.ambiguous_name(name):
+            continue
+        below = next((place for place in closings if place > index), None)
+        if below is None:
+            continue
+        found = catalog.match_by_name(name, section=recognised[below].section)
+        if found is not None and found.form == form_code:
+            recognised[index] = found
+            logger.info(
+                "строка «%s» опознана по разделу %s как %s",
+                name,
+                recognised[below].section,
+                found.code,
+            )
+
+
+def _retract_wrong_section(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    recognised: dict[int, IfrsPosition],
+    form_code: str,
+) -> None:
+    """Снимает опознание строки, стоящей не в своём разделе.
+
+    Раздел не только разводит одинаковые наименования — он и опровергает
+    опознание. У ЛСР «Торговая и прочая дебиторская задолженность» стоит
+    во внеоборотных активах, а справочник знает эту строку оборотной,
+    и в расчёт уходило 1 410 вместо 215 664. Статья оборотных активов
+    не стоит в разделе внеоборотных ни у кого, поэтому такое опознание
+    снимается, а строка идёт человеку.
+
+    Проход последний: итоги разделов к этому времени опознаны и по
+    наименованию, и структурой, иначе ближайшим итогом ниже оказался бы
+    итог чужого раздела.
+    """
+    closings = sorted(
+        index
+        for index, position in recognised.items()
+        if position.is_total and position.form == form_code
+    )
+    for index, position in list(recognised.items()):
+        if position.is_total or position.section not in _EXCLUSIVE_SECTIONS:
+            continue
+        below = next((place for place in closings if place > index), None)
+        if below is None or recognised[below].section not in _EXCLUSIVE_SECTIONS:
+            continue
+        if recognised[below].section != position.section:
+            logger.info(
+                "опознание строки «%s» как %s снято: строка стоит в разделе %s",
+                rows[index][0],
+                position.code,
+                recognised[below].section,
+            )
+            del recognised[index]
 
 
 def _section_start(
@@ -936,11 +1119,20 @@ def _matching_total(
     preceding: list[tuple[Decimal, ...]],
     totals: tuple[IfrsPosition, ...],
     recognised: dict[int, IfrsPosition],
+    inside: set[str],
 ) -> IfrsPosition | None:
     """Какой итог справочника описывает эта строка; None — ни один.
 
     Строка обязана равняться сумме предшествующих по всем периодам сразу:
     совпадение по одному периоду бывает случайным, по двум — уже нет.
+
+    **Равенства суммы мало: итог обязан узнавать свой состав.** Прежде
+    брался первый незанятый итог справочника, какой попадётся, и подходил
+    он по одному лишь равенству. У Автодора «Финансовые доходы (нетто)»
+    равны сумме двух предшествующих строк — это промежуточный итог, кода
+    у него в справочнике нет, — и он был назван чистой прибылью: 11 373
+    вместо 7 636. Поэтому среди опознанных строк **этого раздела** обязана
+    быть хотя бы одна из состава итога.
     """
     periods = min(len(values), min(len(item) for item in preceding))
     if periods == 0:
@@ -950,7 +1142,15 @@ def _matching_total(
         if total != values[position]:
             return None
     taken = {item.code for item in recognised.values()}
-    return next((item for item in totals if item.code not in taken), None)
+    return next(
+        (
+            item
+            for item in totals
+            if item.code not in taken
+            and any(part.code in inside for part in item.components)
+        ),
+        None,
+    )
 
 
 def _notes_after(lines: list[str]) -> tuple[str, ...]:

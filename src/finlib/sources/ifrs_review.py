@@ -49,6 +49,9 @@ class ReviewReason(StrEnum):
     MATERIAL_SPECIFIC_ITEM = "material_specific_item"
     REPORTING_KIND = "reporting_kind"
     IMPLAUSIBLE_GROUPING = "implausible_grouping"
+    # Страница внутри форм без текстового слоя: содержимого её мы не видим,
+    # и что именно потеряно, машина сказать не может.
+    LOST_PAGE = "lost_page"
 
 
 # Основание ручного подтверждения и код контроля, которым оно уходит
@@ -61,6 +64,7 @@ REASON_CODES: dict[ReviewReason, CheckCode] = {
     ReviewReason.UNRECOGNISED_POSITION: CheckCode.LINE_NOT_RECOGNIZED,
     ReviewReason.MATERIAL_SPECIFIC_ITEM: CheckCode.LINE_NOT_RECOGNIZED,
     ReviewReason.REPORTING_KIND: CheckCode.FILE_REPORTING_TYPE_UNKNOWN,
+    ReviewReason.LOST_PAGE: CheckCode.FILE_TEXT_LAYER_MISSING,
 }
 
 
@@ -174,6 +178,13 @@ def review(
     if material:
         reasons.append(ReviewReason.MATERIAL_SPECIFIC_ITEM)
         problems.extend(item.describe() for item in material)
+    if profile.pages_without_text:
+        reasons.append(ReviewReason.LOST_PAGE)
+        problems.append(
+            "внутри форм страницы без текстового слоя: "
+            + ", ".join(str(number) for number in profile.pages_without_text)
+            + " — содержимое не извлечено вовсе"
+        )
     if profile.reporting_kind is not ReportingKind.FULL:
         reasons.append(ReviewReason.REPORTING_KIND)
         problems.append(
