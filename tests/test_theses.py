@@ -394,3 +394,56 @@ def test_questions_and_fact_base_are_not_sent_to_the_model() -> None:
     во входных данных — то есть ослаблением проверки.
     """
     assert "СОСТАВ РАЗДЕЛОВ" not in build_context(SIMPLE, with_theses=True).blocks()
+
+
+def test_paraphrased_thesis_is_rejected() -> None:
+    """Пересказанный или слитый тезис отклоняет ответ целиком.
+
+    Проверка состава утверждений, а не чисел. Модель слила три отказа расчёта
+    в один и сложила вместе строки, которых не хватило разным показателям:
+    «не рассчитаны ликвидность, оборотный капитал и обеспеченность
+    собственными средствами: не раскрыты строки 1550 и 1170», тогда как 1170
+    не хватило только третьему. Расчёт такого утверждения не делал, числа
+    при этом верны, и проверка чисел это пропускала.
+    """
+    from finlib.llm.textcheck import SEVERITY, Severity, TextContext, TextRule, check_text
+
+    theses = tuple(item.text for item in build_theses(SIMPLE).theses)
+    pooled = (
+        "За 2024 год не рассчитаны коэффициент текущей ликвидности (cur_liq), "
+        "чистый оборотный капитал (nwc) и обеспеченность собственными "
+        "оборотными средствами (own_wc_ratio): в отчётности не раскрыты "
+        "строки 1210, 1510, 1550, 1150, 1170."
+    )
+    issues = check_text(
+        {3: pooled}, TextContext(theses=theses), raw_sections={3: pooled}
+    )
+    assert TextRule.THESIS_NOT_QUOTED in {item.rule for item in issues}
+    assert SEVERITY[TextRule.THESIS_NOT_QUOTED] is Severity.BLOCKING
+
+
+def test_verbatim_theses_pass_the_statement_check() -> None:
+    """Дословно приведённые тезисы замечания не вызывают."""
+    from finlib.llm.textcheck import TextContext, TextRule, check_text
+
+    theses = tuple(item.text for item in build_theses(SIMPLE).theses)
+    quoted = " ".join(theses)
+    issues = check_text(
+        {3: quoted}, TextContext(theses=theses), raw_sections={3: quoted}
+    )
+    assert TextRule.THESIS_NOT_QUOTED not in {item.rule for item in issues}
+
+
+def test_statement_checks_run_in_the_pipeline() -> None:
+    """Контроль утверждений текста выполняется без переданного контекста.
+
+    Прежде цикл обработки контекст не передавал, `verify` проверку пропускал,
+    и шесть блокирующих правил не работали в боевом прогоне: ноль в замере
+    означал невыполненную проверку, а не чистый текст.
+    """
+    from finlib.llm.service import _text_context
+    from finlib.standards import Standard
+
+    context = _text_context(SIMPLE, None, date(2024, 12, 31), Standard.RSBU)
+    assert context.fact_base
+    assert context.known_lines

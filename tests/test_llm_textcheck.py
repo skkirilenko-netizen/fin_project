@@ -274,6 +274,9 @@ def test_blocking_rules_match_the_specification() -> None:
         # методикой и переданы модели перечнем — это не вкусовое расхождение.
         TextRule.FACT_BASE_INCOMPLETE,
         TextRule.QUESTION_COUNT,
+        # Задача 18: тезис предписан методикой и приводится дословно. Пересказ
+        # молча искажает содержание, а числа при этом остаются верными.
+        TextRule.THESIS_NOT_QUOTED,
     }
     assert {
         rule for rule, level in SEVERITY.items() if level is Severity.BLOCKING

@@ -50,6 +50,7 @@ class TextRule(StrEnum):
     QUESTION_DUPLICATE = "question_duplicate"
     QUESTION_ABOUT_DISCLOSURE = "question_about_disclosure"
     RISK_WITHOUT_VALUE = "risk_without_value"
+    THESIS_NOT_QUOTED = "thesis_not_quoted"
 
 
 SEVERITY: dict[TextRule, Severity] = {
@@ -64,6 +65,12 @@ SEVERITY: dict[TextRule, Severity] = {
     # на который последующие опираться не могут.
     TextRule.FACT_BASE_INCOMPLETE: Severity.BLOCKING,
     TextRule.QUESTION_COUNT: Severity.BLOCKING,
+    # Тезис предписан методикой и приводится дословно. Пересказ и объединение
+    # тезисов молча искажают содержание: модель слила три отказа расчёта
+    # в один и сложила вместе строки, которых не хватило разным показателям, —
+    # получилось утверждение, которого расчёт не делал. Числа при этом верны,
+    # и проверка чисел такое пропускает.
+    TextRule.THESIS_NOT_QUOTED: Severity.BLOCKING,
     TextRule.DAYS_DIRECTION: Severity.WARNING,
     TextRule.FLAG_CONFLICT_NOT_STATED: Severity.WARNING,
     # Дубль вопроса и вопрос о нераскрытии портят перечень, но документу
@@ -121,6 +128,9 @@ class TextContext:
     fact_base: tuple[str, ...] = ()
     # Правила вопросов к организации: сколько их и в каком порядке основания.
     questions: "Questions | None" = None
+    # Предписанные тезисы, которые модель обязана привести дословно.
+    # Пустой перечень означает, что схема тезисов не применялась.
+    theses: tuple[str, ...] = ()
 
 
 _CLASS_ASSIGNED = re.compile(r"\bкласс\w*\s*[«\"'(]?\s*([A-E])\b", re.IGNORECASE)
@@ -250,7 +260,54 @@ def check_text(
     found += _risks_name_values(sections)
     found += _days_direction(whole, context)
     found += _flag_conflict_is_stated(whole, context)
+    found += _theses_are_quoted(marked, context)
     return found
+
+
+# Раздел, который собирается из предписанных тезисов.
+THESES_SECTION = 3
+
+# Обычный пробельный набор — без неразрывного пробела, которым разделены
+# разряды числа: `\s` захватил бы и его, и сравнение тезиса с текстом
+# перестало бы быть посимвольным там, где оно нужнее всего.
+_WHITESPACE = re.compile(r"[ \t\r\n\f\v]+")
+
+
+def _theses_are_quoted(
+    sections: dict[int, str], context: TextContext
+) -> list[TextIssue]:
+    """Каждый предписанный тезис приведён дословно.
+
+    Проверка состава утверждений, а не чисел: утверждение, не выводимое
+    из переданных тезисов, отклоняется. Числа при этом могут быть верны —
+    и были. Модель слила три отказа расчёта в один и сложила вместе строки,
+    которых не хватило разным показателям: «не рассчитаны ликвидность,
+    оборотный капитал и обеспеченность собственными средствами: не раскрыты
+    строки 1550 и 1170», тогда как 1170 не хватило только третьему. Расчёт
+    такого утверждения не делал, а проверка чисел его пропустила: коды строк
+    в прозе числами не считаются.
+
+    Сравнивается размеченный текст: коды показателей — часть тезиса.
+    Первая буква сравнивается без регистра — после связки она строчная.
+    """
+    if not context.theses:
+        return []
+    text = _WHITESPACE.sub(" ", sections.get(THESES_SECTION, ""))
+    missing = [
+        item
+        for item in context.theses
+        if _WHITESPACE.sub(" ", item)[1:] not in text
+    ]
+    if not missing:
+        return []
+    return [
+        TextIssue(
+            TextRule.THESIS_NOT_QUOTED,
+            f"предписанных тезисов приведено не дословно: {len(missing)} "
+            f"из {len(context.theses)}",
+            context=missing[0][:160],
+        )
+    ]
 
 
 def _no_identifiers(sections: dict[int, str]) -> list[TextIssue]:

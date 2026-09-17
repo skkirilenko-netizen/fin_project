@@ -7,7 +7,7 @@
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
@@ -24,6 +24,7 @@ from finlib.standards import Standard
 from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
+
 
 class PromptScheme(StrEnum):
     """Схема, по которой порождается текстовая часть.
@@ -133,6 +134,30 @@ def with_corrections(prompt: str, problems: list[str]) -> str:
         "Перепиши заключение целиком, устранив перечисленное. Числа бери "
         "из блоков без изменений, новых не вводи."
     )
+
+
+def _thesis_texts(
+    context: ConclusionContext, conn: PgConnection | None, standard: Standard
+) -> tuple[str, ...]:
+    """Предписанные тезисы, которые модель обязана привести дословно."""
+    from finlib.scoring.theses import build_theses
+
+    found = build_theses(
+        context.inn, conn, report_date=context.report_date, standard=standard
+    )
+    return tuple(item.text for item in found.theses)
+
+
+def _text_context(
+    inn: str, conn: PgConnection | None, report_date: date, standard: Standard
+) -> TextContext:
+    """Контекст контроля утверждений текста по данным расчёта."""
+    from finlib.normalize.lines import ReportingType, load_lines
+    from finlib.report.data import load_report_data
+
+    data = load_report_data(inn, conn, report_date=report_date, standard=standard)
+    reporting_type = ReportingType(data.organization["reporting_type"])
+    return data.text_context(load_lines(), reporting_type, load_metrics())
 
 
 def _log(
@@ -246,6 +271,20 @@ def generate_conclusion(
         standard=standard,
         with_theses=scheme is PromptScheme.THESES,
     )
+    # Контроль утверждений текста без контекста не выполняется вовсе
+    # (`verify` пропускает его при text_context=None), а цикл обработки его
+    # не передавал: шесть блокирующих правил месяцами не работали в боевом
+    # прогоне, и нули в замерах означали не чистый текст, а невыполненную
+    # проверку. Контекст строится здесь, если вызывающий его не дал.
+    text_context = text_context or _text_context(
+        context.inn, conn, context.report_date, standard
+    )
+    if scheme is PromptScheme.THESES:
+        # Состав утверждений проверяется только там, где он предписан:
+        # при свободной генерации сверять текст не с чем.
+        text_context = replace(
+            text_context, theses=_thesis_texts(context, conn, standard)
+        )
     prompt = build_prompt(context, scheme=scheme)
     blocks = context.blocks()
     # Пороги стоп-факторов — единственные числа-ориентиры, которые методика

@@ -531,14 +531,21 @@ _SECTION = re.compile(r"^#{1,6}\s*(\d)\.\s*.+?$", re.MULTILINE)
 def _sections_of(text: str) -> dict[int, str]:
     """Разбивает ответ на разделы по их номерам.
 
-    Правила, привязанные к разделу, проверяются только в нём: вопрос о строке
-    вне набора форм плох именно в «Вопросах к организации».
+    Правила, привязанные к разделу, проверяются только в нём. Берутся лишь
+    разделы, которые пишет модель: остальные собирает расчёт, и написанное
+    моделью на их месте в документ не попадает вовсе — проверять там нечего,
+    а правило состава сработало бы на тексте, который никто не прочтёт.
     """
+    from finlib.report.sections import EXPECTED
+
     matches = list(_SECTION.finditer(text))
     if not matches:
         return {0: text}
+    written = {number for number, _ in EXPECTED}
     found: dict[int, str] = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        found[int(match.group(1))] = text[match.end() : end]
+        number = int(match.group(1))
+        if number in written:
+            found[number] = text[match.end() : end]
     return found
