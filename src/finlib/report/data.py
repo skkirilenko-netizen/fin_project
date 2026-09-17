@@ -221,6 +221,9 @@ class ReportData:
             # выводе» нами, а модели остаётся не противоречить ему.
             flag_conflict=conflict.message if conflict is not None else None,
             fact_base=self.fact_base_codes(),
+            # В тексте документа показатель назван наименованием, а не кодом,
+            # и правило состава ищет его так же.
+            metric_names={item.code: item.name for item in catalog.metrics},
             questions=load_policy().questions,
         )
 

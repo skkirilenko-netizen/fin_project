@@ -197,7 +197,11 @@ def test_fact_base_is_built_by_calculation(db_conn) -> None:
     позиции. Писать его ей больше не поручено.
     """
     found = "\n".join(_fact_base_of(FULL_INN, db_conn))
-    assert "(debt_total)" in found
+    # Показатель называется наименованием: код — внутренний идентификатор
+    # методики, и читателю он ничего не говорит. Код строки отчётности
+    # остаётся: по нему величина находится в самой отчётности.
+    assert "Совокупный долг" in found
+    assert "debt_total" not in found
     assert "(1600)" in found
     # Модели состав фактической базы больше не передаётся: раздел не её.
     from finlib.llm.context import build_context
@@ -219,8 +223,8 @@ def test_extra_values_are_selected_by_machine_grounds(db_conn) -> None:
     assert "изменение за период" in extra
     # Обязательные величины во второй перечень не дублируются.
     head = text[: text.index(POLICY.fact_base_section.extra_intro_text)]
-    assert "(nwc)" in head
-    assert "(nwc)" not in extra
+    assert "Чистый оборотный капитал" in head
+    assert "Чистый оборотный капитал" not in extra
 
 
 def test_extra_values_are_limited_to_the_declared_number(db_conn) -> None:
@@ -253,6 +257,54 @@ def test_complete_fact_base_passes() -> None:
     assert not [
         item for item in issues if item.rule is TextRule.FACT_BASE_INCOMPLETE
     ]
+
+
+def test_metric_is_sought_by_its_name_not_its_code() -> None:
+    """Показатель опознаётся по наименованию: кода его в документе больше нет.
+
+    Прежде раздел печатал «Чистый оборотный капитал (nwc)», и правило состава
+    искало величины по кодам. Код показателя — внутренний идентификатор
+    методики, читателю он ничего не говорит, и правило технических
+    идентификаторов требовало его отсутствия: два правила отменяли друг друга
+    на одном тексте.
+    """
+    context = TextContext(
+        fact_base=("1600", "nwc"),
+        metric_names={"nwc": "Чистый оборотный капитал"},
+    )
+    named = "БАЛАНС (актив) (1600) — 418. Чистый оборотный капитал — -12."
+    assert not [
+        item
+        for item in check_calculated({2: named}, context)
+        if item.rule is TextRule.FACT_BASE_INCOMPLETE
+    ]
+
+    silent = "БАЛАНС (актив) (1600) — 418 тыс. руб."
+    missing = [
+        item
+        for item in check_calculated({2: silent}, context)
+        if item.rule is TextRule.FACT_BASE_INCOMPLETE
+    ]
+    assert missing
+    # В замечании названа величина, а не её код: читать его будет человек.
+    assert "Чистый оборотный капитал" in missing[0].message
+
+
+def test_calculated_sections_carry_no_internal_identifiers(db_conn, tmp_path) -> None:
+    """Внутренних идентификаторов методики в разделах документа нет.
+
+    Правило действует и на разделы расчёта: коды строк отчётности остаются,
+    коды показателей и производных — нет.
+    """
+    from docx import Document
+
+    from finlib.llm.cleanup import has_identifiers
+    from finlib.report.document import build_report
+
+    report = build_report(FULL_INN, db_conn, directory=tmp_path, with_text=False)
+    text = "\n".join(item.text for item in Document(report.path).paragraphs)
+    assert not has_identifiers(text), has_identifiers(text)[:5]
+    assert "(1600)" in text, "код строки отчётности остаётся"
 
 
 def test_fact_base_is_checked_before_cleanup() -> None:

@@ -83,7 +83,14 @@ def _render(
     reporting_type: ReportingType,
     facts: dict[str, Decimal],
 ) -> str | None:
-    """Строка перечня: наименование, код в скобках и величина."""
+    """Строка перечня: наименование и величина; у строки отчётности — с кодом.
+
+    Код строки остаётся: для бухгалтерской отчётности «(1600)» — привычная
+    ссылка, по которой читатель находит величину в самой отчётности. Код
+    показателя не остаётся: `debt_total` и `nwc` — внутренние идентификаторы
+    методики, и в тексте документа им места нет. Показатель опознаётся
+    по наименованию, и правило состава ищет его так же.
+    """
     if code.isdigit():
         value = facts.get(code)
         if value is None:
@@ -94,7 +101,7 @@ def _render(
     if metric is None or value is None:
         return None
     shown = format_metric(value, metric.unit, catalog.scale_for(code))
-    return f"{metric.name} ({code}) — {shown}"
+    return f"{metric.name} — {shown}"
 
 
 def _worth_naming(
@@ -149,14 +156,17 @@ def _worth_naming(
         if parsed is None or parsed.base in seen:
             continue
         seen.add(parsed.base)
-        name = (
-            _line_name(parsed.base, lines, reporting_type)
+        # Строка отчётности называется с кодом, показатель — одним
+        # наименованием. Код производной величины не печатается вовсе:
+        # `2330_chg_pct` читателю не говорит ничего, а величина изменения
+        # названа словами рядом.
+        title = (
+            f"{_line_name(parsed.base, lines, reporting_type)} ({parsed.base})"
             if parsed.base_is_line
             else (catalog.get(parsed.base).name if catalog.get(parsed.base) else parsed.base)
         )
         found.append(
-            f"{name} ({parsed.base}) — изменение за период "
-            f"{percent(row['value'])} % ({row['metric_code']})"
+            f"{title} — изменение за период {percent(row['value'])} %"
         )
     return found
 
