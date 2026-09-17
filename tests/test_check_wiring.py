@@ -48,13 +48,17 @@ def test_reachability_is_computed_from_the_pipeline() -> None:
 
     Без этого реестр считал бы подключённым всякий контроль, чей код
     где-нибудь упомянут, — то есть повторил бы ошибку, от которой заведён.
+    Проверяется обе стороны: модуль цикла достижим, а модуль, который цикл
+    не импортирует, — нет, хотя файл существует и работает.
     """
     live = reachable_modules()
     assert "finlib.quality.checks" in live
     assert "finlib.pipeline" in live
-    # Разбор файлов МСФО циклом ещё не вызывается: модуль написан, но
-    # в боевой путь не включён.
-    assert "finlib.sources.ifrs_numbers" not in live
+    # Терминальный слой цикл не импортирует: он сам вызывает цикл.
+    assert "finlib.cli" not in live
+    # Сам реестр тоже недостижим — и это верно: он описывает проверки,
+    # а не выполняет их.
+    assert "finlib.quality.wiring" not in live
 
 
 def test_wired_checks_are_called_where_declared() -> None:
@@ -92,20 +96,24 @@ def test_unwired_checks_really_have_no_call() -> None:
     )
 
 
-def test_code_written_but_unreachable_is_not_called_wired() -> None:
+def test_code_written_but_unreachable_is_not_called_wired(monkeypatch) -> None:
     """Код, написанный и не достижимый из цикла, подключённым не считается.
 
     Разница между `calls_in_sources` и `live_calls` — это и есть третий
-    случай: определитель конвенции написан, покрыт тестами и упомянут
-    в своём модуле, но цикл его не зовёт.
+    случай: код написан, покрыт тестами, упомянут в своём модуле, а цикл
+    его не зовёт. Здесь она проверяется прямо: при опустевшем графе
+    достижимости ни один контроль не считается работающим, хотя все
+    упоминания на месте.
     """
-    written = calls_in_sources(CheckCode.DIGIT_GROUPING_NOT_DETERMINED)
-    live = live_calls(CheckCode.DIGIT_GROUPING_NOT_DETERMINED)
-    assert not live, live
-    assert not REGISTRY[CheckCode.DIGIT_GROUPING_NOT_DETERMINED].wired
-    # Само упоминание при этом может быть: модуль существует и работает,
-    # просто в боевой путь ещё не включён.
-    assert isinstance(written, tuple)
+    import finlib.quality.wiring as module
+
+    code = CheckCode.BALANCE_EQUALITY
+    assert calls_in_sources(code), "контроль должен быть упомянут в исходниках"
+    assert live_calls(code), "и достижим от цикла"
+
+    monkeypatch.setattr(module, "reachable_modules", frozenset)
+    assert calls_in_sources(code), "упоминания никуда не делись"
+    assert not module.live_calls(code), "но вызовом они быть перестали"
 
 
 def test_unwired_checks_name_the_reason_and_the_task() -> None:
@@ -131,14 +139,36 @@ def test_registry_reports_its_own_state() -> None:
     assert "не подключено" in text
 
 
-def test_ifrs_plausibility_is_declared_not_wired_for_now() -> None:
-    """Проверка правдоподобия конвенции пока не подключена — и это записано.
+def test_ifrs_plausibility_is_wired_after_task_23() -> None:
+    """Проверка правдоподобия конвенции подключена к экрану сверки.
 
-    Она готова и покрыта тестами, но разбора форм МСФО, из которого она
-    вызывается, ещё нет. Запись говорит об этом прямо, чтобы отсутствие
-    её срабатываний не читалось как «нарушений не найдено».
+    Нулевой пункт задачи 23. До него она была написана, покрыта тестами
+    и не вызывалась ниоткуда: сверять сумму разделов с итогом было не с чем.
+    Реестр это фиксировал, и перевод в wired потребовался ровно тогда,
+    когда вызов появился.
     """
     entry = REGISTRY[CheckCode.DIGIT_GROUPING_IMPLAUSIBLE]
-    assert not entry.wired
-    assert "задача 23" in entry.planned_in
-    assert CheckCode.DIGIT_GROUPING_IMPLAUSIBLE in unwired()
+    assert entry.wired
+    assert "sources/ifrs_review.py" in entry.called_from
+    assert CheckCode.DIGIT_GROUPING_IMPLAUSIBLE not in unwired()
+
+
+def test_ifrs_intake_checks_are_all_wired() -> None:
+    """Все отказы приёма документа МСФО достижимы от цикла.
+
+    Восемь контролей ветки перешли в wired вместе с подключением
+    `pipeline.accept_ifrs_document`.
+    """
+    intake = (
+        CheckCode.FILE_TEXT_LAYER_MISSING,
+        CheckCode.FILE_NOT_STATEMENTS,
+        CheckCode.FINANCIAL_INSTITUTION,
+        CheckCode.FILE_CURRENCY_NOT_DETERMINED,
+        CheckCode.FILE_CURRENCY_NOT_ROUBLE,
+        CheckCode.FILE_PERIODS_NOT_DETERMINED,
+        CheckCode.DIGIT_GROUPING_NOT_DETERMINED,
+        CheckCode.DIGIT_GROUPING_IMPLAUSIBLE,
+    )
+    for code in intake:
+        assert REGISTRY[code].wired, code.value
+        assert live_calls(code), code.value

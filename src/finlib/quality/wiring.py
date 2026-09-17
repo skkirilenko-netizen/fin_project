@@ -140,64 +140,36 @@ REGISTRY: dict[CheckCode, Wiring] = {
     # которого он вызывается, ещё нет: он появляется в задаче 23. Пока запись
     # честно говорит, что контроль не работает, — иначе его отсутствие
     # в журнале читалось бы как «нарушений не найдено».
-    # Приём файла МСФО написан и покрыт тестами, но циклом не вызывается:
-    # загрузка комплекта МСФО появляется в задаче 23. Пока весь разбор
-    # недостижим от `finlib.pipeline`, и все его отказы числятся
-    # неподключёнными — иначе их молчание читалось бы как отсутствие
-    # нарушений.
+    # Приём файла МСФО подключён к циклу задачей 23: `pipeline.
+    # accept_ifrs_document` проводит документ через определение параметров,
+    # извлечение форм и экран сверки. До этого все восемь отказов числились
+    # неподключёнными — код был написан, покрыт тестами и никем не вызывался.
     CheckCode.FILE_TEXT_LAYER_MISSING: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.FILE_NOT_STATEMENTS: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.FINANCIAL_INSTITUTION: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.FILE_CURRENCY_NOT_DETERMINED: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.FILE_CURRENCY_NOT_ROUBLE: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.FILE_PERIODS_NOT_DETERMINED: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason="приём файла МСФО написан, но циклом ещё не вызывается",
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason=(
-            "определитель конвенции вызывается из приёма файла МСФО, "
-            "а сам приём циклом ещё не вызывается"
-        ),
-        planned_in="задача 23: загрузка комплекта МСФО",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_inbox.py",)
     ),
+    # Нулевой пункт задачи 23: проверка правдоподобия конвенции вызывается
+    # с экрана сверки по разобранным формам — сверять сумму разделов
+    # с итогом теперь есть с чем.
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Wiring(
-        WiringStatus.NOT_WIRED,
-        date(2026, 9, 17),
-        reason=(
-            "проверка правдоподобия конвенции требует разобранных форм: "
-            "сверять сумму разделов с итогом пока не с чем"
-        ),
-        planned_in="задача 23: подключить контроль правдоподобия к разбору форм",
+        WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_review.py",)
     ),
 }
 

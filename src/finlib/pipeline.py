@@ -265,6 +265,60 @@ def load_inbox(
     return result
 
 
+@dataclass
+class IfrsIntake:
+    """Итог приёма документа МСФО: параметры, извлечение и решение сверки."""
+
+    accepted: bool
+    reason: str | None = None
+    check_code: str | None = None
+    profile: object | None = None
+    extraction: object | None = None
+    review: object | None = None
+
+
+def accept_ifrs_document(
+    text: str, on_stage: Callable[[StageResult], None] | None = None
+) -> IfrsIntake:
+    """Проводит документ МСФО через приём, разбор форм и экран сверки.
+
+    Отдельная точка входа, а не ветка внутри `analyze`: у документа МСФО
+    до загрузки в базу проходит своя последовательность — определение
+    параметров, извлечение форм, сверка, — и её итог человек видит прежде,
+    чем комплект попадает в расчёт.
+
+    Здесь же контроли ветки МСФО становятся достижимыми от цикла. Пока
+    документ не проходил через эту функцию, все они числились
+    неподключёнными: код был написан, покрыт тестами и никем не вызывался.
+    """
+    from finlib.sources.ifrs_extract import extract
+    from finlib.sources.ifrs_inbox import Rejection, identify
+    from finlib.sources.ifrs_review import review
+
+    def report(stage: Stage, message: str, ok: bool = True) -> None:
+        if on_stage is not None:
+            on_stage(StageResult(stage, message, ok))
+
+    profile = identify(text)
+    if isinstance(profile, Rejection):
+        report(Stage.LOAD, f"документ отклонён: {profile.reason}", ok=False)
+        return IfrsIntake(False, profile.reason, profile.code.value)
+    report(Stage.LOAD, f"документ принят: {profile.describe()}")
+
+    extraction = extract(text, profile.report_dates, profile.grouping)
+    report(Stage.LOAD, extraction.describe())
+
+    decision = review(extraction, profile)
+    report(
+        Stage.QUALITY,
+        decision.describe(),
+        ok=decision.automatic,
+    )
+    return IfrsIntake(
+        True, profile=profile, extraction=extraction, review=decision
+    )
+
+
 def _load_from_inbox(
     inn: str,
     year: int | None,
