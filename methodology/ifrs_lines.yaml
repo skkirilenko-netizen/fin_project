@@ -487,6 +487,9 @@ positions:
     form: ifrs.statement_of_profit_or_loss
     section: profit_or_loss
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     aliases:
       - {name: Себестоимость продаж, seen_at: ФосАгро}
       - {name: Себестоимость реализации, seen_at: Норникель}
@@ -501,15 +504,21 @@ positions:
     aliases:
       - {name: Валовая прибыль, seen_at: ФосАгро}
       - {name: Валовая прибыль (убыток), seen_at: Сегежа}
+    # Состав складывается: знак вычитаемой статьи хранится в самой величине.
+    # Прежде знак задавался оператором, а величина приходила без него —
+    # и «Себестоимость (160 017)» складывалась с выручкой вместо вычитания.
     components:
       - {code: ifrs.revenue}
-      - {code: ifrs.cost_of_sales, op: "-"}
+      - {code: ifrs.cost_of_sales}
 
   - code: ifrs.selling_expenses
     name: Коммерческие расходы
     form: ifrs.statement_of_profit_or_loss
     section: profit_or_loss
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     aliases:
       - {name: Коммерческие расходы, seen_at: ФосАгро}
       - {name: Коммерческие и сбытовые расходы, seen_at: Сегежа}
@@ -520,6 +529,9 @@ positions:
     form: ifrs.statement_of_profit_or_loss
     section: profit_or_loss
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     aliases:
       - {name: Административные расходы, seen_at: ФосАгро}
       - {name: Общехозяйственные и административные расходы, seen_at: Норникель}
@@ -550,8 +562,8 @@ positions:
       - {name: Прибыль от операционной деятельности, seen_at: Норникель}
     components:
       - {code: ifrs.gross_profit}
-      - {code: ifrs.selling_expenses, op: "-"}
-      - {code: ifrs.administrative_expenses, op: "-"}
+      - {code: ifrs.selling_expenses}
+      - {code: ifrs.administrative_expenses}
       - {code: ifrs.other_operating_result}
 
   - code: ifrs.finance_income
@@ -567,6 +579,9 @@ positions:
     form: ifrs.statement_of_profit_or_loss
     section: profit_or_loss
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     # Оговорка безусловная и существенная: в отчёте о прибыли или убытке
     # финансовые расходы приводятся за вычетом капитализированных процентов
     # и полученных субсидий. У Автодора в форме 131 млн, в примечании —
@@ -606,7 +621,7 @@ positions:
     components:
       - {code: ifrs.operating_profit}
       - {code: ifrs.finance_income}
-      - {code: ifrs.finance_costs, op: "-"}
+      - {code: ifrs.finance_costs}
       - {code: ifrs.share_of_associates_result}
 
   - code: ifrs.income_tax
@@ -614,6 +629,9 @@ positions:
     form: ifrs.statement_of_profit_or_loss
     section: profit_or_loss
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     sign: any
     # Знак у налога бывает обоим: при налоговом доходе статья положительна,
     # и печатается она тогда без скобок. В РСБУ то же различие уже стоило
@@ -637,7 +655,7 @@ positions:
       - {name: Чистая прибыль (убыток) за год, seen_at: ЛСР}
     components:
       - {code: ifrs.profit_before_tax}
-      - {code: ifrs.income_tax, op: "-"}
+      - {code: ifrs.income_tax}
 
 # --- Отчёт о движении денежных средств ----------------------------------------
 
@@ -687,6 +705,9 @@ positions:
     form: ifrs.statement_of_cash_flows
     section: cash_flows
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     aliases:
       - {name: Проценты уплаченные, seen_at: ФосАгро}
       - {name: "Проценты, уплаченные по кредитам и займам", seen_at: Автодор}
@@ -696,6 +717,9 @@ positions:
     form: ifrs.statement_of_cash_flows
     section: cash_flows
     in_brackets: true
+    # Вычитаемая статья: величина хранится со знаком, а нормальный знак —
+    # подсказка на случай, когда эмитент печатает расход без скобок.
+    normal_sign: -1
     aliases:
       - {name: Приобретение основных средств, seen_at: ФосАгро}
       - {name: Приобретение основных средств и нематериальных активов, seen_at: Норникель}

@@ -143,10 +143,16 @@ def test_same_token_reads_differently_by_convention() -> None:
     assert parse_amount("663,888", Grouping.RUSSIAN) == Decimal("663.888")
 
 
-def test_brackets_are_stripped_not_interpreted() -> None:
-    """Скобки — способ печати расхода; знак берётся из справочника статей."""
-    assert parse_amount("(29 390)", Grouping.RUSSIAN) == Decimal(29390)
-    assert parse_amount("(29,390)", Grouping.ENGLISH) == Decimal(29390)
+def test_brackets_mean_minus() -> None:
+    """Скобки — знак минус, и он остаётся при величине.
+
+    В отчётности по МСФО состав итога печатается со знаком: «Выручка 89 187,
+    Себестоимость (76 881), Валовая прибыль 12 306». Хранить величину расхода
+    без знака, как в РСБУ, здесь нельзя — знак несёт сама отчётность, и
+    отбросив его, мы получали валовую прибыль 166 068 вместо 12 306.
+    """
+    assert parse_amount("(29 390)", Grouping.RUSSIAN) == Decimal(-29390)
+    assert parse_amount("(29,390)", Grouping.ENGLISH) == Decimal(-29390)
 
 
 def test_non_numeric_token_is_not_a_number() -> None:

@@ -50,8 +50,26 @@ def test_matching_total_passes_on_ifrs() -> None:
     assert found.computed == Decimal(1000)
 
 
-def test_expense_component_is_subtracted_on_ifrs() -> None:
-    """Расходная статья вычитается оператором, а не знаком величины."""
+def test_expense_component_carries_its_sign_on_ifrs() -> None:
+    """Расходная статья приходит со знаком, и оператор её складывает."""
+    catalog = load_ifrs_lines()
+    line = catalog.require("ifrs.gross_profit")
+    values = {
+        "ifrs.revenue": Decimal(1000),
+        "ifrs.cost_of_sales": Decimal(-600),
+        "ifrs.gross_profit": Decimal(400),
+    }
+    found = check_total(line, *checker(values))
+    assert found.verdict is TotalVerdict.MATCHED
+
+
+def test_sign_of_expense_is_inferred_when_printed_without_brackets() -> None:
+    """Расход без скобок опознаётся по нормальному знаку статьи.
+
+    Знак выводится только там, где он противоречит нормальному: статья
+    с `normal_sign = −1`, пришедшая положительной. Перебирать знаки у всех
+    слагаемых нельзя — так сумма подберётся к любому итогу.
+    """
     catalog = load_ifrs_lines()
     line = catalog.require("ifrs.gross_profit")
     values = {
@@ -59,8 +77,11 @@ def test_expense_component_is_subtracted_on_ifrs() -> None:
         "ifrs.cost_of_sales": Decimal(600),
         "ifrs.gross_profit": Decimal(400),
     }
-    found = check_total(line, *checker(values))
-    assert found.verdict is TotalVerdict.MATCHED
+    normal_sign = lambda code: (  # noqa: E731
+        position.normal_sign if (position := catalog.get(code)) is not None else 1
+    )
+    assert check_total(line, *checker(values)).verdict is TotalVerdict.MISMATCHED
+    assert check_total(line, *checker(values), normal_sign).verdict is TotalVerdict.MATCHED
 
 
 def test_mismatch_reports_difference_and_tolerance() -> None:

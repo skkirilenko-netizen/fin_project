@@ -90,13 +90,16 @@ def test_values_are_split_by_period() -> None:
     assert found.value_of("ifrs.total_assets", DATES[1]) == Decimal(1_360_000)
 
 
-def test_expense_in_brackets_keeps_its_magnitude() -> None:
-    """Скобки — способ печати расхода: величина хранится без знака.
+def test_expense_in_brackets_keeps_its_sign() -> None:
+    """Скобки — знак минус: величина расхода хранится отрицательной.
 
-    Вычитание задаёт оператор в составе итога, как в РСБУ.
+    Соглашение здесь не то же, что в РСБУ. Там вычитание задаёт оператор
+    в составе итога, потому что отчётность печатает величину расхода без
+    знака. В отчётности по МСФО знак стоит в самой форме, и отбрасывать его
+    значило бы складывать расход с доходом.
     """
     found = extraction_of(COMPLETE)
-    assert found.value_of("ifrs.cost_of_sales", DATES[0]) == Decimal(800_000)
+    assert found.value_of("ifrs.cost_of_sales", DATES[0]) == Decimal(-800_000)
 
 
 # --- неподписанные итоги -------------------------------------------------------

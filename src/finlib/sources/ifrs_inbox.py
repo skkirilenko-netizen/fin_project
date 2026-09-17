@@ -308,31 +308,133 @@ def form_headings(
         stripped = line.strip()
         if not stripped or len(stripped) > limit:
             continue
-        lowered = normalize_name(stripped)
+        # Заголовок формы переносится, и ядро наименования разрывается
+        # переносом: у Сегежи «О ФИНАНСОВОМ \nПОЛОЖЕНИИ» и «О ДВИЖЕНИИ
+        # ДЕНЕЖНЫХ \nСРЕДСТВ». По одной строке такой заголовок не находится
+        # вовсе, и формой становилось оглавление — там те же слова умещаются
+        # в строку. Поэтому ядро ищется и в строке, склеенной со следующей.
+        # Ограничение длины остаётся построчным: длинная фраза прозы
+        # заголовком не становится ни сама, ни в склейке.
+        # Строка оглавления отбрасывается целиком, вместе со своими склейками:
+        # склеенная со следующей строкой оглавления, она перестаёт выглядеть
+        # оглавлением — чисел в ней становится два, — и возвращалась
+        # в заголовки через собственный же перенос.
+        if _is_contents_entry(stripped):
+            continue
+        variants = [stripped]
+        for ahead in range(1, policy.document_kind.heading_wrap_lines + 1):
+            if index + ahead >= len(lines):
+                break
+            following = lines[index + ahead].strip()
+            if not following or len(following) > limit:
+                break
+            variants.append(f"{stripped} {following}")
+        # Оглавление отбрасывается признаком оглавления, а не выбором между
+        # вхождениями: слова в нём те же самые, и по словам его от заголовка
+        # не отличить. Отличает его номер страницы в конце при отсутствии
+        # других чисел — у заголовка формы такого вида не бывает.
+        lowered = [
+            normalize_name(item) for item in variants if not _is_contents_entry(item)
+        ]
         for code, cores in policy.document_kind.cores.items():
-            if any(normalize_name(core) in lowered for core in cores):
+            if any(
+                normalize_name(core) in variant for core in cores for variant in lowered
+            ):
                 candidates.setdefault(code, []).append(index)
                 break
 
-    window = policy.document_kind.lookahead_lines
     found: dict[str, int] = {}
     for code, indexes in candidates.items():
-        best = max(indexes, key=lambda item: _table_rows_after(lines, item, window))
-        if _table_rows_after(lines, best, window) >= policy.document_kind.min_table_rows:
-            found[code] = starts[best]
+        # Берётся **первое** вхождение, за которым таблица начинается сразу,
+        # а не то, за которым строк таблицы больше всего.
+        #
+        # Наибольшее число строк выбирало не ту страницу: форма печатается
+        # на нескольких, колонтитул повторяется на каждой, и у ЛСР баланс
+        # занимал страницы 7 и 8 — выбирался колонтитул восьмой, а первая
+        # половина баланса оставалась за блоком и уходила в отчёт о прибылях.
+        #
+        # Одного лишь «первое годное» тоже мало: у Автодора оглавление стоит
+        # вплотную к формам, и таблица попадает в окно просмотра сразу за ним.
+        # Отличает форму от оглавления расстояние: под заголовком формы стоят
+        # единица измерения и шапка колонок, несколько строк, а за строкой
+        # оглавления идут другие такие же строки и пустые.
+        first = next(
+            (item for item in indexes if _heads_a_table(lines, item, policy)), None
+        )
+        if first is not None:
+            found[code] = starts[first]
     return found
 
 
-# Строка таблицы: не менее двух чисел длиной от трёх цифр. Номер страницы
-# в оглавлении — одно короткое число, и под это определение не подходит.
-_TABLE_ROW = re.compile(r"(?:\d[\d    ,.]{2,}\D*){2,}")
+def _heads_a_table(lines: list[str], index: int, policy: ParsingPolicy) -> bool:
+    """Начинается ли под этой строкой таблица формы."""
+    kind = policy.document_kind
+    following = lines[index + 1 : index + 1 + kind.lookahead_lines]
+    distance = next(
+        (number for number, line in enumerate(following, 1) if _is_table_row(line)), None
+    )
+    if distance is None or distance > kind.heading_to_table_lines:
+        return False
+    return sum(1 for line in following if _is_table_row(line)) >= kind.min_table_rows
+
+
+# Цифровая группа: подряд идущие цифры. Считаются именно группы, а не числа:
+# разделитель разрядов и разделитель колонок здесь оба пробел, и «60 021
+# 80 611» на этом этапе неразличимо — одна величина это или две. Группы
+# считать можно и не зная конвенции, а числа — нет.
+_DIGIT_RUN = re.compile(r"\d+")
+
+# Номер пункта в начале строки: «6. Себестоимость реализованной продукции 18».
+_LIST_MARKER = re.compile(r"^\s*\d{1,2}[.)]\s+")
+
+# Дата словами и цифрами: «31 декабря 2025 года», «15.04.2026». В строке
+# таблицы дат не бывает, а в заголовке формы и в шапке колонок — бывают.
+_DATE_IN_LINE = re.compile(
+    r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}"
+    r"|\d{1,2}\s+[А-Яа-яЁё]{3,8}\s+\d{4}"
+    r"|\b(?:19|20)\d{2}\s*(?:год[а-я]*|г\.)",
+    re.IGNORECASE,
+)
+
+
+def _is_table_row(line: str) -> bool:
+    """Строка таблицы — не менее двух цифровых групп.
+
+    Определение сузилось дважды, и оба раза по живым документам. Прежде
+    величиной считалось любое число: оглавление проходило по номеру страницы
+    («6. Себестоимость реализованной продукции 18»), и формой становилось
+    оно, а не сама форма; а заголовок «ПО СОСТОЯНИЮ НА 31 ДЕКАБРЯ 2025 ГОДА»
+    открывал таблицу прежде её первой строки, и многострочная шапка колонок
+    у Сегежи вычерпывала весь допуск разрыва — баланс давал ноль строк.
+
+    Поэтому из строки сначала вычитаются номер пункта и даты, и лишь потом
+    считаются числа.
+    """
+    cleaned = _DATE_IN_LINE.sub(" ", _LIST_MARKER.sub("", line))
+    runs = _DIGIT_RUN.findall(cleaned)
+    # Двух групп мало: в оглавлении ЛСР номер страницы записан диапазоном
+    # («о финансовом положении 7-8»), и оглавление проходило за таблицу.
+    # У величины отчётности хотя бы одна группа от трёх цифр — у номера
+    # страницы и номера примечания столько не бывает.
+    return len(runs) >= 2 and any(len(run) >= 3 for run in runs)
+
+
+# Номер страницы в конце строки оглавления: «… о финансовом положении 6»,
+# «… о прибыли или убытке 7-8».
+_PAGE_NUMBER = re.compile(r"\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*$")
+
+
+def _is_contents_entry(text: str) -> bool:
+    """Строка оглавления: номер страницы в конце и никаких других чисел."""
+    page = _PAGE_NUMBER.search(text)
+    if page is None:
+        return False
+    return not _DIGIT_RUN.search(text[: page.start()])
 
 
 def _table_rows_after(lines: list[str], index: int, window: int) -> int:
     """Сколько строк с величинами идёт следом за строкой."""
-    return sum(
-        1 for line in lines[index + 1 : index + 1 + window] if _TABLE_ROW.search(line)
-    )
+    return sum(1 for line in lines[index + 1 : index + 1 + window] if _is_table_row(line))
 
 
 def form_blocks(
@@ -349,6 +451,14 @@ def form_blocks(
 
     Конец таблицы виден по строкам без величин: подзаголовок раздела — одна
     такая строка, изредка две, а за таблицей идёт сплошной текст.
+
+    **Разрыв страницы таблицу не кончает.** Форма печатается на нескольких
+    страницах, и на переломе стоят колонтитул, номер страницы и надпись
+    о пояснениях — у ЛСР девять строк без величин подряд, больше допуска.
+    Блок баланса обрывался на «Итого активы», и вся сторона капитала
+    и обязательств терялась молча. Перелом опознаётся по повтору заголовка
+    той же формы, за которым снова идёт таблица: прозаическое упоминание
+    формы в примечаниях этому признаку не отвечает.
     """
     if not headings:
         return {}
@@ -368,15 +478,21 @@ def form_blocks(
         first = next(
             (number for number, offset in enumerate(starts) if offset >= start), 0
         )
+        cores = tuple(
+            normalize_name(core) for core in policy.document_kind.cores.get(code, ())
+        )
         collected: list[str] = []
         gap = 0
         started = False
-        for line in lines[first:]:
+        for number, line in enumerate(lines[first:], first):
             if starts[first + len(collected)] >= end:
                 break
             collected.append(line)
-            if _TABLE_ROW.search(line):
+            if _is_table_row(line):
                 started = True
+                gap = 0
+                continue
+            if _continues_after_page_break(lines, number, cores, policy):
                 gap = 0
                 continue
             # Разрыв считается только внутри таблицы. До её первой строки
@@ -390,6 +506,23 @@ def form_blocks(
                     break
         blocks[code] = collected
     return blocks
+
+
+def _continues_after_page_break(
+    lines: list[str], index: int, cores: tuple[str, ...], policy: ParsingPolicy
+) -> bool:
+    """Продолжается ли та же форма на новой странице.
+
+    Признак двойной: строка повторяет заголовок этой формы и за ней снова
+    начинается таблица. Одного упоминания мало — в примечаниях форма
+    называется прозой, и по одному упоминанию блок утёк бы в пояснения.
+    """
+    if not cores:
+        return False
+    lowered = normalize_name(lines[index])
+    if not any(core in lowered for core in cores):
+        return False
+    return _heads_a_table(lines, index, policy)
 
 
 def forms_text(
@@ -557,6 +690,20 @@ def _report_dates(text: str, policy: ParsingPolicy) -> tuple[date, ...]:
             found.add(date(int(year), int(month), int(day)))
         except ValueError:  # pragma: no cover — нереальная дата в тексте
             continue
+    # Отчётные даты идут рядом и приходятся на один и тот же день года:
+    # «31 декабря 2025» и «31 декабря 2024». Прочие даты в шапке — подписание
+    # отчётности, утверждение, события после отчётной даты — такой пары
+    # не образуют. У Сегежи отчётной датой становилось 15.04.2026, день
+    # подписания, и величины раскладывались по несуществующему периоду.
+    by_day: dict[tuple[int, int], list[date]] = {}
+    for item in found:
+        by_day.setdefault((item.day, item.month), []).append(item)
+    pairs = [items for items in by_day.values() if len(items) >= policy.periods.min_count]
+    if pairs:
+        best = max(pairs, key=lambda items: (len(items), max(items)))
+        ordered = sorted(best, reverse=True)[: policy.periods.max_count]
+        return tuple(ordered)
+
     ordered = sorted(found, reverse=True)[: policy.periods.max_count]
     if len(ordered) < policy.periods.min_count:
         return ()

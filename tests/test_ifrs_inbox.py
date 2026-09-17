@@ -9,12 +9,16 @@
 import re
 from datetime import date
 
+from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.quality.codes import CheckCode
 from finlib.sources.ifrs_inbox import (
     DocumentProfile,
     ReportingKind,
+    form_blocks,
+    form_headings,
     identify,
     limitation_for,
+    load_parsing_policy,
 )
 from finlib.sources.ifrs_numbers import Grouping
 
@@ -248,3 +252,100 @@ def test_grouping_is_determined_after_the_document_kind() -> None:
     found = identify(body())
     assert found.accepted
     assert found.grouping_detection.russian_evidence > 0
+
+
+# --- границы форм в живой вёрстке ---------------------------------------------
+
+# Оглавление, разорванный переносом заголовок и разрыв страницы посреди
+# формы — три случая, на которых разбор ошибался молча. Документ собран
+# по вёрстке Сегежи и ЛСР: у первой заголовки набраны двумя строками
+# и оглавление стоит теми же словами, у второй баланс занимает две страницы.
+VERSO = """
+Содержание
+Консолидированный отчет о финансовом положении 6
+Консолидированный отчет о прибыли или убытке 7-8
+Примечания к консолидированной финансовой отчетности 9
+
+КОНСОЛИДИРОВАННЫЙ ОТЧЕТ О ФИНАНСОВОМ
+ПОЛОЖЕНИИ ПО СОСТОЯНИЮ НА 31 ДЕКАБРЯ 2024 ГОДА
+(в миллионах российских рублей)
+Прим.
+31 декабря
+2024 года
+31 декабря
+2023 года
+АКТИВЫ
+Основные средства 11 1 234 567 1 100 000
+Запасы 12 663 888 452 110
+Итого активы 2 234 567 2 000 000
+ПАО «Пример»
+Консолидированный отчет о финансовом положении по состоянию на 31 декабря 2024 г.
+7
+Данные раскрываемого консолидированного отчета о финансовом положении должны
+рассматриваться в совокупности с пояснениями на стр. 9-75, которые являются
+неотъемлемой частью данной отчетности.
+
+В млн руб. Прим. 2024 г. 2023 г.
+КАПИТАЛ И ОБЯЗАТЕЛЬСТВА
+Акционерный капитал 21 500 000 500 000
+Итого капитал и обязательства 2 234 567 2 000 000
+
+КОНСОЛИДИРОВАННЫЙ ОТЧЕТ О ПРИБЫЛИ ИЛИ УБЫТКЕ
+ЗА ГОД, ЗАКОНЧИВШИЙСЯ 31 ДЕКАБРЯ 2024 ГОДА
+(в миллионах российских рублей)
+Выручка 4 507 718 469 004
+Себестоимость продаж (400 100) (380 200)
+Валовая прибыль 107 618 88 804
+Операционная прибыль 87 318 70 704
+Прибыль за год 60 000 50 000
+"""
+
+
+def blocks_of(text: str) -> dict[str, list[str]]:
+    """Строки таблиц каждой формы для собранного документа."""
+    policy = load_parsing_policy()
+    headings = form_headings(text, load_ifrs_lines(), policy)
+    return form_blocks(text, headings, policy)
+
+
+def test_wrapped_heading_is_found() -> None:
+    """Заголовок, разорванный переносом, опознаётся ядром наименования.
+
+    У Сегежи «О ФИНАНСОВОМ \nПОЛОЖЕНИИ» и «О ДВИЖЕНИИ ДЕНЕЖНЫХ \nСРЕДСТВ»:
+    по одной строке такой заголовок не находится вовсе.
+    """
+    found = blocks_of(body(base=VERSO))
+    assert "ifrs.statement_of_financial_position" in found
+    balance = found["ifrs.statement_of_financial_position"]
+    assert any("Основные средства" in line for line in balance)
+
+
+def test_table_of_contents_is_not_a_form() -> None:
+    """Строка оглавления формой не становится, хотя слова те же.
+
+    Отличает её то, что идёт следом: у формы таблица начинается сразу,
+    у оглавления — другие строки оглавления. Номер страницы, записанный
+    диапазоном («7-8»), за две величины не считается.
+    """
+    found = blocks_of(body(base=VERSO))
+    for lines in found.values():
+        assert not any("Содержание" in line for line in lines)
+        assert not any(line.strip().endswith("7-8") for line in lines)
+
+
+def test_page_break_does_not_end_the_form() -> None:
+    """Разрыв страницы посреди формы таблицу не кончает.
+
+    На переломе стоят колонтитул, номер страницы и надпись о пояснениях —
+    больше строк без величин, чем допускает разрыв. У ЛСР блок баланса
+    обрывался на «Итого активы», и сторона капитала терялась молча.
+    """
+    lines = blocks_of(body(base=VERSO))["ifrs.statement_of_financial_position"]
+    assert any("Акционерный капитал" in line for line in lines)
+    assert any("Итого капитал и обязательства" in line for line in lines)
+
+
+def test_form_block_stops_before_the_next_form() -> None:
+    """Блок формы не захватывает следующую форму."""
+    lines = blocks_of(body(base=VERSO))["ifrs.statement_of_financial_position"]
+    assert not any("Выручка" in line for line in lines)

@@ -211,16 +211,21 @@ def test_balance_sheet_totals_are_complete() -> None:
     }
 
 
-def test_expense_items_are_subtracted_not_negated() -> None:
-    """Расходная статья хранится величиной расхода, вычитание — оператором.
+def test_expense_items_carry_their_own_sign() -> None:
+    """Расходная статья хранится со знаком, и оператор её складывает.
 
-    Соглашение о знаке то же, что в РСБУ: `in_brackets` говорит, что статья
-    печатается в скобках, а минус стоит в составе итога.
+    Соглашение здесь не то же, что в РСБУ, и в этом весь смысл: отчётность
+    по МСФО печатает состав итога со знаком, и оператор повторял бы минус
+    вторым разом. `in_brackets` остаётся признаком печати, а `normal_sign`
+    объявляет, какой знак у статьи нормален, — по нему знак выводится
+    арифметикой, когда эмитент печатает расход без скобок.
     """
     gross = CATALOG.require("ifrs.gross_profit")
     cost = next(item for item in gross.components if item.code == "ifrs.cost_of_sales")
-    assert cost.op is Operator.MINUS
-    assert CATALOG.require("ifrs.cost_of_sales").in_brackets
+    assert cost.op is Operator.PLUS
+    position = CATALOG.require("ifrs.cost_of_sales")
+    assert position.in_brackets
+    assert position.normal_sign == -1
 
 
 def test_equity_may_be_negative() -> None:

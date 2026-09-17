@@ -147,8 +147,10 @@ class DocumentKindPolicy(BaseModel):
     required_forms: tuple[str, ...] = Field(min_length=1)
     cores: dict[str, tuple[str, ...]]
     heading_max_length: int = Field(ge=20)
+    heading_wrap_lines: int = Field(ge=0)
     lookahead_lines: int = Field(ge=5)
     min_table_rows: int = Field(ge=1)
+    heading_to_table_lines: int = Field(ge=1)
     table_rows_origin: str = Field(min_length=1)
     table_end_gap: int = Field(ge=2)
     table_end_origin: str = Field(min_length=1)
@@ -536,14 +538,23 @@ def parse_amount(token: str, convention: Grouping) -> Decimal | None:
     Значение по умолчанию здесь означало бы ровно то, ради отказа от чего
     написан весь модуль, — угадывание.
 
-    Круглые скобки вокруг числа — способ печати расходной величины, как
-    в формах РСБУ: знак берётся из справочника статей, а не из скобок,
-    поэтому здесь скобки только снимаются.
+    **Круглые скобки означают минус.** В формах МСФО так печатают расход
+    и всякую вычитаемую величину, и терять их нельзя: «Себестоимость (160 017)»
+    приходила как +160 017, складывалась с выручкой вместо вычитания,
+    и недостача по валовой прибыли равнялась ровно удвоенной себестоимости.
+
+    Знак хранится в самой величине, а не выводится из справочника: у одного
+    эмитента статья печатается в скобках, у другого без них, и соглашение,
+    завязанное на справочник, разошлось бы с документом.
     """
-    cleaned = token.strip().strip("()").strip()
+    cleaned = token.strip()
+    negative = cleaned.startswith("(") and cleaned.endswith(")")
+    cleaned = cleaned.strip("()").strip()
     cleaned = cleaned.replace("−", "-").replace("–", "-")
     if not cleaned:
         return None
+    if negative and not cleaned.startswith("-"):
+        cleaned = f"-{cleaned}"
 
     if convention is Grouping.RUSSIAN:
         for space in SPACES:

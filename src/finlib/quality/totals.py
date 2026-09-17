@@ -13,6 +13,7 @@
 проверяется тестом.
 """
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -21,6 +22,8 @@ from typing import Protocol
 
 from finlib.normalize.lines import Operator
 from finlib.quality.values import as_addend
+
+logger = logging.getLogger(__name__)
 
 
 class Addend(Protocol):
@@ -89,11 +92,38 @@ class TotalCheck:
         }
 
 
+def _with_inferred_signs(
+    line: Total,
+    value_of: Callable[[str], Decimal | None],
+    blocked_reason: Callable[[str], str | None],
+    normal_sign_of: Callable[[str], int],
+) -> tuple[Decimal, list[str]]:
+    """Сумма состава с выведенным знаком у вычитаемых статей.
+
+    Правится знак только там, где он противоречит нормальному: статья
+    с `normal_sign = −1`, пришедшая положительной. Перебирать знаки у всех
+    слагаемых нельзя — так сумма подберётся к любому итогу, и проверка
+    перестанет быть проверкой.
+    """
+    total = Decimal(0)
+    fixed: list[str] = []
+    for component in line.components:
+        if blocked_reason(component.code) is not None:
+            continue
+        value = as_addend(value_of(component.code))
+        if normal_sign_of(component.code) < 0 and value > 0:
+            value = -value
+            fixed.append(component.code)
+        total += value if component.op is Operator.PLUS else -value
+    return total, fixed
+
+
 def check_total(
     line: Total,
     value_of: Callable[[str], Decimal | None],
     blocked_reason: Callable[[str], str | None],
     tolerance_of: Callable[[Decimal], Decimal],
+    normal_sign_of: Callable[[str], int] | None = None,
 ) -> TotalCheck:
     """Сверяет итог с суммой его состава.
 
@@ -156,6 +186,23 @@ def check_total(
 
     difference = computed - total
     tolerance = tolerance_of(total)
+
+    if abs(difference) > tolerance and normal_sign_of is not None:
+        # Эмитент может печатать расход без скобок, и тогда знак величины
+        # приходится выводить арифметикой: вычитаемая статья, пришедшая
+        # положительной, пробуется с обратным знаком. Пробуется именно она,
+        # а не любая: перебор всех знаков подобрал бы сумму к чему угодно.
+        corrected, fixed = _with_inferred_signs(
+            line, value_of, blocked_reason, normal_sign_of
+        )
+        if fixed and abs(corrected - total) <= tolerance:
+            logger.info(
+                "итог %s сошёлся после вывода знака у %s",
+                line.code,
+                ", ".join(fixed),
+            )
+            computed, difference = corrected, corrected - total
+
     verdict = (
         TotalVerdict.MATCHED if abs(difference) <= tolerance else TotalVerdict.MISMATCHED
     )

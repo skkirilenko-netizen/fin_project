@@ -112,6 +112,12 @@ class ExtractedForm:
     # и смешение единиц счёта — повторяющийся источник ошибок.
     rows_total: int = 0
     rows_recognised: int = 0
+    # Строки, отсеянные без участия человека: колонтитулы и контрольные суммы.
+    # Хранятся, а не выбрасываются: из метрики общности их надо исключить
+    # явно, а не тем, что их не видно.
+    auto_dismissed: list[tuple[str, tuple[Decimal, ...], str]] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -259,6 +265,14 @@ def _extract_form(
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
         if position is None:
+            dismissal = _auto_dismissal(name, values, rows[:position_index])
+            if dismissal is not None:
+                # Колонтитул и контрольная сумма — не статьи, и показывать их
+                # человеку незачем. Важнее другое: в метрике общности они
+                # искусственно завышали долю общих статей, потому что номер
+                # страницы встречается у всех эмитентов.
+                form.auto_dismissed.append((name, values, dismissal))
+                continue
             form.unrecognised.append(
                 UnrecognisedRow(
                     form_code,
@@ -288,6 +302,94 @@ def _extract_form(
 def _cells_pattern(grouping: Grouping) -> re.Pattern[str]:
     """Как выглядит ячейка с величиной при этой конвенции записи чисел."""
     return re.compile(_CELL_BY_GROUPING[grouping])
+
+
+def _auto_dismissal(
+    name: str, values: tuple[Decimal, ...], earlier: list[tuple]
+) -> str | None:
+    """Почему строку можно отсеять без человека; None — нельзя.
+
+    Два случая, и оба про строки без наименования. Одно число — колонтитул
+    или номер страницы. Два числа, повторяющие ранее встреченную строку, —
+    контрольная сумма разбивки: у Сегежи убыток печатается ещё раз под
+    разбивкой «неконтролирующим долям участия», и в итог он войти не должен.
+
+    Строка с наименованием так не отсеивается никогда: решение о ней
+    принимает человек.
+    """
+    if name.strip():
+        return None
+    if len(values) == 1:
+        return "auto_not_item"
+    for previous_name, previous_values, _ in earlier:
+        if previous_values == values and previous_name.strip():
+            return f"duplicate_of:{previous_name.strip()}"
+    return None
+
+
+def _looks_like_note_number(value: Decimal) -> bool:
+    """Похожа ли величина на номер примечания, а не на сумму.
+
+    Номера примечаний двузначные и целые. Величина отчётности такой тоже
+    бывает, но не в одиночку: у статьи значение есть за каждый период.
+    """
+    return value == value.to_integral_value() and 0 < value <= MAX_NOTE_NUMBER
+
+
+# Наибольший номер примечания, встреченный в разобранных комплектах, — сорок
+# с небольшим. Округлено вверх с запасом.
+MAX_NOTE_NUMBER = Decimal(99)
+
+
+def _unglue(texts: list[str], periods: int, grouping: Grouping) -> list[str]:
+    """Разрезает ячейку, в которую слиплись величины нескольких колонок.
+
+    Разделитель разрядов и разделитель колонок — оба пробел, и различить их
+    по ширине нельзя: у Автодора «856 349 835 020» — это 856 349 и 835 020,
+    а прочитывалось как одно число в восемьсот пятьдесят шесть миллиардов
+    при валюте баланса в полтора миллиона.
+
+    Опора — число групп: четыре группы по три цифры при двух периодах делятся
+    поровну. Делится только та ячейка, которая делится нацело; неровную
+    не трогаем — угадывать, где граница, нельзя.
+    """
+    if grouping is not Grouping.RUSSIAN or periods < 2:
+        return texts
+    result: list[str] = []
+    for item in texts:
+        groups = re.split(rf"[{_NARROW_SPACE} ]+", item.strip())
+        # Склейка опознаётся по строению: групп вдвое или более больше, чем
+        # периодов, число групп делится на число периодов, и каждая доля
+        # сама по себе — правильно набранное число: первая группа от одной
+        # до трёх цифр, остальные ровно по три.
+        #
+        # Прежде требовалось, чтобы **все** группы были по три цифры, и
+        # правило не срабатывало там, где первая группа короче: «64 582 109
+        # 423» у Сегежи читалось как шестьдесят четыре миллиарда при валюте
+        # баланса в сто сорок один, а «89 187 101 900» — как выручка в
+        # восемьдесят девять миллиардов вместо восьмидесяти девяти тысяч.
+        if len(groups) < 2 * periods or len(groups) % periods:
+            result.append(item)
+            continue
+        size = len(groups) // periods
+        if not all(
+            _well_formed(groups[start : start + size])
+            for start in range(0, len(groups), size)
+        ):
+            result.append(item)
+            continue
+        result.extend(
+            " ".join(groups[start : start + size])
+            for start in range(0, len(groups), size)
+        )
+    return result
+
+
+def _well_formed(groups: list[str]) -> bool:
+    """Складываются ли группы цифр в правильно набранное число."""
+    if not groups or not 1 <= len(groups[0]) <= 3:
+        return False
+    return all(len(part) == 3 for part in groups[1:])
 
 
 def _joined(pending: list[str], name: str) -> str:
@@ -355,9 +457,15 @@ def _split_row(
     if not tail:
         return stripped.strip(), ()
 
+    # Колонки склеиваются: разделитель разрядов и разделитель колонок — оба
+    # пробел, и у «856 349 835 020» они неразличимы по ширине. Четыре группы
+    # по три цифры при двух периодах — это две величины, а не одна
+    # в восемьсот пятьдесят шесть миллиардов при валюте баланса в полтора.
+    texts = _unglue([item.group() for item in tail], periods, grouping)
+
     parsed = tuple(
         value
-        for value in (parse_amount(item.group(), grouping) for item in tail)
+        for value in (parse_amount(item, grouping) for item in texts)
         if value is not None
     )
     if not parsed:
@@ -369,7 +477,14 @@ def _split_row(
     # величиной за отчётный период.
     if periods and len(parsed) > periods:
         parsed = parsed[-periods:]
-        tail = tail[-periods:]
+        tail = tail[-periods:] if len(tail) >= periods else tail
+    # Одинокое двузначное целое при двух и более колонках — номер примечания,
+    # а не величина: у ЛСР заголовок раздела «Собственный капитал 21» получал
+    # величину 21 и попадал в очередь как статья. У настоящей статьи значение
+    # есть за каждый период либо нет вовсе.
+    if periods >= 2 and len(parsed) == 1 and _looks_like_note_number(parsed[0]):
+        return stripped.strip(), ()
+
     name = stripped[: tail[0].start()].strip()
     # К наименованию липнут номер примечания, знак сноски и прочерк «нет
     # значения». Каждый из них ломает опознание целиком: «Денежные средства

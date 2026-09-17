@@ -214,6 +214,11 @@ def _check_totals(
             values.get,
             lambda code: None,
             lambda amount: abs(amount) / Decimal(1000) + Decimal(1),
+            lambda code: (
+                position.normal_sign
+                if (position := catalog.get(code)) is not None
+                else 1
+            ),
         )
         if found.verdict in (TotalVerdict.MATCHED, TotalVerdict.MISMATCHED):
             checked += 1

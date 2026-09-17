@@ -18,6 +18,7 @@
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -191,6 +192,7 @@ class IssuerMarkup:
                 values.get,
                 lambda code: None,
                 lambda amount: abs(amount) * TOLERANCE_SHARE + Decimal(1),
+                normal_sign_of(catalog),
             )
             state[total.code] = outcome.verdict
         return state
@@ -290,6 +292,7 @@ def _unbalanced_totals(
             values.get,
             lambda code: None,
             lambda amount: abs(amount) * TOLERANCE_SHARE + Decimal(1),
+            normal_sign_of(catalog),
         )
         if outcome.verdict is TotalVerdict.MISMATCHED and outcome.difference is not None:
             # Недостача положительна, когда сумма состава меньше итога:
@@ -372,6 +375,16 @@ def apply_assignment(
         logger.info("после присвоения %s сошёлся итог %s", code, ", ".join(closed))
         return True, closed[0]
     return False, candidate.total_code
+
+
+def normal_sign_of(catalog: IfrsCatalog) -> Callable[[str], int]:
+    """Нормальный знак позиции по её коду — подсказка для вывода знака."""
+
+    def sign(code: str) -> int:
+        position = catalog.get(code)
+        return position.normal_sign if position is not None else 1
+
+    return sign
 
 
 def check_part_of(
