@@ -107,14 +107,27 @@ class ThesisRule(BaseModel):
     # обязан этому соответствовать.
     units: tuple[Unit, ...] | None = None
     text: str = Field(min_length=1)
+    # Та же мысль сразу о нескольких показателях. Три предложения подряд одной
+    # конструкцией читаются как сбой, а не как текст.
+    merged: str | None = None
     verb: str | None = None
     unless: dict[str, str] | None = None
     only_if: dict[str, str] | None = None
 
     @property
     def slots(self) -> set[str]:
-        """Слоты, которых требует текст правила."""
+        """Слоты, которых требует одиночная формулировка."""
         return set(re.findall(r"\{(\w+)\}", self.text))
+
+    @property
+    def all_slots(self) -> set[str]:
+        """Слоты обеих формулировок: по ним справочник проверяется целиком.
+
+        В подстановку идут разные наборы: `names` есть только у объединённой
+        формулировки, и требовать его от одиночной значило бы отбросить
+        каждый тезис, которому не с чем сливаться.
+        """
+        return self.slots | set(re.findall(r"\{(\w+)\}", self.merged or ""))
 
 
 class CommonTheses(BaseModel):
@@ -188,6 +201,32 @@ class DynamicsPolicy(BaseModel):
         return abs(change) / abs(before) < self.material_change
 
 
+class Narrative(BaseModel):
+    """Связки для сборки раздела 3 без модели."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lead: str = Field(min_length=1)
+    joiners: tuple[str, ...] = Field(min_length=1)
+
+    def paragraph(self, group: str, texts: list[str]) -> str:
+        """Абзац группы: ведущее наименование и тезисы со связками.
+
+        Связка ставится через один тезис: перед каждым получается частокол,
+        а без них — перечень, а не текст.
+        """
+        parts = [self.lead.format(group=group)]
+        joiner = 0
+        for position, text in enumerate(texts):
+            if position and position % 2 == 0:
+                word = self.joiners[joiner % len(self.joiners)]
+                joiner += 1
+                parts.append(f"{word} {text[0].lower()}{text[1:]}")
+                continue
+            parts.append(text)
+        return " ".join(parts)
+
+
 class SignalRendering(BaseModel):
     """Как тезис сигнала печатается в перечне."""
 
@@ -219,6 +258,7 @@ class ThesesCatalog(BaseModel):
     cross_conditions: dict[str, str] = Field(min_length=1)
     bands: Bands
     dynamics: DynamicsPolicy
+    narrative: Narrative
     signals: SignalRendering
     verbs: dict[str, dict[str, str]] = Field(min_length=1)
     genders: dict[str, str] = Field(min_length=1)
@@ -231,7 +271,7 @@ class ThesesCatalog(BaseModel):
         """Каждый слот, которого требует текст, объявлен в блоке slots."""
         declared = set(self.slots)
         for rule in self._all_rules():
-            unknown = rule.slots - declared
+            unknown = rule.all_slots - declared
             if unknown:
                 raise ValueError(
                     f"тезис {rule.code}: неизвестные слоты {sorted(unknown)}"
@@ -323,6 +363,20 @@ class TheseSet:
     def block(self) -> str:
         """Блок ТЕЗИСЫ для контекста модели."""
         return render_block(self)
+
+    def narrative(self) -> list[str]:
+        """Раздел «Аналитическая интерпретация», собранный без модели.
+
+        Тезисы предписаны, порядок и раскладка по группам заданы расчётом,
+        связки берутся из справочника. Модели в таком разделе остаётся
+        только выбор слов между предложениями — и стоимость обращения
+        сравнивается именно с этим текстом.
+        """
+        policy = load_theses().narrative
+        return [
+            policy.paragraph(name, [item.text for item in items])
+            for name, items in self.by_group()
+        ]
 
     def by_group(self) -> list[tuple[str, tuple[Thesis, ...]]]:
         """Тезисы по группам показателей в порядке методики.
@@ -538,6 +592,65 @@ def _render(
     return text.replace("..", ".")
 
 
+def _merge(
+    built: list[tuple[ThesisRule, _MetricState, str, ThesisKind, str, str]],
+    catalog: ThesesCatalog,
+) -> list[Thesis]:
+    """Сливает однотипные тезисы одной группы в одно утверждение.
+
+    Три предложения подряд одной конструкцией — «Показатель X за 2024 год
+    не рассчитан: не раскрыты строки 1550» — читаются как сбой, а не как текст.
+    Объединять их должен расчёт: модель читает требования «привести дословно»
+    и «связать в текст» как противоречивые и выбирает первое.
+
+    Сливаются только тезисы одного правила с совпадающей причиной и в пределах
+    одной группы: иначе причина одного показателя приписалась бы другому.
+    """
+    buckets: dict[tuple, list[int]] = {}
+    for position, item in enumerate(built):
+        rule, state, _, _, group, _ = item
+        if rule.merged is None:
+            buckets[("сам", position)] = [position]
+            continue
+        keys = sorted(set(re.findall(r"\{(\w+)\}", rule.merged)) - {"names"})
+        signature = (rule.code, group, *(state.values.get(key) for key in keys))
+        buckets.setdefault(signature, []).append(position)
+
+    found: list[Thesis] = []
+    for positions in buckets.values():
+        rule, state, name, kind, group, text = built[positions[0]]
+        if len(positions) == 1 or rule.merged is None:
+            found.append(Thesis(rule.code, state.code, kind, text, group))
+            continue
+        listed = _listed(
+            [
+                f"{built[item][2][0].lower()}{built[item][2][1:]} "
+                f"({built[item][1].code})"
+                for item in positions
+            ]
+        )
+        values = dict(state.values)
+        values["names"] = listed
+        values["name"] = name
+        merged = _WHITESPACE.sub(" ", rule.merged.format(**values)).strip()
+        found.append(
+            Thesis(rule.code, state.code, kind, merged.replace("..", "."), group)
+        )
+        logger.debug(
+            "слиты тезисы %s по показателям %s",
+            rule.code,
+            [built[item][1].code for item in positions],
+        )
+    return found
+
+
+def _listed(items: list[str]) -> str:
+    """Перечисление через запятую с союзом перед последним."""
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} и {items[-1]}"
+
+
 def _pick(
     rules: tuple[ThesisRule, ...],
     state: _MetricState,
@@ -597,7 +710,7 @@ def build_theses(
             current,
         )
 
-    found: list[Thesis] = []
+    built: list[tuple[ThesisRule, _MetricState, str, ThesisKind, str, str]] = []
     for metric in catalog.metrics:
         state = states[metric.code]
         if not state.selectors:
@@ -623,7 +736,9 @@ def build_theses(
             text = _render(rule, state, name, theses_catalog)
             if text is None:
                 continue
-            found.append(Thesis(rule.code, metric.code, kind, text, metric.group))
+            built.append((rule, state, name, kind, metric.group, text))
+
+    found = _merge(built, theses_catalog)
 
     signals = _signal_theses(
         inn, target, conn, standard, catalog, reporting_type, found, states, theses_catalog

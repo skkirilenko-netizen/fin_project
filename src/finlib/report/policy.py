@@ -146,6 +146,8 @@ class Questions(BaseModel):
     max_count: int = Field(gt=0)
     subject_order: tuple[QuestionSubject, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
+    texts: dict[QuestionSubject, str] = Field(min_length=1)
+    none_found: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _check_counts(self) -> Self:
@@ -157,6 +159,47 @@ class Questions(BaseModel):
         if len(set(self.subject_order)) != len(self.subject_order):
             raise ValueError("основания вопросов в порядке повторяются")
         return self
+
+    @model_validator(mode="after")
+    def _check_texts(self) -> Self:
+        """У каждого основания есть предписанная формулировка вопроса.
+
+        Основание без формулировки означало бы вопрос, который некому задать:
+        расчёт нашёл обстоятельство, а сказать о нём нечем.
+        """
+        missing = [item for item in self.subject_order if item not in self.texts]
+        if missing:
+            listed = ", ".join(item.value for item in missing)
+            raise ValueError(f"нет формулировок вопросов для оснований: {listed}")
+        return self
+
+    def question(self, subject: QuestionSubject, **values: str) -> str:
+        """Предписанный вопрос по основанию с подставленными величинами."""
+        return " ".join(self.texts[subject].split()).format(**values)
+
+    @property
+    def none_found_text(self) -> str:
+        """Оговорка при отсутствии оснований."""
+        return " ".join(self.none_found.split())
+
+
+class FactBaseSection(BaseModel):
+    """Предписанные тексты раздела «Фактическая база»."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    intro: str = Field(min_length=1)
+    extra_intro: str = Field(min_length=1)
+
+    @property
+    def intro_text(self) -> str:
+        """Вступление раздела одной строкой."""
+        return " ".join(self.intro.split())
+
+    @property
+    def extra_intro_text(self) -> str:
+        """Вступление к величинам сверх обязательных."""
+        return " ".join(self.extra_intro.split())
 
     def rank_of(self, subject: QuestionSubject) -> int:
         """Место основания в порядке; неизвестное уходит в конец."""
@@ -193,6 +236,7 @@ class ReportPolicy(BaseModel):
     freshness: Freshness
     risks: Risks
     fact_base: FactBase
+    fact_base_section: FactBaseSection
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)
 

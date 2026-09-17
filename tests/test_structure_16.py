@@ -169,42 +169,63 @@ def test_fact_base_drops_what_the_organisation_does_not_have(db_conn) -> None:
     assert "1600" in codes
 
 
-def test_fact_base_block_reaches_the_model(db_conn) -> None:
-    """Перечень уходит модели блоком, а не остаётся в методике."""
+def _fact_base_of(inn: str, db_conn) -> list[str]:
+    """Раздел «Фактическая база», собранный расчётом."""
+    from finlib.metrics.definitions import load_metrics
+    from finlib.normalize.lines import ReportingType, load_lines
+    from finlib.report.composition import fact_base
+    from finlib.report.data import load_report_data
+    from finlib.scoring.definitions import load_scoring
+
+    data = load_report_data(inn, db_conn)
+    return fact_base(
+        data,
+        POLICY,
+        load_lines(),
+        load_metrics(),
+        load_scoring(),
+        ReportingType(data.organization["reporting_type"]),
+    )
+
+
+def test_fact_base_is_built_by_calculation(db_conn) -> None:
+    """Перечень собирает расчёт, а не модель: состав задан методикой.
+
+    Прежде перечень уходил модели блоком, и она его переписывала — в проверке
+    17.09.2026 писала производные вместо величин и теряла обязательные
+    позиции. Писать его ей больше не поручено.
+    """
+    found = "\n".join(_fact_base_of(FULL_INN, db_conn))
+    assert "(debt_total)" in found
+    assert "(1600)" in found
+    # Модели состав фактической базы больше не передаётся: раздел не её.
     from finlib.llm.context import build_context
 
-    context = build_context(FULL_INN, db_conn)
-    assert "СОСТАВ РАЗДЕЛОВ" in context.composition
-    assert "debt_total" in context.composition
-    assert "СОСТАВ РАЗДЕЛОВ" in context.blocks()
+    assert "СОСТАВ РАЗДЕЛОВ" not in build_context(FULL_INN, db_conn).blocks()
 
 
 def test_extra_values_are_selected_by_machine_grounds(db_conn) -> None:
-    """Сверх обязательных перечисляются участники стоп-фактора, флага и сдвигов.
+    """Сверх обязательных перечисляются участники стоп-фактора и сдвигов.
 
     Отбор машинный: иначе состав раздела зависел бы от того, что модель сочтёт
     заслуживающим упоминания, — и в него попадало нераскрытие одной строки
     вместо совокупного долга.
     """
-    from finlib.llm.context import build_context
-
-    composition = build_context(FULL_INN, db_conn).composition
-    extra = composition[composition.index("Сверх обязательных") :]
-    assert "участвует в стоп-факторе" in extra
-    assert "участвует в условии флага" in extra
+    found = _fact_base_of(FULL_INN, db_conn)
+    text = "\n".join(found)
+    assert POLICY.fact_base_section.extra_intro_text in found
+    extra = text[text.index(POLICY.fact_base_section.extra_intro_text) :]
     assert "изменение за период" in extra
     # Обязательные величины во второй перечень не дублируются.
-    head = composition[: composition.index("Сверх обязательных")]
-    assert "nwc" in head
-    assert "nwc" not in extra
+    head = text[: text.index(POLICY.fact_base_section.extra_intro_text)]
+    assert "(nwc)" in head
+    assert "(nwc)" not in extra
 
 
 def test_extra_values_are_limited_to_the_declared_number(db_conn) -> None:
     """Наибольших изменений столько, сколько объявила методика."""
-    from finlib.llm.context import build_context
-
-    composition = build_context(FULL_INN, db_conn).composition
-    extra = composition[composition.index("Сверх обязательных") :]
+    text = "\n".join(_fact_base_of(FULL_INN, db_conn))
+    extra = text[text.index(POLICY.fact_base_section.extra_intro_text) :]
     assert extra.count("изменение за период") <= POLICY.fact_base.top_changes
 
 
@@ -249,13 +270,40 @@ def test_fact_base_is_checked_before_cleanup() -> None:
 
 def test_question_subjects_are_ranked_by_risk(db_conn) -> None:
     """Основания идут по убыванию связанного риска, надзорный сигнал первым."""
-    from finlib.llm.context import build_context
+    from finlib.metrics.definitions import load_metrics
+    from finlib.report.composition import questions
+    from finlib.report.data import load_report_data
+    from finlib.scoring.definitions import load_scoring
 
-    composition = build_context(STOPPED_INN, db_conn).composition
-    # Смотреть надо перечень оснований, а не блок целиком: слово «стоп-фактор»
-    # встречается и выше, среди величин, которые надо назвать.
-    listed = composition[composition.index("Раздел 6") :]
-    assert listed.index("надзорный сигнал") < listed.index("стоп-фактор")
+    data = load_report_data(STOPPED_INN, db_conn)
+    found = questions(data, POLICY, load_metrics(), load_scoring(), [])
+    text = "\n".join(found)
+    assert "надзорным сигналам" in text
+    assert text.index("надзорным сигналам") < text.index("стоп-фактором")
+    assert len(found) <= POLICY.questions.max_count
+
+
+def test_questions_are_prescribed_not_written(db_conn) -> None:
+    """Формулировки вопросов предписаны методикой, а не сочиняются моделью.
+
+    Проверка 17.09.2026: из пяти сочинённых вопросов по ООО «Магнит» три были
+    вида «какие строки отсутствуют в расчёте» — ровно те, что методика
+    запрещает, — а по ПК «Стройсервис» модель ввела порог «90 % выручки»
+    и посчитала разность величин двух периодов.
+    """
+    from finlib.metrics.definitions import load_metrics
+    from finlib.report.composition import questions
+    from finlib.report.data import load_report_data
+    from finlib.scoring.definitions import load_scoring
+
+    data = load_report_data(STOPPED_INN, db_conn)
+    found = questions(data, POLICY, load_metrics(), load_scoring(), [])
+    prescribed = {" ".join(item.split()) for item in POLICY.questions.texts.values()}
+    for question in found:
+        # Формулировка совпадает с предписанной с точностью до подстановок.
+        assert any(
+            question.startswith(item.split("{", 1)[0]) for item in prescribed
+        ), question
 
 
 def test_questions_are_limited_in_number() -> None:
@@ -291,13 +339,18 @@ def test_question_about_non_disclosure_is_caught() -> None:
     assert TextRule.QUESTION_ABOUT_DISCLOSURE in {item.rule for item in issues}
 
 
-def test_prompt_forbids_questions_about_non_disclosure() -> None:
-    """Запрет стоит и в инструкции модели, а не только в проверке."""
-    from finlib.llm.service import load_prompt
+def test_questions_never_ask_about_non_disclosure(db_conn) -> None:
+    """Вопрос о нераскрытии строки не может быть задан вовсе.
 
-    prompt = load_prompt()
-    assert "почему не раскрыта строка" in prompt
-    assert "От трёх до пяти вопросов" in prompt
+    Прежде запрет стоял в инструкции модели, и она его нарушала. Теперь
+    вопросы собирает расчёт из предписанных формулировок, и нарушить запрет
+    нечем: формулировки о нераскрытии в справочнике нет.
+    """
+    forbidden = ("не раскрыт", "отсутствуют в расчёте", "почему не раскры")
+    for text in POLICY.questions.texts.values():
+        lowered = " ".join(text.split()).lower()
+        for item in forbidden:
+            assert item not in lowered, text
 
 
 # --- 5. Предложения по дальнейшим действиям -----------------------------------
@@ -470,7 +523,8 @@ def test_section_four_is_built_by_calculation() -> None:
     for scheme in PromptScheme:
         prompt = load_prompt(scheme=scheme)
         assert f"### {SIGNALS_SECTION}. {SIGNALS_TITLE}" not in prompt
-        assert f"раздел {SIGNALS_SECTION}" in prompt.lower()
+        # Модели прямо сказано, что раздел не её и написанное будет отброшено.
+        assert "формируются расчётом" in prompt
     # Тексты раздела предписаны методикой, а не зашиты в сборку документа.
     assert load_policy().risks.none_found_text
 

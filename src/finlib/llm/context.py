@@ -702,17 +702,10 @@ def build_context(
         ),
         flags=_flags_block(assessment),
         assessment=_assessment_block(assessment, scoring, metrics_catalog),
-        composition=_composition_block(
-            inn,
-            periods,
-            conn,
-            lines_catalog,
-            metrics_catalog,
-            scoring,
-            reporting_type,
-            assessment,
-            standard,
-        ),
+        # Состав фактической базы и основания вопросов модели больше не нужны:
+        # разделы 2 и 6 собирает расчёт. Блок остаётся ради обратной
+        # совместимости вызовов, которым он нужен, и в промпт не идёт.
+        composition="",
         limitations=_limitations_block(
             inn,
             periods,

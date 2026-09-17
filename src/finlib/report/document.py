@@ -32,7 +32,7 @@ from finlib.report.consistency import InconsistentReportError, check_document
 from finlib.report.data import ReportData, load_report_data
 from finlib.report.integrity import NumbersAlteredError, check_numbers
 from finlib.report.policy import ReportPolicy, Trigger, load_policy
-from finlib.report.sections import EXPECTED, Section, split_sections
+from finlib.report.sections import EXPECTED, TEXT_PART, Section, split_sections
 from finlib.report.summary import build_summary
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
 from finlib.standards import Standard
@@ -70,8 +70,8 @@ DISCLAIMER = (
 
 DISCLAIMER_NO_TEXT = (
     _COMMON_HEAD
-    + "Текстовая часть (разделы 2–6) не формировалась: языковая модель "
-    "не привлекалась, и документ содержит только расчётную часть."
+    + "Языковая модель не привлекалась: текстовая часть (разделы 2–6) "
+    "собрана расчётом из предписанных методикой формулировок."
     + _COMMON_TAIL
 )
 
@@ -80,12 +80,14 @@ DISCLAIMER_NO_TEXT = (
 NO_MODEL = "не привлекалась"
 
 NO_TEXT_NOTICE = (
-    "Текстовая часть заключения (разделы 2–6) не формировалась: документ "
-    "подготовлен без привлечения языковой модели. Расчётная часть — класс, "
-    "показатели, надзорные сигналы, предложения по дальнейшим действиям, "
-    "контроли качества и приложение — полна и получена детерминированным "
-    "расчётом. Настоящий документ заключением не является и служит "
-    "расчётной справкой. Ниже приведены разделы, не зависящие от модели."
+    "Языковая модель при подготовке документа не привлекалась. Текстовая "
+    "часть (разделы 2–6) собрана расчётом: состав разделов задан методикой, "
+    "утверждения о показателях выбраны из предписанных формулировок "
+    "по машинным признакам, связки между ними шаблонные. Расчётная часть — "
+    "класс, показатели, надзорные сигналы, предложения по дальнейшим "
+    "действиям, контроли качества и приложение — полна. Настоящий документ "
+    "заключением не является и служит расчётной справкой: связного изложения "
+    "обстоятельств в нём нет."
 )
 
 
@@ -164,14 +166,21 @@ def build_report(
     if sections:
         _write_sections(document, sections, data)
     else:
-        # Оговорка об отсутствии текстовой части идёт первой, а детерминированный
-        # раздел сигналов — после неё: иначе документ сначала печатал раздел 4,
-        # а затем сообщал, что разделов 2–6 нет.
+        # Оговорка об отсутствии разделов модели идёт первой, а разделы
+        # расчёта — после неё: иначе документ сначала печатал раздел 4,
+        # а затем сообщал, что текстовой части нет.
         _write_missing_text(document)
-        # Раздел рисков детерминирован и от модели не зависит: в справке без
-        # текстовой части он обязан остаться целиком, вместе с оговоркой
-        # об отсутствии срабатываний.
-        _write_risks(document, data)
+        # Без модели текстовая часть собирается целиком расчётом: разделы 2,
+        # 4 и 6 и без того его, раздел 3 складывается из предписанных тезисов
+        # шаблонными связками, раздел 5 состоит из предписанных оговорок,
+        # которые модель всё равно приводила дословно.
+        for number, title in TEXT_PART:
+            document.add_heading(f"{number}. {title}", level=1)
+            if number in _CALCULATED:
+                _CALCULATED[number](document, data)
+            else:
+                for text in _without_model(number, inn, conn, data, standard):
+                    document.add_paragraph(text)
     # Предложения по дальнейшим действиям — следствие машинных признаков,
     # а не суждение модели, поэтому раздел собирается здесь и стоит
     # в документе всегда, с текстовой частью и без неё.
@@ -216,27 +225,24 @@ def _model_text_of(path: Path) -> str:
     Читается с диска, а не из памяти: сверять надо то, что получит читатель,
     вместе с последствиями оформления и сериализации.
 
-    Раздел рисков в сверку не входит: он собран расчётом, и его числа
-    в тексте модели отсутствуют по построению. Прежде они передавались
-    в сверку перечнем исключений — теперь раздел просто пропускается,
-    и перечень не может разойтись с тем, что на самом деле напечатано.
+    Разделы расчёта в сверку не входят: их числа в тексте модели отсутствуют
+    по построению. Прежде они передавались в сверку перечнем исключений —
+    теперь разделы просто пропускаются, и перечень не может разойтись с тем,
+    что на самом деле напечатано.
+
+    Моделью написаны разделы 3 и 5; собираются они из заголовка до следующего
+    заголовка раздела, каким бы он ни был.
     """
     document = Document(str(path))
     collected: list[str] = []
+    written = {number for number, _ in EXPECTED}
     inside = False
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        if re.match(r"^2\.\s", text) or text.startswith("2–6"):
-            inside = True
-        elif text.startswith(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}"):
-            inside = False
-        elif re.match(r"^5\.\s", text):
-            inside = True
-        # Раздел предложений и приложение написаны не моделью: сверять
-        # в них нечего, а их собственные числа выглядели бы приписками.
-        elif text.startswith("Приложение") or text.startswith(
-            f"{ACTIONS_SECTION}. {ACTIONS_TITLE}"
-        ):
+        heading = re.match(r"^(\d)\.\s", text)
+        if heading is not None:
+            inside = int(heading.group(1)) in written
+        elif text.startswith("Приложение"):
             break
         if inside:
             collected.append(paragraph.text)
@@ -254,13 +260,13 @@ def _limitations_text(
 
 
 def _write_missing_text(document: Document) -> None:
-    """Оговорка вместо разделов модели.
+    """Оговорка перед разделами, собранными без модели.
 
-    Расчётная часть не зависит от модели и остаётся полной, но документ
-    без разделов 2–6 — не заключение, и читатель обязан это видеть, а не
-    обнаруживать по отсутствию текста.
+    Разделы на месте и величины в них те же, но связного изложения
+    обстоятельств нет, и читатель обязан это видеть, а не обнаруживать
+    по складу текста.
     """
-    document.add_heading("2–6. Текстовая часть", level=1)
+    document.add_heading("О происхождении текстовой части", level=1)
     paragraph = document.add_paragraph()
     run = paragraph.add_run(NO_TEXT_NOTICE)
     run.bold = True
@@ -336,26 +342,95 @@ SIGNAL_LEVELS: dict[str, str] = {
     "attention": "требует внимания",
 }
 
+FACT_BASE_SECTION = 2
+QUESTIONS_SECTION = 6
+
 
 def _write_sections(
     document: Document, sections: list[Section], data: ReportData
 ) -> None:
-    """Разделы 2–6: раздел рисков собирается расчётом, остальное пишет модель.
+    """Текстовая часть: разделы 2, 4 и 6 из расчёта, разделы 3 и 5 от модели.
 
-    Раздел 4 встаёт на своё место по номеру, а не приписывается в конец:
-    порядок разделов задаём мы, и разрыв в нумерации читатель принял бы
+    Разделы расчёта встают на свои места по номеру, а не приписываются
+    в конец: порядок задаём мы, и разрыв в нумерации читатель принял бы
     за пропавший раздел.
     """
-    written = False
-    for section in sections:
-        if not written and section.number > SIGNALS_SECTION:
-            _write_risks(document, data)
-            written = True
-        document.add_heading(f"{section.number}. {section.title}", level=1)
-        for text in section.paragraphs:
+    written = {item.number: item for item in sections}
+    for number, title in TEXT_PART:
+        document.add_heading(f"{number}. {title}", level=1)
+        if number in _CALCULATED:
+            _CALCULATED[number](document, data)
+            continue
+        section = written.get(number)
+        for text in section.paragraphs if section is not None else ():
             document.add_paragraph(text)
-    if not written:  # pragma: no cover — разделы 5 и 6 обязательны
-        _write_risks(document, data)
+
+
+def _without_model(
+    number: int,
+    inn: str,
+    conn: PgConnection | None,
+    data: ReportData,
+    standard: Standard,
+) -> list[str]:
+    """Раздел 3 или 5, собранный без обращения к модели.
+
+    Раздел 3 складывается из предписанных тезисов шаблонными связками
+    (`methodology/theses.yaml`, блок narrative); раздел 5 — из предписанных
+    оговорок, которые модель и так приводила дословно. Коды снимаются здесь
+    же: они механизм проверки, а не часть заключения.
+    """
+    from finlib.llm.cleanup import strip_identifiers
+    from finlib.scoring.theses import build_theses
+
+    if number == 3:
+        found = build_theses(
+            inn, conn, report_date=data.report_date, standard=standard
+        )
+        return [strip_identifiers(item) for item in found.narrative()]
+    if number == 5:
+        block = _limitations_text(inn, conn, data, standard)
+        return [
+            line.lstrip("- ").strip()
+            for line in block.split("\n")
+            if line.startswith("- ")
+        ]
+    return []  # pragma: no cover — прочих разделов у модели не осталось
+
+
+def _write_fact_base(document: Document, data: ReportData) -> None:
+    """Раздел 2 «Фактическая база» целиком из расчёта."""
+    from finlib.metrics.definitions import load_metrics
+    from finlib.normalize.lines import ReportingType, load_lines
+    from finlib.report.composition import fact_base
+
+    reporting_type = ReportingType(data.organization["reporting_type"])
+    for text in fact_base(
+        data,
+        load_policy(),
+        load_lines(),
+        load_metrics(),
+        load_scoring(),
+        reporting_type,
+    ):
+        document.add_paragraph(text)
+
+
+def _write_questions(document: Document, data: ReportData) -> None:
+    """Раздел 6 «Вопросы к организации» целиком из расчёта."""
+    from finlib.metrics.definitions import load_metrics
+    from finlib.report.composition import questions
+
+    years = sorted(
+        {
+            int(row["report_year"])
+            for row in data.sources
+            if row["status"] == "quarantine"
+        }
+    )
+    found = questions(data, load_policy(), load_metrics(), load_scoring(), years)
+    for number, text in enumerate(found, start=1):
+        document.add_paragraph(f"{number}. {text}" if len(found) > 1 else text)
 
 
 def _write_risks(document: Document, data: ReportData) -> None:
@@ -367,7 +442,6 @@ def _write_risks(document: Document, data: ReportData) -> None:
     «Магнит» он свёлся к фразе «Надзорный сигнал имеет величину 20,8».
     """
     policy = load_policy()
-    document.add_heading(f"{SIGNALS_SECTION}. {SIGNALS_TITLE}", level=1)
     if data.signals:
         _write_signals(document, data)
     _write_stop_factor_risk(document, data, policy)
@@ -415,6 +489,16 @@ def _write_signals(document: Document, data: ReportData) -> None:
             run = note.add_run(basis)
             run.italic = True
             run.font.size = Pt(9)
+
+
+# Разделы текстовой части, которые собирает расчёт. Таблица объявлена после
+# самих сборщиков: порядок разделов задаёт TEXT_PART, а здесь только сказано,
+# кто какой из них пишет.
+_CALCULATED = {
+    FACT_BASE_SECTION: _write_fact_base,
+    SIGNALS_SECTION: _write_risks,
+    QUESTIONS_SECTION: _write_questions,
+}
 
 
 def _signal_basis(signal: dict) -> str:

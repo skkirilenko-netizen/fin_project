@@ -321,3 +321,51 @@ def test_abbreviation_in_a_label_is_an_anchor() -> None:
         blocks,
     )
     assert result.verified, result.foreign_values
+
+
+def test_line_code_in_prose_does_not_steal_the_tag() -> None:
+    """Код строки, названный в прозе, не перехватывает тег у следующего числа.
+
+    «Изменение за период по строке 2120 (2120_chg_pct) — 1 832,1 %» называет
+    перед тегом код строки, а не величину. Прежде тег считался приписанным
+    к нему, и величина изменения привязывалась к самой строке 2120,
+    у которой значения совсем другие, — верный ответ отклонялся.
+    """
+    from finlib.llm.pairs import build_index, find_anchor
+
+    blocks = (
+        "=== ПОКАЗАТЕЛИ ===\n"
+        "2120_chg_pct  «Расходы (2120), изменение за период в процентах»  "
+        "31.12.2024: 1 832,1 %\n"
+        "2120  «Расходы по обычной деятельности»  |  31.12.2024: 3 932"
+    )
+    text = "Изменение за период по строке 2120 (2120_chg_pct) — 1 832,1 %."
+    start = text.index("1 832,1")
+    anchor = find_anchor(text, (start, start + len("1 832,1")), build_index(blocks))
+    assert anchor is not None
+    assert anchor.key == "2120_chg_pct"
+
+
+def test_tag_still_binds_to_its_own_number() -> None:
+    """Тег, приписанный к своему числу, по-прежнему не служит якорем соседнему.
+
+    Правило о ссылке на строку его не отменяет: во фразе «на 1,6 %
+    (1600_chg_pct) до 25 736 328 136» валюта баланса обязана привязаться
+    к 1600, а не к коду процентного изменения.
+    """
+    from finlib.llm.pairs import build_index, find_anchor
+
+    blocks = (
+        "=== ПОКАЗАТЕЛИ ===\n"
+        "1600_chg_pct  «Валюта баланса (1600), изменение в процентах»  "
+        "31.12.2025: 1,6 %\n"
+        "=== ДАННЫЕ ===\n"
+        "1600  БАЛАНС  |  31.12.2025: 25 736 328 136"
+    )
+    text = "Валюта баланса (1600) выросла на 1,6 % (1600_chg_pct) до 25 736 328 136."
+    start = text.index("25 736 328 136")
+    anchor = find_anchor(
+        text, (start, start + len("25 736 328 136")), build_index(blocks)
+    )
+    assert anchor is not None
+    assert anchor.key == "1600"

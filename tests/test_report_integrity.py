@@ -171,12 +171,16 @@ def test_broken_formatting_blocks_the_document(db_conn, tmp_path, monkeypatch) -
     original = module._write_sections
 
     def breaking(document, sections, data):
-        """Оформление, подменяющее величину."""
+        """Оформление, подменяющее величину.
+
+        Портится число раздела 3: разделы 2, 4 и 6 собирает расчёт, их
+        величины в сверку не входят — сверяется написанное моделью.
+        """
         damaged = [
             type(item)(
                 item.number,
                 item.title,
-                tuple(text.replace("25 736 328 136", "25 736 328 137") for text in item.paragraphs),
+                tuple(text.replace("0,82", "0,83") for text in item.paragraphs),
             )
             for item in sections
         ]
@@ -188,7 +192,7 @@ def test_broken_formatting_blocks_the_document(db_conn, tmp_path, monkeypatch) -
         build_report(
             FULL_INN, db_conn, conclusion=conclusion_for(ANSWER), directory=tmp_path
         )
-    assert any("25736328137" in item.replace(" ", "") for item in info.value.problems)
+    assert any("0.83" in item.replace(" ", "") for item in info.value.problems)
 
 
 def test_appendix_numbers_are_not_compared(db_conn, tmp_path) -> None:

@@ -15,7 +15,13 @@ from enum import StrEnum
 from finlib.llm.claims import FalseClaim, find_false_claims
 from finlib.llm.cleanup import strip_identifiers
 from finlib.llm.direction import agrees, stated_direction
-from finlib.llm.pairs import Anchor, AnchorIndex, build_index, find_anchor
+from finlib.llm.pairs import (
+    LINE_REFERENCE,
+    Anchor,
+    AnchorIndex,
+    build_index,
+    find_anchor,
+)
 from finlib.llm.textcheck import TextContext, TextIssue, blocking, check_text
 from finlib.llm.verdict import VerdictClaim, find_verdict_claims, parse_verdict
 from finlib.llm.wording import Wording, find_forbidden
@@ -80,9 +86,11 @@ _DOC_NUMBER = re.compile(
 # Ссылка на строку отчётности: «по строкам 1210, 1410, 1510». Это перечень
 # кодов, а не величин, и код может быть любым — в том числе отсутствующим
 # в блоках: именно об отсутствии строки модель и говорит.
-_LINE_REFERENCE = re.compile(
-    r"\bстрок\w*\s*[(\[]?\s*\d{4}(?:\s*(?:,|и|или)\s*\d{4})*", re.IGNORECASE
-)
+#
+# Определение живёт в pairs.py и берётся оттуда: разбор пары «число — код»
+# идёт двумя модулями, и одинаковое понимание того, что такое ссылка
+# на строку, у них обязано быть общим, а не совпадающим по случайности.
+_LINE_REFERENCE = LINE_REFERENCE
 
 
 class Violation(StrEnum):

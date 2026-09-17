@@ -337,3 +337,60 @@ def test_prompt_carries_the_theses_block() -> None:
     prompt = build_prompt(context, scheme=PromptScheme.THESES)
     assert "=== ТЕЗИСЫ ===" in prompt
     assert "Собственный капитал (equity) отрицателен" in prompt
+
+
+# --- слияние однотипных тезисов и сборка без модели --------------------------
+
+
+def test_same_kind_theses_are_merged() -> None:
+    """Однотипные отказы расчёта сливаются в одно утверждение.
+
+    Три предложения подряд одной конструкцией читаются как сбой, а не как
+    текст. Объединять их должен расчёт: модель читает требования «привести
+    дословно» и «связать в текст» как противоречивые и выбирает первое.
+    """
+    texts = [item.text for item in build_theses(SIMPLE).theses]
+    merged = [item for item in texts if item.startswith("За ")]
+    assert merged, texts
+    assert any(" и " in item for item in merged)
+    # Коды показателей в слитом тезисе сохраняются: без них число не привязать.
+    assert any("(cur_liq)" in item and "(nwc)" in item for item in merged)
+
+
+def test_merge_keeps_reasons_apart() -> None:
+    """Показатели с разными причинами в одно утверждение не сливаются.
+
+    Иначе причина одного показателя приписалась бы другому — потеря сведения,
+    а не сокращение.
+    """
+    found = build_theses(SIMPLE)
+    for item in found.theses:
+        if item.kind is not ThesisKind.STATUS:
+            continue
+        # В слитом тезисе причина одна, и она названа после двоеточия один раз.
+        assert item.text.count(":") == 1, item.text
+
+
+def test_narrative_is_assembled_without_the_model() -> None:
+    """Раздел 3 собирается связками из справочника, без обращения к модели.
+
+    Вариант нужен затем, чтобы стоимость обращения было с чем сравнивать.
+    """
+    paragraphs = build_theses(SIMPLE).narrative()
+    assert len(paragraphs) == len(build_theses(SIMPLE).by_group())
+    joiners = load_theses().narrative.joiners
+    assert any(any(word in item for word in joiners) for item in paragraphs)
+    # Каждый тезис попал в текст: связки соединяют, а не заменяют. Первая
+    # буква сравнивается без регистра — после связки она строчная.
+    joined = " ".join(paragraphs)
+    for item in build_theses(SIMPLE).theses:
+        assert item.text[1:] in joined, item.code
+
+
+def test_questions_and_fact_base_are_not_sent_to_the_model() -> None:
+    """Состав разделов 2 и 6 модели больше не передаётся.
+
+    Разделы собирает расчёт, и блок в промпте был бы лишними числами
+    во входных данных — то есть ослаблением проверки.
+    """
+    assert "СОСТАВ РАЗДЕЛОВ" not in build_context(SIMPLE, with_theses=True).blocks()

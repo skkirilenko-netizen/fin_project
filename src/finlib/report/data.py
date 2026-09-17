@@ -89,7 +89,7 @@ ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
 # Строки, раскрытые за отчётный период: по ним видно, какие из обязательных
 # величин раздела «Фактическая база» вообще существуют у этой организации.
 _DISCLOSED = """
-SELECT DISTINCT line_code FROM fact_report
+SELECT DISTINCT line_code, value FROM fact_report
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = %(d)s
   AND value IS NOT NULL
 """
@@ -171,7 +171,15 @@ class ReportData:
     metric_rows: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
-    disclosed_lines: frozenset[str] = frozenset()
+    # Раскрытые строки отчётного периода вместе с величинами: раздел
+    # «Фактическая база» собирается расчётом и печатает не только состав,
+    # но и значения.
+    line_values: dict[str, Decimal] = field(default_factory=dict)
+
+    @property
+    def disclosed_lines(self) -> frozenset[str]:
+        """Коды строк, раскрытых за отчётный период."""
+        return frozenset(self.line_values)
 
     @property
     def class_code(self) -> str | None:
@@ -475,10 +483,10 @@ def load_report_data(
         ],
         checks=fetch_all(_CHECKS, params, conn=conn),
         sources=fetch_all(_SOURCES, params, conn=conn),
-        disclosed_lines=frozenset(
-            row["line_code"]
+        line_values={
+            row["line_code"]: row["value"]
             for row in fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn)
-        ),
+        },
     )
 
 

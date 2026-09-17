@@ -44,16 +44,16 @@ ANSWER = """### 2. Фактическая база
 
 
 def test_all_sections_are_parsed() -> None:
-    """Пять разделов разбираются по заголовкам."""
+    """Разделы модели разбираются по заголовкам; прочие отбрасываются."""
     sections = split_sections(ANSWER)
     assert [item.number for item in sections] == [number for number, _ in EXPECTED]
-    assert sections[0].title == "Фактическая база"
+    assert sections[0].title == "Аналитическая интерпретация"
 
 
 def test_paragraphs_are_kept() -> None:
     """Содержимое раздела не теряется."""
     sections = {item.number: item for item in split_sections(ANSWER)}
-    assert "25 736 328 136" in sections[2].paragraphs[0]
+    assert "0,64" in sections[3].paragraphs[0]
     assert len(sections[5].paragraphs) == 2
 
 
@@ -71,25 +71,29 @@ def test_missing_section_is_an_error() -> None:
     assert 5 in info.value.missing
 
 
-def test_risks_section_is_not_expected_from_the_model() -> None:
-    """Раздел 4 моделью не пишется: его собирает расчёт.
+def test_calculated_sections_are_not_expected_from_the_model() -> None:
+    """Разделы 2, 4 и 6 моделью не пишутся: их собирает расчёт.
 
-    Ответ без него — не неполный ответ, а правильный: оставленный модели,
-    раздел вырождался до одной фразы, а добавить ей туда нечего.
+    Ответ без них — не неполный ответ, а правильный: оставленные модели,
+    они вырождались, а добавить ей туда нечего.
     """
-    without_risks = ANSWER.replace("### 4. Риски", "### 9. Прочее")
-    assert 4 not in {item.number for item in split_sections(without_risks)}
+    stripped = (
+        ANSWER.replace("### 2. Фактическая база", "### 9. Прочее")
+        .replace("### 4. Риски", "### 9. Прочее")
+        .replace("### 6. Вопросы к организации", "### 9. Прочее")
+    )
+    assert [item.number for item in split_sections(stripped)] == [3, 5]
 
 
 def test_section_order_is_ours_not_the_model_s() -> None:
     """Порядок разделов задаём мы: перестановка в документе недопустима."""
     shuffled = "\n".join(
         [
-            ANSWER[ANSWER.index("### 6.") :],
-            ANSWER[ANSWER.index("### 2.") : ANSWER.index("### 6.")],
+            ANSWER[ANSWER.index("### 5.") :],
+            ANSWER[ANSWER.index("### 2.") : ANSWER.index("### 5.")],
         ]
     )
-    assert [item.number for item in split_sections(shuffled)] == [2, 3, 5, 6]
+    assert [item.number for item in split_sections(shuffled)] == [3, 5]
 
 
 # --- повторная попытка ------------------------------------------------------
@@ -191,7 +195,7 @@ def test_model_name_and_versions_are_recorded(rendered) -> None:
 def test_model_text_reaches_the_document(rendered) -> None:
     """Текст модели попадает в документ, а не теряется."""
     _, document = rendered
-    assert "25 736 328 136" in document_text(document)
+    assert "0,64" in document_text(document)
 
 
 def test_document_without_class_renders(db_conn, tmp_path) -> None:

@@ -222,14 +222,17 @@ def test_prompt_includes_all_blocks() -> None:
     assert "{blocks}" not in prompt
 
 
-def test_prompt_forbids_writing_first_section() -> None:
-    """Раздел «Ключевой вывод» и приложение модель не пишет."""
+def test_prompt_leaves_only_two_sections_to_the_model() -> None:
+    """Модель пишет разделы 3 и 5; остальное собирает расчёт.
+
+    Перечень запрета сузился не сам собой: каждый вынесенный раздел выносился
+    по данным замера, и после каждого проверялось, не переехала ли свобода
+    в соседний.
+    """
     prompt = load_prompt()
-    assert "Ключевой вывод" in prompt
-    # Задача 16 добавила раздел «Предложения по дальнейшим действиям»:
-    # он тоже собирается расчётом, и запрет теперь перечисляет три места.
-    assert "формируются расчётом, без тебя" in prompt
-    assert "Предложения по дальнейшим" in prompt
+    assert "Два раздела, и только они" in prompt
+    assert "формируются расчётом" in prompt
+    assert "приложение" in prompt
 
 
 def test_model_never_sees_raw_file() -> None:
