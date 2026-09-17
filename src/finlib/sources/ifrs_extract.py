@@ -258,9 +258,14 @@ def _extract_form(
     for index, line in enumerate(lines):
         name, values, alternative = _split_row(line, grouping, len(report_dates))
         # Координаты старше правил строения числа: они говорят, где кончается
-        # колонка, а правила об этом только догадываются.
+        # колонка, а правила об этом только догадываются. Но величин от этого
+        # не убывает: если ячейка не легла ни в одну колонку — у Норникеля
+        # так вышло с «Прочими финансовыми активами», где первая из трёх
+        # величин осталась за границами допуска, — чтение по координатам
+        # отбрасывается целиком. Свидетельство о границе колонки не повод
+        # потерять величину.
         by_coordinates = by_column.get(index)
-        if by_coordinates:
+        if by_coordinates and len(by_coordinates) >= len(values):
             values, alternative = by_coordinates, ()
         if not values:
             # Строка без величин — либо заголовок раздела, либо начало

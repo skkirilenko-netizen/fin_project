@@ -29,6 +29,7 @@ from pathlib import Path
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
 from finlib.quality.totals import TotalVerdict, check_total
+from finlib.sources.cbonds import other_shares
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
 from finlib.sources.ifrs_numbers import Grouping
@@ -46,11 +47,20 @@ HINT_MIN_RATIO = 0.45
 
 
 class Priority(IntEnum):
-    """Очерёдность показа: чем меньше, тем раньше."""
+    """Очерёдность показа: чем меньше, тем раньше.
 
-    BREAKS_TOTAL = 1
-    MATERIAL = 2
-    OTHER = 3
+    `IN_CBONDS_OTHER` — строка, которую внешний источник не различает:
+    она попала в его «прочие», и величина её существенна. Такая строка
+    стоит первой, потому что размечать имеет смысл ровно то, чего нет
+    больше нигде: основные формы Cbonds отдаёт нормализованными, а всё,
+    что свёрнуто в «прочие», есть только в PDF. У Автодора так свёрнуто
+    86 % валюты баланса, у ЛСР — 0,3 %, и разметка нужна им в разной мере.
+    """
+
+    IN_CBONDS_OTHER = 1
+    BREAKS_TOTAL = 2
+    MATERIAL = 3
+    OTHER = 4
 
 
 class Decision(IntEnum):
@@ -263,6 +273,7 @@ def _for_issuer(
     assets = issuer.extraction.value_of("ifrs.total_assets", issuer.report_date)
     threshold = catalog.materiality.share_of_total_assets
     broken = _unbalanced_totals(issuer, catalog)
+    hidden = other_shares(issuer.inn, issuer.report_date)
 
     found: list[Candidate] = []
     for row in issuer.extraction.unrecognised:
@@ -272,7 +283,29 @@ def _for_issuer(
             abs(row.largest) / abs(assets) if assets not in (None, Decimal(0)) else None
         )
         total_code, gap = _belongs_to(row, issuer, broken, catalog)
-        if total_code is not None:
+        # Раздел берётся от места строки, а не от привязки к несошедшемуся
+        # итогу: итог мог сойтись, а строка всё равно стоит в своём разделе.
+        section = _section_at(row, issuer, catalog) or _section_of(total_code, catalog)
+        # Строка, попавшая в «прочие» внешнего источника: её нет нигде, кроме
+        # PDF. Разметка нужна прежде всего ей.
+        #
+        # Порог здесь двойной, и оба нужны. Само «прочее» раздела обязано быть
+        # существенным по валюте баланса — иначе там нечего размечать: у ЛСР
+        # это от трёх десятых процента до двух, и раздел закрыт внешним
+        # источником целиком. А строка обязана быть существенной **внутри
+        # прочего**, а не по валюте баланса: у Сегежи прочие внеоборотные
+        # активы — тридцать процентов баланса, и строка в полтора процента
+        # валюты составляет двадцатую часть того, чего не видно вовсе.
+        bucket = hidden.get(section) if section else None
+        in_other = (
+            bucket is not None
+            and bucket.share_of_assets >= threshold
+            and bucket.amount != 0
+            and abs(row.largest) / abs(bucket.amount) >= threshold
+        )
+        if in_other:
+            priority = Priority.IN_CBONDS_OTHER
+        elif total_code is not None:
             priority = Priority.BREAKS_TOTAL
         elif share is not None and share >= threshold:
             priority = Priority.MATERIAL
@@ -396,6 +429,29 @@ def _totals_only(code: str, catalog: IfrsCatalog) -> bool:
         (item := catalog.get(component.code)) is not None and item.is_total
         for component in position.components
     )
+
+
+def _section_at(
+    row: UnrecognisedRow, issuer: IssuerMarkup, catalog: IfrsCatalog
+) -> str | None:
+    """Раздел, в котором стоит строка: по ближайшему итогу ниже неё.
+
+    То же правило, по которому строится иерархия итогов: в МСФО слагаемые
+    стоят над своим итогом.
+    """
+    places = issuer.extraction.forms[row.form].recognised_at
+    below = [
+        (place, code)
+        for code, place in places.items()
+        if place > row.index
+        and (position := catalog.get(code)) is not None
+        and position.is_total
+    ]
+    if not below:
+        return None
+    nearest = min(below)[1]
+    position = catalog.get(nearest)
+    return position.section if position is not None else None
 
 
 def _section_of(code: str | None, catalog: IfrsCatalog) -> str | None:

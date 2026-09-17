@@ -24,6 +24,9 @@ from finlib.sources.ifrs_markup import candidates, restore, review_saved
 
 logger = logging.getLogger(__name__)
 
+# Порядок показа очереди — тот же, что у самой очереди.
+PRIORITIES = ("IN_CBONDS_OTHER", "BREAKS_TOTAL", "MATERIAL", "OTHER")
+
 
 def main(argv: list[str] | None = None) -> int:
     """Печатает отчёт по разметке; ноль — прогон состоялся."""
@@ -84,16 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         rows = candidates([issuer], catalog)
         counts = Counter(item.priority.name for item in rows)
         overall_queue.update(counts)
-        breakdown = ", ".join(
-            f"{name} {counts[name]}" for name in ("BREAKS_TOTAL", "MATERIAL", "OTHER")
-        )
+        breakdown = ", ".join(f"{name} {counts[name]}" for name in PRIORITIES)
         print(f"  {issuer.inn}: {len(rows)} — {breakdown}")
     print(
         f"  всего {len(queue)} — "
-        + ", ".join(
-            f"{name} {overall_queue[name]}"
-            for name in ("BREAKS_TOTAL", "MATERIAL", "OTHER")
-        )
+        + ", ".join(f"{name} {overall_queue[name]}" for name in PRIORITIES)
     )
 
     print("\nСХОДИМОСТЬ ИТОГОВ")

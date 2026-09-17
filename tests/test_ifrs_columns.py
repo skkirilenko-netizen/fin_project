@@ -108,6 +108,54 @@ def test_same_name_in_two_sections_is_split_by_section() -> None:
     assert found.value_of("ifrs.short_term_borrowings", DATES[0]) == Decimal(35_876)
 
 
+def test_lease_and_provisions_are_split_by_section_too() -> None:
+    """Двойник не один: аренда и оценочные обязательства называются так же.
+
+    «Обязательства по аренде» стоят в балансе дважды у ФосАгро, Норникеля
+    и Сегежи, «Оценочные обязательства» — у Норникеля, «Резервы» — у ЛСР.
+    Затирания там не было — обе строки просто не опознавались вовсе,
+    и величины терялись тихо.
+    """
+    balance = """
+Консолидированный отчёт о финансовом положении
+Основные средства 83 589 56 128
+Итого внеоборотные активы 83 589 56 128
+Запасы 310 977 297 715
+Итого оборотные активы 310 977 297 715
+Итого активы 394 566 353 843
+Обязательства по аренде 401  381
+Оценочные обязательства 1 576  881
+Итого долгосрочные обязательства 1 977  1 262
+Обязательства по аренде 147  81
+Оценочные обязательства 196  173
+Итого краткосрочные обязательства 343  254
+"""
+    found = extract(balance, DATES, Grouping.RUSSIAN)
+    assert found.value_of("ifrs.long_term_lease_liabilities", DATES[0]) == Decimal(401)
+    assert found.value_of("ifrs.short_term_lease_liabilities", DATES[0]) == Decimal(147)
+    assert found.value_of("ifrs.long_term_provisions", DATES[0]) == Decimal(1576)
+    assert found.value_of("ifrs.short_term_provisions", DATES[0]) == Decimal(196)
+
+
+def test_coordinates_never_cost_a_value() -> None:
+    """Чтение по координатам отбрасывается, если величин в нём меньше.
+
+    У Норникеля «Прочие финансовые активы» — три величины, и первая
+    не легла ни в одну колонку: допуск по правому краю её не принял.
+    Свидетельство о границе колонки не повод потерять величину.
+    """
+    document = page_with_columns()
+    # Ячейка, стоящая далеко от всех колонок: чтение по координатам её теряет.
+    page = document.pages[0]
+    lost = TextPiece("999", 300.0, 700.0 - 2 * 14)
+    broken = PdfDocument(
+        (PdfPage(page.number, page.text, (*page.pieces, lost)),), extractor="проба"
+    )
+    found = extract(broken.text, DATES, Grouping.RUSSIAN, columns=broken.columns_of)
+    flows = found.forms["ifrs.statement_of_cash_flows"]
+    assert any(item.source_name == "Амортизация" for item in flows.values)
+
+
 def test_position_outside_its_section_is_not_recognised() -> None:
     """Статья оборотных активов не опознаётся в разделе внеоборотных.
 
