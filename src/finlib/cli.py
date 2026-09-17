@@ -540,9 +540,15 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         _show_candidate(item, len(queue))
 
         raw = typer.prompt(
-            "  код, номер подсказки, «д [код]» — детализация, «а [коды]» — агрегат, "
-            "«с [код]» — специфическая, «н» — не статья, «п» — пропустить, "
-            "«о» — отменить, «в» — выход",
+            "  код или номер подсказки — строка и есть эта позиция, в итог идёт\n"
+            "  «д [код]» — строка часть позиции. Если у позиции есть своя строка,\n"
+            "     величина уже внутри неё и в итог не идёт, а сумма частей\n"
+            "     обязана с ней совпасть; если своей строки нет — части\n"
+            "     составляют позицию и в итог идут\n"
+            "  «а [коды]» — строка укрупняет несколько позиций; в итог идёт целиком,\n"
+            "     на первую из перечисленных\n"
+            "  «с [код]» — статья, которой в справочнике нет; в итог идёт\n"
+            "  «н» — не статья, «п» — пропустить, «о» — отменить, «в» — выход",
             default="в",
         )
         answer, argument = _parse_command(raw)
@@ -618,15 +624,21 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
                     )
                 )
             elif matched is False:
+                declared = issuer.extraction.value_of(code, issuer.report_date)
                 typer.echo(
                     typer.style(
-                        f"  сумма детализации {total} не равна величине {code}: "
-                        "гипотеза не подтверждена",
+                        f"  сумма детализации {total} не равна раскрытой величине "
+                        f"{code} ({declared}): гипотеза не подтверждена. "
+                        "Детализация раскрытой позиции в итог не идёт — она уже "
+                        "внутри неё, — поэтому недостача итога не изменится",
                         fg=typer.colors.RED,
                     )
                 )
             else:
-                typer.echo("  проверить нечем: сама позиция у эмитента не раскрыта")
+                typer.echo(
+                    "  проверить нечем: сама позиция у эмитента не раскрыта, "
+                    "и детализация составит её величину целиком"
+                )
             continue
         if answer == "а":
             # Агрегат: строка укрупняет несколько позиций. Перечень объявляется
@@ -675,19 +687,34 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
             if not code:
                 typer.echo("  код не введён: строка осталась неразмеченной")
                 continue
-            taken = code_is_taken(code, catalog)
+            taken = code_is_taken(code, catalog, item.inn)
             if taken is not None:
                 typer.echo(typer.style(f"  код занят: {taken}", fg=typer.colors.RED))
                 continue
+            elsewhere = _code_seen_elsewhere(code, item.inn)
+            if elsewhere:
+                typer.echo(
+                    typer.style(
+                        f"  этот код уже есть у {elsewhere}: статья перестала быть "
+                        "специфической — её место в ядре справочника",
+                        fg=typer.colors.YELLOW,
+                    )
+                )
             issuer.dismissed[item.key] = Decision.SPECIFIC
+            issuer.specific[item.key] = code
             try:
                 _save_confirmation(issuer, item, code, who, relation="specific")
             except Exception as exc:  # noqa: BLE001 — откат и внятная причина
                 issuer.dismissed.pop(item.key, None)
+                issuer.specific.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
             history.append((item.inn, item.key, item.source_name))
             saved += 1
+            # Код заведён и годится дальше: у эмитента бывает вторая строка
+            # того же содержания, и её помечают детализацией этого же кода.
+            # Прежде такой ввод отвергался словами «кода нет в справочнике».
+            codes[code] = None
             typer.echo(
                 typer.style(
                     f"  сохранено: «{item.source_name}» → специфическая {code}",
@@ -703,6 +730,32 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
                     f"  кода «{answer}» нет в справочнике: строка осталась "
                     "неразмеченной",
                     fg=typer.colors.RED,
+                )
+            )
+            continue
+
+        if codes.get(answer) is None:
+            # Код подтверждённый, а не ядровый: такую же статью уже размечали
+            # у другого эмитента. Строка остаётся специфической — позиции
+            # в справочнике у кода нет, — и в итог раздела входит через
+            # `extras`, как всякая специфическая.
+            issuer.dismissed[item.key] = Decision.SPECIFIC
+            issuer.specific[item.key] = answer
+            try:
+                _save_confirmation(issuer, item, answer, who, relation="specific")
+            except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+                issuer.dismissed.pop(item.key, None)
+                issuer.specific.pop(item.key, None)
+                typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+                continue
+            history.append((item.inn, item.key, item.source_name))
+            saved += 1
+            elsewhere = _code_seen_elsewhere(answer, item.inn)
+            typer.echo(
+                typer.style(
+                    f"  сохранено: «{item.source_name}» → специфическая {answer}"
+                    + (f"; тот же код у {elsewhere}" if elsewhere else ""),
+                    fg=typer.colors.GREEN,
                 )
             )
             continue
@@ -819,6 +872,21 @@ def _parse_command(raw: str) -> tuple[str, str]:
     # Не команда: это код позиции либо номер подсказки, и регистр кодов
     # значения не имеет — они строчные по правилу справочника.
     return cleaned, ""
+
+
+def _code_seen_elsewhere(code: str, inn: str) -> str:
+    """У каких ещё эмитентов встречается этот код; пусто — ни у кого."""
+    from finlib.db import fetch_all
+
+    try:
+        rows = fetch_all(
+            "SELECT DISTINCT inn FROM ifrs_line_confirmation WHERE code = %(code)s",
+            {"code": code},
+        )
+    except Exception:  # noqa: BLE001 — разметка без базы тоже работает
+        return ""
+    others = sorted(row["inn"] for row in rows if row["inn"] != inn)
+    return ", ".join(others)
 
 
 def _ask_code(question: str, codes: dict) -> str | None:

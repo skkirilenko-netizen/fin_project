@@ -19,7 +19,7 @@
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -28,7 +28,7 @@ from pathlib import Path
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
-from finlib.quality.totals import TotalVerdict, check_total
+from finlib.quality.totals import TotalCheck, TotalVerdict, check_total
 from finlib.sources.cbonds import other_shares
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
@@ -44,6 +44,9 @@ TOLERANCE_SHARE = Decimal("0.0001")
 # Сколько подсказок показывать и насколько близким должно быть написание.
 HINT_COUNT = 5
 HINT_MIN_RATIO = 0.45
+# Порог для кодов, уже подтверждённых у другого эмитента: ниже общего.
+# Их немного, и пропустить такой код дороже, чем показать лишний.
+HINT_MIN_RATIO_CONFIRMED = 0.35
 
 
 class Priority(IntEnum):
@@ -155,6 +158,10 @@ class IssuerMarkup:
     parts: dict[tuple[str, int], str] = field(default_factory=dict)
     # Строки-агрегаты: ключ строки → позиции, которые строка укрупняет.
     aggregates: dict[tuple[str, int], tuple[str, ...]] = field(default_factory=dict)
+    # Специфические статьи: ключ строки → код, заведённый человеком. Код
+    # хранится, а не только признак «специфическая»: без него величина
+    # не попадает в итог раздела, и разметка не двигает арифметику.
+    specific: dict[tuple[str, int], str] = field(default_factory=dict)
 
     def decided(self, row: UnrecognisedRow) -> bool:
         """Решена ли строка — любым способом.
@@ -176,28 +183,89 @@ class IssuerMarkup:
         return self.profile.report_dates[0]
 
     def values(self, catalog: IfrsCatalog) -> dict[str, Decimal]:
-        """Величины по кодам с учётом присвоенного человеком."""
-        found = dict(self.extraction.totals(self.report_date))
+        """Величины по кодам с учётом присвоенного человеком.
+
+        **Что стоит в форме, то входит в итог своего раздела** — и различаются
+        виды разметки не этим, а тем, где именно величина уже посчитана.
+
+        | Вид | Идёт ли в итог |
+        |---|---|
+        | точное присвоение | да, задаёт величину позиции |
+        | детализация позиции **без своей строки** | да, части составляют её |
+        | детализация позиции **со своей строкой** | нет, она уже внутри неё |
+        | агрегат | да, кладётся на первую из покрываемых позиций |
+        | специфическая статья | да, но через `extras`: кода в справочнике нет |
+
+        Детализация раскрытой позиции — единственный случай, когда величина
+        в итог не идёт, и это не изъян режима, а его смысл: строка уже учтена
+        той строкой, частью которой объявлена. У ФосАгро «Прочие внеоборотные
+        активы» раскрыты величиной 90, и три строки на 23 823, помеченные их
+        детализацией, детализацией не являются — сумма не сходится, и
+        `check_part_of` это говорит.
+
+        Детализация складывается **целиком**: прежде бралась первая часть,
+        а остальные молча терялись, и недостача не двигалась, сколько строк
+        ни размечай.
+
+        Агрегат кладётся на первую из покрываемых позиций: разложить его
+        по нескольким нечем — разложения в отчётности нет, — а величина
+        в итоге нужна ровно одна.
+        """
+        disclosed = self.extraction.totals(self.report_date)
+        found = dict(disclosed)
+        details: dict[str, Decimal] = {}
         for row in self.extraction.unrecognised:
             if not row.values:
                 continue
-            # Точное присвоение задаёт величину позиции; детализация к ней
-            # прибавляется. Агрегат в сумму не идёт: он покрывает несколько
-            # позиций сразу, и подставлять его в одну значило бы удвоить.
-            code = self.assignments.get(row.key)
+            code = self.assignments.get(row.key) or (
+                self.aggregates.get(row.key) or (None,)
+            )[0]
             if code is not None:
                 found[code] = found.get(code, Decimal(0)) + row.values[0]
                 continue
             part = self.parts.get(row.key)
-            if part is not None and part not in found:
-                found[part] = found.get(part, Decimal(0)) + row.values[0]
+            if part is not None:
+                details[part] = details.get(part, Decimal(0)) + row.values[0]
+        for code, amount in details.items():
+            if code not in disclosed:
+                found[code] = found.get(code, Decimal(0)) + amount
+        return found
+
+    def extras(self, catalog: IfrsCatalog) -> dict[str, Decimal]:
+        """Величины, которые входят в итог раздела помимо позиций справочника.
+
+        Специфическая статья стоит в форме и в итог раздела входит, но кода
+        справочника у неё нет, и состав итога о ней не знает. Без этого
+        недостача не двигалась после разметки: у ФосАгро итог краткосрочных
+        обязательств не замечал «Дивиденды к уплате» (11 135), а итог
+        оборотных активов — «Налог на прибыль к возмещению» (11 881).
+
+        Раздел берётся по месту строки — ближайшему итогу ниже неё.
+        """
+        found: dict[str, Decimal] = {}
+        for row in self.extraction.unrecognised:
+            code = self.specific.get(row.key)
+            if code is None or not row.values:
+                continue
+            total = _total_below(row, self, catalog)
+            if total is None:
+                continue
+            found[total] = found.get(total, Decimal(0)) + row.values[0]
         return found
 
     def totals_state(self, catalog: IfrsCatalog) -> dict[str, TotalVerdict]:
         """Что с итогами сейчас: сошлись, не сошлись, проверять нечем."""
+        return {
+            code: outcome.verdict for code, outcome in self.totals(catalog).items()
+        }
+
+    def totals(self, catalog: IfrsCatalog) -> dict[str, TotalCheck]:
+        """Сверка каждого итога с учётом разметки и специфических статей."""
         values = self.values(catalog)
-        state: dict[str, TotalVerdict] = {}
+        extras = self.extras(catalog)
+        found: dict[str, TotalCheck] = {}
         for total in catalog.totals():
+            extra = extras.get(total.code, Decimal(0))
             outcome = check_total(
                 total,
                 values.get,
@@ -205,8 +273,8 @@ class IssuerMarkup:
                 lambda amount: abs(amount) * TOLERANCE_SHARE + Decimal(1),
                 normal_sign_of(catalog),
             )
-            state[total.code] = outcome.verdict
-        return state
+            found[total.code] = _with_extra(outcome, extra)
+        return found
 
 
 def load_issuer(
@@ -250,9 +318,10 @@ def candidates(
         for row in issuer.extraction.unrecognised:
             seen_by_name.setdefault(normalize_name(row.source_name), set()).add(issuer.inn)
 
+    confirmed = confirmed_names()
     found: list[Candidate] = []
     for issuer in issuers:
-        found.extend(_for_issuer(issuer, catalog, seen_by_name))
+        found.extend(_for_issuer(issuer, catalog, seen_by_name, confirmed))
 
     found.sort(
         key=lambda item: (
@@ -267,7 +336,10 @@ def candidates(
 
 
 def _for_issuer(
-    issuer: IssuerMarkup, catalog: IfrsCatalog, seen_by_name: dict[str, set[str]]
+    issuer: IssuerMarkup,
+    catalog: IfrsCatalog,
+    seen_by_name: dict[str, set[str]],
+    confirmed: tuple[tuple[str, str], ...] = (),
 ) -> list[Candidate]:
     """Кандидаты одного эмитента с привязкой к незакрытым итогам."""
     assets = issuer.extraction.value_of("ifrs.total_assets", issuer.report_date)
@@ -328,6 +400,7 @@ def _for_issuer(
                     catalog,
                     form=row.form,
                     section=_section_of(total_code, catalog),
+                    confirmed=confirmed,
                 ),
                 previous_name=row.previous_name,
                 next_name=row.next_name,
@@ -336,24 +409,41 @@ def _for_issuer(
     return found
 
 
+def _with_extra(outcome: TotalCheck, extra: Decimal) -> TotalCheck:
+    """Досчитывает к сумме состава то, чему кода в справочнике нет.
+
+    Специфическая статья стоит в форме и в итог раздела входит, но состав
+    итога о ней не знает — кода у неё в справочнике нет. Без этого разметка
+    режимом «с» не двигала недостачу вовсе, и выглядело это как потеря
+    величины.
+    """
+    if extra == 0 or outcome.computed is None or outcome.total is None:
+        return outcome
+    computed = outcome.computed + extra
+    difference = computed - outcome.total
+    tolerance = outcome.tolerance or Decimal(0)
+    return replace(
+        outcome,
+        computed=computed,
+        difference=difference,
+        verdict=(
+            TotalVerdict.MATCHED
+            if abs(difference) <= tolerance
+            else TotalVerdict.MISMATCHED
+        ),
+    )
+
+
 def _unbalanced_totals(
     issuer: IssuerMarkup, catalog: IfrsCatalog
 ) -> dict[str, Decimal]:
     """Несошедшиеся итоги и их недостача: сколько не хватает до суммы."""
-    values = issuer.values(catalog)
     broken: dict[str, Decimal] = {}
-    for total in catalog.totals():
-        outcome = check_total(
-            total,
-            values.get,
-            lambda code: None,
-            lambda amount: abs(amount) * TOLERANCE_SHARE + Decimal(1),
-            normal_sign_of(catalog),
-        )
+    for code, outcome in issuer.totals(catalog).items():
         if outcome.verdict is TotalVerdict.MISMATCHED and outcome.difference is not None:
             # Недостача положительна, когда сумма состава меньше итога:
             # именно столько ищется в неопознанных строках.
-            broken[total.code] = -outcome.difference
+            broken[code] = -outcome.difference
     return broken
 
 
@@ -431,6 +521,21 @@ def _totals_only(code: str, catalog: IfrsCatalog) -> bool:
     )
 
 
+def _total_below(
+    row: UnrecognisedRow, issuer: IssuerMarkup, catalog: IfrsCatalog
+) -> str | None:
+    """Код ближайшего итога ниже строки — итога её раздела."""
+    places = issuer.extraction.forms[row.form].recognised_at
+    below = [
+        (place, code)
+        for code, place in places.items()
+        if place > row.index
+        and (position := catalog.get(code)) is not None
+        and position.is_total
+    ]
+    return min(below)[1] if below else None
+
+
 def _section_at(
     row: UnrecognisedRow, issuer: IssuerMarkup, catalog: IfrsCatalog
 ) -> str | None:
@@ -462,11 +567,35 @@ def _section_of(code: str | None, catalog: IfrsCatalog) -> str | None:
     return position.section if position is not None else None
 
 
+def confirmed_names(conn=None) -> tuple[tuple[str, str], ...]:
+    """Подтверждённые коды с наименованием, как оно стояло у эмитента.
+
+    Нужны подсказкам: у второго эмитента та же статья называется почти так
+    же, и код для неё уже заведён. Без подсказки человек его не найдёт —
+    в справочнике кода нет, — и заведёт второй, а доля общих статей
+    от этого занизится.
+    """
+    from finlib.db import fetch_all
+
+    try:
+        rows = fetch_all(
+            "SELECT DISTINCT ON (code) code, source_name FROM ifrs_line_confirmation"
+            " WHERE relation = 'specific' ORDER BY code, confirmed_at",
+            {},
+            conn=conn,
+        )
+    except Exception as failure:  # noqa: BLE001 — разметка без базы тоже работает
+        logger.warning("подтверждённые наименования не прочитаны: %s", failure)
+        return ()
+    return tuple((row["code"], row["source_name"]) for row in rows)
+
+
 def hints_for(
     name: str,
     catalog: IfrsCatalog,
     form: str | None = None,
     section: str | None = None,
+    confirmed: tuple[tuple[str, str], ...] = (),
 ) -> tuple[Hint, ...]:
     """Ближайшие по написанию позиции ядра — из той же формы.
 
@@ -494,6 +623,19 @@ def hints_for(
         if ratio >= HINT_MIN_RATIO:
             same_section = section is not None and position.section == section
             scored.append((same_section, ratio, Hint(position.code, position.name, ratio)))
+    # Подтверждённые коды идут наравне с ядром: у второго эмитента та же
+    # статья называется почти так же, и код для неё уже заведён. Формой
+    # они не отсекаются — формы у них нет, — а раздел им неизвестен.
+    #
+    # Порог им ниже: список короток, а цена пропуска высока. Не увидев кода,
+    # человек заведёт второй для той же статьи, и доля общих статей —
+    # главное число ветки — занизится тем сильнее, чем лучше идёт разметка.
+    # «НДС к возмещению и текущие переплаты по налогам» против «НДС и прочие
+    # налоги к возмещению» дают 0,41 — ниже общего порога и явно то же самое.
+    for code, source_name in confirmed:
+        ratio = SequenceMatcher(None, target, normalize_name(source_name)).ratio()
+        if ratio >= HINT_MIN_RATIO_CONFIRMED:
+            scored.append((False, ratio, Hint(code, f"{source_name} (подтверждён)", ratio)))
     scored.sort(key=lambda item: (not item[0], -item[1]))
     return tuple(item[2] for item in scored[:HINT_COUNT])
 
@@ -563,9 +705,28 @@ def check_part_of(
     return abs(total - declared) <= tolerance, total
 
 
-def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition]:
-    """Коды ядра по коду — для проверки ввода."""
-    return {item.code: item for item in catalog.positions}
+def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition | None]:
+    """Коды, которые разметка принимает: ядро справочника и подтверждённые.
+
+    Специфический код заводится человеком на одной строке, но живёт дальше:
+    у эмитента бывает вторая строка того же содержания, и её надо пометить
+    детализацией того же кода. Прежде такой ввод отвергался словами «кода нет
+    в справочнике» — код был, но не там, где его искали.
+
+    Значение `None` означает, что код подтверждённый, а не ядровый: позиции
+    справочника у него нет, и раздел с формой у него взять неоткуда.
+    """
+    from finlib.db import fetch_all
+
+    found: dict[str, IfrsPosition | None] = {
+        item.code: item for item in catalog.positions
+    }
+    try:
+        for row in fetch_all("SELECT DISTINCT code FROM ifrs_line_confirmation", {}):
+            found.setdefault(row["code"], None)
+    except Exception as failure:  # noqa: BLE001 — разметка без базы тоже работает
+        logger.warning("подтверждённые коды не прочитаны: %s", failure)
+    return found
 
 
 _SAVED = """
@@ -689,6 +850,7 @@ def restore(issuers: list[IssuerMarkup], conn=None) -> int:
             issuer.aggregates[key] = tuple(row["related_codes"] or (row["code"],))
         elif relation == Relation.SPECIFIC.value:
             issuer.dismissed[key] = Decision.SPECIFIC
+            issuer.specific[key] = row["code"]
         else:
             issuer.assignments[key] = row["code"]
         restored += 1
@@ -713,13 +875,21 @@ def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
     return None
 
 
-def code_is_taken(code: str, catalog: IfrsCatalog, conn=None) -> str | None:
+def code_is_taken(
+    code: str, catalog: IfrsCatalog, inn: str | None = None, conn=None
+) -> str | None:
     """Занят ли код; возвращает объяснение, чем именно занят.
 
     Код ядра для специфической статьи брать нельзя: ядро описывает то,
-    что есть у всех, а специфическая статья — то, чего нет ни у кого
-    другого. Код, уже присвоенный другой статье, тоже занят — иначе две
-    разные вещи окажутся под одним кодом, и поднять их в ядро будет нельзя.
+    что есть у всех, а специфическая статья — то, чего нет ни у кого другого.
+
+    **У другого эмитента тот же код брать можно и нужно.** «НДС и прочие
+    налоги к возмещению» есть и у ФосАгро, и у Сегежи, и если второму
+    эмитенту код запрещён, одинаковые статьи остаются несвязанными,
+    а доля общих статей — главное число ветки — занижается тем сильнее,
+    чем лучше идёт разметка. Занятым код считается только внутри одного
+    эмитента: там второе присвоение означало бы две разные вещи под одним
+    кодом.
     """
     from finlib.db import fetch_all
 
@@ -727,11 +897,33 @@ def code_is_taken(code: str, catalog: IfrsCatalog, conn=None) -> str | None:
     if position is not None:
         return f"это код ядра: {position.name}"
     rows = fetch_all(_TAKEN, {"code": code}, conn=conn)
-    names = {row["source_name"] for row in rows}
-    if len(names) > 1 or (names and code not in {item for item in names}):
-        listed = ", ".join(sorted(names)[:3])
-        return f"код уже присвоен статье: {listed}"
+    mine = {row["source_name"] for row in rows if inn is None or row["inn"] == inn}
+    if mine:
+        listed = ", ".join(sorted(mine)[:3])
+        return f"у этого эмитента код уже присвоен статье: {listed}"
     return None
+
+
+def shared_specific(conn=None) -> dict[str, tuple[str, ...]]:
+    """Специфические коды, присвоенные более чем одному эмитенту.
+
+    Такой код перестал быть специфическим: статья встретилась у нескольких
+    эмитентов, и место ей в ядре справочника. Поднятие остаётся решением
+    человека и правкой YAML руками, а разметка обязана об этом сказать —
+    сама она справочник не правит.
+    """
+    from finlib.db import fetch_all
+
+    found: dict[str, set[str]] = {}
+    for row in fetch_all(
+        "SELECT code, inn FROM ifrs_line_confirmation WHERE relation = 'specific'",
+        {},
+        conn=conn,
+    ):
+        found.setdefault(row["code"], set()).add(row["inn"])
+    return {
+        code: tuple(sorted(inns)) for code, inns in found.items() if len(inns) > 1
+    }
 
 
 _LAST = """
