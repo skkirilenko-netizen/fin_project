@@ -132,10 +132,14 @@ def _worth_naming(
             seen.add(code)
             found.append(f"{rendered} — величина стоп-фактора")
 
+    # Только отчётный период: в metric_value лежат производные всех периодов,
+    # и без отбора в перечень наибольших изменений попадало движение
+    # трёхлетней давности, противоречащее тезису о том же показателе.
     changes = [
         row
         for row in data.derived
         if row["status"] == "ok"
+        and row["report_date"] == data.report_date
         and (parsed := parse_derived(row["metric_code"])) is not None
         and parsed.kind is DerivedKind.CHANGE_PCT
     ]
