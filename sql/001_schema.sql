@@ -328,21 +328,32 @@ COMMENT ON TABLE assessment_signal IS
 -- не формальность: стандарт отчётности разложение получает от оценки
 -- и вторым полем не дублируется, а без внешнего ключа это наследование
 -- ничем не обеспечено.
+-- Имя ограничения — то же, какое Postgres даёт ключу, объявленному в CREATE
+-- TABLE: иначе база и файл разойдутся именем при совпадающем смысле, а сверка
+-- схемы сравнивает их буквально. Ключ, созданный прежней редакцией этой
+-- догонки под другим именем, переименовывается, а не дублируется.
 DO $$
 DECLARE
     part text;
+    canonical text;
+    existing text;
 BEGIN
     FOREACH part IN ARRAY ARRAY[
         'assessment_metric', 'assessment_group', 'assessment_flag', 'assessment_signal'
     ] LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conrelid = part::regclass AND contype = 'f'
-        ) THEN
+        canonical := part || '_assessment_id_fkey';
+        SELECT conname INTO existing FROM pg_constraint
+        WHERE conrelid = part::regclass AND contype = 'f';
+
+        IF existing IS NULL THEN
             EXECUTE format(
                 'ALTER TABLE %I ADD CONSTRAINT %I '
                 'FOREIGN KEY (assessment_id) REFERENCES assessment (id) ON DELETE CASCADE',
-                part, part || '_assessment_fk'
+                part, canonical
+            );
+        ELSIF existing <> canonical THEN
+            EXECUTE format(
+                'ALTER TABLE %I RENAME CONSTRAINT %I TO %I', part, existing, canonical
             );
         END IF;
     END LOOP;

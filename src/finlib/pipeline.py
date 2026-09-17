@@ -53,6 +53,10 @@ logger = logging.getLogger(__name__)
 class Stage(StrEnum):
     """Этап обработки; порядок значений — порядок выполнения."""
 
+    # Сверка схемы идёт прежде работы с данными: база умеет молча разойтись
+    # с sql/001_schema.sql, и тогда отказ приходит не там, где причина,
+    # а отсутствующий внешний ключ не приходит вовсе.
+    SCHEMA = "сверка схемы базы"
     FETCH = "получение отчётности"
     LOAD = "нормализация и загрузка"
     QUALITY = "контроли качества"
@@ -135,6 +139,7 @@ def analyze(
             on_stage(item)
 
     with connection() as conn:
+        _check_schema(conn, report)
         if from_cache_only:
             report(Stage.FETCH, "пропущено: пересчёт из ранее загруженных данных")
             report(Stage.LOAD, "пропущено: пересчёт из ранее загруженных данных")
@@ -159,6 +164,27 @@ def analyze(
             inn, result, standard, directory, report
         )
     return result
+
+
+def _check_schema(conn: PgConnection, report: Callable[..., None]) -> None:
+    """Сверяет схему базы с DDL и останавливает цикл при нехватке объектов.
+
+    Сверка идёт один раз на процесс: схема за время прогона не меняется,
+    а регрессионный набор проводит через цикл полсотни организаций подряд.
+    Этап называется в выводе всегда — в том числе когда расхождений нет:
+    молчаливая проверка неотличима от невыполненной.
+    """
+    from finlib.schema import SchemaMismatchError, ensure_schema
+
+    try:
+        ensure_schema(conn)
+    except SchemaMismatchError as exc:
+        raise PipelineError(
+            Stage.SCHEMA,
+            f"{len(exc.problems)} объектов DDL нет в базе: {'; '.join(exc.problems[:3])}. "
+            "Примените схему: psql findb -f sql/001_schema.sql",
+        ) from exc
+    report(Stage.SCHEMA, "схема базы совпадает с sql/001_schema.sql")
 
 
 def _fetch_and_load(
@@ -231,6 +257,7 @@ def load_inbox(
             on_stage(item)
 
     with connection() as conn:
+        _check_schema(conn, report)
         _load_from_inbox(
             inn, None, conn, inbox, standard, report, result,
             stop_if_all_quarantined=False,

@@ -102,8 +102,13 @@ def test_pipeline_error_names_stage_and_reason() -> None:
 
 
 def test_stage_order_matches_the_pipeline() -> None:
-    """Этапы перечислены в порядке выполнения."""
+    """Этапы перечислены в порядке выполнения.
+
+    Сверка схемы идёт первой: работать с базой, разошедшейся с DDL, нельзя
+    ни на одном из следующих этапов.
+    """
     assert list(Stage) == [
+        Stage.SCHEMA,
         Stage.FETCH,
         Stage.LOAD,
         Stage.QUALITY,
