@@ -52,6 +52,10 @@ class GroupingUndetermined(StrEnum):
     AMBIGUOUS = "ambiguous"
     CONFLICTING = "conflicting"
     INSUFFICIENT = "insufficient"
+    # Улики есть, но их горстка против сотни неоднозначных чисел: у ФосАгро
+    # шесть против ста пятидесяти трёх. Большинством это не является,
+    # и голосование здесь ничего не решает.
+    OUTWEIGHED = "outweighed"
 
 
 # Пробелы, которыми верстают разряды: обычный, неразрывный, узкий неразрывный.
@@ -76,6 +80,24 @@ _DOT_DECIMAL = re.compile(r"\d\.(?:\d{1,2}|\d{4,})(?![\d])")
 _COMMA_AMBIGUOUS = re.compile(r"(?<![\d,.])\d{1,3},\d{3}(?![\d,.])")
 _DOT_AMBIGUOUS = re.compile(r"(?<![\d,.])\d{1,3}\.\d{3}(?![\d,.])")
 
+# Число, содержащее оба разделителя сразу: «11,266.5» и «11.266,5». Улика
+# бесспорная — один и тот же знак не бывает в одном числе и разрядным,
+# и десятичным, — и потому пригодная там, где остальные улики ложны.
+_BOTH_ENGLISH = re.compile(r"\d{1,3}(?:,\d{3})+\.\d+")
+_BOTH_RUSSIAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+")
+
+
+def decisive_evidence(text: str) -> tuple[int, int]:
+    """Сколько в тексте бесспорных улик за русскую и за английскую конвенцию.
+
+    Улика бесспорная — число с обоими разделителями сразу. Такие числа
+    ищутся по всему документу, а не только в таблицах форм: они не бывают
+    ложными, и отбирать их по месту незачем. У ФосАгро их семь, все
+    английские, и стоят они в таблице дивидендов — «11,266.5», — которую
+    голосование из выборки как раз исключает.
+    """
+    return len(_BOTH_RUSSIAN.findall(text)), len(_BOTH_ENGLISH.findall(text))
+
 
 class ArithmeticResolution(BaseModel):
     """Разрешение неоднозначности сходимостью итогов."""
@@ -95,6 +117,7 @@ class GroupingPolicy(BaseModel):
     not_money_rows: tuple[str, ...] = Field(min_length=1)
     min_evidence: int = Field(ge=1)
     min_share: Decimal = Field(gt=0, le=1)
+    min_decisive: Decimal = Field(gt=0, le=1)
     origin: str = Field(min_length=1)
     arithmetic_resolution: ArithmeticResolution
     reasons: dict[GroupingUndetermined, str]
@@ -417,6 +440,14 @@ def detect_grouping(
         return _undetermined(GroupingUndetermined.CONFLICTING, counts)
     if votes < policy.min_evidence:
         return _undetermined(GroupingUndetermined.INSUFFICIENT, counts)
+    # Улики считаются не сами по себе, а против неоднозначных чисел.
+    # У ФосАгро их шесть против ста пятидесяти трёх — три процента, — и все
+    # шесть оказались ложными: слипшаяся строка «5 573,628 507,689» читается
+    # как число с пробелом между разрядами. У остальных разобранных эмитентов
+    # неоднозначных чисел нет вовсе, и доля улик равна единице. Между тремя
+    # процентами и сотней порог можно ставить где угодно; он посередине.
+    if ambiguous and Decimal(total) / Decimal(total + ambiguous) < policy.min_decisive:
+        return _undetermined(GroupingUndetermined.OUTWEIGHED, counts)
     return GroupingDetection(winner, **counts)
 
 

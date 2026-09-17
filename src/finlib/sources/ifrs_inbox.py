@@ -32,6 +32,7 @@ from finlib.sources.ifrs_numbers import (
     GroupingDetection,
     ParsingPolicy,
     ballot,
+    decisive_evidence,
     detect_grouping,
     drop_not_money_rows,
     load_parsing_policy,
@@ -111,10 +112,18 @@ _MONTHS = {
     "ноября": 11,
     "декабря": 12,
 }
+# Год допускает пробел внутри: текстовый слой рвёт числа. У эмитента,
+# отчитывающегося в долларах, в шапке стоит «31 декабря 202 5», и дат
+# в документе не находилось вовсе. Пробел допускается только там, где год
+# стоит при месяце: отдельно взятое «202 5» годом не является.
 _LONG_DATE = re.compile(
-    r"\b(\d{1,2})\s+(" + "|".join(_MONTHS) + r")\s+(\d{4})", re.IGNORECASE
+    r"\b(\d{1,2})\s+(" + "|".join(_MONTHS) + r")\s+(\d\s?\d\s?\d\s?\d)",
+    re.IGNORECASE,
 )
 _SHORT_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
+
+# Голый год: подпись колонки, когда день и месяц названы один раз в шапке.
+_YEAR = re.compile(r"(?<![\d.,])((?:19|20)\d{2})(?![\d.,])")
 
 
 def text_of(path: Path) -> PdfDocument:
@@ -137,12 +146,25 @@ def identify(
     text: str,
     catalog: IfrsCatalog | None = None,
     policy: ParsingPolicy | None = None,
+    grouping: Grouping | None = None,
+    any_currency: bool = False,
 ) -> DocumentProfile | Rejection:
     """Определяет параметры документа либо отказывается его принимать.
 
     Порядок проверок — часть правила, а не деталь: текстовый слой, тип
     документа, периметр методики, валюта, единица, разделитель разрядов,
     отчётные даты, вид отчётности.
+
+    `grouping` задаёт конвенцию вручную, и тогда определение её пропускается
+    целиком. Это выход для документа, у которого разметка чисел не читается
+    ни голосованием, ни арифметикой; способ называется в журнале, потому что
+    доверие к нему иное — за него отвечает человек, а не документ.
+
+    `any_currency` принимает отчётность в любой валюте. Валюта относится
+    к **оценке**, а не к разбору: состав статей от неё не зависит, и разметка
+    справочника по отчётности в долларах делается ровно так же. Отказ
+    остаётся там, где считаются рублёвые показатели, а валюта представления
+    хранится в профиле.
     """
     catalog = catalog or load_ifrs_lines()
     policy = policy or load_parsing_policy()
@@ -185,13 +207,13 @@ def identify(
     # Чужая валюта в шапке формы решает дело даже при упоминании рубля рядом:
     # шапка коротка, случайных упоминаний в ней не бывает, а «в миллионах
     # долларов США» и есть объявление валюты отчётности.
-    if foreign is not None:
+    if foreign is not None and not any_currency:
         return Rejection(
             CheckCode.FILE_CURRENCY_NOT_ROUBLE,
             policy.currency.reasons["not_rouble"],
             {"currency": foreign},
         )
-    if not rouble:
+    if foreign is None and not rouble:
         return Rejection(
             CheckCode.FILE_CURRENCY_NOT_DETERMINED,
             policy.currency.reasons["not_determined"],
@@ -217,6 +239,15 @@ def identify(
 
     voting, removed = ballot("\n".join(voting_lines))
     detection = detect_grouping(voting, policy.digit_grouping)
+    if grouping is not None:
+        detection = replace(
+            detection, convention=grouping, reason=None, resolved_by="manual"
+        )
+        logger.warning(
+            "конвенция %s задана вручную; определение по документу дало %s",
+            grouping.value,
+            detect_grouping(voting, policy.digit_grouping).describe(),
+        )
     if removed or dropped_rows:
         logger.info(
             "голосование за конвенцию: исключено чисел %s; строк не в единице "
@@ -225,11 +256,20 @@ def identify(
             dropped_rows,
         )
 
+    if not detection.determined:
+        # Бесспорная улика — число с обоими разделителями сразу: «11,266.5»
+        # русской конвенцией не читается никак. Ищется по всему документу:
+        # у ФосАгро такие числа стоят в таблице дивидендов, которую
+        # голосование из выборки исключает, а в самих формах улик нет вовсе.
+        resolved = resolve_by_both_separators(text, detection)
+        if resolved is not None:
+            detection = resolved
+
     if not detection.determined and policy.digit_grouping.arithmetic_resolution.enabled:
-        # Число «663,888» само по себе допускает оба прочтения, но документ —
-        # не набор отдельных чисел: итог сходится с суммой слагаемых при
-        # верной конвенции и не сходится при неверной. Ответ берётся
-        # из документа, а не выбирается нами.
+        # Сходимость итогов различает конвенции далеко не всегда: умножение
+        # всех величин на тысячу сохраняет любое равенство сумм, и у ФосАгро
+        # 445 912 + 217 976 = 663 888 сходится при обоих прочтениях. Помогает
+        # она там, где прочтения дают разное число раскрытых величин.
         resolved = resolve_by_arithmetic(text, headings, policy, catalog, detection)
         if resolved is not None:
             detection = resolved
@@ -261,7 +301,7 @@ def identify(
 
     profile = DocumentProfile(
         forms=forms,
-        currency="RUB",
+        currency=foreign or "RUB",
         unit_code=unit,
         grouping=detection.convention,
         report_dates=dates,
@@ -387,6 +427,10 @@ _DIGIT_RUN = re.compile(r"\d+")
 # Номер пункта в начале строки: «6. Себестоимость реализованной продукции 18».
 _LIST_MARKER = re.compile(r"^\s*\d{1,2}[.)]\s+")
 
+# Чем кончается строка таблицы: величиной, величиной в скобках или прочерком
+# на месте нераскрытой величины.
+_ENDS_WITH_VALUE = re.compile(r"(?:\d[)%]*|[-–—])\s*$")
+
 # Дата словами и цифрами: «31 декабря 2025 года», «15.04.2026». В строке
 # таблицы дат не бывает, а в заголовке формы и в шапке колонок — бывают.
 _DATE_IN_LINE = re.compile(
@@ -410,6 +454,13 @@ def _is_table_row(line: str) -> bool:
     Поэтому из строки сначала вычитаются номер пункта и даты, и лишь потом
     считаются числа.
     """
+    # Строка таблицы кончается величиной последнего периода, проза —
+    # словом. Без этого условия за таблицу проходил абзац аудиторского
+    # заключения: «…отчетов о прибылях и убытках за годы, закончившиеся
+    # 31 декабря 2025, 2024 и 2023» — чисел в нём вдоволь, и формой
+    # становился он, а не форма пятнадцатью строками ниже.
+    if not _ENDS_WITH_VALUE.search(line):
+        return False
     cleaned = _DATE_IN_LINE.sub(" ", _LIST_MARKER.sub("", line))
     runs = _DIGIT_RUN.findall(cleaned)
     # Двух групп мало: в оглавлении ЛСР номер страницы записан диапазоном
@@ -493,7 +544,12 @@ def form_blocks(
                 gap = 0
                 continue
             if _continues_after_page_break(lines, number, cores, policy):
-                gap = 0
+                # Таблица начинается заново, и над ней снова стоит шапка:
+                # номер страницы, надпись о пояснениях, заголовки колонок
+                # по строке на дату. У ЛСР их одиннадцать — больше допуска
+                # разрыва, — поэтому счёт разрыва не просто обнуляется,
+                # а откладывается до первой строки новой таблицы.
+                gap, started = 0, False
                 continue
             # Разрыв считается только внутри таблицы. До её первой строки
             # идёт шапка — наименование формы, единица, заголовки колонок,
@@ -537,6 +593,32 @@ def forms_text(
     policy = policy or load_parsing_policy()
     blocks = form_blocks(text, headings, policy)
     return "\n".join("\n".join(lines) for lines in blocks.values())
+
+
+def resolve_by_both_separators(
+    text: str, detection: GroupingDetection
+) -> GroupingDetection | None:
+    """Разрешает конвенцию числами, содержащими оба разделителя сразу.
+
+    «11,266.5» — английская запись и никакая другая: один и тот же знак
+    не бывает в одном числе и разрядным, и десятичным. Такие числа в споре
+    не участвуют — они его решают, — поэтому достаточно, чтобы улики были
+    только одной стороны.
+    """
+    russian, english = decisive_evidence(text)
+    if bool(russian) == bool(english):
+        return None
+    winner = Grouping.RUSSIAN if russian else Grouping.ENGLISH
+    logger.info(
+        "конвенция %s: чисел с обоими разделителями сразу — русских %d, "
+        "английских %d",
+        winner.value,
+        russian,
+        english,
+    )
+    return replace(
+        detection, convention=winner, reason=None, resolved_by="both_separators"
+    )
 
 
 def resolve_by_arithmetic(
@@ -683,7 +765,7 @@ def _report_dates(text: str, policy: ParsingPolicy) -> tuple[date, ...]:
     found: set[date] = set()
     for match in _LONG_DATE.finditer(text):
         day, month, year = match.groups()
-        found.add(date(int(year), _MONTHS[month.lower()], int(day)))
+        found.add(date(int(year.replace(" ", "")), _MONTHS[month.lower()], int(day)))
     for match in _SHORT_DATE.finditer(text):
         day, month, year = match.groups()
         try:
@@ -703,6 +785,20 @@ def _report_dates(text: str, policy: ParsingPolicy) -> tuple[date, ...]:
         best = max(pairs, key=lambda items: (len(items), max(items)))
         ordered = sorted(best, reverse=True)[: policy.periods.max_count]
         return tuple(ordered)
+
+    # Полная дата в шапке может стоять одна, а колонки подписаны голыми
+    # годами: у Норникеля «ЗА ГОДЫ, ЗАКОНЧИВШИЕСЯ 31 ДЕКАБРЯ 2025, 2024
+    # И 2023», а над колонками «2025 2024 2023». Тогда день и месяц берутся
+    # из единственной даты, а годы — из тех, что названы рядом. Выдумывания
+    # здесь нет: и день с месяцем, и каждый год стоят в документе, соединяет
+    # их сама формулировка шапки.
+    if found:
+        latest = max(found)
+        span = range(latest.year - policy.periods.max_count + 1, latest.year + 1)
+        years = {int(item) for item in _YEAR.findall(text) if int(item) in span}
+        completed = {date(year, latest.month, latest.day) for year in years} | found
+        if len(completed) >= policy.periods.min_count:
+            return tuple(sorted(completed, reverse=True)[: policy.periods.max_count])
 
     ordered = sorted(found, reverse=True)[: policy.periods.max_count]
     if len(ordered) < policy.periods.min_count:

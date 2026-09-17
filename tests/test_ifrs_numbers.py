@@ -14,6 +14,7 @@ from finlib.sources.ifrs_numbers import (
     Grouping,
     GroupingUndetermined,
     check_plausibility,
+    decisive_evidence,
     detect_grouping,
     load_parsing_policy,
     parse_amount,
@@ -60,6 +61,32 @@ def test_phosagro_reads_comma_as_thousands_separator() -> None:
     assert found.russian_evidence == 0
     assert parse_amount("663,888", found.convention) == Decimal(663888)
     assert parse_amount("12.5", found.convention) == Decimal("12.5")
+
+
+def test_handful_of_evidence_does_not_outvote_ambiguity() -> None:
+    """Горстка улик против сотни неоднозначных чисел ничего не решает.
+
+    У ФосАгро улик шесть против ста пятидесяти трёх, и все шесть ложные:
+    слипшаяся строка «5 573,628 507,689» читается как число с пробелом
+    между разрядами. Голосование объявляло русскую конвенцию, и величины
+    расходились с отчётностью в тысячу раз.
+    """
+    document = "Итого активы 1 234 567\n" * 3 + "Выручка 663,888 507,718\n" * 40
+    found = detect_grouping(document)
+    assert not found.determined
+    assert found.reason is GroupingUndetermined.OUTWEIGHED
+
+
+def test_number_with_both_separators_decides() -> None:
+    """Число с обоими разделителями сразу — улика бесспорная.
+
+    «11,266.5» русской конвенцией не читается никак: один и тот же знак
+    не бывает в одном числе и разрядным, и десятичным. У ФосАгро такие числа
+    стоят в таблице дивидендов, которую голосование из выборки исключает.
+    """
+    assert decisive_evidence("дивиденд 11,266.5 млн руб.") == (0, 1)
+    assert decisive_evidence("дивиденд 11.266,5 млн руб.") == (1, 0)
+    assert decisive_evidence("Итого активы 663,888") == (0, 0)
 
 
 def test_russian_document_is_not_read_as_english() -> None:

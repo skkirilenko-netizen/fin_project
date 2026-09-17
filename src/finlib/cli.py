@@ -407,6 +407,15 @@ def ifrs_markup_command(
     limit: Annotated[
         int, typer.Option("--limit", help="Сколько строк показать за присест")
     ] = 0,
+    grouping: Annotated[
+        list[str],
+        typer.Option(
+            "--grouping",
+            help="Конвенция чисел вручную: ИНН=russian|english|plain, можно "
+            "повторять. Для документа, у которого разметка не читается "
+            "ни голосованием, ни арифметикой",
+        ),
+    ] = [],  # noqa: B006 — typer требует list по умолчанию
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Разметка неопознанных строк МСФО: присвоение кодов позициям модели.
@@ -419,7 +428,14 @@ def ifrs_markup_command(
     if not who.strip():
         _fail("укажите --who: подтверждение без автора в журнале бесполезно")
 
-    issuers, skipped = _load_issuers(path)
+    manual: dict[str, str] = {}
+    for item in grouping:
+        inn, _, convention = item.partition("=")
+        if not inn.strip() or not convention.strip():
+            _fail(f"--grouping принимает пару ИНН=конвенция, получено «{item}»")
+        manual[inn.strip()] = convention.strip()
+
+    issuers, skipped = _load_issuers(path, manual)
     if not issuers:
         _fail(f"в каталоге {path} нет документов, прошедших приём")
     for name, reason in skipped:
@@ -428,11 +444,19 @@ def ifrs_markup_command(
     _markup_loop(issuers, who.strip(), limit)
 
 
-def _load_issuers(path: Path) -> tuple[list, list[tuple[str, str]]]:
-    """Готовит эмитентов к разметке; непринятые документы называются отдельно."""
+def _load_issuers(
+    path: Path, grouping: dict[str, str] | None = None
+) -> tuple[list, list[tuple[str, str]]]:
+    """Готовит эмитентов к разметке; непринятые документы называются отдельно.
+
+    `grouping` — заданные вручную конвенции по ИНН: выход для документа,
+    разметка чисел которого не читается ни голосованием, ни арифметикой.
+    """
     from finlib.sources.ifrs_inbox import Rejection
     from finlib.sources.ifrs_markup import load_issuer
+    from finlib.sources.ifrs_numbers import Grouping
 
+    grouping = grouping or {}
     issuers, skipped = [], []
     for folder in sorted(p for p in path.iterdir() if p.is_dir()):
         documents = [
@@ -446,7 +470,12 @@ def _load_issuers(path: Path) -> tuple[list, list[tuple[str, str]]]:
         )
         if chosen is None:
             continue
-        found = load_issuer(chosen, folder.name)
+        chosen_grouping = grouping.get(folder.name)
+        found = load_issuer(
+            chosen,
+            folder.name,
+            Grouping(chosen_grouping) if chosen_grouping else None,
+        )
         if isinstance(found, Rejection):
             skipped.append((chosen.name, found.reason))
             continue

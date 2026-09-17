@@ -31,6 +31,7 @@ from finlib.normalize.lines import normalize_name
 from finlib.quality.totals import TotalVerdict, check_total
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
+from finlib.sources.ifrs_numbers import Grouping
 
 logger = logging.getLogger(__name__)
 
@@ -198,14 +199,24 @@ class IssuerMarkup:
         return state
 
 
-def load_issuer(path: Path, inn: str) -> IssuerMarkup | Rejection:
-    """Готовит эмитента к разметке: приём, разбор, ничего в базу."""
+def load_issuer(
+    path: Path, inn: str, grouping: Grouping | None = None
+) -> IssuerMarkup | Rejection:
+    """Готовит эмитента к разметке: приём, разбор, ничего в базу.
+
+    `grouping` задаёт разделитель разрядов вручную — для документа, у которого
+    он не читается ни голосованием, ни арифметикой.
+
+    Валюта разметке безразлична: состав статей от неё не зависит, и отчётность
+    в долларах размечается ровно так же. Отказ по валюте остаётся там, где
+    считаются рублёвые показатели.
+    """
     document = text_of(path)
     if not document.readable:
         from finlib.quality.codes import CheckCode
 
         return Rejection(CheckCode.FILE_NOT_PARSED, f"файл не прочитан: {document.error}")
-    profile = identify(document.text)
+    profile = identify(document.text, grouping=grouping, any_currency=True)
     if isinstance(profile, Rejection):
         return profile
     extraction = extract(document.text, profile.report_dates, profile.grouping)
