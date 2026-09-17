@@ -7,7 +7,14 @@
 """
 
 from finlib.quality.codes import CheckCode
-from finlib.quality.wiring import REGISTRY, calls_in_sources, summary, unwired
+from finlib.quality.wiring import (
+    REGISTRY,
+    calls_in_sources,
+    live_calls,
+    reachable_modules,
+    summary,
+    unwired,
+)
 
 
 def test_every_check_code_is_registered() -> None:
@@ -21,17 +28,33 @@ def test_every_check_code_is_registered() -> None:
 
 
 def test_wired_checks_are_actually_called() -> None:
-    """Контроль, числящийся действующим, обязан иметь боевой вызов.
+    """Контроль, числящийся действующим, обязан иметь вызов, достижимый из цикла.
 
-    Это прямая страховка от первого случая: `check_text` числился рабочим
-    и не выполнялся, потому что цикл не передавал ему контекст.
+    Прямая страховка от первого случая: `check_text` числился рабочим
+    и не выполнялся, потому что цикл не передавал ему контекст. Упоминания
+    кода мало — модуль, в котором он назван, обязан быть достижим
+    от `finlib.pipeline`, иначе контроль в боевом пути не выполняется вовсе.
     """
     idle = {
         code.value: item.called_from
         for code, item in REGISTRY.items()
-        if item.wired and not calls_in_sources(code)
+        if item.wired and not live_calls(code)
     }
     assert not idle, idle
+
+
+def test_reachability_is_computed_from_the_pipeline() -> None:
+    """Достижимость считается от цикла, а не от факта существования файла.
+
+    Без этого реестр считал бы подключённым всякий контроль, чей код
+    где-нибудь упомянут, — то есть повторил бы ошибку, от которой заведён.
+    """
+    live = reachable_modules()
+    assert "finlib.quality.checks" in live
+    assert "finlib.pipeline" in live
+    # Разбор файлов МСФО циклом ещё не вызывается: модуль написан, но
+    # в боевой путь не включён.
+    assert "finlib.sources.ifrs_numbers" not in live
 
 
 def test_wired_checks_are_called_where_declared() -> None:
@@ -44,7 +67,7 @@ def test_wired_checks_are_called_where_declared() -> None:
     for code, item in REGISTRY.items():
         if not item.wired:
             continue
-        actual = calls_in_sources(code)
+        actual = live_calls(code)
         declared = set(item.called_from)
         if not declared <= set(actual):
             wrong[code.value] = {"объявлено": item.called_from, "найдено": actual}
@@ -59,14 +82,30 @@ def test_unwired_checks_really_have_no_call() -> None:
     проверку правдоподобия, этот тест потребует сменить статус.
     """
     stale = {
-        code.value: calls_in_sources(code)
+        code.value: live_calls(code)
         for code, item in REGISTRY.items()
-        if not item.wired and calls_in_sources(code)
+        if not item.wired and live_calls(code)
     }
     assert not stale, (
         f"контроль вызывается, но числится неподключённым: {stale}. "
         "Переведите запись в реестре в wired и назовите места вызова"
     )
+
+
+def test_code_written_but_unreachable_is_not_called_wired() -> None:
+    """Код, написанный и не достижимый из цикла, подключённым не считается.
+
+    Разница между `calls_in_sources` и `live_calls` — это и есть третий
+    случай: определитель конвенции написан, покрыт тестами и упомянут
+    в своём модуле, но цикл его не зовёт.
+    """
+    written = calls_in_sources(CheckCode.DIGIT_GROUPING_NOT_DETERMINED)
+    live = live_calls(CheckCode.DIGIT_GROUPING_NOT_DETERMINED)
+    assert not live, live
+    assert not REGISTRY[CheckCode.DIGIT_GROUPING_NOT_DETERMINED].wired
+    # Само упоминание при этом может быть: модуль существует и работает,
+    # просто в боевой путь ещё не включён.
+    assert isinstance(written, tuple)
 
 
 def test_unwired_checks_name_the_reason_and_the_task() -> None:

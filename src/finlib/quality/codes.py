@@ -54,6 +54,20 @@ class CheckCode(StrEnum):
     FILE_PERIOD_NOT_DETERMINED = "file_period_not_determined"
     FILE_REPORTING_TYPE_UNKNOWN = "file_reporting_type_unknown"
     FILE_NOT_PARSED = "file_not_parsed"
+    # Документ без текстового слоя: разбирать нечего, нужен OCR.
+    FILE_TEXT_LAYER_MISSING = "file_text_layer_missing"
+    # Подан не комплект отчётности, а другой документ — чаще всего годовой
+    # отчёт эмитента. Проверяется первым: в годовом отчёте есть и числа,
+    # и упоминания отчётности, и любой параметр в нём «определится».
+    FILE_NOT_STATEMENTS = "file_not_statements"
+    # Финансовая организация: неклассифицированный баланс, свои показатели,
+    # отдельная методика не реализована.
+    FINANCIAL_INSTITUTION = "financial_institution"
+    FILE_CURRENCY_NOT_DETERMINED = "file_currency_not_determined"
+    # Отчётность не в рублях: методика рублёвая, пересчёт по курсу был бы
+    # нашим допущением поверх отчётности эмитента.
+    FILE_CURRENCY_NOT_ROUBLE = "file_currency_not_rouble"
+    FILE_PERIODS_NOT_DETERMINED = "file_periods_not_determined"
     # Конвенция записи чисел документа МСФО не определена. Отказ, а не выбор
     # по умолчанию: прочтения различаются в тысячу раз, и ни один контроль
     # сходимости ошибки не поймает — сойдётся всё, кроме самих величин.
@@ -93,6 +107,14 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     # Документ, числа которого прочесть нельзя, комплектом не становится.
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: Severity.BLOCKING,
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Severity.BLOCKING,
+    # Документ, который не является отчётностью либо не поддаётся разбору,
+    # комплектом не становится вовсе — фактов из него не пишется.
+    CheckCode.FILE_TEXT_LAYER_MISSING: Severity.BLOCKING,
+    CheckCode.FILE_NOT_STATEMENTS: Severity.BLOCKING,
+    CheckCode.FINANCIAL_INSTITUTION: Severity.BLOCKING,
+    CheckCode.FILE_CURRENCY_NOT_DETERMINED: Severity.BLOCKING,
+    CheckCode.FILE_CURRENCY_NOT_ROUBLE: Severity.BLOCKING,
+    CheckCode.FILE_PERIODS_NOT_DETERMINED: Severity.BLOCKING,
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.MULTIPLE_SOURCE_CODES: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
@@ -127,6 +149,12 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.FILE_NOT_PARSED: "разбор поданного файла отчётности",
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: "определение разделителя разрядов",
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: "правдоподобие разделителя разрядов",
+    CheckCode.FILE_TEXT_LAYER_MISSING: "наличие текстового слоя в документе",
+    CheckCode.FILE_NOT_STATEMENTS: "документ является финансовой отчётностью",
+    CheckCode.FINANCIAL_INSTITUTION: "организация в периметре методики",
+    CheckCode.FILE_CURRENCY_NOT_DETERMINED: "определение валюты отчётности",
+    CheckCode.FILE_CURRENCY_NOT_ROUBLE: "валюта отчётности в периметре методики",
+    CheckCode.FILE_PERIODS_NOT_DETERMINED: "определение отчётных дат",
     CheckCode.AMBIGUOUS_LINE_CODE: "неоднозначность кода строки",
     CheckCode.MULTIPLE_SOURCE_CODES: "строка раскрыта несколькими кодами",
     CheckCode.UNKNOWN_LINE_CODE: "код строки отсутствует в справочнике",

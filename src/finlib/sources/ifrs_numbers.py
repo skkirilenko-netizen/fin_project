@@ -107,12 +107,96 @@ class PlausibilityPolicy(BaseModel):
     thousand_tolerance: Decimal = Field(gt=0, lt=1)
 
 
+class TextLayerPolicy(BaseModel):
+    """Порог, ниже которого документ считается сканом без текстового слоя."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    min_characters: int = Field(ge=1)
+    origin: str = Field(min_length=1)
+
+    @property
+    def reason(self) -> str:
+        """Причина отказа: OCR финансовых таблиц отложен, и это сказано прямо."""
+        return (
+            "В документе нет текстового слоя: извлечено меньше знаков, чем "
+            f"требует методика ({self.min_characters}). Вероятно, подан скан; "
+            "распознавание текста не реализовано."
+        )
+
+
+class DocumentKindPolicy(BaseModel):
+    """Признаки того, что документ — финансовая отчётность."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    min_forms: int = Field(ge=1)
+    required_forms: tuple[str, ...] = Field(min_length=1)
+    reasons: dict[str, str]
+
+
+class FinancialInstitutionPolicy(BaseModel):
+    """Признаки организации вне периметра методики."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    markers: tuple[str, ...] = Field(min_length=1)
+    unclassified_balance_markers: tuple[str, ...] = Field(min_length=1)
+    reasons: dict[str, str]
+
+
+class CurrencyPolicy(BaseModel):
+    """Как в документе объявляется валюта отчётности."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rouble_markers: tuple[str, ...] = Field(min_length=1)
+    foreign_markers: dict[str, str]
+    reasons: dict[str, str]
+
+
+class UnitsPolicy(BaseModel):
+    """Как в документе объявляется единица измерения."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    markers: dict[str, str]
+    reasons: dict[str, str]
+
+
+class PeriodsPolicy(BaseModel):
+    """Сколько отчётных дат допускает модель."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    min_count: int = Field(ge=1)
+    max_count: int = Field(ge=1)
+    reasons: dict[str, str]
+
+
+class ReportingKindPolicy(BaseModel):
+    """Виды отчётности и оговорки, которые они влекут."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    markers: dict[str, str]
+    default: str = Field(min_length=1)
+    limitations: dict[str, str]
+
+
 class ParsingPolicy(BaseModel):
     """Правила разбора файла консолидированной отчётности."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     version: str = Field(min_length=1)
+    text_layer: TextLayerPolicy
+    document_kind: DocumentKindPolicy
+    financial_institution: FinancialInstitutionPolicy
+    currency: CurrencyPolicy
+    units: UnitsPolicy
+    periods: PeriodsPolicy
+    reporting_kind: ReportingKindPolicy
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy
 

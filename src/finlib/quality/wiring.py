@@ -15,10 +15,12 @@
 который работает, но которому не верят.
 """
 
+import ast
 import logging
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 
 from finlib.quality.codes import CheckCode
@@ -138,14 +140,55 @@ REGISTRY: dict[CheckCode, Wiring] = {
     # которого он вызывается, ещё нет: он появляется в задаче 23. Пока запись
     # честно говорит, что контроль не работает, — иначе его отсутствие
     # в журнале читалось бы как «нарушений не найдено».
+    # Приём файла МСФО написан и покрыт тестами, но циклом не вызывается:
+    # загрузка комплекта МСФО появляется в задаче 23. Пока весь разбор
+    # недостижим от `finlib.pipeline`, и все его отказы числятся
+    # неподключёнными — иначе их молчание читалось бы как отсутствие
+    # нарушений.
+    CheckCode.FILE_TEXT_LAYER_MISSING: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
+    CheckCode.FILE_NOT_STATEMENTS: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
+    CheckCode.FINANCIAL_INSTITUTION: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
+    CheckCode.FILE_CURRENCY_NOT_DETERMINED: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
+    CheckCode.FILE_CURRENCY_NOT_ROUBLE: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
+    CheckCode.FILE_PERIODS_NOT_DETERMINED: Wiring(
+        WiringStatus.NOT_WIRED,
+        date(2026, 9, 17),
+        reason="приём файла МСФО написан, но циклом ещё не вызывается",
+        planned_in="задача 23: загрузка комплекта МСФО",
+    ),
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: Wiring(
         WiringStatus.NOT_WIRED,
         date(2026, 9, 17),
         reason=(
-            "определитель конвенции готов, но разбора форм МСФО, из которого "
-            "он вызывается, ещё нет"
+            "определитель конвенции вызывается из приёма файла МСФО, "
+            "а сам приём циклом ещё не вызывается"
         ),
-        planned_in="задача 22: приём файла и определение параметров",
+        planned_in="задача 23: загрузка комплекта МСФО",
     ),
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Wiring(
         WiringStatus.NOT_WIRED,
@@ -157,6 +200,52 @@ REGISTRY: dict[CheckCode, Wiring] = {
         planned_in="задача 23: подключить контроль правдоподобия к разбору форм",
     ),
 }
+
+
+def _imports_of(path: Path) -> set[str]:
+    """Модули пакета, которые импортирует этот файл."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:  # pragma: no cover — синтаксис ловит линтер
+        return set()
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            found.add(node.module)
+        elif isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+    return {item for item in found if item.startswith("finlib.")}
+
+
+@lru_cache(maxsize=1)
+def reachable_modules() -> frozenset[str]:
+    """Модули, достижимые от цикла обработки по импортам.
+
+    Упоминания кода мало: третий случай был именно в том, что код написан,
+    верен и покрыт тестами, а из цикла не вызывается вовсе. Достижимость
+    считается статически от `finlib.pipeline` — точки входа всякой работы
+    с данными, включая CLI и регрессионный прогон. Импорты внутри функций
+    учитываются наравне с верхними: половина модулей проекта импортируется
+    именно так, ради разрыва циклов.
+    """
+    start = "finlib.pipeline"
+    seen: set[str] = set()
+    queue = [start]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        path = SOURCE_ROOT.parent / (name.replace(".", "/") + ".py")
+        if not path.exists():
+            continue
+        queue.extend(_imports_of(path) - seen)
+    return frozenset(seen)
+
+
+def module_name(relative: str) -> str:
+    """Имя модуля по пути внутри пакета: `quality/checks.py` → `finlib.quality.checks`."""
+    return "finlib." + relative.removesuffix(".py").replace("/", ".")
 
 
 def calls_in_sources(code: CheckCode) -> tuple[str, ...]:
@@ -176,6 +265,19 @@ def calls_in_sources(code: CheckCode) -> tuple[str, ...]:
         if any(mark in text for mark in marks):
             found.append(str(path.relative_to(SOURCE_ROOT)))
     return tuple(found)
+
+
+def live_calls(code: CheckCode) -> tuple[str, ...]:
+    """Места вызова, достижимые от цикла обработки.
+
+    Разница с `calls_in_sources` и есть суть реестра: код, упомянутый
+    в модуле, который из цикла не зовётся, в боевом пути не выполняется —
+    и его молчание не означает отсутствия нарушений.
+    """
+    live = reachable_modules()
+    return tuple(
+        item for item in calls_in_sources(code) if module_name(item) in live
+    )
 
 
 def unwired() -> dict[CheckCode, Wiring]:
