@@ -38,5 +38,5 @@ report:  ## Сформировать заключение в docx: make report I
 	uv run python -c "from finlib.report.document import build_report; \
 	print(build_report('$(INN)').path)"
 
-analyze:  ## Полный цикл по ИНН: make analyze INN=7736050003 ARGS=--no-llm
+analyze:  ## Полный цикл по ИНН: make analyze INN=7736050003 ARGS=--llm
 	uv run fin-analysis analyze --inn $(INN) $(ARGS)

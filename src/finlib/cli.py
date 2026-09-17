@@ -108,8 +108,13 @@ def _render(value: Decimal | None, unit: Unit, scale: int) -> str:
 def analyze_command(
     inn: Annotated[str, typer.Option("--inn", help=INN_HELP)],
     year: Annotated[int | None, typer.Option("--year", help="Последний отчётный год")] = None,
-    no_llm: Annotated[
-        bool, typer.Option("--no-llm", help="Документ без текстовых разделов")
+    llm: Annotated[
+        bool,
+        typer.Option(
+            "--llm",
+            help="Поручить связки между утверждениями языковой модели; "
+            "по умолчанию текстовая часть собирается расчётом",
+        ),
     ] = False,
     force_refresh: Annotated[
         bool, typer.Option("--force-refresh", help="Запросить источник, минуя кэш")
@@ -148,7 +153,7 @@ def analyze_command(
         result = analyze(
             inn,
             year=year,
-            with_llm=not no_llm,
+            with_llm=llm,
             force_refresh=force_refresh,
             directory=output,
             source=source,
@@ -358,8 +363,13 @@ def quality_command(
 @app.command("reprocess")
 def reprocess_command(
     inn: Annotated[str, typer.Option("--inn", help=INN_HELP)],
-    no_llm: Annotated[
-        bool, typer.Option("--no-llm", help="Документ без текстовых разделов")
+    llm: Annotated[
+        bool,
+        typer.Option(
+            "--llm",
+            help="Поручить связки между утверждениями языковой модели; "
+            "по умолчанию текстовая часть собирается расчётом",
+        ),
     ] = False,
     output: Annotated[
         Path | None, typer.Option("--output", help="Каталог для документа")
@@ -373,7 +383,7 @@ def reprocess_command(
     try:
         result = analyze(
             inn,
-            with_llm=not no_llm,
+            with_llm=llm,
             from_cache_only=True,
             directory=output,
             on_stage=_echo_stage,

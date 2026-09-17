@@ -51,6 +51,7 @@ class TextRule(StrEnum):
     QUESTION_ABOUT_DISCLOSURE = "question_about_disclosure"
     RISK_WITHOUT_VALUE = "risk_without_value"
     THESIS_NOT_QUOTED = "thesis_not_quoted"
+    GROUP_HEADING_MISSING = "group_heading_missing"
 
 
 SEVERITY: dict[TextRule, Severity] = {
@@ -71,6 +72,14 @@ SEVERITY: dict[TextRule, Severity] = {
     # получилось утверждение, которого расчёт не делал. Числа при этом верны,
     # и проверка чисел такое пропускает.
     TextRule.THESIS_NOT_QUOTED: Severity.BLOCKING,
+    # Наименование группы открывает абзац и относит стоящие в нём утверждения
+    # к группе показателей — той самой, по которой раскладывается балл.
+    # Сравнение документов 17.09.2026 показало, что этой разметки в тексте
+    # модели нет ни у одной из четырёх организаций: инструкция прямо запрещала
+    # переносить наименования групп, и модель ей следовала. Запрет снят,
+    # а требование стало проверяемым: тезисы сохранялись дословно, и
+    # thesis_not_quoted пропускал потерю структуры целиком.
+    TextRule.GROUP_HEADING_MISSING: Severity.BLOCKING,
     TextRule.DAYS_DIRECTION: Severity.WARNING,
     TextRule.FLAG_CONFLICT_NOT_STATED: Severity.WARNING,
     # Дубль вопроса и вопрос о нераскрытии портят перечень, но документу
@@ -131,6 +140,9 @@ class TextContext:
     # Предписанные тезисы, которые модель обязана привести дословно.
     # Пустой перечень означает, что схема тезисов не применялась.
     theses: tuple[str, ...] = ()
+    # Наименования групп показателей, по которым у организации есть тезисы.
+    # Каждое обязано открывать свой абзац раздела 3 — в обоих режимах сборки.
+    thesis_groups: tuple[str, ...] = ()
 
 
 _CLASS_ASSIGNED = re.compile(r"\bкласс\w*\s*[«\"'(]?\s*([A-E])\b", re.IGNORECASE)
@@ -200,6 +212,11 @@ RISK_PARAGRAPH_MIN = 80
 # Длина основы слова при сравнении вопросов: окончания отбрасываются.
 QUESTION_STEM = 5
 
+# Сколько первых знаков абзаца считается его началом. Наименование группы
+# стоит здесь: либо первым словом, либо в связке «переходя к…». Дальше идут
+# сами утверждения, и слова наименования встречаются в них постоянно.
+GROUP_HEADING_WINDOW = 80
+
 # Слова, по которым вопросы неразличимы.
 _STOP_WORDS = frozenset(
     {
@@ -244,7 +261,7 @@ def check_text(
 
     Согласованность состава отчётности между «Ограничениями» и «Происхождением
     документа» проверяется не здесь, а в `report/consistency.py`: она о данных
-    документа, а не о тексте модели, и нужна даже при `--no-llm`.
+    документа, а не о тексте модели, и нужна в обоих режимах сборки.
     """
     whole = "\n".join(sections.values())
     marked = raw_sections if raw_sections is not None else sections
@@ -261,7 +278,57 @@ def check_text(
     found += _days_direction(whole, context)
     found += _flag_conflict_is_stated(whole, context)
     found += _theses_are_quoted(marked, context)
+    found += _groups_are_headed(sections, context)
     return found
+
+
+def _groups_are_headed(
+    sections: dict[int, str], context: TextContext
+) -> list[TextIssue]:
+    """Каждая группа показателей открывает свой абзац наименованием.
+
+    Раздел 3 разложен по группам показателей — тем же, по которым считается
+    балл, — и наименование группы в начале абзаца это отношение называет.
+    Без него перечень утверждений остаётся верным, а деление на группы
+    пропадает: читатель не видит, о ликвидности идёт речь или о структуре
+    капитала, и раздел перестаёт соответствовать разложению балла
+    в приложении.
+
+    Наименование ищется в начале абзаца, а не где угодно в разделе: слова
+    наименования стоят и в самих утверждениях — «коэффициент текущей
+    ликвидности» содержит «ликвидность», — и проверка по всему тексту
+    пропускала бы ровно тот случай, ради которого написана.
+
+    Сравниваются основы слов, а не точное написание: русские наименования
+    склоняются, и «Структура капитала» приходит как «к структуре капитала».
+    Расчёт ставит наименование первым словом абзаца, модель вправе ввести
+    его оборотом — засчитывается и то и другое.
+    """
+    if not context.thesis_groups:
+        return []
+    text = sections.get(THESES_SECTION, "")
+    if not text:
+        return []
+    openings = [
+        _stems(paragraph[:GROUP_HEADING_WINDOW])
+        for paragraph in text.split("\n")
+        if paragraph.strip()
+    ]
+    missing = [
+        name
+        for name in context.thesis_groups
+        if not any(_stems(name) <= opening for opening in openings)
+    ]
+    if not missing:
+        return []
+    return [
+        TextIssue(
+            TextRule.GROUP_HEADING_MISSING,
+            f"группы показателей не названы в разделе «Аналитическая "
+            f"интерпретация»: {', '.join(missing)}",
+            context=missing[0],
+        )
+    ]
 
 
 # Раздел, который собирается из предписанных тезисов.
@@ -565,6 +632,14 @@ def _risks_name_values(sections: dict[int, str]) -> list[TextIssue]:
             context=loose[0][:120],
         )
     ]
+
+
+def _stems(text: str) -> frozenset[str]:
+    """Основы значимых слов: окончания русских наименований отбрасываются."""
+    return frozenset(
+        word[:QUESTION_STEM]
+        for word in re.findall(r"[а-яёa-z]{4,}", text.casefold())
+    )
 
 
 def _question_key(text: str) -> str:

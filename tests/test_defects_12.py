@@ -444,10 +444,10 @@ def test_defect_4_count_matches_the_methodology(db_conn) -> None:
 
 
 def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
-    """Документ без текстовой части объясняет своё содержимое сам."""
+    """Документ, собранный расчётом, объясняет своё содержимое сам."""
     from docx import Document
 
-    from finlib.report.document import DISCLAIMER, DISCLAIMER_NO_TEXT, build_report
+    from finlib.report.document import DISCLAIMER, DISCLAIMER_CALCULATED, build_report
 
     report = build_report(
         NO_CLASS_INN, db_conn, directory=tmp_path, with_text=False
@@ -455,11 +455,12 @@ def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
     document = Document(report.path)
     text = "\n".join(item.text for item in document.paragraphs)
 
-    # Дисклеймер контекстный: утверждать, что текст подготовлен моделью
-    # и проверен, в документе без модели — ложь.
-    assert DISCLAIMER_NO_TEXT in text
+    # Дисклеймер контекстный: утверждать, что связки порождены моделью,
+    # в документе, собранном расчётом, — ложь.
+    assert DISCLAIMER_CALCULATED in text
     assert DISCLAIMER not in text
     assert "не привлекалась" in text
+    assert "воспроизводим" in text
 
     # Пустым он при этом не выглядит: раздел 1 содержателен, приложение полно.
     assert "Класс финансового состояния не присвоен" in text
@@ -471,19 +472,21 @@ def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
 
 
 def test_document_title_matches_its_content(db_conn, tmp_path) -> None:
-    """Документ без текстовой части называется справкой, а не заключением.
+    """Документ называется заключением в обоих режимах сборки.
 
-    Оговорка внутри прямо называет его расчётной справкой, и заголовок
-    «Заключение» ей противоречил бы.
+    Прежде собранный без модели назывался расчётной справкой: тогда разделы 2,
+    4 и 6 писала модель, и без неё документ терял содержание. Теперь все
+    утверждения предписаны расчётом в обоих режимах, различаются только
+    связки, и называть документ справкой из-за них — неправда о нём.
     """
     from docx import Document
 
-    from finlib.report.document import TITLE, TITLE_NO_TEXT, build_report
+    from finlib.report.document import TITLE, build_report
 
     report = build_report(FULL_INN, db_conn, directory=tmp_path, with_text=False)
     text = "\n".join(item.text for item in Document(report.path).paragraphs)
-    assert TITLE_NO_TEXT in text
-    assert TITLE not in text
+    assert TITLE in text
+    assert "справка" not in text.casefold()
 
 
 def test_footnote_does_not_point_at_a_missing_table(db_conn) -> None:

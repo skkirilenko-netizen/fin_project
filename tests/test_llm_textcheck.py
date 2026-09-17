@@ -277,10 +277,84 @@ def test_blocking_rules_match_the_specification() -> None:
         # Задача 18: тезис предписан методикой и приводится дословно. Пересказ
         # молча искажает содержание, а числа при этом остаются верными.
         TextRule.THESIS_NOT_QUOTED,
+        # Раскладка раздела 3 по группам показателей — та же, по которой
+        # считается балл. Без наименования группы абзац теряет отношение
+        # к ней, а тезисы остаются дословными, и их проверка молчит.
+        TextRule.GROUP_HEADING_MISSING,
     }
     assert {
         rule for rule, level in SEVERITY.items() if level is Severity.BLOCKING
     } == expected
+
+
+# --- раскладка раздела 3 по группам показателей -----------------------------
+
+GROUPED = TextContext(thesis_groups=("Ликвидность", "Структура капитала"))
+
+
+def test_missing_group_heading_is_blocking() -> None:
+    """Абзац без наименования группы отменяет ответ.
+
+    Сравнение документов 17.09.2026: тезисы приведены дословно, а деление
+    на группы пропало во всех четырёх документах. Проверка тезисов такую
+    потерю не видит — она сверяет утверждения, а не строение раздела.
+    """
+    text = (
+        "Оборотных активов больше, чем краткосрочных обязательств: "
+        "коэффициент текущей ликвидности 1,49.\n"
+        "При этом собственный капитал положителен: 7 252 788 тыс. руб."
+    )
+    found = issues(text, context=GROUPED)
+    assert TextRule.GROUP_HEADING_MISSING in {item.rule for item in found}
+    assert blocking(found)
+
+
+def test_named_groups_pass() -> None:
+    """Наименование группы, введённое оборотом, правилу отвечает."""
+    text = (
+        "Ликвидность. Оборотных активов больше, чем краткосрочных "
+        "обязательств: коэффициент текущей ликвидности 1,49.\n"
+        "Переходя к структуре капитала, отметим: собственный капитал "
+        "положителен: 7 252 788 тыс. руб."
+    )
+    assert TextRule.GROUP_HEADING_MISSING not in rules(text, context=GROUPED)
+
+
+def test_group_name_inside_a_thesis_does_not_count() -> None:
+    """Слово наименования внутри утверждения подзаголовком не считается.
+
+    «Коэффициент текущей ликвидности» содержит слово «ликвидность», и проверка
+    по всему тексту засчитала бы группу там, где абзац её не открывает, —
+    то есть молчала бы ровно в том случае, ради которого написана.
+    """
+    text = (
+        "Показатели организации за отчётный период приведены ниже, и первым "
+        "из них стоит коэффициент текущей ликвидности 1,49 при собственном "
+        "капитале 7 252 788 тыс. руб."
+    )
+    assert TextRule.GROUP_HEADING_MISSING in rules(text, context=GROUPED)
+
+
+def test_group_headings_are_not_required_without_theses() -> None:
+    """При свободной генерации раскладки по группам нет, и правило молчит."""
+    assert TextRule.GROUP_HEADING_MISSING not in rules("Ликвидность снизилась.")
+
+
+def test_calculated_section_names_every_group(db_conn) -> None:
+    """Раздел 3, собранный расчётом, правилу отвечает по построению.
+
+    Требование одно на оба режима, поэтому и проверяется на обоих: связка
+    `narrative.lead` ставит наименование группы первым словом абзаца.
+    """
+    from finlib.scoring.theses import build_theses
+
+    found = build_theses("2100010824", db_conn)
+    text = "\n".join(found.narrative())
+    context = TextContext(thesis_groups=tuple(name for name, _ in found.by_group()))
+    assert context.thesis_groups, "у организации должны быть тезисы хотя бы одной группы"
+    assert TextRule.GROUP_HEADING_MISSING not in {
+        item.rule for item in check_text({3: text}, context)
+    }
 
 
 def test_warnings_do_not_block() -> None:

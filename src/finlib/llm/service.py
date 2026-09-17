@@ -138,14 +138,19 @@ def with_corrections(prompt: str, problems: list[str]) -> str:
 
 def _thesis_texts(
     context: ConclusionContext, conn: PgConnection | None, standard: Standard
-) -> tuple[str, ...]:
-    """Предписанные тезисы, которые модель обязана привести дословно."""
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Предписанные тезисы и наименования групп, по которым они разложены.
+
+    Возвращаются вместе: обе величины берутся из одного перечня тезисов,
+    и собрать их порознь значило бы дважды спросить расчёт об одном и том же.
+    """
     from finlib.scoring.theses import build_theses
 
     found = build_theses(
         context.inn, conn, report_date=context.report_date, standard=standard
     )
-    return tuple(item.text for item in found.theses)
+    groups = tuple(name for name, _ in found.by_group())
+    return tuple(item.text for item in found.theses), groups
 
 
 def _text_context(
@@ -281,9 +286,11 @@ def generate_conclusion(
     )
     if scheme is PromptScheme.THESES:
         # Состав утверждений проверяется только там, где он предписан:
-        # при свободной генерации сверять текст не с чем.
+        # при свободной генерации сверять текст не с чем. Раскладка по группам
+        # приходит оттуда же: группы объявлены тем же перечнем тезисов.
+        theses, groups = _thesis_texts(context, conn, standard)
         text_context = replace(
-            text_context, theses=_thesis_texts(context, conn, standard)
+            text_context, theses=theses, thesis_groups=groups
         )
     prompt = build_prompt(context, scheme=scheme)
     blocks = context.blocks()

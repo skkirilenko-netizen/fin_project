@@ -135,7 +135,7 @@ def test_reprocess_skips_the_source(tmp_path) -> None:
     """Пересчёт идёт по загруженным данным и к источнику не обращается."""
     result = runner.invoke(
         app,
-        ["reprocess", "--inn", STOPPED_INN, "--no-llm", "--output", str(tmp_path)],
+        ["reprocess", "--inn", STOPPED_INN, "--output", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
     assert "пропущено: пересчёт из ранее загруженных данных" in result.output
@@ -144,20 +144,45 @@ def test_reprocess_skips_the_source(tmp_path) -> None:
 
 
 def test_document_without_text_says_so(tmp_path) -> None:
-    """Документ без разделов модели оговаривает это прямо."""
+    """Документ, собранный расчётом, оговаривает это прямо.
+
+    Сборка расчётом — режим по умолчанию, поэтому флага в вызове нет:
+    обращение к модели включается `--llm`.
+    """
     from docx import Document
 
-    from finlib.report.document import NO_TEXT_NOTICE
+    from finlib.report.document import CALCULATED_TEXT_NOTICE
 
     result = runner.invoke(
         app,
-        ["reprocess", "--inn", STOPPED_INN, "--no-llm", "--output", str(tmp_path)],
+        ["reprocess", "--inn", STOPPED_INN, "--output", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
     path = next(iter(tmp_path.glob("*.docx")))
     text = "\n".join(item.text for item in Document(path).paragraphs)
-    assert NO_TEXT_NOTICE in text
+    assert CALCULATED_TEXT_NOTICE in text
     assert "Ключевой вывод" in text, "расчётная часть остаётся полной"
+
+
+def test_model_is_off_by_default(tmp_path, monkeypatch) -> None:
+    """Без `--llm` к модели не обращаются вовсе.
+
+    Умолчание развёрнуто по замеру 17.09.2026: сборка расчётом даёт документ
+    всегда и за секунды, а вклад модели укладывается в связки одного раздела.
+    Сторож здесь грубый и потому надёжный — обращение к модели поднимает
+    исключение, и молчаливого вызова не останется.
+    """
+    import finlib.llm.client as client_module
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("модель вызвана без --llm")
+
+    monkeypatch.setattr(client_module.LLMClient, "complete", refuse)
+    result = runner.invoke(
+        app, ["reprocess", "--inn", STOPPED_INN, "--output", str(tmp_path)]
+    )
+    assert result.exit_code == 0, result.output
+    assert list(tmp_path.glob("*.docx")), "документ не записан"
 
 
 def test_document_without_text_records_no_model(tmp_path) -> None:
@@ -166,7 +191,7 @@ def test_document_without_text_records_no_model(tmp_path) -> None:
 
     result = runner.invoke(
         app,
-        ["reprocess", "--inn", STOPPED_INN, "--no-llm", "--output", str(tmp_path)],
+        ["reprocess", "--inn", STOPPED_INN, "--output", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
     path = next(iter(tmp_path.glob("*.docx")))

@@ -89,7 +89,7 @@ class PipelineResult:
     document: Path | None = None
     stages: list[StageResult] = field(default_factory=list)
     quarantined: int = 0
-    with_llm: bool = True
+    with_llm: bool = False
 
 
 def analyze(
@@ -97,7 +97,7 @@ def analyze(
     *,
     year: int | None = None,
     standard: Standard = Standard.RSBU,
-    with_llm: bool = True,
+    with_llm: bool = False,
     force_refresh: bool = False,
     from_cache_only: bool = False,
     directory: Path | None = None,
@@ -107,6 +107,12 @@ def analyze(
     scheme: PromptScheme = DEFAULT_SCHEME,
 ) -> PipelineResult:
     """Проводит организацию через весь цикл и возвращает путь к заключению.
+
+    with_llm по умолчанию выключен: текстовую часть собирает расчёт. Замер
+    17.09.2026 на подвыборке из семи организаций показал, чем оборачивается
+    обратное умолчание — документов 4 из 7 против 7 из 7, тридцать минут
+    против полутора секунд, а вклад модели укладывается в связки одного
+    раздела. Обращение к модели включается явно.
 
     from_cache_only пропускает обращение к источнику: пересчёт идёт по уже
     загруженным фактам. force_refresh, наоборот, заставляет источник ответить
