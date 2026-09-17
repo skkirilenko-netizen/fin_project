@@ -31,6 +31,7 @@ from finlib.sources.ifrs_numbers import (
     Grouping,
     GroupingDetection,
     ParsingPolicy,
+    ballot,
     detect_grouping,
     load_parsing_policy,
 )
@@ -201,13 +202,23 @@ def identify(
             CheckCode.UNIT_NOT_DETERMINED, policy.units.reasons["not_determined"]
         )
 
-    detection = detect_grouping(text, policy.digit_grouping)
+    # За конвенцию голосуют только денежные величины таблиц: примечания
+    # и текстовая часть полны чисел, которые денежными не являются —
+    # номеров пунктов, ссылок на стандарты, процентов, — и каждое такое
+    # число подаёт ложную улику.
+    voting, removed = ballot(forms_text(text, headings))
+    detection = detect_grouping(voting, policy.digit_grouping)
+    if removed:
+        logger.info(
+            "голосование за конвенцию: исключено чисел %s",
+            ", ".join(f"{name} — {count}" for name, count in sorted(removed.items())),
+        )
     if not detection.determined:
         reason = policy.digit_grouping.reasons[detection.reason]
         return Rejection(
             CheckCode.DIGIT_GROUPING_NOT_DETERMINED,
             reason,
-            {"detection": detection.describe()},
+            {"detection": detection.describe(), "excluded": removed},
         )
 
     dates = _report_dates(text, policy)
@@ -291,6 +302,23 @@ def _table_rows_after(lines: list[str], index: int, window: int) -> int:
     return sum(
         1 for line in lines[index + 1 : index + 1 + window] if _TABLE_ROW.search(line)
     )
+
+
+def forms_text(text: str, headings: dict[str, int]) -> str:
+    """Текст блоков форм: от заголовка каждой до начала следующей.
+
+    Всё, что вне блоков, — примечания, аудиторское заключение, оглавление —
+    в голосовании за конвенцию не участвует: чисел там больше, чем в формах,
+    и денежных величин среди них почти нет.
+    """
+    if not headings:
+        return ""
+    ordered = sorted(headings.values())
+    parts = []
+    for index, start in enumerate(ordered):
+        end = ordered[index + 1] if index + 1 < len(ordered) else len(text)
+        parts.append(text[start:end])
+    return "\n".join(parts)
 
 
 def header_of(text: str, position: int, policy: ParsingPolicy) -> str:

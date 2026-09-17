@@ -188,14 +188,36 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
 
 
 def run(directory: Path, write: bool = False) -> IntakeReport:
-    """Проводит все документы каталога."""
+    """Проводит по одному документу на эмитента.
+
+    Рядом с PDF часто лежит текстовая выгрузка того же комплекта. Считать
+    оба значило бы удвоить статистику: доля автоматического прохождения
+    посчиталась бы по документам, а не по эмитентам, а это разные величины.
+    Предпочитается PDF как первоисточник; текстовая выгрузка берётся, когда
+    PDF нет.
+    """
     report = IntakeReport()
-    for path in sorted(directory.rglob("*")):
-        if path.suffix.lower() not in SUFFIXES:
-            continue
+    for folder in sorted({path.parent for path in directory.rglob("*")}):
         # ИНН берётся из имени каталога: файл кладут в data/raw/ifrs/{ИНН}/.
-        inn = path.parent.name if path.parent.name.isdigit() else None
-        report.runs.append(run_one(path, write=write, inn=inn))
+        inn = folder.name if folder.name.isdigit() else None
+        found = [
+            path
+            for path in sorted(folder.iterdir())
+            if path.suffix.lower() in SUFFIXES
+        ]
+        if not found:
+            continue
+        chosen = next(
+            (path for path in found if path.suffix.lower() == ".pdf"), found[0]
+        )
+        if len(found) > 1:
+            logger.info(
+                "у эмитента %s документов %d, разбирается %s",
+                inn or folder.name,
+                len(found),
+                chosen.name,
+            )
+        report.runs.append(run_one(chosen, write=write, inn=inn))
     return report
 
 

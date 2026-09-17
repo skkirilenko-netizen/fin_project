@@ -35,6 +35,18 @@ logger = logging.getLogger(__name__)
 # нет: модель хранит три, как и для РСБУ.
 PERIOD_ROLES: tuple[str, ...] = ("current", "previous", "before_previous")
 
+# Организация по МСФО может быть новой: в базе РСБУ её нет, если отчётность
+# по ней не загружалась. Наименование не выдумывается — оно остаётся пустым
+# до тех пор, пока не будет извлечено из документа: назвать организацию
+# по имени файла значило бы взять название из того, что назначил человек,
+# выгружавший отчётность.
+_ENSURE_ORGANIZATION = """
+INSERT INTO organization (inn, name) VALUES (%(inn)s, %(name)s)
+ON CONFLICT (inn) DO UPDATE SET
+    name = COALESCE(organization.name, EXCLUDED.name),
+    updated_at = now()
+"""
+
 _DROP_ACTUAL = """
 UPDATE src_file SET is_actual = false
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)s
@@ -143,6 +155,7 @@ def load_extraction(
     correction_version: int = 0,
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
+    organization_name: str | None = None,
 ) -> LoadResult:
     """Пишет принятый комплект МСФО одной транзакцией.
 
@@ -153,6 +166,9 @@ def load_extraction(
     Комплект, не прошедший экран сверки без подтверждения, уходит в карантин:
     извлечение, о котором машина не знает, что перед ней, в расчёт не идёт.
     """
+    execute(
+        _ENSURE_ORGANIZATION, {"inn": inn, "name": organization_name}, conn=conn
+    )
     report_date = profile.report_dates[0]
     unconfirmed = _unconfirmed(extraction, confirmations or {})
     quarantined = not review.automatic and bool(unconfirmed or not confirmed_by)
