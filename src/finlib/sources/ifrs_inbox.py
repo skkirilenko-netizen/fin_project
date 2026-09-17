@@ -18,7 +18,7 @@
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -33,6 +33,7 @@ from finlib.sources.ifrs_numbers import (
     ParsingPolicy,
     ballot,
     detect_grouping,
+    drop_not_money_rows,
     load_parsing_policy,
 )
 from finlib.sources.pdf_text import PdfDocument, read_document
@@ -206,13 +207,33 @@ def identify(
     # и текстовая часть полны чисел, которые денежными не являются —
     # номеров пунктов, ссылок на стандарты, процентов, — и каждое такое
     # число подаёт ложную улику.
-    voting, removed = ballot(forms_text(text, headings))
+    blocks = form_blocks(text, headings, policy)
+    voting_lines: list[str] = []
+    dropped_rows = 0
+    for lines in blocks.values():
+        kept, dropped = drop_not_money_rows(lines, policy.digit_grouping)
+        voting_lines.extend(kept)
+        dropped_rows += dropped
+
+    voting, removed = ballot("\n".join(voting_lines))
     detection = detect_grouping(voting, policy.digit_grouping)
-    if removed:
+    if removed or dropped_rows:
         logger.info(
-            "голосование за конвенцию: исключено чисел %s",
+            "голосование за конвенцию: исключено чисел %s; строк не в единице "
+            "отчётности — %d",
             ", ".join(f"{name} — {count}" for name, count in sorted(removed.items())),
+            dropped_rows,
         )
+
+    if not detection.determined and policy.digit_grouping.arithmetic_resolution.enabled:
+        # Число «663,888» само по себе допускает оба прочтения, но документ —
+        # не набор отдельных чисел: итог сходится с суммой слагаемых при
+        # верной конвенции и не сходится при неверной. Ответ берётся
+        # из документа, а не выбирается нами.
+        resolved = resolve_by_arithmetic(text, headings, policy, catalog, detection)
+        if resolved is not None:
+            detection = resolved
+
     if not detection.determined:
         reason = policy.digit_grouping.reasons[detection.reason]
         return Rejection(
@@ -221,7 +242,17 @@ def identify(
             {"detection": detection.describe(), "excluded": removed},
         )
 
-    dates = _report_dates(text, policy)
+    # Отчётные даты стоят в шапках форм — «31 декабря 2025 года». По всему
+    # документу их находятся десятки: сроки погашения займов, даты договоров,
+    # события после отчётной даты. У ЛСР так извлекалась дата 28.07.2066,
+    # и период, за который считались величины, оказывался выдуманным.
+    #
+    # Если в шапках дат нет, поиск расширяется до таблиц форм, но не дальше:
+    # у Сегежи дата стоит в строке над таблицей, а не в шапке под заголовком.
+    dates = _report_dates(
+        " ".join(header_of(text, start, policy) for start in headings.values()),
+        policy,
+    ) or _report_dates(forms_text(text, headings, policy), policy)
     if not dates:
         return Rejection(
             CheckCode.FILE_PERIODS_NOT_DETERMINED,
@@ -304,21 +335,137 @@ def _table_rows_after(lines: list[str], index: int, window: int) -> int:
     )
 
 
-def forms_text(text: str, headings: dict[str, int]) -> str:
-    """Текст блоков форм: от заголовка каждой до начала следующей.
+def form_blocks(
+    text: str, headings: dict[str, int], policy: ParsingPolicy
+) -> dict[str, list[str]]:
+    """Строки таблицы каждой формы: от заголовка до конца таблицы.
 
-    Всё, что вне блоков, — примечания, аудиторское заключение, оглавление —
-    в голосовании за конвенцию не участвует: чисел там больше, чем в формах,
-    и денежных величин среди них почти нет.
+    **Блок кончается там, где кончается таблица**, а не там, где начинается
+    следующая форма. Прежде он тянулся до следующего заголовка и захватывал
+    примечания целиком: у ЛСР в «блоке баланса» оказывалось 698 строк вместо
+    нескольких десятков. Раздутый блок портит и опознание — доля опознанных
+    строк считается по мусору, — и голосование за конвенцию, потому что числа
+    примечаний подают ложные улики.
+
+    Конец таблицы виден по строкам без величин: подзаголовок раздела — одна
+    такая строка, изредка две, а за таблицей идёт сплошной текст.
     """
     if not headings:
-        return ""
-    ordered = sorted(headings.values())
-    parts = []
-    for index, start in enumerate(ordered):
-        end = ordered[index + 1] if index + 1 < len(ordered) else len(text)
-        parts.append(text[start:end])
-    return "\n".join(parts)
+        return {}
+
+    lines = text.split("\n")
+    starts: list[int] = []
+    position = 0
+    for line in lines:
+        starts.append(position)
+        position += len(line) + 1
+
+    ordered = sorted(headings.items(), key=lambda item: item[1])
+    gap_limit = policy.document_kind.table_end_gap
+    blocks: dict[str, list[str]] = {}
+    for index, (code, start) in enumerate(ordered):
+        end = ordered[index + 1][1] if index + 1 < len(ordered) else len(text)
+        first = next(
+            (number for number, offset in enumerate(starts) if offset >= start), 0
+        )
+        collected: list[str] = []
+        gap = 0
+        started = False
+        for line in lines[first:]:
+            if starts[first + len(collected)] >= end:
+                break
+            collected.append(line)
+            if _TABLE_ROW.search(line):
+                started = True
+                gap = 0
+                continue
+            # Разрыв считается только внутри таблицы. До её первой строки
+            # идёт шапка — наименование формы, единица, заголовки колонок,
+            # каждый своей строкой; у ФосАгро их девять, и счёт разрыва
+            # с начала обрывал блок прежде, чем таблица начиналась.
+            if started:
+                gap += 1
+                if gap > gap_limit:
+                    del collected[-gap:]
+                    break
+        blocks[code] = collected
+    return blocks
+
+
+def forms_text(
+    text: str, headings: dict[str, int], policy: ParsingPolicy | None = None
+) -> str:
+    """Текст таблиц форм — выборка для голосования за конвенцию.
+
+    Всё, что вне таблиц, — примечания, аудиторское заключение, оглавление —
+    не участвует: чисел там больше, чем в формах, а денежных величин среди
+    них почти нет.
+    """
+    policy = policy or load_parsing_policy()
+    blocks = form_blocks(text, headings, policy)
+    return "\n".join("\n".join(lines) for lines in blocks.values())
+
+
+def resolve_by_arithmetic(
+    text: str,
+    headings: dict[str, int],
+    policy: ParsingPolicy,
+    catalog: IfrsCatalog,
+    detection: GroupingDetection,
+) -> GroupingDetection | None:
+    """Разрешает неоднозначность конвенции сходимостью итогов.
+
+    Формы разбираются обеими конвенциями, и принимается та, при которой
+    сходится больше итогов. Если не сходится ни одна либо сходятся обе
+    одинаково — ответа нет, и отказ остаётся: арифметика не сказала ничего,
+    а выбирать самим здесь и значит угадывать.
+
+    Проверено на ФосАгро, где неоднозначны все величины форм: 445 912 +
+    217 976 = 663 888 сходится только при запятой в роли разделителя
+    разрядов.
+    """
+    from finlib.quality.totals import TotalVerdict, check_total
+    from finlib.sources.ifrs_extract import extract
+
+    # Даты нужны разбору, но на исход не влияют: сходимость проверяется
+    # в пределах одного периода, а колонок у формы столько же при любой
+    # конвенции.
+    dates = _report_dates(
+        " ".join(header_of(text, start, policy) for start in headings.values()),
+        policy,
+    )
+    if not dates:
+        return None
+
+    rule = policy.digit_grouping.arithmetic_resolution
+    scores: dict[Grouping, int] = {}
+    for convention in (Grouping.RUSSIAN, Grouping.ENGLISH):
+        found = extract(text, dates, convention, catalog)
+        values = found.totals(dates[0])
+        matched = 0
+        for total in catalog.totals():
+            outcome = check_total(
+                total,
+                values.get,
+                lambda code: None,
+                lambda amount: abs(amount) / Decimal(10_000) + Decimal(1),
+            )
+            if outcome.verdict is TotalVerdict.MATCHED:
+                matched += 1
+        scores[convention] = matched
+        logger.info(
+            "разрешение арифметикой: при конвенции %s сходится итогов %d",
+            convention.value,
+            matched,
+        )
+
+    best = max(scores, key=lambda item: scores[item])
+    rival = max(item for item in scores if item is not best)
+    if scores[best] < rule.min_totals or scores[best] == scores[rival]:
+        return None
+    return replace(
+        detection, convention=best, reason=None, resolved_by="arithmetic"
+    )
 
 
 def header_of(text: str, position: int, policy: ParsingPolicy) -> str:

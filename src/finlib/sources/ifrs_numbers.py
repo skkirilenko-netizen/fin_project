@@ -25,6 +25,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from finlib.config import settings
+from finlib.normalize.lines import normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +77,26 @@ _COMMA_AMBIGUOUS = re.compile(r"(?<![\d,.])\d{1,3},\d{3}(?![\d,.])")
 _DOT_AMBIGUOUS = re.compile(r"(?<![\d,.])\d{1,3}\.\d{3}(?![\d,.])")
 
 
+class ArithmeticResolution(BaseModel):
+    """Разрешение неоднозначности сходимостью итогов."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool
+    min_totals: int = Field(ge=1)
+    origin: str = Field(min_length=1)
+
+
 class GroupingPolicy(BaseModel):
     """Пороги определения конвенции."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    not_money_rows: tuple[str, ...] = Field(min_length=1)
     min_evidence: int = Field(ge=1)
     min_share: Decimal = Field(gt=0, le=1)
     origin: str = Field(min_length=1)
+    arithmetic_resolution: ArithmeticResolution
     reasons: dict[GroupingUndetermined, str]
 
 
@@ -137,6 +150,8 @@ class DocumentKindPolicy(BaseModel):
     lookahead_lines: int = Field(ge=5)
     min_table_rows: int = Field(ge=1)
     table_rows_origin: str = Field(min_length=1)
+    table_end_gap: int = Field(ge=2)
+    table_end_origin: str = Field(min_length=1)
     reasons: dict[str, str]
 
 
@@ -246,6 +261,10 @@ class GroupingDetection:
     ambiguous: int = 0
     numbers_seen: int = 0
     samples: tuple[str, ...] = field(default_factory=tuple)
+    # Чем разрешена неоднозначность, если она была: голосованием или
+    # сходимостью итогов. Способ называется, потому что доверие к нему разное:
+    # голосование опирается на разметку чисел, арифметика — на сам документ.
+    resolved_by: str = "vote"
 
     @property
     def determined(self) -> bool:
@@ -302,6 +321,27 @@ _NOT_MONEY: tuple[tuple[str, re.Pattern[str]], ...] = (
     # раньше даты нельзя, иначе от даты останутся обрывки.
     ("год", re.compile(r"\b(?:19|20)\d{2}\b")),
 )
+
+
+def drop_not_money_rows(
+    lines: list[str], policy: GroupingPolicy
+) -> tuple[list[str], int]:
+    """Убирает строки, величины которых приведены не в единице отчётности.
+
+    Прибыль на акцию, номинал, количество акций стоят внутри форм и законны,
+    но за конвенцию разрядов голосовать не вправе: они печатаются в рублях
+    с копейками, тогда как суммы в той же форме идут миллионами с пробелами.
+    """
+    markers = tuple(normalize_name(item) for item in policy.not_money_rows)
+    kept: list[str] = []
+    dropped = 0
+    for line in lines:
+        lowered = normalize_name(line)
+        if any(marker in lowered for marker in markers):
+            dropped += 1
+            continue
+        kept.append(line)
+    return kept, dropped
 
 
 def ballot(text: str) -> tuple[str, dict[str, int]]:

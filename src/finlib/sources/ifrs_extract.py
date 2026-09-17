@@ -194,19 +194,12 @@ def _split_by_forms(text: str, catalog: IfrsCatalog) -> dict[str, list[str]]:
     называется «Раскрываемый консолидированный отчет о финансовом положении»,
     приём её находил, а разбор нет, и комплект давал ноль опознанных строк.
     """
-    from finlib.sources.ifrs_inbox import form_headings
+    from finlib.sources.ifrs_inbox import form_blocks, form_headings
     from finlib.sources.ifrs_numbers import load_parsing_policy
 
-    headings = form_headings(text, catalog, load_parsing_policy())
-    if not headings:
-        return {}
-
-    ordered = sorted(headings.items(), key=lambda item: item[1])
-    blocks: dict[str, list[str]] = {}
-    for index, (code, start) in enumerate(ordered):
-        end = ordered[index + 1][1] if index + 1 < len(ordered) else len(text)
-        blocks[code] = text[start:end].split("\n")
-    return blocks
+    policy = load_parsing_policy()
+    headings = form_headings(text, catalog, policy)
+    return form_blocks(text, headings, policy)
 
 
 def _extract_form(
@@ -222,7 +215,7 @@ def _extract_form(
     tail_from = 0
 
     for index, line in enumerate(lines):
-        name, values = _split_row(line, grouping)
+        name, values = _split_row(line, grouping, len(report_dates))
         if not values:
             continue
         rows.append((name, values, index))
@@ -259,7 +252,9 @@ def _cells_pattern(grouping: Grouping) -> re.Pattern[str]:
     return re.compile(_CELL_BY_GROUPING[grouping])
 
 
-def _split_row(line: str, grouping: Grouping) -> tuple[str, tuple[Decimal, ...]]:
+def _split_row(
+    line: str, grouping: Grouping, periods: int = 0
+) -> tuple[str, tuple[Decimal, ...]]:
     """Делит строку таблицы на наименование и величины периодов.
 
     Величины ищутся в хвосте строки: наименование стоит слева и содержать
@@ -297,6 +292,14 @@ def _split_row(line: str, grouping: Grouping) -> tuple[str, tuple[Decimal, ...]]
     )
     if not parsed:
         return stripped.strip(), ()
+
+    # Колонок с величинами столько, сколько периодов. Всё, что левее, —
+    # не величина: у ФосАгро это номер примечания, «Основные средства
+    # 12 395,831 357,577», и без отсечения слева номер примечания стал бы
+    # величиной за отчётный период.
+    if periods and len(parsed) > periods:
+        parsed = parsed[-periods:]
+        tail = tail[-periods:]
     return stripped[: tail[0].start()].strip(), parsed
 
 
