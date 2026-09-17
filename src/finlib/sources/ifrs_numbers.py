@@ -132,7 +132,21 @@ class DocumentKindPolicy(BaseModel):
 
     min_forms: int = Field(ge=1)
     required_forms: tuple[str, ...] = Field(min_length=1)
+    cores: dict[str, tuple[str, ...]]
+    heading_max_length: int = Field(ge=20)
+    lookahead_lines: int = Field(ge=5)
+    min_table_rows: int = Field(ge=1)
+    table_rows_origin: str = Field(min_length=1)
     reasons: dict[str, str]
+
+
+class HeaderWindow(BaseModel):
+    """Сколько знаков после заголовка формы считается её шапкой."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    characters: int = Field(ge=100)
+    origin: str = Field(min_length=1)
 
 
 class FinancialInstitutionPolicy(BaseModel):
@@ -193,6 +207,7 @@ class ParsingPolicy(BaseModel):
     text_layer: TextLayerPolicy
     document_kind: DocumentKindPolicy
     financial_institution: FinancialInstitutionPolicy
+    header_window: HeaderWindow
     currency: CurrencyPolicy
     units: UnitsPolicy
     periods: PeriodsPolicy

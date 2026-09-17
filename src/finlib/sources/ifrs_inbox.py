@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
@@ -33,6 +34,7 @@ from finlib.sources.ifrs_numbers import (
     detect_grouping,
     load_parsing_policy,
 )
+from finlib.sources.pdf_text import PdfDocument, read_document
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,22 @@ _LONG_DATE = re.compile(
 _SHORT_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
 
 
+def text_of(path: Path) -> PdfDocument:
+    """Текстовый слой документа.
+
+    Извлечение живёт в `sources/pdf_text.py` за отдельным интерфейсом:
+    библиотеки для PDF различаются тем, насколько точно держат раскладку
+    по колонкам, и замена одной на другую не должна трогать разбор форм.
+
+    Разбирается именно слой, а не изображение: распознавание сканов
+    не реализовано. Ошибка чтения наверх не поднимается — о ней говорит
+    контроль приёма, а не исключение из недр библиотеки. Причины «слой пуст»
+    и «файл не прочитан» различаются: предлагать распознавание там, где дело
+    в шифровании, значит назвать ложную причину.
+    """
+    return read_document(path)
+
+
 def identify(
     text: str,
     catalog: IfrsCatalog | None = None,
@@ -135,7 +153,8 @@ def identify(
             {"characters": len(text.strip())},
         )
 
-    forms = _forms_in(text, catalog)
+    headings = form_headings(text, catalog, policy)
+    forms = tuple(headings)
     missing = set(policy.document_kind.required_forms) - set(forms)
     if len(forms) < policy.document_kind.min_forms or missing:
         return Rejection(
@@ -152,20 +171,31 @@ def identify(
             {"marker": institution},
         )
 
-    foreign = _foreign_currency(lowered, policy)
+    # Валюта и единица берутся из шапок форм, а не из всего документа:
+    # в отчётности на двести страниц упоминание чужой валюты есть почти
+    # всегда, и признаком валюты отчётности оно не является.
+    headers = normalize_name(
+        " ".join(header_of(text, start, policy) for start in headings.values())
+    )
+
+    foreign = _foreign_currency(headers, policy)
+    rouble = _rouble(headers, text, headings, policy)
+    # Чужая валюта в шапке формы решает дело даже при упоминании рубля рядом:
+    # шапка коротка, случайных упоминаний в ней не бывает, а «в миллионах
+    # долларов США» и есть объявление валюты отчётности.
     if foreign is not None:
         return Rejection(
             CheckCode.FILE_CURRENCY_NOT_ROUBLE,
             policy.currency.reasons["not_rouble"],
             {"currency": foreign},
         )
-    if not any(marker in lowered for marker in policy.currency.rouble_markers):
+    if not rouble:
         return Rejection(
             CheckCode.FILE_CURRENCY_NOT_DETERMINED,
             policy.currency.reasons["not_determined"],
         )
 
-    unit = _unit(lowered, policy)
+    unit = _unit(headers, policy)
     if unit is None:
         return Rejection(
             CheckCode.UNIT_NOT_DETERMINED, policy.units.reasons["not_determined"]
@@ -200,19 +230,76 @@ def identify(
     return profile
 
 
-def _forms_in(text: str, catalog: IfrsCatalog) -> tuple[str, ...]:
-    """Коды форм, заголовки которых найдены в документе.
+def form_headings(
+    text: str, catalog: IfrsCatalog, policy: ParsingPolicy
+) -> dict[str, int]:
+    """Где в документе начинается каждая форма: код формы → позиция заголовка.
 
-    Заголовки и синонимы берутся из справочника статей: перечень один
-    на всю ветку, и расходиться ему не с чем.
+    Заголовок ищется **построчно и по ядру наименования**, а не вхождением
+    полной фразы в текст. Две причины, обе с настоящей отчётности:
+
+    у Сегежи формы называются «Консолидированный отчет специального
+    назначения о финансовом положении» — полная фраза справочника в неё
+    не укладывается, и документ был отклонён как не отчётность;
+
+    в оглавлении и в примечаниях те же слова стоят внутри длинных
+    предложений, и поиск по всему тексту опознавал бы форму по упоминанию.
+    Поэтому строка длиннее заголовка формой не считается.
+
+    **Из нескольких вхождений выбирается то, за которым идёт таблица.**
+    Оглавление состоит ровно из таких же коротких строк: «Консолидированный
+    отчет о финансовом положении 8». Отличить его по номеру страницы —
+    угадывание, а по тому, что идёт следом, — признак: у формы дальше стоят
+    строки с величинами, у оглавления — другие строки оглавления. Это та же
+    опора на структуру, что и при опознании неподписанного итога.
     """
-    lowered = normalize_name(text)
-    found = [
-        code
-        for code, form in catalog.forms.items()
-        if any(name in lowered for name in form.match_names)
-    ]
-    return tuple(found)
+    limit = policy.document_kind.heading_max_length
+    lines = text.split("\n")
+    starts: list[int] = []
+    position = 0
+    for line in lines:
+        starts.append(position)
+        position += len(line) + 1
+
+    candidates: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or len(stripped) > limit:
+            continue
+        lowered = normalize_name(stripped)
+        for code, cores in policy.document_kind.cores.items():
+            if any(normalize_name(core) in lowered for core in cores):
+                candidates.setdefault(code, []).append(index)
+                break
+
+    window = policy.document_kind.lookahead_lines
+    found: dict[str, int] = {}
+    for code, indexes in candidates.items():
+        best = max(indexes, key=lambda item: _table_rows_after(lines, item, window))
+        if _table_rows_after(lines, best, window) >= policy.document_kind.min_table_rows:
+            found[code] = starts[best]
+    return found
+
+
+# Строка таблицы: не менее двух чисел длиной от трёх цифр. Номер страницы
+# в оглавлении — одно короткое число, и под это определение не подходит.
+_TABLE_ROW = re.compile(r"(?:\d[\d    ,.]{2,}\D*){2,}")
+
+
+def _table_rows_after(lines: list[str], index: int, window: int) -> int:
+    """Сколько строк с величинами идёт следом за строкой."""
+    return sum(
+        1 for line in lines[index + 1 : index + 1 + window] if _TABLE_ROW.search(line)
+    )
+
+
+def header_of(text: str, position: int, policy: ParsingPolicy) -> str:
+    """Шапка формы: несколько строк после её заголовка.
+
+    Валюта и единица измерения стоят здесь — «(в миллионах российских
+    рублей)», — а не где угодно в документе.
+    """
+    return text[position : position + policy.header_window.characters]
 
 
 def _financial_institution(lowered: str, policy: ParsingPolicy) -> str | None:
@@ -227,6 +314,39 @@ def _financial_institution(lowered: str, policy: ParsingPolicy) -> str | None:
         if normalize_name(marker) in lowered:
             return marker
     return None
+
+
+def _rouble(
+    headers: str,
+    text: str,
+    headings: dict[str, int],
+    policy: ParsingPolicy,
+) -> bool:
+    """Объявлен ли рубль в шапках форм.
+
+    Маркеры нормализуются так же, как текст: «руб.» приходит как «В млн руб.»,
+    и нормализация снимает точку. Но нормализация снимает и знак валюты
+    целиком: `normalize_name("₽")` — пустая строка, а пустая строка входит
+    в любой текст. Проверка рубля от этого возвращала истину всегда,
+    то есть не работала вовсе — при том что ни один тест не падал
+    и ни один документ не был отклонён по этой причине.
+
+    Поэтому словесные маркеры ищутся в нормализованном тексте, а знаки
+    валюты — в сыром: нормализовать их нечего.
+    """
+    for marker in policy.currency.rouble_markers:
+        normalized = normalize_name(marker)
+        if normalized:
+            if normalized in headers:
+                return True
+            continue
+        # Знак валюты нормализации не переживает и ищется как есть.
+        raw = "".join(
+            header_of(text, start, policy) for start in headings.values()
+        )
+        if marker in raw:
+            return True
+    return False
 
 
 def _foreign_currency(lowered: str, policy: ParsingPolicy) -> str | None:

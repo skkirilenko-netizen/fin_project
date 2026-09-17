@@ -186,17 +186,26 @@ def extract(
 
 
 def _split_by_forms(text: str, catalog: IfrsCatalog) -> dict[str, list[str]]:
-    """Делит документ на блоки по заголовкам форм."""
+    """Делит документ на блоки по заголовкам форм.
+
+    Заголовки ищет тот же код, что и приём документа (`ifrs_inbox.
+    form_headings`): по ядру наименования и по тому, что следом идёт таблица.
+    Два способа искать одно и то же неминуемо разойдутся — у ЛСР форма
+    называется «Раскрываемый консолидированный отчет о финансовом положении»,
+    приём её находил, а разбор нет, и комплект давал ноль опознанных строк.
+    """
+    from finlib.sources.ifrs_inbox import form_headings
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    headings = form_headings(text, catalog, load_parsing_policy())
+    if not headings:
+        return {}
+
+    ordered = sorted(headings.items(), key=lambda item: item[1])
     blocks: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in text.split("\n"):
-        found = catalog.match_form(line.strip()) if line.strip() else None
-        if found is not None:
-            current = found
-            blocks.setdefault(current, [])
-            continue
-        if current is not None:
-            blocks[current].append(line)
+    for index, (code, start) in enumerate(ordered):
+        end = ordered[index + 1][1] if index + 1 < len(ordered) else len(text)
+        blocks[code] = text[start:end].split("\n")
     return blocks
 
 

@@ -26,16 +26,17 @@ from pathlib import Path
 
 from finlib.db import connection
 from finlib.normalize.ifrs_loader import load_extraction
+from finlib.quality.codes import CheckCode
 from finlib.sources.ifrs_extract import extract
-from finlib.sources.ifrs_inbox import Rejection, identify
+from finlib.sources.ifrs_inbox import Rejection, identify, text_of
 from finlib.sources.ifrs_review import ReviewOutcome, review
 
 logger = logging.getLogger(__name__)
 
-# Текстовые выгрузки документов: разбор PDF в текст делается снаружи
-# (pdftotext), потому что распознавание сканов — отдельная задача, а разбор
-# текстового слоя от способа его извлечения не зависит.
-SUFFIXES = (".txt", ".md")
+# Документ приходит либо PDF, либо готовой текстовой выгрузкой. Текстовый
+# слой PDF извлекается нами; распознавание сканов не реализовано, и документ
+# без слоя отклоняется приёмом с этой причиной.
+SUFFIXES = (".txt", ".md", ".pdf")
 
 
 @dataclass
@@ -146,14 +147,24 @@ class IntakeReport:
 
 def run_one(path: Path, write: bool = False, inn: str | None = None) -> DocumentRun:
     """Проводит один документ через приём, извлечение и сверку."""
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    profile = identify(text)
+    document = text_of(path)
+    if not document.readable:
+        # Файл не прочитан — это не скан: предлагать распознавание там, где
+        # дело в шифровании или повреждении, значит назвать ложную причину.
+        return DocumentRun(
+            path,
+            False,
+            rejection=f"файл не прочитан: {document.error}",
+            check_code=CheckCode.FILE_NOT_PARSED.value,
+        )
+
+    profile = identify(document.text)
     if isinstance(profile, Rejection):
         return DocumentRun(
             path, False, rejection=profile.reason, check_code=profile.code.value
         )
 
-    extraction = extract(text, profile.report_dates, profile.grouping)
+    extraction = extract(document.text, profile.report_dates, profile.grouping)
     decision = review(extraction, profile)
 
     found = DocumentRun(
