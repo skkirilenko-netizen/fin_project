@@ -25,7 +25,7 @@ NOT_CALCULATED_MARK = "не рассчитан"
 _ORGANIZATION = """
 SELECT o.inn, o.name, o.short_name, o.ogrn, o.okved, o.region,
        s.reporting_type, s.standard, s.unit_code, s.unit_source, s.knd,
-       s.correction_version, s.source
+       s.correction_version, s.source, s.digit_grouping
 FROM organization o
 JOIN src_file s ON s.inn = o.inn AND s.report_year = %(year)s
                 AND s.standard = %(standard)s AND s.is_actual

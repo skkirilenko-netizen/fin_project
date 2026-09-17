@@ -54,6 +54,13 @@ class CheckCode(StrEnum):
     FILE_PERIOD_NOT_DETERMINED = "file_period_not_determined"
     FILE_REPORTING_TYPE_UNKNOWN = "file_reporting_type_unknown"
     FILE_NOT_PARSED = "file_not_parsed"
+    # Конвенция записи чисел документа МСФО не определена. Отказ, а не выбор
+    # по умолчанию: прочтения различаются в тысячу раз, и ни один контроль
+    # сходимости ошибки не поймает — сойдётся всё, кроме самих величин.
+    DIGIT_GROUPING_NOT_DETERMINED = "digit_grouping_not_determined"
+    # Разобранные величины не согласуются между собой так, как согласуются
+    # величины одной конвенции: признак того, что конвенция выбрана неверно.
+    DIGIT_GROUPING_IMPLAUSIBLE = "digit_grouping_implausible"
     # Код не привязывается к строке: неполон справочник.
     AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
     # Несколько кодов раскрыли одну укрупнённую строку: аномалия самой отчётности.
@@ -83,6 +90,9 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.FILE_PERIOD_NOT_DETERMINED: Severity.BLOCKING,
     CheckCode.FILE_REPORTING_TYPE_UNKNOWN: Severity.BLOCKING,
     CheckCode.FILE_NOT_PARSED: Severity.BLOCKING,
+    # Документ, числа которого прочесть нельзя, комплектом не становится.
+    CheckCode.DIGIT_GROUPING_NOT_DETERMINED: Severity.BLOCKING,
+    CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Severity.BLOCKING,
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.MULTIPLE_SOURCE_CODES: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
@@ -115,6 +125,8 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.FILE_PERIOD_NOT_DETERMINED: "определение отчётного периода по содержимому файла",
     CheckCode.FILE_REPORTING_TYPE_UNKNOWN: "определение типа отчётности по содержимому файла",
     CheckCode.FILE_NOT_PARSED: "разбор поданного файла отчётности",
+    CheckCode.DIGIT_GROUPING_NOT_DETERMINED: "определение разделителя разрядов",
+    CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: "правдоподобие разделителя разрядов",
     CheckCode.AMBIGUOUS_LINE_CODE: "неоднозначность кода строки",
     CheckCode.MULTIPLE_SOURCE_CODES: "строка раскрыта несколькими кодами",
     CheckCode.UNKNOWN_LINE_CODE: "код строки отсутствует в справочнике",

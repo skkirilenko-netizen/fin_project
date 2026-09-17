@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS src_file (
     unit_multiplier   numeric,
     unit_source       text NOT NULL DEFAULT 'unknown'
                       CHECK (unit_source IN ('form_standard', 'explicit', 'unknown')),
+    -- Конвенция записи чисел в исходном документе. Для источников, отдающих
+    -- числа машиночитаемо (ГИР БО), не определяется и остаётся NULL: там
+    -- разделителей разрядов нет вовсе. Для файла МСФО определяется по всему
+    -- документу, и неопределённость означает карантин, а не выбор по умолчанию.
+    digit_grouping    text CHECK (digit_grouping IN ('russian', 'english', 'plain')),
     status            text NOT NULL DEFAULT 'loaded'
                       CHECK (status IN ('loaded', 'processed', 'quarantine')),
     quarantine_reason text,
@@ -51,6 +56,22 @@ CREATE TABLE IF NOT EXISTS src_file (
     loaded_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT src_file_uniq UNIQUE (inn, standard, report_year, source, correction_version)
 );
+
+-- Колонка заведена позже таблицы: CREATE TABLE IF NOT EXISTS её в готовую
+-- базу не принесёт. NULL означает «не определялась», и для источников,
+-- отдающих числа машиночитаемо, это верно — разделителей разрядов там нет.
+ALTER TABLE src_file ADD COLUMN IF NOT EXISTS digit_grouping text;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'src_file'::regclass AND conname = 'src_file_digit_grouping_check'
+    ) THEN
+        ALTER TABLE src_file ADD CONSTRAINT src_file_digit_grouping_check
+            CHECK (digit_grouping IN ('russian', 'english', 'plain'));
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS src_file_checksum_idx ON src_file (checksum);
 CREATE INDEX IF NOT EXISTS src_file_status_idx ON src_file (status);
@@ -76,6 +97,12 @@ COMMENT ON COLUMN src_file.is_actual IS
     'Является ли эта корректировка актуальной по данным источника; в расчёт идёт только актуальная';
 COMMENT ON COLUMN src_file.unit_multiplier IS 'Коэффициент приведения значений источника к тысячам рублей';
 COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прошли контроли качества и в расчёт не идут';
+COMMENT ON COLUMN src_file.digit_grouping IS
+    'Конвенция записи чисел исходного документа: russian — разряды пробелом, '
+    'english — разряды запятой, plain — разделителей нет. NULL — не определялась '
+    '(источник отдаёт числа машиночитаемо). Неверная конвенция не ловится ни одним '
+    'контролем сходимости: баланс сойдётся, а все абсолютные величины будут '
+    'неверны в тысячу раз';
 COMMENT ON COLUMN src_file.reporting_type IS
     'Набор строк отчётности: full — полные формы, simplified — упрощённые (приложение 5 к приказу 66н). '
     'Свойство сданного комплекта, а не организации: право на упрощённую отчётность может быть утрачено. '

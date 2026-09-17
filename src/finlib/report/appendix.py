@@ -28,6 +28,24 @@ UNIT_SOURCE_NAMES: dict[str, str] = {
     "explicit": "указана источником",
 }
 
+# Конвенция записи чисел исходного документа. Печатается наравне с единицей
+# измерения и по той же причине: неверно прочитанный разделитель разрядов
+# не ловится ни одним контролем сходимости — сойдётся всё, кроме самих
+# величин, и ошибка будет ровно в тысячу раз. Читатель должен иметь
+# возможность проверить, как прочитаны числа.
+GROUPING_NAMES: dict[str, str] = {
+    "russian": "разряды отделены пробелом, десятичный знак — запятая",
+    "english": "разряды отделены запятой, десятичный знак — точка",
+    "plain": "разделителей разрядов в документе нет",
+}
+
+# Источник отдаёт числа машиночитаемо, и разделителя разрядов у них нет вовсе.
+# Молчать об этом нельзя: пустая графа читалась бы как несделанная работа.
+GROUPING_NOT_APPLICABLE = (
+    "не определялась: источник отдаёт числа машиночитаемо, разделителей "
+    "разрядов в них нет"
+)
+
 # Наименование источника: в документ идёт название, а не машинный код.
 SOURCE_NAMES: dict[str, str] = {
     "gir_bo": "Государственный информационный ресурс бухгалтерской отчётности (ГИР БО)",
@@ -244,6 +262,14 @@ def _objects(codes: list[str] | None) -> str:
     return f"{listed} и ещё {len(ordered) - OBJECTS_SHOWN}"
 
 
+def _grouping(organization: dict) -> str:
+    """Как прочитаны числа исходного документа; для машинных источников — почему нет."""
+    found = organization.get("digit_grouping")
+    if not found:
+        return GROUPING_NOT_APPLICABLE
+    return GROUPING_NAMES.get(found, found)
+
+
 def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str]:
     """Происхождение документа: версии, источник, дата."""
     assessment = data.assessment
@@ -259,6 +285,7 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
         f"Стандарт отчётности: {data.standard.value.upper()}.",
         f"Набор форм: {forms}.",
         f"Единица измерения: {data.unit_name} ({unit}).",
+        f"Запись чисел в исходном документе: {_grouping(organization)}.",
         f"Источник данных: "
         f"{SOURCE_NAMES.get(organization['source'], organization['source'])}.",
         f"Языковая модель текстовой части: {model}.",
