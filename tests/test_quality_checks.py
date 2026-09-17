@@ -377,27 +377,39 @@ def test_jump_detection_warns() -> None:
         facts(PREVIOUS, {(BALANCE, "1210"): Decimal(10000)}),
     )
     results = list(jump_detection(ctx))
-    assert statuses(results) == [CheckStatus.WARNING]
+    assert statuses(results) == [CheckStatus.WARNING, CheckStatus.PASS]
     assert results[0].severity is Severity.WARNING
     assert not results[0].is_blocking_failure
 
 
 def test_jump_detection_silent_within_factor() -> None:
-    """Изменение в пределах порога не сигналит."""
+    """Изменение в пределах порога не сигналит, но число сравнений называет.
+
+    Прежде контроль молчал совсем, и ноль записей означал сразу два разных
+    состояния: сравнили величины и ничего не нашли — или не сравнили ничего.
+    """
     ctx = context(
         facts(CURRENT, {(BALANCE, "1210"): Decimal(40000)}),
         facts(PREVIOUS, {(BALANCE, "1210"): Decimal(10000)}),
     )
-    assert list(jump_detection(ctx)) == []
+    results = list(jump_detection(ctx))
+    assert statuses(results) == [CheckStatus.PASS]
+    assert results[0].details["compared"] == 1
 
 
 def test_jump_detection_ignores_small_base() -> None:
-    """Скачок на микровеличине не сигналит: содержательно он ничего не значит."""
+    """Скачок на микровеличине не сигналит: содержательно он ничего не значит.
+
+    Сравнивать при этом оказалось нечего, и контроль говорит именно это —
+    «не выполнялся», а не «нарушений нет».
+    """
     ctx = context(
         facts(CURRENT, {(BALANCE, "1210"): Decimal(500)}),
         facts(PREVIOUS, {(BALANCE, "1210"): Decimal(10)}),
     )
-    assert list(jump_detection(ctx)) == []
+    results = list(jump_detection(ctx))
+    assert statuses(results) == [CheckStatus.INFO]
+    assert "ни одна величина не сравнима" in results[0].message
 
 
 # --- retained_earnings_link -------------------------------------------------

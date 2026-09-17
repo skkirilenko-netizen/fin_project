@@ -59,6 +59,11 @@ class CheckCode(StrEnum):
     # Несколько кодов раскрыли одну укрупнённую строку: аномалия самой отчётности.
     MULTIPLE_SOURCE_CODES = "multiple_source_codes"
     UNKNOWN_LINE_CODE = "unknown_line_code"
+    # Сводка судеб кодов источника: сколько сопоставлено, сколько игнорируется
+    # осознанно, сколько неприменимо к набору форм. Без неё нули по трём
+    # предыдущим кодам ничем не подтверждены — журнал молчит и когда коды
+    # разобраны все, и когда разбор не выполнялся вовсе.
+    LINE_MAPPING = "line_mapping"
     PERIOD_VALUE_MISMATCH = "period_value_mismatch"
     FACT_OVERWRITE = "fact_overwrite"
 
@@ -81,6 +86,8 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.AMBIGUOUS_LINE_CODE: Severity.WARNING,
     CheckCode.MULTIPLE_SOURCE_CODES: Severity.WARNING,
     CheckCode.UNKNOWN_LINE_CODE: Severity.WARNING,
+    # Сводка — не нарушение, а счётчик проверенного.
+    CheckCode.LINE_MAPPING: Severity.INFO,
     # Расхождение сравнительного значения с отчётным — признак переклассификации
     # или исправления, содержательный сигнал для заключения.
     CheckCode.PERIOD_VALUE_MISMATCH: Severity.WARNING,
@@ -111,6 +118,7 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.AMBIGUOUS_LINE_CODE: "неоднозначность кода строки",
     CheckCode.MULTIPLE_SOURCE_CODES: "строка раскрыта несколькими кодами",
     CheckCode.UNKNOWN_LINE_CODE: "код строки отсутствует в справочнике",
+    CheckCode.LINE_MAPPING: "сопоставление кодов источника со справочником",
     CheckCode.PERIOD_VALUE_MISMATCH: "расхождение сравнительного значения с отчётным",
     CheckCode.FACT_OVERWRITE: "перезапись ранее загруженного значения",
 }
@@ -137,6 +145,10 @@ MAPPING_CODES: frozenset[CheckCode] = frozenset(
         CheckCode.UNKNOWN_LINE_CODE,
         CheckCode.AMBIGUOUS_LINE_CODE,
         CheckCode.MULTIPLE_SOURCE_CODES,
+        # Сводка судеб кодов — то же состояние комплекта, что и записи выше,
+        # и переписывается вместе с ними: иначе повторная загрузка множила бы
+        # счётчики, и число разобранных кодов росло бы от прогона к прогону.
+        CheckCode.LINE_MAPPING,
     }
 )
 

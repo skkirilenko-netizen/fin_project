@@ -350,7 +350,7 @@ def verify(
     # Правила текста применяются к очищенному тексту — тому, что увидит
     # читатель. Коды к этому моменту свою работу сделали: пара «число — код»
     # уже сверена выше.
-    raw_sections = _sections_of(text)
+    raw_sections = sections_of(text)
     statements = (
         check_text(
             {number: strip_identifiers(body) for number, body in raw_sections.items()},
@@ -528,7 +528,7 @@ def _context_of(text: str, span: tuple[int, int], width: int = 40) -> str:
 _SECTION = re.compile(r"^#{1,6}\s*(\d)\.\s*.+?$", re.MULTILINE)
 
 
-def _sections_of(text: str) -> dict[int, str]:
+def sections_of(text: str) -> dict[int, str]:
     """Разбивает ответ на разделы по их номерам.
 
     Правила, привязанные к разделу, проверяются только в нём. Берутся лишь

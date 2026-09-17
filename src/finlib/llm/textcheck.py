@@ -271,15 +271,99 @@ def check_text(
     found += _deltas_match(whole)
     found += _templates_are_applicable(whole, context)
     found += _no_free_interpretation(whole, context)
-    found += _questions_stay_in_the_form_set(sections, context)
-    found += _fact_base_is_complete(marked, context)
-    found += _questions_are_sound(sections, context)
-    found += _risks_name_values(sections)
     found += _days_direction(whole, context)
     found += _flag_conflict_is_stated(whole, context)
     found += _theses_are_quoted(marked, context)
     found += _groups_are_headed(sections, context)
     return found
+
+
+def check_calculated(
+    sections: dict[int, str], context: TextContext
+) -> list[TextIssue]:
+    """Проверяет разделы, которые собирает расчёт.
+
+    Эти правила проверяют **содержание, а не авторство**: состав фактической
+    базы, строки, о которых спрашивают, повторы оснований. Расчёт ошибается
+    здесь ровно так же, как ошибалась модель, — перечень величин расходится
+    с методикой, два основания одного рода дают два вопроса, формулировка
+    справочника спрашивает о нераскрытии.
+
+    Прежде они стояли в `check_text` и после выноса разделов 2, 4 и 6
+    в расчёт не проверяли ни одного объекта: `verify` отдаёт только разделы,
+    написанные моделью. На 21 боевом ответе — ноль срабатываний при нуле
+    проверок, и в отчёте это выглядело чистым результатом.
+
+    Вызывается при сборке документа, а не в `verify`: разделы расчёта
+    собираются в обоих режимах, и при сборке без модели проверять их
+    больше некому.
+
+    Правила о технических идентификаторах здесь нет намеренно: в разделе
+    «Фактическая база» коды показателей — часть содержания, о чём говорит
+    и вводная фраза раздела, и правило состава ищет величины именно по ним.
+    Требовать их отсутствия значило бы поставить два правила, отменяющих
+    друг друга на одном тексте.
+    """
+    found: list[TextIssue] = []
+    found += _fact_base_is_complete(sections, context)
+    found += _questions_stay_in_the_form_set(sections, context)
+    found += _questions_are_sound(sections, context)
+    found += _groups_are_headed(sections, context)
+    return found
+
+
+def counted(sections: dict[int, str], context: TextContext) -> dict[str, int]:
+    """Сколько объектов нашлось у каждого применяемого правила.
+
+    Счётчик проверенного, который печатается рядом со счётчиком нарушений.
+    Без него ноль нарушений неотличим от невыполненной проверки — так шесть
+    правил месяцами показывали чистый результат, не имея ни одного объекта.
+
+    Правила из `NOT_APPLICABLE` сюда не входят: у них предмета нет вовсе,
+    и место им в перечне неприменимых, а не в нулевой графе.
+    """
+    text = "\n".join(sections.values())
+    questions = len(_QUESTION.findall(sections.get(QUESTIONS_SECTION, "")))
+    found = {
+        TextRule.TECHNICAL_IDENTIFIER: len(sections),
+        TextRule.CLASS_STATED_BOTH_WAYS: 1 if text.strip() else 0,
+        TextRule.DELTA_MISMATCH: len(_FROM_TO.findall(text)),
+        TextRule.TEMPLATE_NOT_APPLICABLE: len(context.forbidden_templates),
+        TextRule.FREE_INTERPRETATION: len(context.refused_metrics),
+        TextRule.DAYS_DIRECTION: len(context.days_metrics),
+        TextRule.FLAG_CONFLICT_NOT_STATED: int(context.flag_conflict is not None),
+        TextRule.THESIS_NOT_QUOTED: len(context.theses),
+        TextRule.GROUP_HEADING_MISSING: len(context.thesis_groups),
+        TextRule.FACT_BASE_INCOMPLETE: (
+            len(context.fact_base) if sections.get(FACT_BASE_SECTION) else 0
+        ),
+        TextRule.QUESTION_OUT_OF_FORM_SET: questions,
+        TextRule.QUESTION_DUPLICATE: questions,
+        TextRule.QUESTION_ABOUT_DISCLOSURE: questions,
+    }
+    return {rule.value: count for rule, count in found.items()}
+
+
+# Правила, утратившие предмет. Они не удалены и не переведены в предупреждения:
+# удалённое правило нельзя отличить от забытого, а замолчавшее — от
+# работающего. Здесь названо, почему объекта у правила больше нет и с какого
+# дня. Реестр печатается в сводке и проверяется тестом: правило не вправе
+# одновременно стоять здесь и применяться.
+NOT_APPLICABLE: dict[TextRule, str] = {
+    # Раздел 4 собирает расчёт из предписанных формулировок сигналов, и каждая
+    # приходит с величиной и отсечкой, набранными при оценке. Тезиса без
+    # величины в разделе не возникает по построению.
+    TextRule.RISK_WITHOUT_VALUE: (
+        "с 17.09.2026: раздел «Риски и надзорные сигналы» собирается расчётом, "
+        "и величина с отсечкой печатаются при каждой формулировке"
+    ),
+    # Число вопросов задаёт расчёт: `composition.questions` режет перечень
+    # по max_count методики, а основания вопросов — машинные признаки.
+    TextRule.QUESTION_COUNT: (
+        "с 17.09.2026: перечень вопросов собирает расчёт по основаниям "
+        "методики и ограничивает его сам"
+    ),
+}
 
 
 def _groups_are_headed(
@@ -559,11 +643,16 @@ def _fact_base_is_complete(
 def _questions_are_sound(
     sections: dict[int, str], context: TextContext
 ) -> list[TextIssue]:
-    """Вопросов столько, сколько задано методикой, и они не повторяются.
+    """Вопросы не повторяются и спрашивают по существу обстоятельства.
 
     Вопрос о том, почему не раскрыта строка, содержательного ответа не имеет:
     в упрощённой форме строки нет вовсе, а в полной нераскрытие само по себе
     правомерно. Спрашивать нужно по существу обстоятельства.
+
+    Числа вопросов правило больше не проверяет: перечень собирает расчёт
+    и ограничивает его сам (`NOT_APPLICABLE`). Дубли при этом остаются
+    предметом проверки — расчёт снимает их точным сравнением текста,
+    а два основания одного рода дают разные строки с одним смыслом.
     """
     policy = context.questions
     text = sections.get(QUESTIONS_SECTION, "")
@@ -572,15 +661,6 @@ def _questions_are_sound(
 
     questions = [item.strip() for item in _QUESTION.findall(text) if item.strip()]
     found: list[TextIssue] = []
-    if not policy.min_count <= len(questions) <= policy.max_count:
-        found.append(
-            TextIssue(
-                TextRule.QUESTION_COUNT,
-                f"вопросов к организации {len(questions)}, а методика требует "
-                f"от {policy.min_count} до {policy.max_count}",
-            )
-        )
-
     seen: dict[str, str] = {}
     for question in questions:
         key = _question_key(question)
@@ -613,6 +693,11 @@ def _risks_name_values(sections: dict[int, str]) -> list[TextIssue]:
 
     Раздел называется «Риски и надзорные сигналы», и утверждение без числа
     в нём неотличимо от общего рассуждения: проверить его нечем.
+
+    **Правило не применяется** — см. `NOT_APPLICABLE`. Раздел 4 собирает
+    расчёт, и величина с отсечкой печатаются при каждой формулировке сигнала.
+    Код оставлен: предмет вернётся, если раздел снова отдадут модели, и тогда
+    правило нужно будет включить, а не писать заново.
     """
     text = sections.get(RISKS_SECTION, "")
     if not text:

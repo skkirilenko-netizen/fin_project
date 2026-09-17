@@ -19,6 +19,7 @@ from finlib.llm.textcheck import (
     Severity,
     TextContext,
     TextRule,
+    check_calculated,
     check_text,
 )
 from finlib.report.appendix import checks_table, exclusions_table, not_calculated_table
@@ -230,12 +231,15 @@ def test_extra_values_are_limited_to_the_declared_number(db_conn) -> None:
 
 
 def test_missing_fact_base_value_blocks_the_answer() -> None:
-    """Раздел без обязательной величины отклоняется."""
+    """Раздел без обязательной величины отклоняется.
+
+    Раздел 2 собирает расчёт, поэтому правило переехало в `check_calculated`:
+    оно о содержании, а не об авторстве. Перечень задан методикой, а расчёт
+    печатает только те величины, которые сумел отрендерить.
+    """
     context = TextContext(fact_base=("1600", "nwc"))
-    issues = check_text(
-        {2: "Валюта баланса (1600) — 418 тыс. руб."},
-        context,
-        raw_sections={2: "Валюта баланса (1600) — 418 тыс. руб."},
+    issues = check_calculated(
+        {2: "Валюта баланса (1600) — 418 тыс. руб."}, context
     )
     codes = {item.rule for item in issues}
     assert TextRule.FACT_BASE_INCOMPLETE in codes
@@ -244,8 +248,8 @@ def test_missing_fact_base_value_blocks_the_answer() -> None:
 
 def test_complete_fact_base_passes() -> None:
     """Названы все обязательные — замечания нет."""
-    marked = "Валюта баланса (1600) — 418, оборотный капитал (nwc) — -12."
-    issues = check_text({2: marked}, TextContext(fact_base=("1600", "nwc")), {2: marked})
+    text = "Валюта баланса (1600) — 418, оборотный капитал (nwc) — -12."
+    issues = check_calculated({2: text}, TextContext(fact_base=("1600", "nwc")))
     assert not [
         item for item in issues if item.rule is TextRule.FACT_BASE_INCOMPLETE
     ]
@@ -306,23 +310,34 @@ def test_questions_are_prescribed_not_written(db_conn) -> None:
         ), question
 
 
-def test_questions_are_limited_in_number() -> None:
-    """Вопросов от трёх до пяти: меньше — не перечень, больше — не читают."""
+def test_question_count_is_declared_inapplicable() -> None:
+    """Число вопросов задаёт расчёт, и правило объявлено неприменимым явно.
+
+    Не удалено и не переведено в предупреждение: удалённое правило нельзя
+    отличить от забытого, а замолчавшее — от работающего. В реестре стоят
+    причина и дата.
+    """
+    from finlib.llm.textcheck import NOT_APPLICABLE
+
     assert POLICY.questions.min_count == 3
     assert POLICY.questions.max_count == 5
-    text = "\n".join(f"Вопрос {number}?" for number in range(8))
-    issues = check_text({6: text}, TextContext(questions=POLICY.questions))
-    assert TextRule.QUESTION_COUNT in {item.rule for item in issues}
+    assert TextRule.QUESTION_COUNT in NOT_APPLICABLE
+    assert "17.09.2026" in NOT_APPLICABLE[TextRule.QUESTION_COUNT]
 
 
 def test_duplicate_questions_are_a_warning() -> None:
-    """Дубль портит перечень, но верный в остальном ответ не отменяет."""
+    """Дубль портит перечень, но верный в остальном документ не отменяет.
+
+    Правило переехало на текст расчёта: он собирает вопросы сам и снимает
+    дубли точным сравнением, а два основания одного рода дают разные строки
+    с одним смыслом.
+    """
     text = (
         "Чем объясняется рост дебиторской задолженности?\n"
         "Чем объясняются рост дебиторских задолженностей?\n"
         "За счёт чего получена прибыль?"
     )
-    issues = check_text({6: text}, TextContext(questions=POLICY.questions))
+    issues = check_calculated({6: text}, TextContext(questions=POLICY.questions))
     duplicates = [item for item in issues if item.rule is TextRule.QUESTION_DUPLICATE]
     assert duplicates
     assert not duplicates[0].blocking
@@ -335,7 +350,7 @@ def test_question_about_non_disclosure_is_caught() -> None:
         "За счёт чего получена прибыль?\n"
         "Кто сторона расчётов по дебиторской задолженности?"
     )
-    issues = check_text({6: text}, TextContext(questions=POLICY.questions))
+    issues = check_calculated({6: text}, TextContext(questions=POLICY.questions))
     assert TextRule.QUESTION_ABOUT_DISCLOSURE in {item.rule for item in issues}
 
 
@@ -351,6 +366,38 @@ def test_questions_never_ask_about_non_disclosure(db_conn) -> None:
         lowered = " ".join(text.split()).lower()
         for item in forbidden:
             assert item not in lowered, text
+
+
+def test_calculated_sections_are_checked_on_a_real_document(db_conn, tmp_path) -> None:
+    """Разделы расчёта проходят проверку при сборке документа.
+
+    Правила переехали к тем разделам, которые теперь собирает расчёт. Раньше
+    они стояли в `check_text` и объектов не имели вовсе: `verify` отдаёт
+    только разделы модели. Здесь проверяется, что вызов на месте и правила
+    видят настоящий текст, а не пустые разделы.
+    """
+    from finlib.llm import textcheck
+    from finlib.report.document import build_report
+
+    original = textcheck.check_calculated
+    seen: list[dict[int, str]] = []
+
+    def watching(sections, context):
+        seen.append(sections)
+        return original(sections, context)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(textcheck, "check_calculated", watching)
+    try:
+        build_report(STOPPED_INN, db_conn, directory=tmp_path, with_text=False)
+    finally:
+        monkey.undo()
+
+    assert seen, "проверка разделов расчёта не вызывалась"
+    sections = seen[0]
+    assert sections[2].strip(), "раздел «Фактическая база» пуст"
+    assert sections[6].strip(), "раздел «Вопросы к организации» пуст"
+    assert sections[3].strip(), "раздел «Аналитическая интерпретация» пуст"
 
 
 # --- 5. Предложения по дальнейшим действиям -----------------------------------
@@ -583,28 +630,34 @@ def test_signal_basis_repeats_the_value_of_the_wording(inn: str, db_conn) -> Non
             assert value in signal["message"], signal["signal_code"]
 
 
-def test_risk_thesis_without_a_value_is_a_warning() -> None:
-    """Утверждение о риске без числа проверить нечем."""
+def test_risk_rule_is_declared_inapplicable() -> None:
+    """Правило о величине при тезисе риска объявлено неприменимым явно.
+
+    Раздел 4 собирает расчёт, и величина с отсечкой печатаются при каждой
+    формулировке сигнала: тезиса без величины в разделе не возникает.
+    Код правила оставлен — предмет вернётся, если раздел снова отдадут
+    модели, — но молчать без объяснения оно не вправе.
+    """
+    from finlib.llm.textcheck import NOT_APPLICABLE
+
+    assert TextRule.RISK_WITHOUT_VALUE in NOT_APPLICABLE
+    assert "17.09.2026" in NOT_APPLICABLE[TextRule.RISK_WITHOUT_VALUE]
+
+
+def test_inapplicable_rules_do_not_fire() -> None:
+    """Неприменимое правило не вправе одновременно и молчать, и применяться."""
+    from finlib.llm.textcheck import NOT_APPLICABLE
+
     loose = (
         "Организация испытывает существенные трудности с обслуживанием своих "
         "обязательств, и положение её выглядит крайне неустойчивым по всем "
         "признакам, которые принято принимать во внимание."
     )
-    issues = check_text({4: loose}, TextContext())
-    found = [item for item in issues if item.rule is TextRule.RISK_WITHOUT_VALUE]
-    assert found
-    assert not found[0].blocking
-
-
-def test_risk_thesis_with_a_value_passes() -> None:
-    """Тезис с величиной замечания не вызывает."""
-    text = (
-        "Чистый оборотный капитал (nwc) отрицателен и составляет "
-        "-521 415 920 тыс. руб., краткосрочные обязательства покрываются "
-        "оборотными активами лишь частично."
-    )
-    issues = check_text({4: text}, TextContext())
-    assert not [item for item in issues if item.rule is TextRule.RISK_WITHOUT_VALUE]
+    sections = {4: loose, 6: "\n".join(f"Вопрос {number}?" for number in range(8))}
+    context = TextContext(questions=POLICY.questions)
+    fired = {item.rule for item in check_text(sections, context)}
+    fired |= {item.rule for item in check_calculated(sections, context)}
+    assert not fired & set(NOT_APPLICABLE)
 
 
 # --- методика: проверки самого справочника ------------------------------------

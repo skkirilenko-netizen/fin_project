@@ -8,7 +8,7 @@
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -175,6 +175,13 @@ def build_report(
     if problems:
         raise InconsistentReportError([item.message for item in problems])
 
+    # Разделы, которые собрал расчёт, проверяются теми же правилами, что
+    # прежде применялись к тексту модели: они о содержании, а не об авторстве.
+    # Расчёт тоже способен спросить о строке вне набора форм или повторить
+    # основание — формулировки берутся из справочника, а основания приходят
+    # машинными признаками.
+    _check_calculated_sections(inn, conn, data, standard, bool(sections))
+
     written_at = generated_at or datetime.now()
     document = Document()
     _set_base_style(document)
@@ -223,7 +230,9 @@ def build_report(
                     *(f"{number}." for number, _ in EXPECTED),
                 ],
             )
-        except NumbersAlteredError:
+        except (NumbersAlteredError, SectionsNotFoundError):
+            # Ненайденные разделы — та же беда, что искажённые числа:
+            # документ с непроверенным текстом выглядит проверенным.
             path.unlink(missing_ok=True)
             raise
     logger.info("заключение записано: %s", path)
@@ -234,6 +243,10 @@ def build_report(
         model=model,
         sections=tuple(sections),
     )
+
+
+class SectionsNotFoundError(RuntimeError):
+    """Разделы модели в записанном документе не найдены: сверять нечего."""
 
 
 def _model_text_of(path: Path) -> str:
@@ -249,20 +262,37 @@ def _model_text_of(path: Path) -> str:
 
     Моделью написаны разделы 3 и 5; собираются они из заголовка до следующего
     заголовка раздела, каким бы он ни был.
+
+    Найденные разделы пересчитываются и сверяются с ожидаемыми. Иначе разбор
+    устроен так же, как был устроен пропуск `check_text`: стоит измениться
+    формату заголовка — и функция вернёт пустую строку, сверка не найдёт
+    ни одного расхождения, и документ выйдет с пометкой «числа проверены».
+    Пустая сверка не вправе выглядеть успехом.
     """
     document = Document(str(path))
     collected: list[str] = []
     written = {number for number, _ in EXPECTED}
+    found: set[int] = set()
     inside = False
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         heading = re.match(r"^(\d)\.\s", text)
         if heading is not None:
-            inside = int(heading.group(1)) in written
+            number = int(heading.group(1))
+            inside = number in written
+            if inside:
+                found.add(number)
         elif text.startswith("Приложение"):
             break
         if inside:
             collected.append(paragraph.text)
+    missing = sorted(written - found)
+    if missing:
+        listed = ", ".join(str(number) for number in missing)
+        raise SectionsNotFoundError(
+            f"в записанном документе не найдены разделы модели: {listed}. "
+            "Сверять числа не с чем, документ не выпускается"
+        )
     return "\n".join(collected)
 
 
@@ -361,6 +391,9 @@ SIGNAL_LEVELS: dict[str, str] = {
 
 FACT_BASE_SECTION = 2
 QUESTIONS_SECTION = 6
+# Раздел, который собирает расчёт только при сборке без модели: с моделью
+# его пишет она, и проверяет его постпроверка ответа.
+THESES_SECTION = 3
 
 
 def _write_sections(
@@ -415,26 +448,86 @@ def _without_model(
     return []  # pragma: no cover — прочих разделов у модели не осталось
 
 
-def _write_fact_base(document: Document, data: ReportData) -> None:
-    """Раздел 2 «Фактическая база» целиком из расчёта."""
+class CalculatedTextError(RuntimeError):
+    """Разделы, собранные расчётом, нарушают правила текста."""
+
+    def __init__(self, problems: list[str]) -> None:
+        listed = "; ".join(problems)
+        super().__init__(
+            f"разделы расчёта не прошли контроль утверждений: {listed}"
+        )
+        self.problems = problems
+
+
+def _check_calculated_sections(
+    inn: str,
+    conn: PgConnection | None,
+    data: ReportData,
+    standard: Standard,
+    with_text: bool,
+) -> None:
+    """Проверяет разделы, собранные расчётом, и блокирует документ при провале.
+
+    Проверяются разделы 2 и 6 — они собираются расчётом в обоих режимах —
+    и раздел 3, когда его собирает расчёт. Раздел 3 модели проверяет
+    постпроверка ответа, и проверять его здесь второй раз незачем.
+    """
+    from finlib.llm.cleanup import strip_identifiers
+    from finlib.llm.textcheck import blocking, check_calculated
+    from finlib.metrics.definitions import load_metrics
+    from finlib.normalize.lines import ReportingType, load_lines
+
+    lines_catalog = load_lines()
+    reporting_type = ReportingType(data.organization["reporting_type"])
+    context = data.text_context(lines_catalog, reporting_type, load_metrics())
+
+    sections = {
+        FACT_BASE_SECTION: "\n".join(_fact_base_texts(data)),
+        QUESTIONS_SECTION: "\n".join(_question_texts(data)),
+    }
+    if not with_text:
+        from finlib.scoring.theses import build_theses
+
+        found = build_theses(inn, conn, report_date=data.report_date, standard=standard)
+        sections[THESES_SECTION] = "\n".join(
+            strip_identifiers(item) for item in found.narrative()
+        )
+        context = replace(
+            context, thesis_groups=tuple(name for name, _ in found.by_group())
+        )
+
+    problems = check_calculated(sections, context)
+    if blocking(problems):
+        raise CalculatedTextError([item.message for item in blocking(problems)])
+    for item in problems:
+        logger.warning("разделы расчёта: %s", item.message)
+
+
+def _fact_base_texts(data: ReportData) -> list[str]:
+    """Абзацы раздела 2, собранные расчётом."""
     from finlib.metrics.definitions import load_metrics
     from finlib.normalize.lines import ReportingType, load_lines
     from finlib.report.composition import fact_base
 
     reporting_type = ReportingType(data.organization["reporting_type"])
-    for text in fact_base(
+    return fact_base(
         data,
         load_policy(),
         load_lines(),
         load_metrics(),
         load_scoring(),
         reporting_type,
-    ):
+    )
+
+
+def _write_fact_base(document: Document, data: ReportData) -> None:
+    """Раздел 2 «Фактическая база» целиком из расчёта."""
+    for text in _fact_base_texts(data):
         document.add_paragraph(text)
 
 
-def _write_questions(document: Document, data: ReportData) -> None:
-    """Раздел 6 «Вопросы к организации» целиком из расчёта."""
+def _question_texts(data: ReportData) -> list[str]:
+    """Вопросы раздела 6, собранные расчётом."""
     from finlib.metrics.definitions import load_metrics
     from finlib.report.composition import questions
 
@@ -445,7 +538,12 @@ def _write_questions(document: Document, data: ReportData) -> None:
             if row["status"] == "quarantine"
         }
     )
-    found = questions(data, load_policy(), load_metrics(), load_scoring(), years)
+    return questions(data, load_policy(), load_metrics(), load_scoring(), years)
+
+
+def _write_questions(document: Document, data: ReportData) -> None:
+    """Раздел 6 «Вопросы к организации» целиком из расчёта."""
+    found = _question_texts(data)
     for number, text in enumerate(found, start=1):
         document.add_paragraph(f"{number}. {text}" if len(found) > 1 else text)
 

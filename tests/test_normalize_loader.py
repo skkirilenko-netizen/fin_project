@@ -108,6 +108,36 @@ def test_load_writes_facts(db_conn) -> None:
     assert values["1600"]["period_role"] == "current"
 
 
+def test_mapping_summary_counts_every_code(db_conn) -> None:
+    """Загрузка называет, сколько кодов разобрано и как именно.
+
+    Записи о неизвестных и неоднозначных кодах пишутся только при
+    срабатывании, и ноль таких записей сам по себе не означает ничего:
+    коды могли быть разобраны все, а могло не быть разбора. Сводка делает
+    этот ноль утверждением.
+    """
+    report = by_year(sets_from(FULL_BFO, FULL_INN), 2025)
+    load_report_set(report, org(FULL_INN), db_conn)
+
+    records = dq(db_conn, FULL_INN, "line_mapping")
+    assert {row["form_code"] for row in records} == set(report.forms)
+    for row in records:
+        details = row["details"]
+        assert details["mapped"] > 0, row["form_code"]
+        assert set(details) == {
+            "mapped",
+            "ignored",
+            "not_applicable",
+            "unknown",
+            "ambiguous",
+            "not_recognized",
+        }
+    # Сводка — состояние комплекта, а не событие: повторная загрузка её
+    # переписывает, а не удваивает.
+    load_report_set(report, org(FULL_INN), db_conn)
+    assert len(dq(db_conn, FULL_INN, "line_mapping")) == len(records)
+
+
 def test_not_disclosed_is_null_not_zero(db_conn) -> None:
     """Нераскрытая строка пишется как NULL со статусом not_disclosed."""
     report = by_year(sets_from(FULL_BFO, FULL_INN), 2025)

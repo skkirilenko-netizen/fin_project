@@ -35,7 +35,12 @@ SELECT count(*) AS calls,
        count(*) FILTER (WHERE verified) AS accepted,
        count(*) FILTER (WHERE NOT verified) AS rejected,
        count(DISTINCT inn) AS organizations,
-       round(avg(duration_ms) / 1000.0, 1) AS avg_seconds
+       round(avg(duration_ms) / 1000.0, 1) AS avg_seconds,
+       -- Знаменатель к нарушениям. Ноль замечаний при неизвестном числе
+       -- сверенных чисел означает не чистый текст, а несделанную работу,
+       -- и различить это можно только здесь.
+       sum(checked_numbers) AS checked,
+       count(*) FILTER (WHERE checked_numbers IS NULL) AS unmeasured
 FROM llm_log WHERE {scope}
 """
 
@@ -157,9 +162,16 @@ def render(summary: dict) -> str:
             f"  отклонено:            {totals['rejected']}",
             f"  организаций:          {totals['organizations']}",
             f"  среднее время ответа: {totals['avg_seconds'] or '—'} с",
+            f"  сверено чисел:        {totals['checked'] or 0}",
             "",
         ]
     )
+    if totals["unmeasured"]:
+        lines[-1:] = [
+            f"  постпроверка не выполнялась: {totals['unmeasured']} обращений "
+            "(число сверенных чисел неизвестно)",
+            "",
+        ]
     if attempts:
         average = sum(attempts) / len(attempts)
         lines.extend(
@@ -185,6 +197,16 @@ def render(summary: dict) -> str:
         for name, count in summary["violations"].most_common():
             lines.append(f"  {count:>4}  {name}")
         lines.append("")
+    elif totals["checked"]:
+        # Пустая графа без знаменателя читалась бы как «проверка ничего
+        # не нашла», хотя означать может и то, что проверять было нечего.
+        lines.extend(
+            [
+                "=== Нарушения по кодам ===",
+                f"  нарушений нет; сверено чисел: {totals['checked']}",
+                "",
+            ]
+        )
 
     lines.append("=== По организациям ===")
     for row in summary["by_org"]:

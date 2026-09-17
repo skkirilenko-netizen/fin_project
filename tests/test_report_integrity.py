@@ -206,3 +206,42 @@ def test_appendix_numbers_are_not_compared(db_conn, tmp_path) -> None:
     )
     text = "\n".join(item.text for item in Document(report.path).paragraphs)
     assert "Версия методики оценки" in text, "приложение на месте и сверку не сорвало"
+
+
+def test_missing_sections_block_the_document(db_conn, tmp_path, monkeypatch) -> None:
+    """Пустая сверка не вправе выглядеть успехом.
+
+    Разбор документа на разделы держится на формате заголовка. Изменится
+    формат — функция вернёт пустую строку, сверять станет нечего, и документ
+    выйдет с пометкой «числа проверены»: ровно та конструкция, из-за которой
+    контроль утверждений текста месяцами не выполнялся. Поэтому число
+    найденных разделов сверяется с ожидаемым.
+    """
+    import finlib.report.document as module
+
+    # Заголовки в документе те же, а ожидание разделов разошлось с ними:
+    # так же выглядит и обратный случай — изменившийся формат заголовка
+    # при прежнем ожидании.
+    monkeypatch.setattr(module, "EXPECTED", (*module.EXPECTED, (9, "Небывалый")))
+
+    with pytest.raises(module.SectionsNotFoundError) as info:
+        build_report(
+            FULL_INN, db_conn, conclusion=conclusion_for(ANSWER), directory=tmp_path
+        )
+    assert "9" in str(info.value)
+    assert not list(tmp_path.glob("*.docx")), "документ не остаётся на диске"
+
+
+def test_section_scan_reports_what_it_did_not_find(tmp_path) -> None:
+    """Разбор называет, каких разделов не нашёл, а не возвращает пустоту."""
+    from finlib.report.document import SectionsNotFoundError, _model_text_of
+
+    document = Document()
+    document.add_heading("Раздел 3: Аналитическая интерпретация", level=1)
+    document.add_paragraph("Коэффициент текущей ликвидности 1,49.")
+    path = tmp_path / "renamed.docx"
+    document.save(path)
+
+    with pytest.raises(SectionsNotFoundError) as info:
+        _model_text_of(path)
+    assert "3" in str(info.value) and "5" in str(info.value)

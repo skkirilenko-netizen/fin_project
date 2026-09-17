@@ -335,6 +335,10 @@ CREATE TABLE IF NOT EXISTS llm_log (
     temperature     numeric,
     verified        boolean,
     foreign_numbers jsonb,
+    -- Сколько пар «число — код» постпроверка сверила. Без этой величины
+    -- ноль посторонних чисел и отсутствие чисел в ответе — одна и та же
+    -- запись, а статистика отказов считается по журналу.
+    checked_numbers integer,
     attempt         integer NOT NULL DEFAULT 1,
     duration_ms     integer,
     -- Версия кода, которой сделан прогон: короткий git-хеш рабочего дерева.
@@ -355,6 +359,10 @@ CREATE TABLE IF NOT EXISTS llm_log (
 -- версия тех прогонов действительно неизвестна.
 ALTER TABLE llm_log ADD COLUMN IF NOT EXISTS code_version text;
 
+-- Та же причина: колонка заведена позже таблицы. NULL в прежних записях
+-- означает именно то, что там написано, — сколько чисел сверено, неизвестно.
+ALTER TABLE llm_log ADD COLUMN IF NOT EXISTS checked_numbers integer;
+
 CREATE INDEX IF NOT EXISTS llm_log_real_idx ON llm_log (inn, created_at)
     WHERE NOT is_test;
 
@@ -363,6 +371,9 @@ CREATE INDEX IF NOT EXISTS llm_log_inn_idx ON llm_log (inn, report_date);
 COMMENT ON TABLE llm_log IS 'Каждое обращение к модели с результатом постпроверки';
 COMMENT ON COLUMN llm_log.verified IS 'false — ответ содержит посторонние числа и пользователю не показывается';
 COMMENT ON COLUMN llm_log.foreign_numbers IS 'Числа из ответа, не найденные во входных блоках';
+COMMENT ON COLUMN llm_log.checked_numbers IS
+    'Сколько пар «число — код» сверено; NULL — постпроверка не выполнялась. '
+    'Ноль нарушений при неизвестном числе проверок — не успех, а отсутствие сведений';
 COMMENT ON COLUMN llm_log.code_version IS 'Версия кода прогона (git-хеш); записи других версий в статистику не идут';
 
 -- Доверие к периоду ----------------------------------------------------------

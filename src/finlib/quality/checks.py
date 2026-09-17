@@ -328,13 +328,20 @@ def period_revised(context: ReportContext) -> Iterator[CheckOutcome]:
 
 
 def jump_detection(context: ReportContext) -> Iterator[CheckOutcome]:
-    """Изменение показателя более чем в заданное число раз — предупреждение."""
+    """Изменение показателя более чем в заданное число раз — предупреждение.
+
+    Каждая пара смежных периодов даёт запись о числе сравнённых величин, даже
+    когда ни одна не выбилась. Прежде контроль писал только срабатывания,
+    и ноль записей означал сразу два разных состояния: сравнили две с лишним
+    сотни пар и ничего не нашли — или не сравнили ни одной.
+    """
     code = CheckCode.JUMP_DETECTION
     policy = context.thresholds.jump_detection
     severity = context.thresholds.severity_of(code.value)
     periods = context.ordered_periods
     for newer, older in zip(periods, periods[1:], strict=False):
         new_facts, old_facts = context.periods[newer], context.periods[older]
+        compared = 0
         for key, item in sorted(new_facts.values.items()):
             form_code, line_code = key
             previous = old_facts.get(form_code, line_code)
@@ -343,6 +350,7 @@ def jump_detection(context: ReportContext) -> Iterator[CheckOutcome]:
                 continue
             if abs(previous) < policy.min_base:
                 continue
+            compared += 1
             ratio = abs(current) / abs(previous)
             if ratio <= policy.factor:
                 continue
@@ -358,6 +366,19 @@ def jump_detection(context: ReportContext) -> Iterator[CheckOutcome]:
                     "factor": str(policy.factor),
                 },
                 severity,
+            )
+        if compared:
+            yield CheckOutcome(
+                code, CheckStatus.PASS, newer, None, None,
+                f"Сравнено величин с предыдущим периодом: {compared}",
+                {"compared": compared, "previous_period": str(older)},
+                severity,
+            )
+        else:
+            yield _skipped(
+                code, newer,
+                "ни одна величина не сравнима с предыдущим периодом: "
+                f"нет раскрытых пар с базой от {policy.min_base}",
             )
 
 

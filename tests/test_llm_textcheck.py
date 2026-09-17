@@ -203,21 +203,35 @@ def test_statement_of_non_calculation_passes() -> None:
 
 
 def test_question_about_absent_line_is_blocking() -> None:
-    """Вопрос о строке вне набора форм содержательного ответа не имеет."""
+    """Вопрос о строке вне набора форм содержательного ответа не имеет.
+
+    Правило переехало на текст расчёта вместе с самим разделом: вопросы
+    собирает он, а формулировки берёт из справочника — подставить в них
+    строку, которой у организации нет, он способен ровно так же.
+    """
+    from finlib.llm.textcheck import check_calculated
+
     text = "1. Почему не раскрыты строки 1410 и 1510?"
-    assert TextRule.QUESTION_OUT_OF_FORM_SET in rules(text, section=6)
+    found = check_calculated({6: text}, CONTEXT)
+    assert TextRule.QUESTION_OUT_OF_FORM_SET in {item.rule for item in found}
 
 
 def test_question_about_present_line_passes() -> None:
     """Вопрос о раскрытой строке правомерен."""
+    from finlib.llm.textcheck import check_calculated
+
     text = "1. Чем вызван рост кредиторской задолженности по строке 1520?"
-    assert TextRule.QUESTION_OUT_OF_FORM_SET not in rules(text, section=6)
+    found = check_calculated({6: text}, CONTEXT)
+    assert TextRule.QUESTION_OUT_OF_FORM_SET not in {item.rule for item in found}
 
 
 def test_rule_applies_only_to_questions() -> None:
     """Правило привязано к разделу «Вопросы», а не ко всему тексту."""
+    from finlib.llm.textcheck import check_calculated
+
     text = "В упрощённой форме строки 1410 и 1510 не предусмотрены."
-    assert TextRule.QUESTION_OUT_OF_FORM_SET not in rules(text, section=5)
+    found = check_calculated({5: text}, CONTEXT)
+    assert TextRule.QUESTION_OUT_OF_FORM_SET not in {item.rule for item in found}
 
 
 # --- предупреждения ----------------------------------------------------------

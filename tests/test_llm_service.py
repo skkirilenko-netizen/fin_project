@@ -88,6 +88,25 @@ def test_verified_answer_is_returned() -> None:
     assert result.checked_numbers > 0
 
 
+def test_journal_records_how_much_was_checked() -> None:
+    """Число сверенных чисел пишется в журнал рядом с нарушениями.
+
+    Без него «нарушений нет» и «сверять было нечего» — одна и та же запись,
+    а статистика отказов считается по журналу. У принятого ответа величина
+    положительна, у отклонённого — тоже: проверка выполнялась в обоих случаях.
+    """
+    with client_returning(GOOD) as client:
+        result = generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
+    accepted = journal()[-1]
+    assert accepted["checked_numbers"] == result.checked_numbers > 0
+
+    with client_returning(BAD, BAD, BAD) as client, pytest.raises(ConclusionRejectedError):
+        generate_conclusion(INN, context=CONTEXT, client=client, is_test=True)
+    rejected = journal()[-1]
+    assert rejected["verified"] is False
+    assert rejected["checked_numbers"] > 0
+
+
 def test_rejected_answer_is_retried_then_fails() -> None:
     """Непрошедший ответ повторяется, затем ошибка."""
     with client_returning(BAD, BAD) as client, pytest.raises(ConclusionRejectedError) as info:

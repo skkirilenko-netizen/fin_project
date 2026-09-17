@@ -176,6 +176,10 @@ class BuiltFacts:
     """Факты комплекта и всё, что в них не попало."""
 
     facts: list[Fact] = dc_field(default_factory=list)
+    # Сколько кодов формы сопоставлено со справочником. Счётчик проверенного:
+    # без него нули по unknown и ambiguous ничем не подтверждены — журнал
+    # молчит и когда разобраны все коды, и когда разбора не было.
+    mapped: dict[str, int] = dc_field(default_factory=dict)
     unknown: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     ignored: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
     not_applicable: dict[str, tuple[str, ...]] = dc_field(default_factory=dict)
@@ -212,6 +216,7 @@ def build_facts(report: ReportSet, catalog: LinesCatalog) -> BuiltFacts:
             )
         else:
             mapping = map_codes(codes, filled, catalog, report.reporting_type, form_code)
+        built.mapped[form_code] = len(mapping.mapped)
         if mapping.unknown:
             built.unknown[form_code] = tuple(item.source_code for item in mapping.unknown)
         if mapping.ignored:
@@ -399,6 +404,7 @@ def load_report_set(
     records.extend(_code_records(report, src_file_id, built.unknown, built.ambiguous_details))
     records.extend(_conflict_records(report, src_file_id, built.conflicts))
     records.extend(_not_recognized_records(report, src_file_id, built.not_recognized))
+    records.extend(_mapping_summary(report, src_file_id, built))
     # Записи о сопоставлении строк описывают состояние комплекта, а не событие:
     # повторная загрузка снимает прежние и кладёт нынешние.
     execute(
@@ -752,6 +758,55 @@ def _not_recognized_records(
                     "disclosed": {
                         f"{period:%Y-%m-%d}": str(value) for period, value in line.disclosed
                     },
+                },
+            )
+        )
+    return records
+
+
+def _mapping_summary(
+    report: ReportSet, src_file_id: int, built: BuiltFacts
+) -> list[CheckRecord]:
+    """Сводка судеб кодов по каждой форме комплекта.
+
+    Счётчик проверенного рядом со счётчиком нарушений: записи о неизвестных
+    и неоднозначных кодах пишутся только при срабатывании, и ноль таких
+    записей сам по себе не означает ничего. Здесь названо, сколько кодов
+    формы разобрано и как именно, — и тогда ноль неизвестных кодов становится
+    утверждением, а не молчанием.
+    """
+    records: list[CheckRecord] = []
+    for form_code in sorted(report.forms):
+        mapped = built.mapped.get(form_code, 0)
+        ignored = len(built.ignored.get(form_code, ()))
+        not_applicable = len(built.not_applicable.get(form_code, ()))
+        unknown = len(built.unknown.get(form_code, ()))
+        ambiguous = len(built.ambiguous.get(form_code, ()))
+        not_recognized = sum(
+            1 for item in built.not_recognized if item.form_code == form_code
+        )
+        records.append(
+            CheckRecord(
+                inn=report.inn,
+                check_code=CheckCode.LINE_MAPPING,
+                status=CheckStatus.INFO,
+                severity=Severity.INFO,
+                message=(
+                    f"Форма {form_code}: сопоставлено кодов {mapped}, "
+                    f"игнорируется методикой {ignored}, неприменимо к набору "
+                    f"{not_applicable}, неизвестно {unknown}, "
+                    f"неоднозначно {ambiguous}, не опознано по наименованию "
+                    f"{not_recognized}"
+                ),
+                src_file_id=src_file_id,
+                form_code=form_code,
+                details={
+                    "mapped": mapped,
+                    "ignored": ignored,
+                    "not_applicable": not_applicable,
+                    "unknown": unknown,
+                    "ambiguous": ambiguous,
+                    "not_recognized": not_recognized,
                 },
             )
         )

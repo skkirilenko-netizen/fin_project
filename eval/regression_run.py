@@ -951,6 +951,17 @@ WHERE inn = ANY(%(inns)s) AND NOT is_test AND NOT verified
   AND prompt_name = %(scheme)s
 """
 
+# Знаменатель к замечаниям: сколько пар «число — код» постпроверка сверила
+# за этот прогон. Считается по всем ответам, а не только по отклонённым:
+# нули в разбивке замечаний без него неотличимы от невыполненной проверки.
+_TEXT_CHECKED = """
+SELECT coalesce(sum(checked_numbers), 0) AS checked,
+       count(*) FILTER (WHERE checked_numbers IS NULL) AS unmeasured
+FROM llm_log
+WHERE inn = ANY(%(inns)s) AND NOT is_test
+  AND created_at >= %(since)s AND prompt_name = %(scheme)s
+"""
+
 
 def run_metrics(
     runs: list[OrgRun],
@@ -1063,10 +1074,18 @@ def _text_metrics(
             for item in items or ():
                 kind = item.get("violation") or item.get("rule") or section
                 violations[kind] = violations.get(kind, 0) + 1
+    checked = fetch_all(
+        _TEXT_CHECKED, {"inns": inns, "since": since, "scheme": scheme.value}
+    )[0]
     return {
         "дошли до текстовой части": len(reached),
         "документов собрано": len(documents),
         "доля прошедших контроли текста": _share(len(documents), len(reached)),
+        # Знаменатель стоит рядом с замечаниями и в отчёте печатается перед
+        # ними: нули в разбивке без него читаются как чистый текст, а означать
+        # могут невыполненную проверку.
+        "сверено чисел постпроверкой": int(checked["checked"]),
+        "обращений без постпроверки": int(checked["unmeasured"]),
         "замечания постпроверки": dict(
             sorted(violations.items(), key=lambda item: -item[1])
         ),

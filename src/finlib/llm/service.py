@@ -53,12 +53,12 @@ MAX_ATTEMPTS = 3
 _INSERT_LOG = """
 INSERT INTO llm_log (
     inn, report_date, model, prompt_name, prompt_text, response_text,
-    temperature, verified, foreign_numbers, attempt, duration_ms, code_version,
-    is_test
+    temperature, verified, foreign_numbers, checked_numbers, attempt, duration_ms,
+    code_version, is_test
 ) VALUES (
     %(inn)s, %(report_date)s, %(model)s, %(prompt_name)s, %(prompt_text)s, %(response_text)s,
-    %(temperature)s, %(verified)s, %(foreign_numbers)s, %(attempt)s, %(duration_ms)s,
-    %(code_version)s, %(is_test)s
+    %(temperature)s, %(verified)s, %(foreign_numbers)s, %(checked_numbers)s, %(attempt)s,
+    %(duration_ms)s, %(code_version)s, %(is_test)s
 )
 """
 
@@ -236,6 +236,10 @@ def _log(
             )
             if result
             else None,
+            # Знаменатель к нарушениям: без него «нарушений нет» и «сверять
+            # было нечего» — одна и та же запись, а отказы разбираются
+            # по журналу. NULL остаётся, когда постпроверка не выполнялась.
+            "checked_numbers": result.checked if result else None,
             "attempt": attempt,
             "duration_ms": completion.duration_ms if completion else None,
             # Версия кода прогона: записи разных версий несопоставимы, и разбор

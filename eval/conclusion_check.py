@@ -19,13 +19,25 @@ from pathlib import Path
 from finlib.llm.client import LLMClient
 from finlib.llm.context import build_context
 from finlib.llm.service import build_prompt
+from finlib.llm.textcheck import NOT_APPLICABLE, counted
 from finlib.llm.verify import (
     classify_numbers,
     extract_numbers,
+    sections_of,
     strip_reasoning,
     verify,
 )
 from finlib.metrics.definitions import load_metrics
+
+
+def _text_context(inn: str, report_date: date):
+    """Контекст контроля утверждений текста — тот же, что в боевом цикле."""
+    from finlib.normalize.lines import ReportingType, load_lines
+    from finlib.report.data import load_report_data
+
+    data = load_report_data(inn, report_date=report_date)
+    reporting_type = ReportingType(data.organization["reporting_type"])
+    return data.text_context(load_lines(), reporting_type, load_metrics())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,7 +58,15 @@ def main(argv: list[str] | None = None) -> int:
         completion = client.complete(build_prompt(context))
     text = strip_reasoning(completion.text)
 
-    result = verify(text, blocks, thresholds=load_metrics().stop_factor_values())
+    # Контекст обязателен: без него `verify` пропускает контроль утверждений
+    # текста целиком, и инструмент показывал бы чистый разбор там, где
+    # проверка не выполнялась. Ровно это месяцами происходило в боевом цикле.
+    result = verify(
+        text,
+        blocks,
+        thresholds=load_metrics().stop_factor_values(),
+        text_context=_text_context(args.inn, context.report_date),
+    )
 
     print(f"организация: {context.inn}, период {context.report_date:%d.%m.%Y}")
     print(f"модель: {completion.model}, ответ за {completion.duration_ms} мс")
@@ -56,6 +76,17 @@ def main(argv: list[str] | None = None) -> int:
     print()
     passed = result.checked - len(result.foreign)
     print(f"сверено {result.checked}, прошло {passed}, отклонено {len(result.foreign)}")
+    # Счётчик проверенного рядом со счётчиком нарушений: ноль замечаний
+    # по правилам текста сам по себе не говорит ничего.
+    print("\nправила текста:")
+    objects_by_rule = counted(
+        sections_of(text), _text_context(args.inn, context.report_date)
+    )
+    for rule, objects in sorted(objects_by_rule.items()):
+        firings = sum(1 for item in result.statements if item.rule.value == rule)
+        print(f"  {objects:>4} объектов, нарушений {firings}  {rule}")
+    for rule, reason in sorted(NOT_APPLICABLE.items()):
+        print(f"     — не применяется  {rule.value}: {reason}")
     if result.problems:
         print("\nзамечания:")
         for item in result.problems:
