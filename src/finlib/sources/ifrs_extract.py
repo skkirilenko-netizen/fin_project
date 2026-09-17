@@ -118,6 +118,10 @@ class ExtractedForm:
     auto_dismissed: list[tuple[str, tuple[Decimal, ...], str]] = field(
         default_factory=list
     )
+    # Место опознанной позиции в таблице: код → номер строки. Нужно
+    # для иерархии итогов — в отчётности по МСФО слагаемые стоят **над**
+    # своим итогом, и без места строки «ближайший итог ниже» не определить.
+    recognised_at: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -236,11 +240,12 @@ def _extract_form(
     """Разбирает один блок формы: величины, неопознанные строки, сноски."""
     form = ExtractedForm(form_code)
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
+    alternatives: dict[int, tuple[Decimal, ...]] = {}
     tail_from = 0
 
     pending: list[str] = []
     for index, line in enumerate(lines):
-        name, values = _split_row(line, grouping, len(report_dates))
+        name, values, alternative = _split_row(line, grouping, len(report_dates))
         if not values:
             # Строка без величин — либо заголовок раздела, либо начало
             # наименования, перенесённого вёрсткой. Какая именно, станет
@@ -248,6 +253,8 @@ def _extract_form(
             if name:
                 pending.append(name)
             continue
+        if alternative:
+            alternatives[len(rows)] = alternative
         rows.append((_joined(pending, name), values, index))
         pending.clear()
         tail_from = index + 1
@@ -258,6 +265,8 @@ def _extract_form(
         found = catalog.match_by_name(name) if name else None
         if found is not None and found.form == form_code:
             recognised[position_index] = found
+
+    _choose_reading_by_totals(rows, alternatives, recognised, catalog)
 
     _name_totals_by_structure(rows, recognised, known, form)
 
@@ -289,6 +298,7 @@ def _extract_form(
             )
             continue
         form.rows_recognised += 1
+        form.recognised_at.setdefault(position.code, position_index)
         for report_date, value in zip(report_dates, values, strict=False):
             form.values.append(
                 ExtractedValue(position.code, report_date, value, name.strip())
@@ -355,6 +365,60 @@ def _unglue(texts: list[str], periods: int, grouping: Grouping) -> list[str]:
     """
     if grouping is not Grouping.RUSSIAN or periods < 2:
         return texts
+    texts = _strip_note_column(texts, periods)
+    plain = _unglue_columns(texts, periods)
+    if len(plain) >= periods:
+        return plain
+    # Колонок всё ещё меньше, чем периодов, — значит, склейка осталась,
+    # и спереди к ней приклеен номер примечания: «Инвестиции в совместные
+    # и ассоциированные компании 5 414 414» — это примечание 5 и две
+    # величины по 414, а читалось как пять миллиардов при валюте баланса
+    # в сто сорок одну тысячу.
+    #
+    # Отрезать номер сразу нельзя: у «1 500 000» первая группа тоже
+    # однозначна, и остаток «500 000» делится ровно надвое — итог активов
+    # превращался в пятьсот. Поэтому номер отрезается только тогда, когда
+    # без него колонок не хватает.
+    return _unglue_columns(texts, periods, note_number=True)
+
+
+def _strip_note_column(texts: list[str], periods: int) -> list[str]:
+    """Отделяет номер примечания, слипшийся с первой величиной строки.
+
+    Колонка «Прим.» стоит слева от величин, и её номер прилипает к первой
+    из них: у Сегежи «Добавочный капитал 19 116 179 35 122» — это
+    примечание 19 и величины 116 179 и 35 122, а читалось как девятнадцать
+    миллиардов при итоге капитала в 255.
+
+    Опознаётся строением, а не догадкой: колонок ровно столько, сколько
+    периодов, у первой на одну группу цифр больше, чем у остальных, лишняя
+    группа — одна-две цифры, **и без неё величина становится сравнимой
+    с соседним периодом**.
+
+    Последнее условие и отличает номер от разряда. «1 000 000  930 000» —
+    тоже три группы против двух, но величины соседних периодов различаются
+    на восемь процентов, и отрезать там нечего; у Сегежи же 19 116 179
+    против 35 122 — разница в пятьсот сорок пять раз, а после отсечения
+    в три с половиной. Величина отчётности за смежные годы так не меняется.
+    """
+    if len(texts) != periods or periods < 2:
+        return texts
+    split = [re.split(rf"[{_NARROW_SPACE} ]+", item.strip()) for item in texts]
+    rest = max(len(item) for item in split[1:])
+    if len(split[0]) != rest + 1 or len(split[0][0]) > 2:
+        return texts
+    whole = sum(len(group) for group in split[0])
+    stripped = whole - len(split[0][0])
+    neighbour = max(sum(len(group) for group in item) for item in split[1:])
+    if whole - neighbour < 2 or abs(stripped - neighbour) >= whole - neighbour:
+        return texts
+    return [split[0][0], " ".join(split[0][1:]), *texts[1:]]
+
+
+def _unglue_columns(
+    texts: list[str], periods: int, note_number: bool = False
+) -> list[str]:
+    """Разрезает ячейки, считая или не считая первую группу номером примечания."""
     result: list[str] = []
     for item in texts:
         groups = re.split(rf"[{_NARROW_SPACE} ]+", item.strip())
@@ -368,21 +432,41 @@ def _unglue(texts: list[str], periods: int, grouping: Grouping) -> list[str]:
         # 423» у Сегежи читалось как шестьдесят четыре миллиарда при валюте
         # баланса в сто сорок один, а «89 187 101 900» — как выручка в
         # восемьдесят девять миллиардов вместо восьмидесяти девяти тысяч.
-        if len(groups) < 2 * periods or len(groups) % periods:
-            result.append(item)
+        # Без номера примечания доля колонки должна быть не короче двух групп:
+        # «60 021» при двух периодах — одна величина, а не шестьдесят и
+        # двадцать один. Разделить её поровну можно, и правило, разрешающее
+        # это, режет пополам каждую вторую строку баланса.
+        columns = _split_evenly(groups, periods, min_size=2)
+        if columns is not None:
+            result.extend(columns)
             continue
-        size = len(groups) // periods
-        if not all(
-            _well_formed(groups[start : start + size])
-            for start in range(0, len(groups), size)
-        ):
-            result.append(item)
-            continue
-        result.extend(
-            " ".join(groups[start : start + size])
-            for start in range(0, len(groups), size)
+        columns = (
+            _split_evenly(groups[1:], periods, min_size=1)
+            if note_number and len(groups) > 1 and len(groups[0]) <= 2
+            else None
         )
+        if columns is not None:
+            result.append(groups[0])
+            result.extend(columns)
+            continue
+        result.append(item)
     return result
+
+
+def _split_evenly(groups: list[str], periods: int, min_size: int) -> list[str] | None:
+    """Делит группы цифр поровну между колонками; None — не делятся.
+
+    Склейка опознаётся по строению: число групп делится на число периодов,
+    доля каждой колонки не короче `min_size` групп, и каждая доля сама
+    по себе — правильно набранное число.
+    """
+    if len(groups) < periods * min_size or len(groups) % periods:
+        return None
+    size = len(groups) // periods
+    parts = [groups[start : start + size] for start in range(0, len(groups), size)]
+    if not all(_well_formed(part) for part in parts):
+        return None
+    return [" ".join(part) for part in parts]
 
 
 def _well_formed(groups: list[str]) -> bool:
@@ -426,22 +510,27 @@ _CONTINUES = re.compile(r".*(?:[,(]|\bи|\bили|\bпо|\bна|\bв|\bот|\bд
 
 def _split_row(
     line: str, grouping: Grouping, periods: int = 0
-) -> tuple[str, tuple[Decimal, ...]]:
-    """Делит строку таблицы на наименование и величины периодов.
+) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...]]:
+    """Делит строку таблицы на наименование, величины периодов и запасное чтение.
 
     Величины ищутся в хвосте строки: наименование стоит слева и содержать
     чисел не обязано, а вот числа справа — это колонки периодов. Ячейка
     опознаётся по конвенции документа, иначе «700 000  650 000» слипается
     в одну величину.
+
+    Запасное чтение — то же самое при допущении, что в каждой колонке
+    стоит ровно одна группа цифр: «367 391» у Автодора это не триста
+    шестьдесят семь тысяч, а 367 и 391 за два года. Выбрать между чтениями
+    по виду строки нельзя, это выбирает арифметика итога.
     """
     stripped = line.rstrip()
     if not stripped.strip():
-        return "", ()
+        return "", (), ()
 
     pattern = _cells_pattern(grouping)
     matches = list(pattern.finditer(stripped))
     if not matches:
-        return stripped.strip(), ()
+        return stripped.strip(), (), ()
 
     # Хвост числовых ячеек: подряд идущие числа в конце строки. Число внутри
     # наименования («Примечание 12») колонкой не является.
@@ -455,13 +544,15 @@ def _split_row(
         position = match.start()
     tail.reverse()
     if not tail:
-        return stripped.strip(), ()
+        return stripped.strip(), (), ()
 
     # Колонки склеиваются: разделитель разрядов и разделитель колонок — оба
     # пробел, и у «856 349 835 020» они неразличимы по ширине. Четыре группы
     # по три цифры при двух периодах — это две величины, а не одна
     # в восемьсот пятьдесят шесть миллиардов при валюте баланса в полтора.
-    texts = _unglue([item.group() for item in tail], periods, grouping)
+    cells = [item.group() for item in tail]
+    texts = _unglue(cells, periods, grouping)
+    alternative = _by_single_groups(cells, periods, grouping)
 
     parsed = tuple(
         value
@@ -469,7 +560,7 @@ def _split_row(
         if value is not None
     )
     if not parsed:
-        return stripped.strip(), ()
+        return stripped.strip(), (), ()
 
     # Колонок с величинами столько, сколько периодов. Всё, что левее, —
     # не величина: у ФосАгро это номер примечания, «Основные средства
@@ -483,7 +574,7 @@ def _split_row(
     # величину 21 и попадал в очередь как статья. У настоящей статьи значение
     # есть за каждый период либо нет вовсе.
     if periods >= 2 and len(parsed) == 1 and _looks_like_note_number(parsed[0]):
-        return stripped.strip(), ()
+        return stripped.strip(), (), ()
 
     name = stripped[: tail[0].start()].strip()
     # К наименованию липнут номер примечания, знак сноски и прочерк «нет
@@ -491,7 +582,89 @@ def _split_row(
     # и их эквиваленты 18» справочник не узнаёт, хотя без номера узнаёт.
     for pattern in (_NOTE_NUMBER, _FOOTNOTE_MARK, _TRAILING_DASH):
         name = pattern.sub("", name).strip()
-    return name, parsed
+    return name, parsed, (alternative if alternative != parsed else ())
+
+
+def _choose_reading_by_totals(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    alternatives: dict[int, tuple[Decimal, ...]],
+    recognised: dict[int, IfrsPosition],
+    catalog: IfrsCatalog,
+) -> None:
+    """Выбирает чтение неоднозначной строки по итогу её раздела.
+
+    «367 391» — одна величина или две, по написанию не отличить. Отличает
+    арифметика: слагаемое не бывает больше своего итога. У Автодора «Прочие
+    внеоборотные активы» при первом чтении дают 367 391 при итоге раздела
+    9 178 — величина в сорок раз больше итога, в который входит. При втором
+    чтении 367 и 391, и оба меньше итога.
+
+    Схождения итога это не требует: часть слагаемых у эмитента может быть
+    не опознана справочником, и точной суммы тогда нет вовсе. Требуется
+    ровно то, что можно утверждать без справочника: слагаемое не больше
+    итога. Чтение меняется только там, где первое чтение это нарушает,
+    а второе нет, — иначе перебором подберётся что угодно.
+    """
+    if not alternatives:
+        return
+    by_code = {position.code: index for index, position in recognised.items()}
+    for total in catalog.totals(form=None):
+        place = by_code.get(total.code)
+        if place is None:
+            continue
+        limits = rows[place][1]
+        for component in total.components:
+            index = by_code.get(component.code)
+            if index is None or index not in alternatives:
+                continue
+            current, other = rows[index][1], alternatives[index]
+            if _exceeds(current, limits) and not _exceeds(other, limits):
+                logger.info(
+                    "строка «%s» прочитана как %s: при чтении %s слагаемое"
+                    " больше своего итога %s",
+                    rows[index][0],
+                    other,
+                    current,
+                    total.code,
+                )
+                rows[index] = (rows[index][0], other, rows[index][2])
+
+
+def _exceeds(values: tuple[Decimal, ...], limits: tuple[Decimal, ...]) -> bool:
+    """Превышает ли хоть одна величина итог своего периода по модулю."""
+    return any(
+        abs(value) > abs(limit) for value, limit in zip(values, limits, strict=False)
+    )
+
+
+def _by_single_groups(
+    cells: list[str], periods: int, grouping: Grouping
+) -> tuple[Decimal, ...]:
+    """Чтение строки при допущении «одна группа цифр — одна колонка».
+
+    У Автодора «Прочие внеоборотные активы   367 391» — это 367 и 391 за два
+    года, а не триста шестьдесят семь тысяч: итог внеоборотных активов у него
+    9 178, и величина в сорок раз больше итога своего раздела туда не входит.
+    Отличить такую строку от настоящих «367 391» нельзя ничем, кроме
+    арифметики, поэтому чтение не подменяет основное, а идёт рядом с ним.
+    """
+    if grouping is not Grouping.RUSSIAN or periods < 2:
+        return ()
+    groups: list[tuple[str, bool]] = []
+    for cell in cells:
+        negative = cell.strip().startswith("(") or cell.strip().startswith(("-", "−"))
+        body = cell.strip().strip("()").lstrip("-−").strip()
+        if "," in body or "." in body:
+            return ()
+        groups.extend((item, negative) for item in re.split(rf"[{_NARROW_SPACE} ]+", body))
+    if len(groups) == periods + 1 and len(groups[0][0]) <= 2:
+        # Слева стоит номер примечания: «Отложенные налоговые активы 26 346 169».
+        groups = groups[1:]
+    if len(groups) != periods or any(not 1 <= len(item) <= 3 for item, _ in groups):
+        return ()
+    return tuple(
+        Decimal(f"-{item}") if negative else Decimal(item) for item, negative in groups
+    )
 
 
 # Хвостовое короткое число наименования — номер примечания, а не часть

@@ -319,21 +319,61 @@ def _belongs_to(
     первый попавшийся незакрытый итог, и «Прочая выручка» приписывалась
     к итогу внеоборотных активов.
 
-    Среди итогов своей формы выбирается тот, чья недостача ближе к величине
-    строки: если строки не хватает ровно на эту сумму, она и есть искомое
-    слагаемое. Точнее сказать нельзя — состав итога и есть то, что человек
-    уточняет разметкой.
+    **Решает положение строки, а не близость недостачи.** В отчётности
+    по МСФО слагаемые стоят над своим итогом, и строка входит в ближайший
+    итог **ниже** себя: итог закрывает раздел, и всё, что стоит после него,
+    к нему уже не относится. Прежде выбирался итог с ближайшей по величине
+    недостачей, и строка попадала куда угодно: «Всего активов» приписывалось
+    к итогу оборотных активов, «Резервы» — к итогу капитала, а у Автодора
+    «Затраты, осуществлённые в интересах Принципала» уходили в итог
+    внеоборотных активов, хотя стоят после него, — недостача там становилась
+    отрицательной и росла с каждой новой строкой.
+
+    **Итог из одних итогов строк не принимает.** Состав «Итого активы» —
+    два итога разделов, и отдельная статья в него входит только через свой
+    раздел. То же у «Итого капитал и обязательства». Это не перечень
+    исключений, а свойство состава, поэтому и проверяется по составу.
+
+    Близость недостачи остаётся запасным правилом — на случай, когда ни один
+    итог формы не опознан по наименованию и положения его в таблице мы
+    не знаем.
     """
     amount = abs(row.values[0]) if row.values else Decimal(0)
     same_form = {
         code: gap
         for code, gap in broken.items()
-        if (position := catalog.get(code)) is not None and position.form == row.form
+        if (position := catalog.get(code)) is not None
+        and position.form == row.form
+        and not _totals_only(code, catalog)
     }
     if not same_form:
         return None, None
+
+    places = issuer.extraction.forms[row.form].recognised_at
+    below = {code: places[code] for code in same_form if places.get(code, -1) > row.index}
+    if below:
+        nearest = min(below, key=lambda code: below[code])
+        return nearest, same_form[nearest]
+
+    if any(code in places for code in same_form):
+        # Итоги формы опознаны, но все стоят выше строки: раздел, к которому
+        # она относится, не раскрыт итогом вовсе. Приписать её к чужому
+        # разделу хуже, чем не приписать ни к какому.
+        return None, None
+
     best = min(same_form, key=lambda code: abs(abs(same_form[code]) - amount))
     return best, same_form[best]
+
+
+def _totals_only(code: str, catalog: IfrsCatalog) -> bool:
+    """Состоит ли итог из одних итогов — тогда отдельных статей он не берёт."""
+    position = catalog.get(code)
+    if position is None or not position.components:
+        return False
+    return all(
+        (item := catalog.get(component.code)) is not None and item.is_total
+        for component in position.components
+    )
 
 
 def _section_of(code: str | None, catalog: IfrsCatalog) -> str | None:
