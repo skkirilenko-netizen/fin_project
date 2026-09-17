@@ -78,6 +78,17 @@ class UnrecognisedRow:
     values: tuple[Decimal, ...]
     previous_name: str = ""
     next_name: str = ""
+    # Место строки в таблице формы. Опознавать строку по наименованию нельзя:
+    # у семи строк его нет вовсе, а «Прочие расходы» встречается в форме
+    # дважды. По имени решение человека применялось не к той строке либо
+    # не применялось вовсе — строка возвращалась в очередь, хотя её величина
+    # уже была учтена в итоге.
+    index: int = 0
+
+    @property
+    def key(self) -> tuple[str, int]:
+        """Устойчивый ключ строки: форма и место в ней."""
+        return (self.form, self.index)
 
     @property
     def largest(self) -> Decimal:
@@ -259,6 +270,7 @@ def _extract_form(
                     next_name=rows[position_index + 1][0].strip()
                     if position_index + 1 < len(rows)
                     else "",
+                    index=position_index,
                 )
             )
             continue

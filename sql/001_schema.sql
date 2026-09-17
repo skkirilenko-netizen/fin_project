@@ -502,6 +502,10 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     -- позицию и не раскладывается на существующие.
     relation       text NOT NULL DEFAULT 'exact'
                    CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific')),
+    -- Место строки в таблице формы. Наименование ключом быть не может:
+    -- у части строк его нет вовсе, а «Прочие расходы» встречаются в форме
+    -- дважды — разметка применялась не к той строке либо не применялась.
+    row_index      integer,
     related_codes  text[],
     -- Подтвердилась ли разметка арифметикой: сумма сошлась с величиной
     -- позиции. NULL — проверить было нечем, и это не то же самое, что
@@ -522,6 +526,7 @@ ALTER TABLE ifrs_line_confirmation
 ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS related_codes text[];
 ALTER TABLE ifrs_line_confirmation
     ADD COLUMN IF NOT EXISTS arithmetic_confirmed boolean;
+ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS row_index integer;
 
 DO $$
 BEGIN

@@ -487,15 +487,17 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         )
     )
 
-    history: list[tuple[str, str]] = []
-    skipped: set[tuple[str, str]] = set()
+    # ИНН, ключ строки и наименование: ключ нужен, чтобы отменить именно эту
+    # строку, наименование — чтобы сказать человеку, что отменено.
+    history: list[tuple[str, tuple[str, int], str]] = []
+    skipped: set[tuple[str, tuple[str, int]]] = set()
     saved = 0
 
     while True:
         queue = [
             item
             for item in candidates(issuers, catalog)
-            if (item.inn, item.source_name) not in skipped
+            if (item.inn, item.key) not in skipped
         ]
         if not queue:
             typer.echo(typer.style("\nОчередь пуста.", bold=True))
@@ -508,56 +510,77 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         issuer = by_inn[item.inn]
         _show_candidate(item, len(queue))
 
-        answer = typer.prompt(
-            "  код, номер подсказки, «д» — детализация, «а» — агрегат, "
-            "«с» — специфическая, «н» — не статья, «п» — пропустить, "
+        raw = typer.prompt(
+            "  код, номер подсказки, «д [код]» — детализация, «а [коды]» — агрегат, "
+            "«с [код]» — специфическая, «н» — не статья, «п» — пропустить, "
             "«о» — отменить, «в» — выход",
             default="в",
-        ).strip()
+        )
+        answer, argument = _parse_command(raw)
 
-        if answer in ("в", "q", ""):
+        if answer == "в":
             break
         if answer == "п":
-            skipped.add((item.inn, item.source_name))
+            skipped.add((item.inn, item.key))
+            typer.echo(f"  пропущено: «{item.source_name or '(без наименования)'}»")
             continue
         if answer == "о":
             # Отмена не ограничена присестом: ошибку замечают и через день,
             # а править журнал руками неудобно и опасно.
             if history:
-                inn, name = history.pop()
-                code = issuer.assignments.get(name, "")
+                inn, key, name = history.pop()
             else:
                 found = last_confirmation(issuers)
                 if found is None:
                     typer.echo("  отменять нечего")
                     continue
-                inn, name, code = found
-            forget(by_inn[inn], name)
+                inn, name, key = found
+            forget(by_inn[inn], key, name)
             saved = max(0, saved - 1)
             typer.echo(
-                typer.style(
-                    f"  отменено: «{name}» ({code})", fg=typer.colors.YELLOW
-                )
+                typer.style(f"  отменено: «{name}»", fg=typer.colors.YELLOW)
             )
             continue
         if answer == "н":
-            issuer.dismissed[item.source_name] = Decision.NOT_A_LINE
+            issuer.dismissed[item.key] = Decision.NOT_A_LINE
+            typer.echo(
+                f"  сохранено: «{item.source_name or '(без наименования)'}» → не статья"
+            )
             continue
         if answer == "д":
             # Детализация: строка вместе с соседними даёт позицию. Гипотеза
             # принимается только тогда, когда сумма сошлась с величиной
             # позиции; не сошлось — разметка сохраняется непроверенной,
             # и об этом сказано прямо.
-            code = _ask_code("  код позиции, которую строка детализирует", codes)
-            if code is None:
-                continue
-            issuer.parts[item.source_name] = code
-            matched, total = check_part_of(issuer, code, catalog)
-            _save_confirmation(
-                issuer, item, code, who, relation="part_of", confirmed=matched
+            code = argument or _ask_code(
+                "  код позиции, которую строка детализирует", codes
             )
-            history.append((item.inn, item.source_name))
+            if not code or code not in codes:
+                if code:
+                    typer.echo(
+                        typer.style(
+                            f"  кода {code} нет в справочнике: строка осталась "
+                            "неразмеченной",
+                            fg=typer.colors.RED,
+                        )
+                    )
+                continue
+            # Решение применяется целиком либо не применяется вовсе: сначала
+            # запись в журнал, затем влияние на итоги. Прежде величина
+            # попадала в итог, а строка оставалась в очереди.
+            issuer.parts[item.key] = code
+            matched, total = check_part_of(issuer, code, catalog)
+            try:
+                _save_confirmation(
+                    issuer, item, code, who, relation="part_of", confirmed=matched
+                )
+            except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+                issuer.parts.pop(item.key, None)
+                typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+                continue
+            history.append((item.inn, item.key, item.source_name))
             saved += 1
+            typer.echo(f"  сохранено: «{item.source_name}» → детализация {code}")
             if matched is True:
                 typer.echo(
                     typer.style(
@@ -579,67 +602,92 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
         if answer == "а":
             # Агрегат: строка укрупняет несколько позиций. Перечень объявляется
             # при разметке — без него неизвестно, что именно она покрывает.
-            listed = typer.prompt(
+            listed = argument or typer.prompt(
                 "  коды позиций через запятую, которые строка укрупняет", default=""
-            ).strip()
-            parts = tuple(item.strip() for item in listed.split(",") if item.strip())
+            )
+            parts = tuple(
+                part.strip() for part in listed.replace(";", ",").split(",") if part.strip()
+            )
             unknown = [code for code in parts if code not in codes]
             if len(parts) < 2 or unknown:
                 typer.echo(
                     typer.style(
                         "  нужны два и более кода из справочника"
-                        + (f"; неизвестны: {', '.join(unknown)}" if unknown else ""),
+                        + (f"; неизвестны: {', '.join(unknown)}" if unknown else "")
+                        + ": строка осталась неразмеченной",
                         fg=typer.colors.RED,
                     )
                 )
                 continue
-            issuer.aggregates[item.source_name] = parts
-            _save_confirmation(
-                issuer,
-                item,
-                parts[0],
-                who,
-                relation="aggregate_of",
-                related=parts,
-            )
-            history.append((item.inn, item.source_name))
+            issuer.aggregates[item.key] = parts
+            try:
+                _save_confirmation(
+                    issuer, item, parts[0], who, relation="aggregate_of", related=parts
+                )
+            except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+                issuer.aggregates.pop(item.key, None)
+                typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+                continue
+            history.append((item.inn, item.key, item.source_name))
             saved += 1
             typer.echo(
                 typer.style(
-                    f"  сохранено как агрегат {len(parts)} позиций",
+                    f"  сохранено: «{item.source_name}» → агрегат "
+                    f"{', '.join(parts)}",
                     fg=typer.colors.GREEN,
                 )
             )
             continue
         if answer == "с":
-            code = typer.prompt(
+            code = argument or typer.prompt(
                 "  код специфической статьи, например ifrs.principal_receivable",
                 default="",
             ).strip()
             if not code:
+                typer.echo("  код не введён: строка осталась неразмеченной")
                 continue
             taken = code_is_taken(code, catalog)
             if taken is not None:
                 typer.echo(typer.style(f"  код занят: {taken}", fg=typer.colors.RED))
                 continue
-            issuer.dismissed[item.source_name] = Decision.SPECIFIC
-            _save_confirmation(issuer, item, code, who)
-            history.append((item.inn, item.source_name))
+            issuer.dismissed[item.key] = Decision.SPECIFIC
+            try:
+                _save_confirmation(issuer, item, code, who, relation="specific")
+            except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+                issuer.dismissed.pop(item.key, None)
+                typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+                continue
+            history.append((item.inn, item.key, item.source_name))
             saved += 1
-            typer.echo(typer.style(f"  сохранено как {code}", fg=typer.colors.GREEN))
+            typer.echo(
+                typer.style(
+                    f"  сохранено: «{item.source_name}» → специфическая {code}",
+                    fg=typer.colors.GREEN,
+                )
+            )
             continue
         if answer.isdigit() and 1 <= int(answer) <= len(item.hints):
             answer = item.hints[int(answer) - 1].code
         if answer not in codes:
             typer.echo(
-                typer.style(f"  кода {answer} нет в справочнике", fg=typer.colors.RED)
+                typer.style(
+                    f"  кода «{answer}» нет в справочнике: строка осталась "
+                    "неразмеченной",
+                    fg=typer.colors.RED,
+                )
             )
             continue
 
         closed, total = apply_assignment(issuer, item, answer, catalog)
-        _save_confirmation(issuer, item, answer, who)
-        history.append((item.inn, item.source_name))
+        try:
+            _save_confirmation(issuer, item, answer, who)
+        except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+            issuer.assignments.pop(item.key, None)
+            typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+            continue
+        history.append((item.inn, item.key, item.source_name))
         saved += 1
+        typer.echo(f"  сохранено: «{item.source_name}» → {answer}")
         if closed:
             typer.echo(
                 typer.style(
@@ -695,8 +743,53 @@ def _show_skipped(skipped: set, issuers: list, catalog) -> None:
     typer.echo("")
     typer.echo(typer.style(f"Пропущено строк: {len(skipped)}", bold=True))
     for item in candidates(issuers, catalog):
-        if (item.inn, item.source_name) in skipped:
+        if (item.inn, item.key) in skipped:
             typer.echo(f"  {item.inn}  {item.describe()}")
+
+
+# Однобуквенные команды разметки и их латинские двойники. Раскладку
+# переключают не всегда, и «a» вместо «а» — не ошибка человека, а свойство
+# клавиатуры: команда обязана приниматься в обоих написаниях.
+_COMMAND_ALIASES: dict[str, str] = {
+    "a": "а",  # агрегат
+    "n": "н",
+    "h": "н",  # не статья
+    "p": "п",  # пропустить
+    "o": "о",  # отменить
+    "c": "с",  # специфическая
+    "d": "д",
+    "g": "д",  # детализация
+    "v": "в",
+    "b": "в",
+    "q": "в",  # выход
+}
+
+# Команды, принимающие продолжение в той же строке: «д ifrs.x»,
+# «а ifrs.x, ifrs.y». Спрашивать вторым вопросом можно, но заставлять —
+# лишний шаг на каждой из двух сотен строк.
+_COMMANDS_WITH_ARGUMENT = frozenset({"д", "а", "с"})
+
+
+def _parse_command(raw: str) -> tuple[str, str]:
+    """Разбирает ввод на команду и её продолжение.
+
+    Ввод нормализуется: снимаются пробелы и невидимые знаки, регистр
+    не учитывается, латинские двойники приводятся к кириллице. Прежде
+    «a» отвергалось как неизвестный код, а «а ifrs.x, ifrs.y» одной строкой
+    целиком принималось за код.
+    """
+    cleaned = raw.replace(" ", " ").strip().casefold()
+    if not cleaned:
+        return "в", ""
+    head, _, tail = cleaned.partition(" ")
+    command = _COMMAND_ALIASES.get(head, head)
+    if len(head) == 1 and command in _COMMANDS_WITH_ARGUMENT:
+        return command, tail.strip()
+    if len(cleaned) == 1:
+        return _COMMAND_ALIASES.get(cleaned, cleaned), ""
+    # Не команда: это код позиции либо номер подсказки, и регистр кодов
+    # значения не имеет — они строчные по правилу справочника.
+    return cleaned, ""
 
 
 def _ask_code(question: str, codes: dict) -> str | None:
@@ -738,13 +831,13 @@ def _save_confirmation(
         execute(
             "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
             "form_code, value, share_of_assets, confirmed_by, relation, related_codes, "
-            "arithmetic_confirmed) VALUES (%(code)s, %(inn)s, %(date)s, %(name)s, "
-            "%(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, %(related)s, "
-            "%(confirmed)s) "
+            "arithmetic_confirmed, row_index) VALUES (%(code)s, %(inn)s, %(date)s, "
+            "%(name)s, %(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, "
+            "%(related)s, %(confirmed)s, %(index)s) "
             "ON CONFLICT (code, inn, report_date, source_name) DO UPDATE SET "
             "value = EXCLUDED.value, share_of_assets = EXCLUDED.share_of_assets, "
             "confirmed_by = EXCLUDED.confirmed_by, relation = EXCLUDED.relation, "
-            "related_codes = EXCLUDED.related_codes, "
+            "related_codes = EXCLUDED.related_codes, row_index = EXCLUDED.row_index, "
             "arithmetic_confirmed = EXCLUDED.arithmetic_confirmed, confirmed_at = now()",
             {
                 "code": code,
@@ -758,6 +851,7 @@ def _save_confirmation(
                 "relation": relation,
                 "related": list(related) if related else None,
                 "confirmed": confirmed,
+                "index": candidate.index,
             },
             conn=conn,
         )

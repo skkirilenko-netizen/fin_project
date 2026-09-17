@@ -93,6 +93,8 @@ class Candidate:
     values: tuple[Decimal, ...]
     share_of_assets: Decimal | None
     priority: Priority
+    # Место строки в форме: по нему решение применяется именно к ней.
+    index: int = 0
     # Итог, в состав которого строка предположительно входит, и его недостача.
     total_code: str | None = None
     total_gap: Decimal | None = None
@@ -107,6 +109,11 @@ class Candidate:
     def amount(self) -> Decimal:
         """Величина строки за отчётный период."""
         return self.values[0] if self.values else Decimal(0)
+
+    @property
+    def key(self) -> tuple[str, int]:
+        """Устойчивый ключ строки — форма и место в ней."""
+        return (self.form, self.index)
 
     def describe(self) -> str:
         """Однострочное описание для списка."""
@@ -123,14 +130,33 @@ class IssuerMarkup:
     path: Path
     profile: DocumentProfile
     extraction: Extraction
-    assignments: dict[str, str] = field(default_factory=dict)
-    dismissed: dict[str, Decision] = field(default_factory=dict)
-    # Строки, помеченные детализацией: наименование → код позиции, которую
+    # Все решения человека хранятся по ключу строки — форме и месту в ней.
+    # По наименованию хранить нельзя: у части строк его нет вовсе, а «Прочие
+    # расходы» встречаются в форме дважды. Из-за ключа по имени решение
+    # применялось не к той строке либо не применялось вовсе, и строка
+    # возвращалась в очередь с уже учтённой величиной.
+    assignments: dict[tuple[str, int], str] = field(default_factory=dict)
+    dismissed: dict[tuple[str, int], Decision] = field(default_factory=dict)
+    # Строки, помеченные детализацией: ключ строки → код позиции, которую
     # они вместе составляют. Держатся отдельно от точных присвоений: в сумму
     # позиции они входят, а самой позицией не являются.
-    parts: dict[str, str] = field(default_factory=dict)
-    # Строки-агрегаты: наименование → позиции, которые строка укрупняет.
-    aggregates: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    parts: dict[tuple[str, int], str] = field(default_factory=dict)
+    # Строки-агрегаты: ключ строки → позиции, которые строка укрупняет.
+    aggregates: dict[tuple[str, int], tuple[str, ...]] = field(default_factory=dict)
+
+    def decided(self, row: UnrecognisedRow) -> bool:
+        """Решена ли строка — любым способом.
+
+        Проверяются все виды разом: прежде очередь смотрела только точные
+        присвоения и отказы, а детализация и агрегат в неё не попадали —
+        строка оставалась в очереди, хотя её величина уже шла в итог.
+        """
+        return (
+            row.key in self.assignments
+            or row.key in self.dismissed
+            or row.key in self.parts
+            or row.key in self.aggregates
+        )
 
     @property
     def report_date(self) -> date:
@@ -146,11 +172,11 @@ class IssuerMarkup:
             # Точное присвоение задаёт величину позиции; детализация к ней
             # прибавляется. Агрегат в сумму не идёт: он покрывает несколько
             # позиций сразу, и подставлять его в одну значило бы удвоить.
-            code = self.assignments.get(row.source_name)
+            code = self.assignments.get(row.key)
             if code is not None:
                 found[code] = found.get(code, Decimal(0)) + row.values[0]
                 continue
-            part = self.parts.get(row.source_name)
+            part = self.parts.get(row.key)
             if part is not None and part not in found:
                 found[part] = found.get(part, Decimal(0)) + row.values[0]
         return found
@@ -220,7 +246,7 @@ def _for_issuer(
 
     found: list[Candidate] = []
     for row in issuer.extraction.unrecognised:
-        if row.source_name in issuer.assignments or row.source_name in issuer.dismissed:
+        if issuer.decided(row):
             continue
         share = (
             abs(row.largest) / abs(assets) if assets not in (None, Decimal(0)) else None
@@ -238,6 +264,7 @@ def _for_issuer(
                 form=row.form,
                 source_name=row.source_name,
                 values=row.values,
+                index=row.index,
                 share_of_assets=share,
                 priority=priority,
                 total_code=total_code,
@@ -333,7 +360,7 @@ def apply_assignment(
     """
     catalog = catalog or load_ifrs_lines()
     before = issuer.totals_state(catalog)
-    issuer.assignments[candidate.source_name] = code
+    issuer.assignments[candidate.key] = code
     after = issuer.totals_state(catalog)
 
     closed = [
@@ -365,7 +392,7 @@ def check_part_of(
     parts = [
         row.values[0]
         for row in issuer.extraction.unrecognised
-        if issuer.parts.get(row.source_name) == code and row.values
+        if issuer.parts.get(row.key) == code and row.values
     ]
     if not parts:
         return None, None
@@ -380,7 +407,8 @@ def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition]:
 
 
 _SAVED = """
-SELECT code, inn, source_name FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
+SELECT code, inn, source_name, form_code, row_index, relation, related_codes
+FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
 """
 
 _TAKEN = """
@@ -389,7 +417,8 @@ SELECT code, inn, source_name FROM ifrs_line_confirmation WHERE code = %(code)s
 
 _FORGET = """
 DELETE FROM ifrs_line_confirmation
-WHERE inn = %(inn)s AND source_name = %(name)s AND report_date = %(date)s
+WHERE inn = %(inn)s AND report_date = %(date)s
+  AND (row_index = %(index)s OR (row_index IS NULL AND source_name = %(name)s))
 """
 
 
@@ -412,11 +441,43 @@ def restore(issuers: list[IssuerMarkup], conn=None) -> int:
         issuer = by_inn.get(row["inn"])
         if issuer is None:
             continue
-        issuer.assignments[row["source_name"]] = row["code"]
+        key = _restore_key(issuer, row)
+        if key is None:
+            logger.warning(
+                "разметка «%s» (%s) не восстановлена: строки нет в разборе",
+                row["source_name"],
+                row["inn"],
+            )
+            continue
+        relation = row["relation"] or Relation.EXACT.value
+        if relation == Relation.PART_OF.value:
+            issuer.parts[key] = row["code"]
+        elif relation == Relation.AGGREGATE_OF.value:
+            issuer.aggregates[key] = tuple(row["related_codes"] or (row["code"],))
+        elif relation == Relation.SPECIFIC.value:
+            issuer.dismissed[key] = Decision.SPECIFIC
+        else:
+            issuer.assignments[key] = row["code"]
         restored += 1
     if restored:
         logger.info("восстановлено присвоений прежних присестов: %d", restored)
     return restored
+
+
+def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
+    """Ключ строки для восстановленной разметки.
+
+    Индекс строки пишется с самого начала, но записи прежних сессий его
+    не имеют: для них строка ищется по форме и наименованию, а при пустом
+    имени — не ищется вовсе. Молчать об этом нельзя, иначе разметка тихо
+    пропадёт и покажется заново.
+    """
+    if row.get("row_index") is not None:
+        return (row["form_code"], int(row["row_index"]))
+    for item in issuer.extraction.unrecognised:
+        if item.form == row["form_code"] and item.source_name == row["source_name"]:
+            return item.key
+    return None
 
 
 def code_is_taken(code: str, catalog: IfrsCatalog, conn=None) -> str | None:
@@ -441,12 +502,14 @@ def code_is_taken(code: str, catalog: IfrsCatalog, conn=None) -> str | None:
 
 
 _LAST = """
-SELECT inn, source_name, code FROM ifrs_line_confirmation
+SELECT inn, source_name, code, form_code, row_index FROM ifrs_line_confirmation
 WHERE inn = ANY(%(inns)s) ORDER BY confirmed_at DESC, id DESC LIMIT 1
 """
 
 
-def last_confirmation(issuers: list[IssuerMarkup], conn=None) -> tuple[str, str, str] | None:
+def last_confirmation(
+    issuers: list[IssuerMarkup], conn=None
+) -> tuple[str, str, tuple[str, int]] | None:
     """Последнее присвоение по журналу: эмитент, наименование, код.
 
     Отмена не ограничена текущим присестом: ошибку замечают и через день,
@@ -458,22 +521,39 @@ def last_confirmation(issuers: list[IssuerMarkup], conn=None) -> tuple[str, str,
     if not rows:
         return None
     row = rows[0]
-    return row["inn"], row["source_name"], row["code"]
+    by_inn = {item.inn: item for item in issuers}
+    issuer = by_inn.get(row["inn"])
+    key = _restore_key(issuer, row) if issuer is not None else None
+    return row["inn"], row["source_name"], key or (row["form_code"], -1)
 
 
-def forget(issuer: IssuerMarkup, source_name: str, conn=None) -> None:
-    """Отменяет присвоение: убирает из памяти и из журнала подтверждений.
+def forget(
+    issuer: IssuerMarkup, key: tuple[str, int], source_name: str = "", conn=None
+) -> None:
+    """Отменяет разметку: убирает из памяти и из журнала подтверждений.
+
+    Отменяются все виды разом — точное присвоение, детализация, агрегат,
+    отказ: человек отменяет решение о строке, а не одну из его форм.
+    Влияние на итоги снимается вместе с записью, потому что итоги считаются
+    по этим же словарям.
 
     Ошибка на двух сотнях строк неизбежна, а править потом в базе руками
-    неудобно и опасно — исправление тем и отличается от второго наблюдения,
+    неудобно и опасно: исправление тем и отличается от второго наблюдения,
     что старую запись надо убрать, а не добавить рядом.
     """
     from finlib.db import execute
 
-    issuer.assignments.pop(source_name, None)
-    issuer.dismissed.pop(source_name, None)
+    issuer.assignments.pop(key, None)
+    issuer.dismissed.pop(key, None)
+    issuer.parts.pop(key, None)
+    issuer.aggregates.pop(key, None)
     execute(
         _FORGET,
-        {"inn": issuer.inn, "name": source_name, "date": issuer.report_date},
+        {
+            "inn": issuer.inn,
+            "index": key[1],
+            "name": source_name,
+            "date": issuer.report_date,
+        },
         conn=conn,
     )
