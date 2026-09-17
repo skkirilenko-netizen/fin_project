@@ -150,6 +150,7 @@ positions:
       - {code: ifrs.goodwill}
       - {code: ifrs.investments_in_associates}
       - {code: ifrs.deferred_tax_assets}
+      - {code: ifrs.advances_for_non_current_assets}
       - {code: ifrs.other_non_current_assets}
 
 # --- Оборотные активы ---------------------------------------------------------
@@ -170,6 +171,28 @@ positions:
       - {name: Торговая и прочая дебиторская задолженность, seen_at: ФосАгро}
       - {name: Дебиторская задолженность и авансы выданные, seen_at: Норникель}
       - {name: Торговая дебиторская задолженность, seen_at: Сегежа}
+
+  - code: ifrs.vat_and_other_taxes_receivable
+    name: НДС и прочие налоги к возмещению
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    # Размечена человеком как специфическая у ФосАгро, но встретилась
+    # и у Сегежи, и у Норникеля: специфической статья считается, пока её
+    # нет ни у кого другого. Держать такую в подтверждённых значит занижать
+    # долю общих статей — главное число ветки.
+    aliases:
+      - {name: НДС и прочие налоги к возмещению, seen_at: ФосАгро}
+      - {name: "НДС к возмещению и текущие переплаты по налогам", seen_at: Сегежа}
+      - {name: Прочие налоги к возмещению, seen_at: Норникель}
+
+  - code: ifrs.current_tax_assets
+    name: Налог на прибыль к возмещению
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    aliases:
+      - {name: Налог на прибыль к возмещению, seen_at: ФосАгро}
+      - {name: Текущая переплата по налогу на прибыль, seen_at: Сегежа}
+      - {name: Авансовые платежи по налогу на прибыль, seen_at: Норникель}
 
   - code: ifrs.contract_assets
     name: Активы по договорам с покупателями
@@ -233,7 +256,10 @@ positions:
     components:
       - {code: ifrs.inventories}
       - {code: ifrs.trade_receivables}
+      - {code: ifrs.contract_assets}
       - {code: ifrs.advances_paid}
+      - {code: ifrs.vat_and_other_taxes_receivable}
+      - {code: ifrs.current_tax_assets}
       - {code: ifrs.cash}
       - {code: ifrs.other_current_assets}
 
@@ -436,6 +462,9 @@ positions:
       - {name: "Торговая и прочая долгосрочная кредиторская задолженность",
          seen_at: Норникель}
       - {name: Долгосрочная кредиторская задолженность, seen_at: ЛСР}
+      # Наименование то же, что у краткосрочной позиции: у ЛСР обе строки
+      # называются одинаково, и различает их раздел.
+      - {name: Торговая и прочая кредиторская задолженность, seen_at: ЛСР}
       - {name: "Обязательства по договорам, торговая и прочая кредиторская\
           \ задолженность", seen_at: ЛСР}
 
@@ -459,6 +488,7 @@ positions:
     components:
       - {code: ifrs.long_term_borrowings}
       - {code: ifrs.long_term_lease_liabilities}
+      - {code: ifrs.long_term_trade_payables}
       - {code: ifrs.deferred_tax_liabilities}
       - {code: ifrs.long_term_provisions}
       - {code: ifrs.other_non_current_liabilities}
@@ -508,6 +538,15 @@ positions:
       - {name: "Авансы, полученные от покупателей", seen_at: Автодор}
       - {name: Обязательства по договорам с покупателями, seen_at: ФосАгро}
 
+  - code: ifrs.dividends_payable
+    name: Дивиденды к уплате
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    # Встречается у трёх эмитентов из пяти — статья общая, а не своя.
+    aliases:
+      - {name: Дивиденды к уплате, seen_at: ФосАгро}
+      - {name: Дивиденды к выплате, seen_at: Норникель}
+
   - code: ifrs.taxes_payable
     name: Налоги к уплате
     form: ifrs.statement_of_financial_position
@@ -550,6 +589,7 @@ positions:
       - {code: ifrs.trade_payables}
       - {code: ifrs.advances_received}
       - {code: ifrs.taxes_payable}
+      - {code: ifrs.dividends_payable}
       - {code: ifrs.short_term_provisions}
       - {code: ifrs.other_current_liabilities}
 
@@ -580,6 +620,14 @@ positions:
     components:
       - {code: ifrs.total_equity}
       - {code: ifrs.total_liabilities}
+    # Запасной состав — для эмитента, у которого строки «Итого обязательства»
+    # нет: пассив идёт капиталом и двумя разделами обязательств сразу.
+    # Так у Сегежи, ФосАгро и Норникеля, и с единственным составом их пассив
+    # не проверялся вовсе — сумма состояла из одного капитала.
+    alternative_components:
+      - - {code: ifrs.total_equity}
+        - {code: ifrs.total_non_current_liabilities}
+        - {code: ifrs.total_current_liabilities}
 
 # --- Отчёт о прибыли или убытке -----------------------------------------------
 #
@@ -683,6 +731,18 @@ positions:
       - {code: ifrs.selling_expenses}
       - {code: ifrs.administrative_expenses}
       - {code: ifrs.other_operating_result}
+    # Запасной состав — для эмитента, у которого валовой прибыли нет вовсе.
+    # У Сегежи отчёт о прибылях идёт от выручки прямо к операционному убытку:
+    # 89 187 − 76 881 − 28 188 − 36 139 + 1 393 = −50 628. С основным составом
+    # такой итог не сходится никогда, и арифметика ОПУ у неё не работала
+    # как контроль вовсе.
+    alternative_components:
+      - - {code: ifrs.revenue}
+        - {code: ifrs.cost_of_sales}
+        - {code: ifrs.selling_expenses}
+        - {code: ifrs.administrative_expenses}
+        - {code: ifrs.impairment_losses}
+        - {code: ifrs.other_operating_result}
 
   - code: ifrs.finance_income
     name: Финансовые доходы
@@ -741,6 +801,7 @@ positions:
       - {code: ifrs.operating_profit}
       - {code: ifrs.finance_income}
       - {code: ifrs.finance_costs}
+      - {code: ifrs.fx_gain_loss}
       - {code: ifrs.share_of_associates_result}
 
   - code: ifrs.income_tax

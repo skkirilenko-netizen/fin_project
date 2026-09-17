@@ -802,8 +802,15 @@ def _show_candidate(item, left: int) -> None:
         typer.echo(typer.style(f"    ↓ {item.next_name}", dim=True))
 
     values = ", ".join(str(value) for value in item.values)
+    # Мера у каждой формы своя, и называется она по имени: статья баланса
+    # соизмеряется с валютой баланса, строка ОПУ — с выручкой, а у потока
+    # денежных средств такой меры нет вовсе.
+    base = {
+        "ifrs.statement_of_financial_position": "доля активов",
+        "ifrs.statement_of_profit_or_loss": "доля выручки",
+    }.get(item.form, "доля")
     share = f"{item.share_of_assets:.2%}" if item.share_of_assets else "—"
-    typer.echo(f"  величины: {values}; доля активов: {share}")
+    typer.echo(f"  величины: {values}; {base}: {share}")
     if item.total_code:
         typer.echo(
             f"  входит в незакрытый итог {item.total_code}, недостача {item.total_gap}"

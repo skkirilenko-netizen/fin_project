@@ -324,6 +324,13 @@ def _extract_form(
     }
 
     _name_totals_by_structure(rows, recognised, known, form, set(dismissals))
+    # Второй проход по разделам: часть итогов опознаётся структурой, а не
+    # наименованием, и в первый проход их ещё не было. У ФосАгро итоги обоих
+    # разделов обязательств подписаны словами «Долгосрочные обязательства»
+    # и «Краткосрочные обязательства» — справочник таких не знает, — и
+    # «Торговая и прочая кредиторская задолженность» оставалась неопознанной
+    # только потому, что разделу не на что было опереться.
+    _resolve_by_section(rows, recognised, catalog, form_code)
     _retract_wrong_section(rows, recognised, form_code)
 
     form.rows_total = len(rows)

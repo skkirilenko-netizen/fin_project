@@ -79,6 +79,12 @@ class IfrsPosition(BaseModel):
     # инверсию пробовать первой.
     normal_sign: int = 1
     components: tuple[IfrsComponent, ...] = ()
+    # Запасные составы итога: та же величина, набранная иначе. Эмитенты
+    # раскрывают отчёт о прибылях по-разному, и промежуточной строки может
+    # не быть вовсе: у Сегежи валовой прибыли нет, операционный убыток
+    # набирается прямо из выручки и расходов. Один состав на всех означал бы,
+    # что у такого эмитента арифметика ОПУ не проверяется ничем.
+    alternative_components: tuple[tuple[IfrsComponent, ...], ...] = ()
     aliases: tuple[Alias, ...] = ()
     # Безусловная оговорка о содержании позиции: верна для любого эмитента
     # и идёт в раздел «Ограничения анализа».
@@ -94,6 +100,13 @@ class IfrsPosition(BaseModel):
         names = (self.name, *(item.name for item in self.aliases))
         return tuple(dict.fromkeys(normalize_name(name) for name in names))
 
+    @property
+    def compositions(self) -> tuple[tuple[IfrsComponent, ...], ...]:
+        """Все составы итога: основной первым, запасные следом."""
+        if not self.components:
+            return ()
+        return (self.components, *self.alternative_components)
+
     @model_validator(mode="after")
     def _total_has_components(self) -> Self:
         """Состав есть только у итоговых позиций и только непустой."""
@@ -101,6 +114,12 @@ class IfrsPosition(BaseModel):
             raise ValueError(f"итоговая позиция {self.code} объявлена без состава")
         if self.components and not self.is_total:
             raise ValueError(f"позиция {self.code} не итоговая, но имеет состав")
+        if self.alternative_components and not self.components:
+            raise ValueError(
+                f"позиция {self.code} объявила запасной состав без основного"
+            )
+        if any(not item for item in self.alternative_components):
+            raise ValueError(f"у позиции {self.code} пустой запасной состав")
         return self
 
 
@@ -189,7 +208,10 @@ class IfrsCatalog(BaseModel):
         """
         known = {item.code for item in self.positions}
         for position in self.positions:
-            missing = [item.code for item in position.components if item.code not in known]
+            # Запасные составы проверяются наравне с основным: ошибка в них
+            # так же превращается в вечно несходящийся итог.
+            listed = [item for group in position.compositions for item in group]
+            missing = [item.code for item in listed if item.code not in known]
             if missing:
                 raise ValueError(
                     f"в составе {position.code} названы неизвестные позиции: "
@@ -197,9 +219,7 @@ class IfrsCatalog(BaseModel):
                 )
             by_code = {item.code: item for item in self.positions}
             other_form = [
-                item.code
-                for item in position.components
-                if by_code[item.code].form != position.form
+                item.code for item in listed if by_code[item.code].form != position.form
             ]
             if other_form:
                 raise ValueError(

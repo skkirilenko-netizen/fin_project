@@ -266,14 +266,9 @@ class IssuerMarkup:
         found: dict[str, TotalCheck] = {}
         for total in catalog.totals():
             extra = extras.get(total.code, Decimal(0))
-            outcome = check_total(
-                total,
-                values.get,
-                lambda code: None,
-                lambda amount: abs(amount) * TOLERANCE_SHARE + Decimal(1),
-                normal_sign_of(catalog),
+            found[total.code] = best_composition(
+                total, values, catalog, extra, TOLERANCE_SHARE
             )
-            found[total.code] = _with_extra(outcome, extra)
         return found
 
 
@@ -343,6 +338,7 @@ def _for_issuer(
 ) -> list[Candidate]:
     """Кандидаты одного эмитента с привязкой к незакрытым итогам."""
     assets = issuer.extraction.value_of("ifrs.total_assets", issuer.report_date)
+    revenue = issuer.extraction.value_of("ifrs.revenue", issuer.report_date)
     threshold = catalog.materiality.share_of_total_assets
     broken = _unbalanced_totals(issuer, catalog)
     hidden = other_shares(issuer.inn, issuer.report_date)
@@ -351,9 +347,7 @@ def _for_issuer(
     for row in issuer.extraction.unrecognised:
         if issuer.decided(row):
             continue
-        share = (
-            abs(row.largest) / abs(assets) if assets not in (None, Decimal(0)) else None
-        )
+        share = _relative_size(row, issuer, assets, revenue)
         total_code, gap = _belongs_to(row, issuer, broken, catalog)
         # Раздел берётся от места строки, а не от привязки к несошедшемуся
         # итогу: итог мог сойтись, а строка всё равно стоит в своём разделе.
@@ -407,6 +401,66 @@ def _for_issuer(
             )
         )
     return found
+
+
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """Один из составов итога — вход для общей арифметики сходимости."""
+
+    code: str
+    components: tuple
+
+    @property
+    def is_total(self) -> bool:
+        """Состав бывает только у итога."""
+        return True
+
+
+def best_composition(
+    total: IfrsPosition,
+    values: dict[str, Decimal],
+    catalog: IfrsCatalog,
+    extra: Decimal = Decimal(0),
+    tolerance_share: Decimal = TOLERANCE_SHARE,
+) -> TotalCheck:
+    """Сверка итога по лучшему из его составов.
+
+    Эмитенты раскрывают отчёт о прибылях по-разному, и промежуточной строки
+    может не быть вовсе: у Сегежи валовой прибыли нет, операционный убыток
+    набирается прямо из выручки и расходов. Один состав на всех означал бы,
+    что у такого эмитента арифметика ОПУ не проверяется ничем.
+
+    Лучшим считается сошедшийся, а среди несошедшихся — тот, чьё расхождение
+    меньше: он и показывает, какого слагаемого недостаёт. Подбора здесь нет —
+    составы объявлены методикой поимённо, а не перебираются.
+    """
+    outcomes = [
+        _with_extra(
+            check_total(
+                _Composition(total.code, group),
+                values.get,
+                lambda code: None,
+                lambda amount: abs(amount) * tolerance_share + Decimal(1),
+                normal_sign_of(catalog),
+            ),
+            extra,
+        )
+        for group in total.compositions
+    ]
+    matched = next(
+        (item for item in outcomes if item.verdict is TotalVerdict.MATCHED), None
+    )
+    if matched is not None:
+        return matched
+    return min(
+        outcomes,
+        key=lambda item: abs(item.difference) if item.difference is not None else _FAR,
+    )
+
+
+# Заведомо большее расхождение, чем любое настоящее: им помечается исход,
+# у которого расхождения нет вовсе — сравнивать его с числом нельзя.
+_FAR = Decimal("1e30")
 
 
 def _with_extra(outcome: TotalCheck, extra: Decimal) -> TotalCheck:
@@ -519,6 +573,32 @@ def _totals_only(code: str, catalog: IfrsCatalog) -> bool:
         (item := catalog.get(component.code)) is not None and item.is_total
         for component in position.components
     )
+
+
+def _relative_size(
+    row: UnrecognisedRow,
+    issuer: IssuerMarkup,
+    assets: Decimal | None,
+    revenue: Decimal | None,
+) -> Decimal | None:
+    """Насколько строка велика — относительно того, с чем её сравнивают.
+
+    **Мера у каждой формы своя.** Статья баланса соизмеряется с валютой
+    баланса, строка отчёта о прибылях — с выручкой: себестоимость ФосАгро
+    как «48,89 % активов» не значит ничего и при разметке сбивает.
+    У отчёта о движении денежных средств такой меры нет вовсе — поток
+    за период не доля ни от запаса, ни от оборота, — и вместо числа стоит
+    прочерк.
+    """
+    if row.form == "ifrs.statement_of_profit_or_loss":
+        base = revenue
+    elif row.form == "ifrs.statement_of_financial_position":
+        base = assets
+    else:
+        return None
+    if base is None or base == 0:
+        return None
+    return abs(row.largest) / abs(base)
 
 
 def _total_below(

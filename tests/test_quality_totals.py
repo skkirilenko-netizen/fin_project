@@ -116,11 +116,11 @@ def test_undisclosed_component_counts_as_zero() -> None:
     }
     found = check_total(line, *checker(values))
     assert found.verdict is TotalVerdict.MATCHED
+    # Перечислены все нераскрытые слагаемые состава — сравнивается
+    # с составом справочника, а не с зашитым списком: состав пополняется.
     assert set(found.undisclosed) == {
-        "ifrs.trade_receivables",
-        "ifrs.advances_paid",
-        "ifrs.other_current_assets",
-    }
+        item.code for item in line.components
+    } - set(values)
 
 
 def test_nothing_disclosed_is_not_a_failure() -> None:
