@@ -413,6 +413,72 @@ COMMENT ON COLUMN llm_log.checked_numbers IS
     'Ноль нарушений при неизвестном числе проверок — не успех, а отсутствие сведений';
 COMMENT ON COLUMN llm_log.code_version IS 'Версия кода прогона (git-хеш); записи других версий в статистику не идут';
 
+-- Подтверждённые специфические статьи МСФО ------------------------------------
+
+-- Статья консолидированной отчётности, превышающая порог существенности,
+-- никогда не сворачивается в «прочее»: она выносится отдельной позицией
+-- с кодом, присвоенным человеком на экране сверки. Такие коды живут здесь,
+-- а не в methodology/ifrs_lines.yaml: методика правится руками и диффом,
+-- а позиция, присвоенная во время работы, методикой не является.
+--
+-- Наименование хранится ДОСЛОВНО, как оно стояло в отчётности. Через полгода
+-- при решении, поднимать ли позицию в ядро, нужно видеть, одну ли вещь
+-- подтверждали у разных эмитентов под разными названиями, — по коду этого
+-- не увидеть, код присваивали мы.
+CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
+    id             bigserial PRIMARY KEY,
+    code           text NOT NULL CHECK (code ~ '^ifrs\.[a-z][a-z0-9_]*$'),
+    inn            text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
+    src_file_id    bigint REFERENCES src_file (id) ON DELETE SET NULL,
+    report_date    date NOT NULL,
+    -- Наименование статьи в отчётности эмитента, без нормализации.
+    source_name    text NOT NULL,
+    -- Раздел отчётности и величина, ради которой статья вынесена отдельно.
+    form_code      text NOT NULL,
+    value          numeric(20, 3),
+    share_of_assets numeric(10, 6) NOT NULL,
+    confirmed_by   text NOT NULL,
+    confirmed_at   timestamptz NOT NULL DEFAULT now(),
+    note           text,
+    -- Один эмитент подтверждает статью за период один раз: повторное
+    -- подтверждение того же — исправление, а не второе наблюдение,
+    -- иначе признак кандидата в ядро набирался бы повторами одного случая.
+    CONSTRAINT ifrs_line_confirmation_uniq UNIQUE (code, inn, report_date, source_name)
+);
+
+CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
+    ON ifrs_line_confirmation (code);
+
+COMMENT ON TABLE ifrs_line_confirmation IS
+    'Специфические статьи МСФО сверх порога существенности, подтверждённые '
+    'человеком на экране сверки. Не методика: методика правится руками и диффом';
+COMMENT ON COLUMN ifrs_line_confirmation.source_name IS
+    'Наименование статьи дословно, как в отчётности эмитента. Нужно, чтобы '
+    'увидеть, одну ли вещь подтверждали у разных эмитентов под разными названиями';
+COMMENT ON COLUMN ifrs_line_confirmation.share_of_assets IS
+    'Доля валюты баланса, ради которой статья вынесена отдельной позицией';
+
+-- Кандидат в ядро: статья, подтверждённая у нескольких эмитентов независимо.
+-- Признак машинный и никого ни к чему не обязывает — поднятие позиции в ядро
+-- остаётся решением человека и правкой ifrs_lines.yaml руками. Признак лишь
+-- показывает, что пора посмотреть. Порог (core_candidate.distinct_issuers)
+-- задан методикой, здесь печатается само число эмитентов.
+CREATE OR REPLACE VIEW ifrs_core_candidate AS
+SELECT
+    code,
+    count(DISTINCT inn)                      AS issuers,
+    count(*)                                 AS confirmations,
+    array_agg(DISTINCT source_name ORDER BY source_name) AS source_names,
+    max(share_of_assets)                     AS max_share,
+    max(confirmed_at)                        AS last_confirmed_at
+FROM ifrs_line_confirmation
+GROUP BY code;
+
+COMMENT ON VIEW ifrs_core_candidate IS
+    'Специфические статьи в разрезе кода: сколько эмитентов подтвердили её '
+    'независимо и под какими наименованиями. Порог кандидата в ядро задан '
+    'в methodology/ifrs_lines.yaml, решение о поднятии принимает человек';
+
 -- Доверие к периоду ----------------------------------------------------------
 
 -- Один и тот же период приходит и своим комплектом, и сравнительной колонкой

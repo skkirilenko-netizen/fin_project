@@ -4,13 +4,12 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
 from typing import Any
 
-from finlib.normalize.lines import LineDef, Operator, ReportingType, UnitSource
+from finlib.normalize.lines import LineDef, ReportingType, UnitSource
 from finlib.quality.codes import CheckCode, CheckStatus, Severity
 from finlib.quality.context import PeriodFacts, ReportContext
-from finlib.quality.values import as_addend
+from finlib.quality.totals import TotalVerdict, check_total
 
 logger = logging.getLogger(__name__)
 
@@ -92,26 +91,6 @@ def _not_verifiable(
     )
 
 
-def _sum_components(
-    line: LineDef, facts: PeriodFacts, form_code: str
-) -> tuple[Decimal, list[str], dict[str, str]]:
-    """Сумма состава итоговой строки, а также нераскрытые и незагруженные слагаемые."""
-    total = Decimal(0)
-    undisclosed: list[str] = []
-    blocked: dict[str, str] = {}
-    for component in line.components:
-        reason = facts.blocked_reason(form_code, component.code)
-        if reason is not None:
-            blocked[component.code] = reason
-            continue
-        value = facts.get(form_code, component.code)
-        if value is None:
-            undisclosed.append(component.code)
-        amount = as_addend(value)
-        total += amount if component.op is Operator.PLUS else -amount
-    return total, undisclosed, blocked
-
-
 def _compare(
     check_code: CheckCode,
     context: ReportContext,
@@ -119,53 +98,39 @@ def _compare(
     form_code: str,
     line: LineDef,
 ) -> CheckOutcome:
-    """Сверяет итог с суммой его состава по правилам обеих трактовок."""
+    """Сверяет итог с суммой его состава по правилам обеих трактовок.
+
+    Сама арифметика живёт в `quality/totals.py` и работает с любым
+    справочником: она проверяет равенство суммы, а не природу кодов. Здесь
+    исход перекладывается в запись журнала — с уровнем, периодом и формой,
+    то есть с тем, чего арифметика не знает.
+    """
     report_date = facts.report_date
     kwargs = {"form_code": form_code, "line_code": line.code}
 
-    if facts.blocked_reason(form_code, line.code) is not None:
-        return _not_verifiable(
-            check_code, report_date, str(facts.blocked_reason(form_code, line.code)), **kwargs
-        )
+    found = check_total(
+        line,
+        lambda code: facts.get(form_code, code),
+        lambda code: facts.blocked_reason(form_code, code),
+        context.thresholds.rounding.tolerance,
+    )
 
-    total = facts.get(form_code, line.code)
-    if total is None:
-        return _skipped(check_code, report_date, f"итог {line.code} не раскрыт", **kwargs)
-
-    computed, undisclosed, blocked = _sum_components(line, facts, form_code)
-    if blocked:
+    if found.verdict is TotalVerdict.NOT_VERIFIABLE:
         # Причину называем полностью: строка отсутствует не потому, что её
         # не раскрыли, а потому, что мы отказались угадывать её принадлежность.
-        reasons = "; ".join(f"{code} — {reason}" for code, reason in sorted(blocked.items()))
-        return _not_verifiable(
-            check_code,
-            report_date,
-            f"слагаемые итога {line.code} не загружены ({reasons}), сумму проверить нельзя",
-            **kwargs,
-        )
-    if len(undisclosed) == len(line.components):
-        return _skipped(
-            check_code, report_date, "ни одно слагаемое не раскрыто", **kwargs
-        )
+        return _not_verifiable(check_code, report_date, found.reason, **kwargs)
+    if found.verdict is TotalVerdict.NOTHING_TO_CHECK:
+        return _skipped(check_code, report_date, found.reason, **kwargs)
 
-    difference = computed - total
-    tolerance = context.thresholds.rounding.tolerance(total)
-    details = {
-        "total": str(total),
-        "computed": str(computed),
-        "difference": str(difference),
-        "tolerance": str(tolerance),
-        "components": [f"{c.op.value}{c.code}" for c in line.components],
-        "undisclosed_components": undisclosed,
-    }
-    if abs(difference) <= tolerance:
+    severity = _severity(context, check_code, report_date)
+    if found.verdict is TotalVerdict.MATCHED:
         return CheckOutcome(
             check_code=check_code,
             status=CheckStatus.PASS,
             report_date=report_date,
             message=f"Итог {line.code} сходится с суммой состава",
-            details=details,
-            severity=_severity(context, check_code, report_date),
+            details=found.details,
+            severity=severity,
             **kwargs,
         )
     return CheckOutcome(
@@ -173,11 +138,12 @@ def _compare(
         status=CheckStatus.FAIL,
         report_date=report_date,
         message=(
-            f"Итог {line.code} = {total} не равен сумме состава {computed}, "
-            f"расхождение {difference} при допуске {tolerance}"
+            f"Итог {line.code} = {found.total} не равен сумме состава "
+            f"{found.computed}, расхождение {found.difference} "
+            f"при допуске {found.tolerance}"
         ),
-        details=details,
-        severity=_severity(context, check_code, report_date),
+        details=found.details,
+        severity=severity,
         **kwargs,
     )
 

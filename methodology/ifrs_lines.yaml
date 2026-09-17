@@ -1,0 +1,730 @@
+# Унифицированная модель статей консолидированной отчётности по МСФО.
+#
+# Справочник параллельный справочнику РСБУ, а не его продолжение. Причины
+# в природе данных, а не в удобстве:
+#
+#   1. В МСФО нет кодов строк, утверждённых нормативным актом. Позиция
+#      опознаётся наименованием через синонимы; в РСБУ первичен код,
+#      а наименование повторяется («Заёмные средства» — и 1410, и 1510).
+#      Это разные механизмы опознания, и общий каталог заставил бы натягивать
+#      один на другой.
+#   2. Состав статей меняется от эмитента к эмитенту, тогда как справочник
+#      РСБУ фиксирован формой. Разная природа — разные правила проверки.
+#   3. Специфические статьи сверх порога существенности получают коды при
+#      подтверждении человеком, то есть справочник пополняется во время
+#      работы. Подтверждённые статьи живут не здесь, а в таблице
+#      ifrs_line_confirmation: методика правится руками, и дифф —
+#      единственный контроль над ней. Позиция, присвоенная во время работы,
+#      методикой не является.
+#
+# КОД ПОЗИЦИИ — `ifrs.<имя>`. Префикс обязателен и проверяется загрузчиком.
+# Точка в коде выбрана намеренно: четырёхзначное число в грамматике формул
+# уже означает код строки РСБУ, а голое строчное имя — константу методики
+# из thresholds.yaml. Код с точкой не может быть ни тем, ни другим, и в
+# fact_report.line_code он с первого взгляда отличим от кода РСБУ.
+#
+# Состав итоговых строк (components) — то же, что в РСБУ: перечень слагаемых
+# с операторами, по которому работают контроли сходимости. Арифметика состава
+# от природы кодов не зависит и вынесена в quality/totals.py.
+
+version: "0.1.0"
+
+# Формы отчётности. Кодов ОКУД у них нет: это не формы, утверждённые
+# приказом, а разделы консолидированной отчётности, и называются они
+# у эмитентов по-разному. Код формы — наш, с тем же префиксом.
+forms:
+  ifrs.statement_of_financial_position:
+    name: Отчёт о финансовом положении
+    aliases:
+      - Консолидированный отчёт о финансовом положении
+      - Отчёт о финансовом положении (баланс)
+      - Консолидированный бухгалтерский баланс
+  ifrs.statement_of_profit_or_loss:
+    name: Отчёт о прибыли или убытке
+    aliases:
+      - Консолидированный отчёт о прибыли или убытке
+      - Отчёт о прибыли или убытке и прочем совокупном доходе
+      - Консолидированный отчёт о прибыли или убытке и прочем совокупном доходе
+      - Отчёт о совокупном доходе
+  ifrs.statement_of_cash_flows:
+    name: Отчёт о движении денежных средств
+    aliases:
+      - Консолидированный отчёт о движении денежных средств
+
+# --- Отчёт о финансовом положении: внеоборотные активы ------------------------
+#
+# Синонимы собраны с шести разобранных комплектов, и у каждого отмечено,
+# у кого он встречен: через полгода при разборе расхождения нужно видеть,
+# откуда взялось написание, а не доверять памяти.
+
+positions:
+  - code: ifrs.ppe
+    name: Основные средства
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Основные средства, seen_at: ФосАгро}
+      - {name: Основные средства и незавершённое строительство, seen_at: Автодор}
+      - {name: Основные средства и капитальное строительство, seen_at: Норникель}
+
+  - code: ifrs.right_of_use_assets
+    name: Активы в форме права пользования
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Активы в форме права пользования, seen_at: ФосАгро}
+      - {name: Right-of-use активы, seen_at: Сегежа}
+      - {name: Активы в форме права пользования по договорам аренды, seen_at: ЛСР}
+
+  - code: ifrs.intangible_assets
+    name: Нематериальные активы
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Нематериальные активы, seen_at: ФосАгро}
+      - {name: Прочие нематериальные активы, seen_at: Сегежа}
+
+  - code: ifrs.goodwill
+    name: Гудвил
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Гудвил, seen_at: Сегежа}
+      - {name: Гудвилл, seen_at: ЛСР}
+      - {name: Деловая репутация, seen_at: Норникель}
+
+  - code: ifrs.investments_in_associates
+    name: Инвестиции в ассоциированные и совместные предприятия
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Инвестиции в ассоциированные предприятия, seen_at: Норникель}
+      - {name: Инвестиции в ассоциированные и совместные предприятия, seen_at: ФосАгро}
+      - {name: Инвестиции в совместные предприятия, seen_at: ЛСР}
+
+  - code: ifrs.deferred_tax_assets
+    name: Отложенные налоговые активы
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Отложенные налоговые активы, seen_at: ФосАгро}
+      - {name: Отложенный налоговый актив, seen_at: Автодор}
+
+  - code: ifrs.other_non_current_assets
+    name: Прочие внеоборотные активы
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    aliases:
+      - {name: Прочие внеоборотные активы, seen_at: ФосАгро}
+      - {name: Прочие долгосрочные активы, seen_at: Норникель}
+      - {name: Прочие внеоборотные финансовые активы, seen_at: Сегежа}
+
+  - code: ifrs.total_non_current_assets
+    name: Итого внеоборотные активы
+    form: ifrs.statement_of_financial_position
+    section: non_current_assets
+    is_total: true
+    aliases:
+      - {name: Итого внеоборотные активы, seen_at: ФосАгро}
+      - {name: Итого долгосрочные активы, seen_at: Норникель}
+      - {name: Внеоборотные активы, seen_at: ФосАгро}
+      - {name: Итого внеоборотных активов, seen_at: ЛСР}
+    components:
+      - {code: ifrs.ppe}
+      - {code: ifrs.right_of_use_assets}
+      - {code: ifrs.intangible_assets}
+      - {code: ifrs.goodwill}
+      - {code: ifrs.investments_in_associates}
+      - {code: ifrs.deferred_tax_assets}
+      - {code: ifrs.other_non_current_assets}
+
+# --- Оборотные активы ---------------------------------------------------------
+
+  - code: ifrs.inventories
+    name: Запасы
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    aliases:
+      - {name: Запасы, seen_at: ФосАгро}
+      - {name: Товарно-материальные запасы, seen_at: Норникель}
+
+  - code: ifrs.trade_receivables
+    name: Торговая и прочая дебиторская задолженность
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    aliases:
+      - {name: Торговая и прочая дебиторская задолженность, seen_at: ФосАгро}
+      - {name: Дебиторская задолженность и авансы выданные, seen_at: Норникель}
+      - {name: Торговая дебиторская задолженность, seen_at: Сегежа}
+
+  - code: ifrs.advances_paid
+    name: Авансы выданные
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    aliases:
+      - {name: Авансы выданные, seen_at: ЛСР}
+      - {name: Авансы поставщикам, seen_at: Автодор}
+      - {name: Предоплата и прочие текущие активы, seen_at: Сегежа}
+
+  - code: ifrs.cash
+    name: Денежные средства и их эквиваленты
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    # Оговорка безусловная: она верна для любого эмитента и идёт в раздел
+    # «Ограничения анализа». Средства, ограниченные в использовании, в эту
+    # позицию не входят, и у застройщика это решает дело: у ЛСР 217 501 млн
+    # на счетах эскроу стоят под балансом сноской и компании недоступны.
+    note: >-
+      В состав денежных средств и их эквивалентов не входят средства,
+      ограниченные в использовании: остатки на счетах эскроу, залоговые
+      и целевые счета раскрываются отдельно и в свободную ликвидность
+      не включаются.
+    aliases:
+      - {name: Денежные средства и их эквиваленты, seen_at: ФосАгро}
+      - {name: Денежные средства и эквиваленты денежных средств, seen_at: Норникель}
+      - {name: Денежные средства, seen_at: Автодор}
+
+  - code: ifrs.other_current_assets
+    name: Прочие оборотные активы
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    aliases:
+      - {name: Прочие оборотные активы, seen_at: ФосАгро}
+      - {name: Прочие краткосрочные активы, seen_at: Норникель}
+      - {name: Прочие текущие активы, seen_at: Сегежа}
+
+  - code: ifrs.total_current_assets
+    name: Итого оборотные активы
+    form: ifrs.statement_of_financial_position
+    section: current_assets
+    is_total: true
+    aliases:
+      - {name: Итого оборотные активы, seen_at: ФосАгро}
+      - {name: Итого краткосрочные активы, seen_at: Норникель}
+      - {name: Оборотные активы, seen_at: ФосАгро}
+      - {name: Итого оборотных активов, seen_at: ЛСР}
+    components:
+      - {code: ifrs.inventories}
+      - {code: ifrs.trade_receivables}
+      - {code: ifrs.advances_paid}
+      - {code: ifrs.cash}
+      - {code: ifrs.other_current_assets}
+
+  - code: ifrs.total_assets
+    name: Итого активы
+    form: ifrs.statement_of_financial_position
+    section: assets
+    is_total: true
+    aliases:
+      - {name: Итого активы, seen_at: ФосАгро}
+      - {name: Итого активов, seen_at: ЛСР}
+      - {name: Всего активы, seen_at: Автодор}
+      - {name: Итого сумма активов, seen_at: Норникель}
+    components:
+      - {code: ifrs.total_non_current_assets}
+      - {code: ifrs.total_current_assets}
+
+# --- Капитал ------------------------------------------------------------------
+
+  - code: ifrs.share_capital
+    name: Акционерный капитал
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    aliases:
+      - {name: Акционерный капитал, seen_at: ФосАгро}
+      - {name: Уставный капитал, seen_at: Автодор}
+      - {name: Уставный и добавочный капитал, seen_at: Сегежа}
+
+  - code: ifrs.share_premium
+    name: Добавочный капитал
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    aliases:
+      - {name: Добавочный капитал, seen_at: ЛСР}
+      - {name: Эмиссионный доход, seen_at: Норникель}
+
+  - code: ifrs.retained_earnings
+    name: Накопленная прибыль (непокрытый убыток)
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    aliases:
+      - {name: Нераспределённая прибыль, seen_at: ФосАгро}
+      - {name: Накопленная прибыль, seen_at: Норникель}
+      - {name: Накопленный убыток, seen_at: Сегежа}
+      - {name: Нераспределённая прибыль (непокрытый убыток), seen_at: ЛСР}
+
+  - code: ifrs.other_reserves
+    name: Накопленный прочий совокупный доход
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    aliases:
+      - {name: Прочие резервы, seen_at: Норникель}
+      - {name: Накопленный прочий совокупный доход, seen_at: ФосАгро}
+      - {name: Резерв пересчёта валют, seen_at: Сегежа}
+
+  - code: ifrs.non_controlling_interests
+    name: Неконтролирующие доли участия
+    form: ifrs.statement_of_financial_position
+    section: equity
+    sign: any
+    aliases:
+      - {name: Неконтролирующие доли участия, seen_at: ФосАгро}
+      - {name: Неконтролирующая доля, seen_at: Норникель}
+      - {name: Доля неконтролирующих акционеров, seen_at: ЛСР}
+
+  - code: ifrs.total_equity
+    name: Итого капитал
+    form: ifrs.statement_of_financial_position
+    section: equity
+    is_total: true
+    # Итог капитала правомерно отрицателен, и это не признак одного
+    # состояния: у Автодора −111 млн при рейтингах АА(RU)/ruAA+ — капитала
+    # нет по устройству, прибыль реинвестируется Принципалу; у Сегежи
+    # −15 008 млн при накопленном убытке 138 955 млн и существенной
+    # неопределённости непрерывности деятельности. Формальное условие одно,
+    # смысл противоположный — отсюда тип эмитента в задаче 26.
+    sign: any
+    aliases:
+      - {name: Итого капитал, seen_at: ФосАгро}
+      - {name: Итого капитала, seen_at: ЛСР}
+      - {name: Всего капитал, seen_at: Автодор}
+      - {name: Итого собственный капитал, seen_at: Норникель}
+    components:
+      - {code: ifrs.share_capital}
+      - {code: ifrs.share_premium}
+      - {code: ifrs.retained_earnings}
+      - {code: ifrs.other_reserves}
+      - {code: ifrs.non_controlling_interests}
+
+# --- Долгосрочные обязательства -----------------------------------------------
+
+  - code: ifrs.long_term_borrowings
+    name: Кредиты и займы (долгосрочные)
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    aliases:
+      - {name: Долгосрочные кредиты и займы, seen_at: ФосАгро}
+      - {name: Долгосрочные заёмные средства, seen_at: Автодор}
+      - {name: Кредиты и займы, seen_at: Норникель}
+
+  - code: ifrs.long_term_lease_liabilities
+    name: Обязательства по аренде (долгосрочные)
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    aliases:
+      - {name: Долгосрочные обязательства по аренде, seen_at: ФосАгро}
+      - {name: Обязательства по договорам аренды, seen_at: ЛСР}
+
+  - code: ifrs.deferred_tax_liabilities
+    name: Отложенные налоговые обязательства
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    aliases:
+      - {name: Отложенные налоговые обязательства, seen_at: ФосАгро}
+      - {name: Отложенное налоговое обязательство, seen_at: Автодор}
+
+  - code: ifrs.long_term_provisions
+    name: Оценочные обязательства (долгосрочные)
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    aliases:
+      - {name: Долгосрочные оценочные обязательства, seen_at: Норникель}
+      - {name: Резервы под обязательства, seen_at: ЛСР}
+      - {name: Долгосрочные резервы, seen_at: Сегежа}
+
+  - code: ifrs.other_non_current_liabilities
+    name: Прочие долгосрочные обязательства
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    aliases:
+      - {name: Прочие долгосрочные обязательства, seen_at: ФосАгро}
+      - {name: Прочие внеоборотные обязательства, seen_at: Сегежа}
+
+  - code: ifrs.total_non_current_liabilities
+    name: Итого долгосрочные обязательства
+    form: ifrs.statement_of_financial_position
+    section: non_current_liabilities
+    is_total: true
+    aliases:
+      - {name: Итого долгосрочные обязательства, seen_at: ФосАгро}
+      - {name: Итого долгосрочных обязательств, seen_at: ЛСР}
+      - {name: Итого долгосрочные обязательства и резервы, seen_at: Норникель}
+    components:
+      - {code: ifrs.long_term_borrowings}
+      - {code: ifrs.long_term_lease_liabilities}
+      - {code: ifrs.deferred_tax_liabilities}
+      - {code: ifrs.long_term_provisions}
+      - {code: ifrs.other_non_current_liabilities}
+
+# --- Краткосрочные обязательства ----------------------------------------------
+
+  - code: ifrs.short_term_borrowings
+    name: Кредиты и займы (краткосрочные)
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Краткосрочные кредиты и займы, seen_at: ФосАгро}
+      - {name: Краткосрочные заёмные средства, seen_at: Автодор}
+      - {name: Кредиты и займы и текущая часть долгосрочных кредитов, seen_at: Норникель}
+
+  - code: ifrs.short_term_lease_liabilities
+    name: Обязательства по аренде (краткосрочные)
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Краткосрочные обязательства по аренде, seen_at: ФосАгро}
+      - {name: Текущая часть обязательств по аренде, seen_at: ЛСР}
+
+  - code: ifrs.trade_payables
+    name: Торговая и прочая кредиторская задолженность
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Торговая и прочая кредиторская задолженность, seen_at: ФосАгро}
+      - {name: Кредиторская задолженность и начисленные обязательства, seen_at: Норникель}
+      - {name: Торговая кредиторская задолженность, seen_at: Сегежа}
+
+  - code: ifrs.advances_received
+    name: Авансы полученные
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Авансы полученные, seen_at: ЛСР}
+      - {name: "Авансы, полученные от покупателей", seen_at: Автодор}
+      - {name: Обязательства по договорам с покупателями, seen_at: ФосАгро}
+
+  - code: ifrs.taxes_payable
+    name: Налоги к уплате
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Задолженность по налогам, seen_at: ФосАгро}
+      - {name: Обязательства по налогу на прибыль, seen_at: Норникель}
+      - {name: "Налоги к уплате, кроме налога на прибыль", seen_at: Сегежа}
+
+  - code: ifrs.short_term_provisions
+    name: Оценочные обязательства (краткосрочные)
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Краткосрочные оценочные обязательства, seen_at: Норникель}
+      - {name: Краткосрочные резервы, seen_at: Сегежа}
+
+  - code: ifrs.other_current_liabilities
+    name: Прочие краткосрочные обязательства
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    aliases:
+      - {name: Прочие краткосрочные обязательства, seen_at: ФосАгро}
+      - {name: Прочие текущие обязательства, seen_at: Сегежа}
+
+  - code: ifrs.total_current_liabilities
+    name: Итого краткосрочные обязательства
+    form: ifrs.statement_of_financial_position
+    section: current_liabilities
+    is_total: true
+    aliases:
+      - {name: Итого краткосрочные обязательства, seen_at: ФосАгро}
+      - {name: Итого краткосрочных обязательств, seen_at: ЛСР}
+      - {name: Итого текущие обязательства, seen_at: Сегежа}
+    components:
+      - {code: ifrs.short_term_borrowings}
+      - {code: ifrs.short_term_lease_liabilities}
+      - {code: ifrs.trade_payables}
+      - {code: ifrs.advances_received}
+      - {code: ifrs.taxes_payable}
+      - {code: ifrs.short_term_provisions}
+      - {code: ifrs.other_current_liabilities}
+
+  - code: ifrs.total_liabilities
+    name: Итого обязательства
+    form: ifrs.statement_of_financial_position
+    section: liabilities
+    is_total: true
+    aliases:
+      - {name: Итого обязательства, seen_at: ФосАгро}
+      - {name: Итого обязательств, seen_at: ЛСР}
+      - {name: Всего обязательства, seen_at: Автодор}
+    components:
+      - {code: ifrs.total_non_current_liabilities}
+      - {code: ifrs.total_current_liabilities}
+
+  - code: ifrs.total_equity_and_liabilities
+    name: Итого капитал и обязательства
+    form: ifrs.statement_of_financial_position
+    section: equity_and_liabilities
+    is_total: true
+    aliases:
+      - {name: Итого капитал и обязательства, seen_at: ФосАгро}
+      - {name: Итого капитала и обязательств, seen_at: ЛСР}
+      - {name: Всего капитал и обязательства, seen_at: Автодор}
+    components:
+      - {code: ifrs.total_equity}
+      - {code: ifrs.total_liabilities}
+
+# --- Отчёт о прибыли или убытке -----------------------------------------------
+#
+# Расходные статьи помечены in_brackets: в отчётности они печатаются
+# в круглых скобках, хранятся как величина расхода, а вычитание задано
+# оператором в составе итоговой строки. Соглашение то же, что в РСБУ.
+
+  - code: ifrs.revenue
+    name: Выручка
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    aliases:
+      - {name: Выручка, seen_at: ФосАгро}
+      - {name: Выручка от реализации, seen_at: Норникель}
+      - {name: Выручка от продаж, seen_at: ЛСР}
+      - {name: Выручка от реализации продукции, seen_at: Сегежа}
+
+  - code: ifrs.cost_of_sales
+    name: Себестоимость продаж
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    in_brackets: true
+    aliases:
+      - {name: Себестоимость продаж, seen_at: ФосАгро}
+      - {name: Себестоимость реализации, seen_at: Норникель}
+      - {name: Себестоимость реализованной продукции, seen_at: Сегежа}
+
+  - code: ifrs.gross_profit
+    name: Валовая прибыль
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    is_total: true
+    sign: any
+    aliases:
+      - {name: Валовая прибыль, seen_at: ФосАгро}
+      - {name: Валовая прибыль (убыток), seen_at: Сегежа}
+    components:
+      - {code: ifrs.revenue}
+      - {code: ifrs.cost_of_sales, op: "-"}
+
+  - code: ifrs.selling_expenses
+    name: Коммерческие расходы
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    in_brackets: true
+    aliases:
+      - {name: Коммерческие расходы, seen_at: ФосАгро}
+      - {name: Коммерческие и сбытовые расходы, seen_at: Сегежа}
+      - {name: Расходы на продажу, seen_at: ЛСР}
+
+  - code: ifrs.administrative_expenses
+    name: Административные расходы
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    in_brackets: true
+    aliases:
+      - {name: Административные расходы, seen_at: ФосАгро}
+      - {name: Общехозяйственные и административные расходы, seen_at: Норникель}
+      - {name: Управленческие расходы, seen_at: ЛСР}
+
+  - code: ifrs.other_operating_result
+    name: Прочие операционные доходы и расходы (сальдо)
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    sign: any
+    # Сальдо, а не две статьи: эмитенты раскрывают их и вместе, и порознь,
+    # и требовать раздельного раскрытия значило бы не опознать половину.
+    # Для расчёта операционной прибыли важна именно сумма.
+    aliases:
+      - {name: Прочие операционные доходы и расходы, seen_at: ФосАгро}
+      - {name: "Прочие операционные расходы, нетто", seen_at: Норникель}
+      - {name: "Прочие доходы и расходы, нетто", seen_at: Сегежа}
+
+  - code: ifrs.operating_profit
+    name: Операционная прибыль
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    is_total: true
+    sign: any
+    aliases:
+      - {name: Операционная прибыль, seen_at: ФосАгро}
+      - {name: Операционная прибыль (убыток), seen_at: Сегежа}
+      - {name: Прибыль от операционной деятельности, seen_at: Норникель}
+    components:
+      - {code: ifrs.gross_profit}
+      - {code: ifrs.selling_expenses, op: "-"}
+      - {code: ifrs.administrative_expenses, op: "-"}
+      - {code: ifrs.other_operating_result}
+
+  - code: ifrs.finance_income
+    name: Финансовые доходы
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    aliases:
+      - {name: Финансовые доходы, seen_at: ФосАгро}
+      - {name: Процентные доходы, seen_at: Автодор}
+
+  - code: ifrs.finance_costs
+    name: Финансовые расходы
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    in_brackets: true
+    # Оговорка безусловная и существенная: в отчёте о прибыли или убытке
+    # финансовые расходы приводятся за вычетом капитализированных процентов
+    # и полученных субсидий. У Автодора в форме 131 млн, в примечании —
+    # 26 430 млн, из которых 26 024 покрыты целевым финансированием
+    # Принципала. Покрытие процентов по форме даёт 7,5 при стоимости долга
+    # в двести раз выше видимой, поэтому реальная величина берётся
+    # из примечания (задача 24).
+    note: >-
+      Финансовые расходы в отчёте о прибыли или убытке приводятся за вычетом
+      капитализированных процентов и полученного целевого финансирования.
+      Начисленные проценты до вычетов раскрываются в примечании к заёмным
+      средствам, и покрытие процентов считается по нему.
+    aliases:
+      - {name: Финансовые расходы, seen_at: ФосАгро}
+      - {name: Процентные расходы, seen_at: Автодор}
+      - {name: "Финансовые расходы, нетто", seen_at: Сегежа}
+
+  - code: ifrs.share_of_associates_result
+    name: Доля в прибыли (убытке) ассоциированных предприятий
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    sign: any
+    aliases:
+      - {name: Доля в прибыли ассоциированных предприятий, seen_at: Норникель}
+      - {name: Доля в результатах ассоциированных и совместных предприятий, seen_at: ФосАгро}
+
+  - code: ifrs.profit_before_tax
+    name: Прибыль (убыток) до налогообложения
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    is_total: true
+    sign: any
+    aliases:
+      - {name: Прибыль до налогообложения, seen_at: ФосАгро}
+      - {name: Прибыль (убыток) до налогообложения, seen_at: Сегежа}
+      - {name: Прибыль до налога на прибыль, seen_at: Норникель}
+    components:
+      - {code: ifrs.operating_profit}
+      - {code: ifrs.finance_income}
+      - {code: ifrs.finance_costs, op: "-"}
+      - {code: ifrs.share_of_associates_result}
+
+  - code: ifrs.income_tax
+    name: Расход по налогу на прибыль
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    in_brackets: true
+    sign: any
+    # Знак у налога бывает обоим: при налоговом доходе статья положительна,
+    # и печатается она тогда без скобок. В РСБУ то же различие уже стоило
+    # отдельного разбора (строка 2410 в двух наборах форм), поэтому здесь
+    # знак объявлен свободным сразу.
+    aliases:
+      - {name: Расход по налогу на прибыль, seen_at: ФосАгро}
+      - {name: Налог на прибыль, seen_at: Норникель}
+      - {name: Расходы по налогу на прибыль, seen_at: Сегежа}
+
+  - code: ifrs.profit_for_period
+    name: Прибыль (убыток) за период
+    form: ifrs.statement_of_profit_or_loss
+    section: profit_or_loss
+    is_total: true
+    sign: any
+    aliases:
+      - {name: Прибыль за период, seen_at: ФосАгро}
+      - {name: Прибыль (убыток) за период, seen_at: Сегежа}
+      - {name: Чистая прибыль, seen_at: Норникель}
+      - {name: Чистая прибыль (убыток) за год, seen_at: ЛСР}
+    components:
+      - {code: ifrs.profit_before_tax}
+      - {code: ifrs.income_tax, op: "-"}
+
+# --- Отчёт о движении денежных средств ----------------------------------------
+
+  - code: ifrs.cash_from_operations
+    name: Чистый денежный поток от операционной деятельности
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    sign: any
+    aliases:
+      - {name: Чистые денежные средства от операционной деятельности, seen_at: ФосАгро}
+      - {name: Чистый денежный поток от операционной деятельности, seen_at: Норникель}
+      - {name: "Денежные средства, полученные от операционной деятельности", seen_at: Сегежа}
+
+  - code: ifrs.cash_from_investing
+    name: Чистый денежный поток от инвестиционной деятельности
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    sign: any
+    aliases:
+      - {name: Чистые денежные средства от инвестиционной деятельности, seen_at: ФосАгро}
+      - {name: Чистый денежный поток от инвестиционной деятельности, seen_at: Норникель}
+
+  - code: ifrs.cash_from_financing
+    name: Чистый денежный поток от финансовой деятельности
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    sign: any
+    aliases:
+      - {name: Чистые денежные средства от финансовой деятельности, seen_at: ФосАгро}
+      - {name: Чистый денежный поток от финансовой деятельности, seen_at: Норникель}
+
+  - code: ifrs.depreciation
+    name: Амортизация основных средств и нематериальных активов
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    # Нужна для EBITDA. В отчёте о движении денежных средств она стоит
+    # корректировкой к прибыли; если её там нет, берётся из сегментного
+    # примечания. Нет ни там, ни там — Чистый долг / EBITDA не считается,
+    # суррогаты запрещены (правило действует с РСБУ).
+    aliases:
+      - {name: Амортизация основных средств и нематериальных активов, seen_at: ФосАгро}
+      - {name: Амортизация, seen_at: Норникель}
+      - {name: Износ и амортизация, seen_at: Сегежа}
+
+  - code: ifrs.interest_paid
+    name: Проценты уплаченные
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    in_brackets: true
+    aliases:
+      - {name: Проценты уплаченные, seen_at: ФосАгро}
+      - {name: "Проценты, уплаченные по кредитам и займам", seen_at: Автодор}
+
+  - code: ifrs.capital_expenditure
+    name: Приобретение основных средств и нематериальных активов
+    form: ifrs.statement_of_cash_flows
+    section: cash_flows
+    in_brackets: true
+    aliases:
+      - {name: Приобретение основных средств, seen_at: ФосАгро}
+      - {name: Приобретение основных средств и нематериальных активов, seen_at: Норникель}
+      - {name: Капитальные затраты, seen_at: Сегежа}
+
+# Существенность специфической статьи: доля валюты баланса, сверх которой
+# статья никогда не сворачивается в «прочее», а выносится отдельной позицией
+# с кодом, присвоенным при подтверждении человеком.
+#
+# Основание порога — три наблюдения: у Автодора 85 % активов лежат в двух
+# статьях, которых нет ни у кого другого (задолженность Принципала, затраты
+# в интересах Принципала); у Сегежи обязательства по опционным соглашениям —
+# около 30 % краткосрочных обязательств; у ЛСР средства на счетах эскроу.
+# Порог 5 % ниже любого из них с запасом: он отсекает мелочь, а не отбирает
+# существенное.
+materiality:
+  share_of_total_assets: "0.05"
+  origin: >-
+    Экспертная отсечка по трём наблюдениям ветки МСФО. Подлежит уточнению
+    на регрессионном наборе задачи 29.
+
+# Сколько эмитентов, подтвердивших одну и ту же специфическую статью
+# независимо друг от друга, делают её кандидатом в ядро. Признак машинный
+# и никого ни к чему не обязывает: поднятие позиции в ядро — решение
+# человека и правка этого файла руками. Признак лишь показывает, что пора
+# посмотреть.
+core_candidate:
+  distinct_issuers: 3
+  origin: >-
+    Три эмитента — наименьшее число, при котором совпадение перестаёт быть
+    частным случаем одного составителя отчётности. Величина экспертная,
+    подлежит уточнению по мере накопления подтверждений.
