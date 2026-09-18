@@ -39,7 +39,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ifrs_intake_run import DocumentRun, _fold_deliveries, run_one  # noqa: E402
-from ifrs_set import Entry, IfrsSet, Outcome, load_set  # noqa: E402
+from ifrs_set import (  # noqa: E402
+    DataSource,
+    Entry,
+    IfrsSet,
+    Outcome,
+    load_set,
+)
 
 from finlib.config import settings  # noqa: E402
 from finlib.normalize.ifrs_lines import load_ifrs_lines  # noqa: E402
@@ -88,6 +94,31 @@ REJECTION_FEATURES: dict[str, str] = {
     "financial_institution": "financial_institution",
     "file_text_layer_missing": "no_text_layer",
 }
+
+# Признаки, которые прогон умеет померить по документу, и признаки, которые
+# он берёт у Cbonds. Перечислены явно и проверяются тестом против правил
+# набора: **признак, объявленный в правилах и не измеряемый прогоном, ноль
+# в отчёте получит навсегда** — и ноль этот будет неотличим от отсутствия
+# наблюдений. Это тот же дефект, что контроль, который никто не вызывает.
+CBONDS_FEATURES: frozenset[str] = frozenset(
+    {"foreign_currency", "negative_equity", "loss"}
+)
+DOCUMENT_FEATURES: frozenset[str] = frozenset(
+    set(ISSUER_TYPE_FEATURES.values())
+    | set(REPORTING_KIND_FEATURES.values())
+    | set(REJECTION_FEATURES.values())
+    | {
+        "automatic_intake",
+        "material_specific_item",
+        "lost_page",
+        "english_grouping",
+        "unmodified_opinion",
+        "modified_opinion",
+        "going_concern",
+        "review_engagement",
+        "audit_not_readable",
+    }
+)
 
 
 @dataclass
@@ -202,6 +233,11 @@ class Report:
             f"наибольшее {max(seconds):.1f}".replace(".", ","),
         ]
 
+    @property
+    def without_document(self) -> tuple[str, ...]:
+        """Признаки, которые прогон меряет без выгрузки документа."""
+        return self.found.features_by_source(DataSource.CBONDS)
+
     def _coverage(self) -> list[str]:
         """Заявленное покрытие против фактического."""
         seen: Counter[str] = Counter()
@@ -233,6 +269,11 @@ class Report:
                 "не входят, извлечение по ним не выполнялось:"
             )
             lines += [f"  - {item.entry.inn} {item.entry.name}" for item in missing]
+        lines.append(
+            "- признаков, измеримых без выгрузки документа: "
+            f"{len(self.without_document)} из {len(self.found.rules.features)} — "
+            "остальные видны только в документе"
+        )
         lines.append(
             "- метрики полного контура (класс, распределение классов, текстовая "
             "часть) в быстром не печатаются вовсе: напечатать их нулями значило "
@@ -285,6 +326,8 @@ def _document_features(path: Path, run: DocumentRun) -> set[str]:
     found.add(REPORTING_KIND_FEATURES.get(run.reporting_kind, run.reporting_kind))
     if run.automatic:
         found.add("automatic_intake")
+    if run.grouping == "english":
+        found.add("english_grouping")
     if run.material_items:
         found.add("material_specific_item")
     if "lost_page" in run.reasons:
@@ -310,7 +353,10 @@ def _document_features(path: Path, run: DocumentRun) -> set[str]:
             found.add("modified_opinion")
         elif audit.modified is False:
             found.add("unmodified_opinion")
-        if "going_concern" in audit.signals:
+        # Непрерывность деятельности объявляется **разделом** заключения,
+        # а не видом мнения и не сигналом: у Сегежи мнение немодифицированное,
+        # а раздел стоит. Искать её среди сигналов значило бы не найти никогда.
+        if "going_concern_uncertainty" in audit.sections:
             found.add("going_concern")
     return found
 

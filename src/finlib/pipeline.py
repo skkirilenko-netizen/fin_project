@@ -272,6 +272,10 @@ class IfrsIntake:
     accepted: bool
     reason: str | None = None
     check_code: str | None = None
+    # Подробности отказа, которые нужно увидеть глазами: у отказа
+    # по разделителю разрядов это сами числа-свидетельства. Счётчик говорит,
+    # сколько улик нашлось, и не говорит, чего они стоят.
+    details: dict[str, object] | None = None
     profile: object | None = None
     extraction: object | None = None
     review: object | None = None
@@ -317,7 +321,7 @@ def accept_ifrs_document(
     profile = identify(text, document=document)
     if isinstance(profile, Rejection):
         report(Stage.LOAD, f"документ отклонён: {profile.reason}", ok=False)
-        return IfrsIntake(False, profile.reason, profile.code.value)
+        return IfrsIntake(False, profile.reason, profile.code.value, profile.details)
     report(Stage.LOAD, f"документ принят: {profile.describe()}")
 
     columns = getattr(document, "columns_of", None)

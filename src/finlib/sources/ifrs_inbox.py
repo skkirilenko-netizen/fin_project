@@ -342,7 +342,16 @@ def identify(
         return Rejection(
             CheckCode.DIGIT_GROUPING_NOT_DETERMINED,
             reason,
-            {"detection": detection.describe(), "excluded": removed},
+            {
+                "detection": detection.describe(),
+                "excluded": removed,
+                # Сами числа и строки, в которых они стоят: отказ по конвенции
+                # проверяется глазами, и по одним счётчикам сказать, чего улики
+                # стоят, нельзя. «1.5» — улика за английскую конвенцию ровно
+                # до тех пор, пока не видно, что это ставка процента.
+                "evidence": detection.evidence(),
+                "where": _evidence_lines(voting_lines, detection),
+            },
         )
 
     # Отчётные даты стоят в шапках форм — «31 декабря 2025 года». По всему
@@ -714,6 +723,28 @@ def forms_text(
     policy = policy or load_parsing_policy()
     blocks = form_blocks(text, headings, policy)
     return "\n".join("\n".join(lines) for lines in blocks.values())
+
+
+def _evidence_lines(
+    lines: list[str], detection: GroupingDetection, limit: int = 6
+) -> tuple[str, ...]:
+    """Строки, в которых стоят числа-свидетельства обеих конвенций.
+
+    Место важнее самого числа: «2.5» в строке ставки по займу и «2.5»
+    в строке величины — разные вещи, и по числу отдельно от строки их
+    не различить.
+    """
+    wanted = [(item, "англ.") for item in detection.english_samples]
+    wanted += [(item, "рус.") for item in detection.russian_samples[:2]]
+    found: list[str] = []
+    for number, side in wanted:
+        for line in lines:
+            if number in line:
+                found.append(f"[{side}] «{number}» в строке: {line.strip()[:90]}")
+                break
+        if len(found) >= limit:
+            break
+    return tuple(found)
 
 
 def table_header_of(lines: list[str], grouping: Grouping) -> list[str]:

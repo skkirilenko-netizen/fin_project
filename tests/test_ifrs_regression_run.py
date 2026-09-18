@@ -97,3 +97,23 @@ def test_share_says_when_the_denominator_is_empty() -> None:
     """Доля от пустого знаменателя не печатается нулём процентов."""
     assert "знаменатель пуст" in runner._share(0, 0)
     assert "%" in runner._share(1, 2)
+
+
+def test_every_declared_feature_can_be_measured() -> None:
+    """Признак, объявленный в правилах, прогон обязан уметь померить.
+
+    Иначе он получит ноль навсегда, и ноль этот будет неотличим
+    от отсутствия наблюдений — тот же дефект, что контроль, которого никто
+    не вызывает.
+    """
+    declared = set(runner.load_set().rules.features)
+    measurable = runner.DOCUMENT_FEATURES | runner.CBONDS_FEATURES
+    assert declared - measurable == set(), "объявлены, но не меряются"
+    assert measurable - declared == set(), "меряются, но не объявлены"
+
+
+def test_cbonds_features_match_the_declaration() -> None:
+    """Перечень признаков без выгрузки в коде и в правилах один."""
+    rules = runner.load_set()
+    declared = set(rules.features_by_source(runner.DataSource.CBONDS))
+    assert declared == set(runner.CBONDS_FEATURES)

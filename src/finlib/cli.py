@@ -1139,6 +1139,14 @@ def _echo_pdf_check(path: Path, document) -> bool:
                 fg=typer.colors.RED,
             )
         )
+        # Отказ по разделителю разрядов проверяется только глазами: счётчик
+        # улик говорит «сколько», а разбираться приходится с «какие». Числа
+        # печатаются вместе со строками, в которых стоят, — это и есть места
+        # документа, куда надо посмотреть.
+        for line in (intake.details or {}).get("evidence", ()):
+            typer.echo(f"      {line}")
+        for line in (intake.details or {}).get("where", ()):
+            typer.echo(typer.style(f"      {line}", fg=typer.colors.YELLOW))
         return False
 
     profile = intake.profile

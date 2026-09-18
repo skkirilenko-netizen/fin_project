@@ -61,6 +61,10 @@ class DocumentRun:
     # отчётной датой и не видом отчётности.
     report_date: str = ""
     reporting_kind: str = ""
+    # Конвенция записи чисел: свойство вёрстки документа, и признак покрытия
+    # набора. Хранится здесь, потому что определяется приёмом и больше
+    # нигде не восстанавливается.
+    grouping: str = ""
     # Доставка того же комплекта, отложенная в пользу другой: причина.
     set_aside: str | None = None
 
@@ -210,6 +214,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         reporting_kind=profile.reporting_kind.value
         if hasattr(profile.reporting_kind, "value")
         else str(profile.reporting_kind),
+        grouping=profile.grouping.value,
     )
 
     if write and inn:

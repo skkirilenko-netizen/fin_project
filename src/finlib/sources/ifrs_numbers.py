@@ -116,7 +116,6 @@ class GroupingPolicy(BaseModel):
 
     not_money_rows: tuple[str, ...] = Field(min_length=1)
     min_evidence: int = Field(ge=1)
-    min_share: Decimal = Field(gt=0, le=1)
     min_decisive: Decimal = Field(gt=0, le=1)
     origin: str = Field(min_length=1)
     arithmetic_resolution: ArithmeticResolution
@@ -318,6 +317,15 @@ class GroupingDetection:
     ambiguous: int = 0
     numbers_seen: int = 0
     samples: tuple[str, ...] = field(default_factory=tuple)
+    # Сами числа-свидетельства, по нескольку с каждой стороны. Счётчик
+    # говорит, сколько улик нашлось, и не говорит, чего они стоят: «1.5»
+    # в русском документе — улика за английскую конвенцию ровно до тех пор,
+    # пока не видно, что это ставка процента или номер пункта. Отказ, причину
+    # которого нельзя проверить глазами, заставляет гадать о документе,
+    # которого не видно.
+    russian_samples: tuple[str, ...] = field(default_factory=tuple)
+    english_samples: tuple[str, ...] = field(default_factory=tuple)
+    ambiguous_samples: tuple[str, ...] = field(default_factory=tuple)
     # Чем разрешена неоднозначность, если она была: голосованием или
     # сходимостью итогов. Способ называется, потому что доверие к нему разное:
     # голосование опирается на разметку чисел, арифметика — на сам документ.
@@ -343,6 +351,34 @@ class GroupingDetection:
             f"{self.english_evidence}, неоднозначных {self.ambiguous}, "
             f"чисел просмотрено {self.numbers_seen}"
         )
+
+    def evidence(self) -> tuple[str, ...]:
+        """Сами числа, на которых построено решение, — построчно.
+
+        Счётчик отвечает «сколько», а разбираться приходится с «какие»:
+        отказ по конвенции читается только вместе с числами, которые его
+        вызвали. Строка с числом и есть то место документа, куда надо
+        посмотреть.
+        """
+        found: list[str] = []
+        for name, items in (
+            ("за русскую", self.russian_samples),
+            ("за английскую", self.english_samples),
+            ("допускают оба прочтения", self.ambiguous_samples),
+        ):
+            if items:
+                found.append(f"{name}: " + ", ".join(f"«{item}»" for item in items))
+        return tuple(found)
+
+
+# Сколько чисел-свидетельств показывать при отказе. Больше десятка человек
+# глазами не разбирает, меньше трёх не даёт увидеть повтор.
+SAMPLE_LIMIT = 10
+
+
+def _few(found: list[str]) -> tuple[str, ...]:
+    """Несколько разных чисел из найденных: повторы места не занимают."""
+    return tuple(dict.fromkeys(item.strip() for item in found))[:SAMPLE_LIMIT]
 
 
 # Любое число документа — для счётчика просмотренного.
@@ -434,13 +470,14 @@ def detect_grouping(
     """
     policy = policy or load_parsing_policy().digit_grouping
 
-    russian = len(_SPACE_GROUPED.findall(text)) + len(_COMMA_DECIMAL.findall(text))
-    english = (
-        len(_COMMA_GROUPED.findall(text))
-        + len(_DOT_GROUPED.findall(text))
-        + len(_DOT_DECIMAL.findall(text))
+    for_russian = _SPACE_GROUPED.findall(text) + _COMMA_DECIMAL.findall(text)
+    for_english = (
+        _COMMA_GROUPED.findall(text)
+        + _DOT_GROUPED.findall(text)
+        + _DOT_DECIMAL.findall(text)
     )
-    ambiguous = len(_COMMA_AMBIGUOUS.findall(text)) + len(_DOT_AMBIGUOUS.findall(text))
+    unclear = _COMMA_AMBIGUOUS.findall(text) + _DOT_AMBIGUOUS.findall(text)
+    russian, english, ambiguous = len(for_russian), len(for_english), len(unclear)
     seen = len(_ANY_NUMBER.findall(text))
     samples = tuple(_ANY_NUMBER.findall(text)[:5])
 
@@ -450,6 +487,9 @@ def detect_grouping(
         "ambiguous": ambiguous,
         "numbers_seen": seen,
         "samples": samples,
+        "russian_samples": _few(for_russian),
+        "english_samples": _few(for_english),
+        "ambiguous_samples": _few(unclear),
     }
 
     total = russian + english
@@ -462,16 +502,23 @@ def detect_grouping(
             return _undetermined(GroupingUndetermined.AMBIGUOUS, counts)
         return GroupingDetection(Grouping.PLAIN, **counts)
 
-    winner = Grouping.RUSSIAN if russian >= english else Grouping.ENGLISH
-    votes = max(russian, english)
-    share = Decimal(votes) / Decimal(total)
-
-    if share < policy.min_share:
-        # Смешанные конвенции в одном документе не разбираются: это не выбор
-        # большинством, а отказ — часть чисел неминуемо будет прочитана неверно.
+    # Конвенцией считается то, что набрало порог улик, — и порог один
+    # на обе стороны. Прежде победителю требовались три улики, а отказ
+    # наступал от одной улики против: правило требовало единогласия, которого
+    # не даёт ни одна вёрстка. Одно-два числа чужой разметки — та же опечатка
+    # составителя, что и одно число своей, и мерить их разными мерками нельзя.
+    russian_is_convention = russian >= policy.min_evidence
+    english_is_convention = english >= policy.min_evidence
+    if russian_is_convention and english_is_convention:
+        # Конвенции в документе действительно две. Разбирать такой документ
+        # нельзя: часть чисел неминуемо будет прочитана неверно.
         return _undetermined(GroupingUndetermined.CONFLICTING, counts)
-    if votes < policy.min_evidence:
+    if not russian_is_convention and not english_is_convention:
         return _undetermined(GroupingUndetermined.INSUFFICIENT, counts)
+
+    winner = Grouping.RUSSIAN if russian_is_convention else Grouping.ENGLISH
+    votes = russian if russian_is_convention else english
+    total = votes + min(russian, english)
     # Улики считаются не сами по себе, а против неоднозначных чисел.
     # У ФосАгро их шесть против ста пятидесяти трёх — три процента, — и все
     # шесть оказались ложными: слипшаяся строка «5 573,628 507,689» читается
@@ -480,6 +527,23 @@ def detect_grouping(
     # процентами и сотней порог можно ставить где угодно; он посередине.
     if ambiguous and Decimal(total) / Decimal(total + ambiguous) < policy.min_decisive:
         return _undetermined(GroupingUndetermined.OUTWEIGHED, counts)
+    # Улики противоположной стороны отброшены как случайность вёрстки —
+    # и названы: прочитанные вопреки собственной разметке, эти числа
+    # заслуживают взгляда человека, а молчание о них было бы тем же
+    # молчаливым изменением порога.
+    disregarded = english if winner is Grouping.RUSSIAN else russian
+    if disregarded:
+        logger.info(
+            "конвенция %s: улик противоположной стороны %d, отброшены как "
+            "случайность вёрстки — %s",
+            winner.value,
+            disregarded,
+            ", ".join(
+                counts["english_samples"]
+                if winner is Grouping.RUSSIAN
+                else counts["russian_samples"]
+            ),
+        )
     return GroupingDetection(winner, **counts)
 
 

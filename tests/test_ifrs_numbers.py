@@ -131,6 +131,45 @@ def test_single_evidence_is_not_a_convention() -> None:
     assert found.reason is GroupingUndetermined.INSUFFICIENT
 
 
+def test_stray_number_of_another_convention_does_not_refuse_the_document() -> None:
+    """Порог улик один на обе стороны: опечатка не отменяет конвенцию.
+
+    Прежде победителю требовались три улики, а отказ наступал от одной
+    улики против — правило требовало единогласия, которого не даёт ни одна
+    вёрстка. Проверено на Акроне: 162 улики за русскую конвенцию и ноль
+    против, одно подставленное число английской разметки отказывало
+    документ целиком.
+    """
+    stray = RUSSIAN_DOC + "\nПрочие обязательства 1,234,567\n"
+    found = detect_grouping(stray)
+    assert found.convention is Grouping.RUSSIAN
+    assert found.english_evidence == 1
+    # Отброшенная улика названа: строку с ней человек обязан увидеть.
+    assert found.english_samples == ("1,234,567",)
+
+
+def test_three_numbers_on_each_side_are_two_conventions() -> None:
+    """Три улики с каждой стороны — это уже две конвенции, и это отказ."""
+    mixed = RUSSIAN_DOC + "\n".join(
+        f"Прочее {i} 1,234,56{i}" for i in range(3)
+    )
+    found = detect_grouping(mixed)
+    assert not found.determined
+    assert found.reason is GroupingUndetermined.CONFLICTING
+
+
+def test_evidence_names_the_numbers_behind_the_verdict() -> None:
+    """Решение читается вместе с числами, на которых построено.
+
+    Счётчик отвечает «сколько улик», а разбираться приходится с «какие»:
+    «1.5» — улика за английскую конвенцию ровно до тех пор, пока не видно,
+    что это ставка процента.
+    """
+    found = detect_grouping(RUSSIAN_DOC)
+    lines = found.evidence()
+    assert lines and any("за русскую" in item for item in lines)
+
+
 def test_document_without_separators_needs_no_convention() -> None:
     """Где разделителей нет вовсе, выбирать не из чего."""
     plain = "Итого активы 663888\nВыручка 507718\nКапитал 155770\n"
