@@ -1,0 +1,250 @@
+"""Расчёт показателей по МСФО (задача 27).
+
+**Подстановки нет нигде.** Правило пришло из РСБУ и в этой ветке уже дважды
+подтвердилось ценой: покрытие процентов считается только по начисленным
+из примечаний — величина из отчёта о прибыли или убытке у Автодора дала бы
+414 вместо 54 382; ликвидность девелопера без средств на счетах эскроу
+завышена вчетверо и потому не приводится вовсе.
+
+**Отрицательный знаменатель отменяет показатель.** «Чистый долг / EBITDA
+−1,86» у Сегежи арифметически верен и читается как низкая нагрузка, будучи
+противоположным. Причина `negative_denominator`; сама отрицательная EBITDA
+при этом не пропадает — она остаётся величиной и идёт в сигналы.
+
+**FFO на промежуточной отчётности не считается.** Выбор объявлен: приведение
+операционного потока к году умножением на 12/N даёт величину, которую нечем
+проверить, а сезонность у девелопера делает её заведомо ложной. EBITDA
+и проценты приводятся и помечаются.
+"""
+
+import logging
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import StrEnum
+
+from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, MetricDef, load_ifrs_metrics
+
+logger = logging.getLogger(__name__)
+
+
+class Reason(StrEnum):
+    """Почему показатель не рассчитан."""
+
+    MISSING_INPUT = "missing_input"
+    ZERO_DENOMINATOR = "zero_denominator"
+    NEGATIVE_DENOMINATOR = "negative_denominator"
+    NOT_EXTRACTED_YET = "not_extracted_yet"
+    ADJUSTMENT_IMPOSSIBLE = "adjustment_impossible"
+    INTERIM_NOT_ANNUALISED = "interim_not_annualised"
+
+
+REASON_TEXT: dict[Reason, str] = {
+    Reason.MISSING_INPUT: "нет входных величин",
+    Reason.ZERO_DENOMINATOR: "знаменатель равен нулю",
+    Reason.NEGATIVE_DENOMINATOR: "знаменатель отрицателен, отношение читалось бы наоборот",
+    Reason.NOT_EXTRACTED_YET: "величина знаменателя пока не извлекается",
+    Reason.ADJUSTMENT_IMPOSSIBLE: "поправку по типу эмитента нечем посчитать",
+    Reason.INTERIM_NOT_ANNUALISED: "на промежуточной отчётности не рассчитывается",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class MetricValue:
+    """Значение показателя либо отказ с названной причиной."""
+
+    code: str
+    name: str
+    group: str
+    in_scoring: bool
+    value: Decimal | None = None
+    reason: Reason | None = None
+    missing: tuple[str, ...] = ()
+    annualised: bool = False
+
+    @property
+    def calculable(self) -> bool:
+        """Рассчитан ли показатель."""
+        return self.value is not None
+
+    def describe(self) -> str:
+        """Однострочное описание для отчёта."""
+        if self.calculable:
+            mark = " (приведён к году)" if self.annualised else ""
+            return f"{self.name}: {self.value.quantize(Decimal('0.001'))}{mark}"
+        text = REASON_TEXT.get(self.reason, "причина не названа")
+        missing = f" — {', '.join(self.missing)}" if self.missing else ""
+        return f"{self.name}: не рассчитан, {text}{missing}"
+
+
+@dataclass(frozen=True, slots=True)
+class Inputs:
+    """Вход расчёта: величины отчётности, величины примечаний, обстановка.
+
+    Величины примечаний приходят отдельным словарём намеренно: показатель,
+    объявленный `notes_only`, обязан быть не в состоянии взять величину
+    из формы — не по договорённости, а потому, что её здесь нет.
+    """
+
+    values: dict[str, Decimal]
+    notes: dict[str, Decimal]
+    issuer_type: str = "corporate"
+    months: int = 12
+
+    @property
+    def interim(self) -> bool:
+        """Промежуточная ли отчётность."""
+        return self.months != 12
+
+
+def compute_all(
+    inputs: Inputs, policy: IfrsMetricsPolicy | None = None
+) -> tuple[MetricValue, ...]:
+    """Считает все показатели справочника, включая отказы с причинами."""
+    policy = policy or load_ifrs_metrics()
+    derived = _derived(inputs, policy)
+    return tuple(_compute(item, inputs, derived, policy) for item in policy.metrics)
+
+
+def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | None]:
+    """Производные величины: долг, чистый долг, EBITDA, FFO.
+
+    Величина, собранная не полностью, остаётся `None`: один недостающий
+    компонент отменяет её целиком, и частичных сумм здесь нет.
+    """
+    get = inputs.values.get
+    long_debt, short_debt = get("ifrs.long_term_borrowings"), get("ifrs.short_term_borrowings")
+    debt = None
+    if long_debt is not None or short_debt is not None:
+        debt = (long_debt or Decimal(0)) + (short_debt or Decimal(0))
+    cash = get("ifrs.cash")
+    profit, depreciation = get("ifrs.operating_profit"), get("ifrs.depreciation")
+    before = get("ifrs.cash_before_working_capital_changes")
+    interest_paid, taxes_paid = get("ifrs.interest_paid"), get("ifrs.income_taxes_paid")
+
+    ebitda = profit + abs(depreciation) if profit is not None and depreciation is not None else None
+    ffo = None
+    if None not in (before, interest_paid, taxes_paid) and not inputs.interim:
+        ffo = before - abs(interest_paid) - abs(taxes_paid)
+    scale = Decimal(12) / Decimal(inputs.months)
+    if inputs.interim and ebitda is not None and "ebitda" in policy.annualisation.scaled:
+        ebitda *= scale
+    return {
+        "debt_total": debt,
+        "net_debt": debt - cash if debt is not None and cash is not None else None,
+        "ebitda": ebitda,
+        "ffo": ffo,
+        "interest_accrued": _annualised(
+            inputs.notes.get("interest_accrued"), inputs, policy, "interest_accrued"
+        ),
+        "debt_due_within_year": inputs.notes.get("debt_due_within_year"),
+    }
+
+
+def _annualised(
+    value: Decimal | None, inputs: Inputs, policy: IfrsMetricsPolicy, code: str
+) -> Decimal | None:
+    """Приводит потоковую величину к году, если период неполный."""
+    if value is None or not inputs.interim or code not in policy.annualisation.scaled:
+        return value
+    return value * Decimal(12) / Decimal(inputs.months)
+
+
+def _compute(
+    metric: MetricDef,
+    inputs: Inputs,
+    derived: dict[str, Decimal | None],
+    policy: IfrsMetricsPolicy,
+) -> MetricValue:
+    """Считает один показатель по правилам справочника."""
+    empty = MetricValue(metric.code, metric.name, metric.group, metric.in_scoring)
+
+    adjustment = next(
+        (item for item in policy.for_type(inputs.issuer_type) if item.metric == metric.code),
+        None,
+    )
+    if adjustment is not None:
+        missing = tuple(
+            code for code in adjustment.requires if inputs.values.get(code) is None
+        )
+        if missing:
+            # Поправку нечем посчитать — исходный показатель не приводится:
+            # завышенный вчетверо хуже отсутствующего.
+            return _refused(empty, Reason.ADJUSTMENT_IMPOSSIBLE, missing)
+
+    if metric.availability == "not_extracted_yet":
+        return _refused(empty, Reason.NOT_EXTRACTED_YET)
+
+    numerator = _value_of(metric.numerator, inputs, derived, metric)
+    if numerator is None:
+        if metric.numerator in policy.annualisation.never_scaled and inputs.interim:
+            return _refused(empty, Reason.INTERIM_NOT_ANNUALISED)
+        return _refused(empty, Reason.MISSING_INPUT, (metric.numerator,))
+
+    if metric.denominator is None:
+        return MetricValue(
+            metric.code,
+            metric.name,
+            metric.group,
+            metric.in_scoring,
+            numerator,
+            annualised=_is_annualised(metric.numerator, inputs, policy),
+        )
+
+    denominator = _value_of(metric.denominator, inputs, derived, metric)
+    if denominator is None:
+        return _refused(empty, Reason.MISSING_INPUT, (metric.denominator,))
+    if denominator == 0:
+        return _refused(empty, Reason.ZERO_DENOMINATOR)
+    if metric.denominator_must_be_positive and denominator < 0:
+        return _refused(empty, Reason.NEGATIVE_DENOMINATOR)
+
+    annualised = _is_annualised(metric.numerator, inputs, policy) or _is_annualised(
+        metric.denominator, inputs, policy
+    )
+    return MetricValue(
+        metric.code,
+        metric.name,
+        metric.group,
+        metric.in_scoring,
+        numerator / denominator,
+        annualised=annualised,
+    )
+
+
+def _value_of(
+    code: str,
+    inputs: Inputs,
+    derived: dict[str, Decimal | None],
+    metric: MetricDef,
+) -> Decimal | None:
+    """Величина по коду: из примечаний, из производных либо из отчётности.
+
+    Показатель, объявленный `notes_only`, берёт знаменатель **только**
+    из примечаний. Величина из формы здесь недоступна — не по соглашению,
+    а потому, что её в этом словаре нет.
+    """
+    if metric.denominator_source == "notes_only" and code == metric.denominator:
+        return inputs.notes.get(code) if code in inputs.notes else derived.get(code)
+    if code in derived:
+        return derived[code]
+    return inputs.values.get(code)
+
+
+def _is_annualised(code: str, inputs: Inputs, policy: IfrsMetricsPolicy) -> bool:
+    """Приводилась ли эта величина к году."""
+    return inputs.interim and code in policy.annualisation.scaled
+
+
+def _refused(
+    empty: MetricValue, reason: Reason, missing: tuple[str, ...] = ()
+) -> MetricValue:
+    """Отказ с названной причиной."""
+    logger.info("показатель %s не рассчитан: %s", empty.code, reason.value)
+    return MetricValue(
+        empty.code,
+        empty.name,
+        empty.group,
+        empty.in_scoring,
+        reason=reason,
+        missing=missing,
+    )

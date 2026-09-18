@@ -317,6 +317,18 @@ def accept_ifrs_document(
     extraction = extract(text, profile.report_dates, profile.grouping)
     report(Stage.LOAD, extraction.describe())
 
+    # Аудиторское заключение читается здесь же: его сведения относятся
+    # к самой отчётности, и без них журнал комплекта молчал бы о том,
+    # с оговоркой она выпущена или без.
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.sources.ifrs_audit import read_audit_report
+    from finlib.sources.ifrs_inbox import form_headings
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    headings = form_headings(text, load_ifrs_lines(), load_parsing_policy())
+    audit = read_audit_report(text, before=min(headings.values(), default=0))
+    report(Stage.LOAD, f"аудиторское заключение: {audit.describe()}")
+
     decision = review(extraction, profile)
     report(
         Stage.QUALITY,
@@ -345,6 +357,7 @@ def accept_ifrs_document(
             raw_path=raw_path,
             confirmed_by=confirmed_by,
             confirmations=confirmations,
+            audit=audit,
         )
     report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
     intake.loaded = loaded

@@ -149,46 +149,6 @@ class IssuerTypePolicy(BaseModel):
         )
 
 
-class MetricAdjustment(BaseModel):
-    """Поправка состава показателя для типа эмитента."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    metric: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    type: str = Field(min_length=1)
-    adjusted_name: str = Field(min_length=1)
-    exclude_from_numerator: tuple[dict, ...] = Field(min_length=1)
-    requires: tuple[str, ...] = Field(min_length=1)
-    on_missing: str = Field(pattern="^not_calculable$")
-    reason_code: str = Field(min_length=1)
-    limitation: str = Field(min_length=1)
-    origin: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _exclusions_are_named(self) -> Self:
-        """У каждой исключаемой позиции объявлены код и причина."""
-        for item in self.exclude_from_numerator:
-            if "code" not in item or "reason" not in item:
-                raise ValueError(f"у поправки {self.metric} исключение без кода или причины")
-            if not str(item["code"]).startswith("ifrs."):
-                raise ValueError(f"исключается не позиция МСФО: {item['code']}")
-        return self
-
-
-class MetricsPolicy(BaseModel):
-    """Состав показателей по МСФО: пока только поправки по типу."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    version: str = Field(min_length=1)
-    adjustments: tuple[MetricAdjustment, ...] = Field(min_length=1)
-
-    def for_type(self, code: str) -> tuple[MetricAdjustment, ...]:
-        """Поправки, действующие для этого типа."""
-        return tuple(item for item in self.adjustments if item.type == code)
-
-
 def load_issuer_types(path: Path | None = None) -> IssuerTypePolicy:
     """Читает справочник типов эмитента."""
     source = path or settings.methodology_dir / "ifrs_issuer_type.yaml"
@@ -204,9 +164,10 @@ def load_issuer_types(path: Path | None = None) -> IssuerTypePolicy:
     return policy
 
 
-def load_ifrs_metrics(path: Path | None = None) -> MetricsPolicy:
-    """Читает состав показателей по МСФО."""
-    source = path or settings.methodology_dir / "ifrs_metrics.yaml"
-    return MetricsPolicy.model_validate(
-        yaml.safe_load(Path(source).read_text(encoding="utf-8"))
-    )
+# Состав показателей живёт в своём справочнике: поправки по типу — лишь
+# часть его, и держать их порознь значило бы иметь два описания одного.
+def load_ifrs_metrics(path: Path | None = None):
+    """Читает состав показателей по МСФО — из `normalize/ifrs_metrics.py`."""
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics as loader
+
+    return loader(path)

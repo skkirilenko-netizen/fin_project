@@ -421,6 +421,82 @@ def value_from_notes(
     return NoteValue(line.code, note=seen[0], refusal=Refusal.LINE_NOT_FOUND)
 
 
+def note_values(
+    index: NoteIndex,
+    rows: dict[str, tuple[int, ...]],
+    text: str,
+    grouping: Grouping,
+    periods: int,
+    catalog=None,
+) -> tuple[dict[str, Decimal], tuple[NoteValue, ...]]:
+    """Величины примечаний по ссылкам из строк форм.
+
+    `rows` — ссылки на примечания по кодам строк формы: от какой строки
+    в какое примечание идти. Возвращаются найденные величины и все исходы,
+    включая отказы: показатель, которому величины не хватило, обязан узнать
+    причину, а не остаться без объяснения.
+    """
+    from finlib.normalize.ifrs_note_lines import load_note_lines
+
+    catalog = catalog or load_note_lines()
+    found: dict[str, Decimal] = {}
+    outcomes: list[NoteValue] = []
+    for line in catalog.lines:
+        references: list[int] = []
+        for code in line.found_in:
+            references.extend(rows.get(code, ()))
+        outcome = value_from_notes(
+            line, index, tuple(dict.fromkeys(references)), text, grouping, periods
+        )
+        outcomes.append(outcome)
+        if outcome.found:
+            found[line.code] = outcome.value
+    return found, tuple(outcomes)
+
+
+def accrued_interest(
+    found: dict[str, Decimal], outcomes: tuple[NoteValue, ...], catalog=None
+) -> Decimal | None:
+    """Начисленные проценты по заёмным средствам: расход плюс капитализированные.
+
+    **Величина из отчёта о прибыли или убытке не подставляется.** У Автодора
+    она даёт 414 при начисленных 54 382, у Норникеля объявлена очищенной
+    от капитализированных процентов, а сами они раскрыты прозой примечания.
+    Нет составляющей — нет показателя: правило то же, что в РСБУ для
+    «Чистый долг / EBITDA» при отсутствии амортизации.
+    """
+    from finlib.normalize.ifrs_note_lines import load_note_lines
+
+    catalog = catalog or load_note_lines()
+    expense = found.get("ifrs.interest_expense_accrued")
+    if expense is None:
+        return None
+    capitalised = found.get("ifrs.interest_capitalised")
+    if capitalised is not None:
+        return expense + capitalised
+    # Строка формы объявила себя очищенной от капитализированных процентов,
+    # а их величины нет: знаменатель был бы занижен, а выглядел полным.
+    rows = next(
+        (
+            item.rows
+            for item in outcomes
+            if item.code == "ifrs.interest_expense_accrued" and item.found
+        ),
+        (),
+    )
+    lowered = " ".join(rows).lower()
+    if any(
+        marker.lower() in lowered
+        for marker in catalog.interest_cover.requires_capitalised_when_net
+    ):
+        logger.info(
+            "начисленные проценты не собраны: расход очищен от капитализированных, "
+            "а их величина не извлечена"
+        )
+        return None
+    return expense
+
+
 def references_in(name: str, policy: NotesPolicy | None = None) -> tuple[int, ...]:
     """Номера примечаний, на которые ссылается строка формы.
 

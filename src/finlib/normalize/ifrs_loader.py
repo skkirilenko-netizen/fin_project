@@ -22,7 +22,7 @@ from decimal import Decimal
 
 from finlib.db import PgConnection, execute, fetch_all, fetch_one
 from finlib.normalize.loader import PERIOD_RANK
-from finlib.quality.codes import CheckCode, CheckStatus, Severity
+from finlib.quality.codes import LOADER_SEVERITY, CheckCode, CheckStatus, Severity
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.sources.ifrs_extract import Extraction
 from finlib.sources.ifrs_inbox import DocumentProfile
@@ -156,6 +156,7 @@ def load_extraction(
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
     organization_name: str | None = None,
+    audit=None,
 ) -> LoadResult:
     """Пишет принятый комплект МСФО одной транзакцией.
 
@@ -188,6 +189,7 @@ def load_extraction(
     written = _write_facts(inn, src_file_id, extraction, profile, conn)
 
     records = _journal_records(inn, src_file_id, extraction, review, revisions, quarantined)
+    records.extend(_audit_records(inn, src_file_id, audit))
     log_records(records, conn=conn)
 
     saved = 0
@@ -367,6 +369,74 @@ def _unconfirmed(extraction: Extraction, confirmations: dict[str, str]) -> list[
         for row in extraction.unrecognised
         if row.source_name not in confirmations
     ]
+
+
+def _audit_records(inn: str, src_file_id: int, audit) -> list[CheckRecord]:
+    """Записи о том, что сказано в аудиторском заключении.
+
+    **Сведения заключения идут в журнал комплекта**, а не только на экран:
+    мнение с оговоркой, существенная неопределённость и пересмотр
+    относятся к самой отчётности, на которой построен расчёт. Молчание
+    журнала о заключении читалось бы как «оговорок нет», а это ровно
+    та подмена, против которой задача 25 и делалась.
+
+    Три состояния определённости дают три разные записи: заключения нет,
+    заключение не прочитано, вид мнения назван. Нечитаемое заключение —
+    не отсутствие оговорок.
+    """
+    from finlib.sources.ifrs_audit import Determination, Engagement
+
+    if audit is None:
+        return []
+    found: list[CheckRecord] = []
+
+    def record(code: CheckCode, message: str, details: dict | None = None) -> None:
+        found.append(
+            CheckRecord(
+                inn=inn,
+                check_code=code,
+                status=CheckStatus.WARNING,
+                severity=LOADER_SEVERITY[code],
+                src_file_id=src_file_id,
+                message=message,
+                details=details or {},
+            )
+        )
+
+    if audit.determination is Determination.ABSENT:
+        record(CheckCode.AUDIT_REPORT_ABSENT, "Аудиторское заключение не приложено")
+        return found
+    if audit.determination is Determination.NOT_READABLE:
+        record(
+            CheckCode.AUDIT_REPORT_NOT_READABLE,
+            "Аудиторское заключение не прочитано: страницы без текстового слоя",
+            {"pages": list(audit.unreadable_pages)},
+        )
+        return found
+
+    if audit.engagement is Engagement.REVIEW:
+        record(
+            CheckCode.AUDIT_REVIEW_ENGAGEMENT,
+            "Отчётность прошла обзорную проверку, а не аудит",
+        )
+    if audit.modified:
+        record(
+            CheckCode.AUDIT_OPINION_MODIFIED,
+            f"Мнение аудитора модифицировано: {audit.opinion_name}",
+            {"opinion": audit.opinion},
+        )
+    if "going_concern_uncertainty" in audit.sections:
+        record(
+            CheckCode.AUDIT_GOING_CONCERN,
+            "Аудитор объявил существенную неопределённость в отношении "
+            "непрерывности деятельности",
+        )
+    if "statements_restated" in audit.signals:
+        record(
+            CheckCode.AUDIT_STATEMENTS_RESTATED,
+            "Аудитор обратил внимание на пересмотр ранее выпущенной отчётности",
+        )
+    return found
 
 
 def _journal_records(
