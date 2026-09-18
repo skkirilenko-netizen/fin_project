@@ -304,18 +304,24 @@ def main(argv: list[str] | None = None) -> int:
         f"оглавление от {policy.contents_min_entries} записей"
     )
 
+    # Каждый документ папки, а не первый попавшийся: выбор молча — тот самый
+    # дефект, при котором документ исчезает из замера без сообщения.
     found: list[DocumentNotes] = []
     for folder in sorted(item for item in args.path.iterdir() if item.is_dir()):
         documents = [
-            item for item in sorted(folder.iterdir()) if item.suffix.lower() == ".pdf"
+            item
+            for item in sorted(folder.iterdir())
+            if item.suffix.lower() in (".pdf", ".txt", ".md")
         ]
         if not documents:
+            print(f"\n{folder.name}: документов нет — замер по папке не проводился")
             continue
-        outcome = measure(documents[0], folder.name)
-        if isinstance(outcome, str):
-            print(f"\n{folder.name}: замер не состоялся — {outcome}")
-            continue
-        found.append(outcome)
+        for document in documents:
+            outcome = measure(document, f"{folder.name}/{document.name[:24]}")
+            if isinstance(outcome, str):
+                print(f"\n{folder.name} / {document.name}: замер не состоялся — {outcome}")
+                continue
+            found.append(outcome)
 
     if not found:
         print(

@@ -56,6 +56,52 @@ class Engagement(StrEnum):
     REVIEW = "review"
 
 
+class TextRefusal(StrEnum):
+    """Почему дословный текст раздела не извлечён.
+
+    **Текст берётся целиком или не берётся вовсе.** Обрезанная аудиторская
+    оговорка хуже отсутствующей: читатель решит, что прочёл её полностью,
+    и решит это молча.
+    """
+
+    BOUNDARY_NOT_DETERMINED = "boundary_not_determined"
+    PAGES_NOT_READABLE = "pages_not_readable"
+    EMPTY = "empty"
+
+
+TEXT_REFUSAL_TEXT: dict[TextRefusal, str] = {
+    TextRefusal.BOUNDARY_NOT_DETERMINED: (
+        "конец раздела не определён: следующего заголовка за ним нет"
+    ),
+    TextRefusal.PAGES_NOT_READABLE: (
+        "внутри раздела есть страницы без текстового слоя"
+    ),
+    TextRefusal.EMPTY: "под заголовком раздела нет текста",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SectionText:
+    """Дословный текст раздела заключения либо отказ с названной причиной."""
+
+    code: str
+    name: str
+    text: str = ""
+    refusal: TextRefusal | None = None
+
+    @property
+    def found(self) -> bool:
+        """Извлечён ли текст целиком."""
+        return bool(self.text)
+
+    def describe(self) -> str:
+        """Однострочное описание для отчёта."""
+        if self.found:
+            return f"{self.name}: {len(self.text)} знаков"
+        reason = TEXT_REFUSAL_TEXT.get(self.refusal, "причина не названа")
+        return f"{self.name}: текст не извлечён — {reason}"
+
+
 @dataclass(frozen=True, slots=True)
 class AuditReport:
     """Итог чтения заключения."""
@@ -69,6 +115,32 @@ class AuditReport:
     signals: tuple[str, ...] = ()
     pages: tuple[int, int] | None = None
     unreadable_pages: tuple[int, ...] = ()
+    texts: tuple[SectionText, ...] = ()
+    auditor: str = ""
+    signed_on: str = ""
+
+    def text_of(self, code: str) -> SectionText | None:
+        """Дословный текст раздела по коду."""
+        return next((item for item in self.texts if item.code == code), None)
+
+    def quote(self, code: str, policy: AuditPolicy) -> str:
+        """Цитата раздела для документа — готовой строкой, а не заново.
+
+        Цитата обязана назвать источник: раздел, аудитора и дату заключения.
+        Читатель обязан видеть, где кончается аудитор и начинаемся мы,
+        а без подписи и даты цитата этого не показывает.
+        """
+        found = self.text_of(code)
+        if found is None or not found.found:
+            return ""
+        signed = ""
+        if self.auditor:
+            signed = f", {self.auditor}"
+            if self.signed_on:
+                signed += f", {self.signed_on}"
+        return policy.attribution.quote_template.format(
+            section=found.name, signed=signed, text=found.text
+        )
 
     def describe(self) -> str:
         """Однострочная сводка для отчёта и журнала."""
@@ -122,7 +194,11 @@ def read_audit_report(
 
     index, engagement = heading
     start = offsets[index]
-    end = limit
+    # Конец заключения — заголовок следующего раздела документа, а не начало
+    # первой формы: между подписью аудитора и формой стоит заявление
+    # об ответственности руководства, и у Норникеля из-за этого терялась
+    # страница. Первая форма остаётся внешним рубежом.
+    end = _report_end(lines, offsets, index, limit, policy)
     block = [
         lines[position].strip()
         for position in range(index, len(lines))
@@ -156,7 +232,168 @@ def read_audit_report(
         signals=_signals_of(block, sections, policy),
         pages=pages,
         unreadable_pages=lost,
+        texts=_texts_of(lines, offsets, index, end, sections, document, policy),
+        auditor=(auditor := _auditor_of(block, policy))[0],
+        signed_on=_signed_on(block, policy, auditor[1]),
     )
+
+
+def _report_end(
+    lines: list[str],
+    offsets: list[int],
+    index: int,
+    limit: int,
+    policy: AuditPolicy,
+) -> int:
+    """Смещение конца заключения: заголовок следующего раздела документа."""
+    wanted = [normalize_name(item) for item in policy.ends_before]
+    for position in range(index + 1, len(lines)):
+        if offsets[position] >= limit:
+            break
+        stripped = lines[position].strip()
+        if not stripped or _CONTENTS_TAIL.search(stripped):
+            continue
+        normalized = normalize_name(stripped)
+        if any(normalized.startswith(item) for item in wanted):
+            return offsets[position]
+    return limit
+
+
+def _texts_of(
+    lines: list[str],
+    offsets: list[int],
+    index: int,
+    end: int,
+    sections: tuple[str, ...],
+    document: PdfDocument | None,
+    policy: AuditPolicy,
+) -> tuple[SectionText, ...]:
+    """Дословный текст каждого найденного раздела — целиком либо никак.
+
+    Границы раздела — его заголовок и заголовок следующего раздела. Если
+    следующего нет, концом служит конец заключения; не определился и он —
+    отказ. Обрезанная оговорка хуже отсутствующей.
+    """
+    # Заголовок раздела повторяется на следующей странице — у Европлана
+    # «Ключевые вопросы аудита» стоят дважды. Повтор не начинает нового
+    # раздела: это тот же случай, что «(продолжение)» у примечаний.
+    starts: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for position in range(index, len(lines)):
+        if offsets[position] >= end:
+            break
+        normalized = normalize_name(lines[position].strip())
+        if not normalized:
+            continue
+        for section in policy.sections:
+            if any(
+                normalized.startswith(normalize_name(item))
+                for item in section.headings
+            ):
+                if section.code not in seen:
+                    seen.add(section.code)
+                    starts.append((position, section.code))
+                break
+
+    found: list[SectionText] = []
+    for order, (position, code) in enumerate(starts):
+        section = policy.section(code)
+        if code not in sections:
+            continue
+        stop = (
+            starts[order + 1][0]
+            if order + 1 < len(starts)
+            else _line_at(offsets, end)
+        )
+        if stop <= position + 1:
+            found.append(
+                SectionText(code, section.name, refusal=TextRefusal.EMPTY)
+            )
+            continue
+        lost = _unreadable_within(
+            document,
+            (
+                document.page_at(offsets[position]),
+                document.page_at(offsets[min(stop, len(lines) - 1)]),
+            )
+            if document is not None
+            else None,
+        )
+        if lost:
+            found.append(
+                SectionText(code, section.name, refusal=TextRefusal.PAGES_NOT_READABLE)
+            )
+            continue
+        body = " ".join(_without_signature(lines[position + 1 : stop], policy))
+        found.append(
+            SectionText(code, section.name, text=body)
+            if body
+            else SectionText(code, section.name, refusal=TextRefusal.EMPTY)
+        )
+    return tuple(found)
+
+
+def _without_signature(lines: list[str], policy: AuditPolicy) -> list[str]:
+    """Строки раздела без блока подписи в конце.
+
+    Подпись стоит за последним разделом и ни к одному из них не относится:
+    строка, состоящая только из даты или только из наименования аудитора,
+    в цитату идти не должна — иначе читатель прочтёт её как часть оговорки.
+    """
+    pattern = re.compile(
+        "".join(policy.attribution.date_pattern.split()), re.IGNORECASE
+    )
+    found = [line.strip() for line in lines if line.strip()]
+    while found:
+        last = found[-1]
+        only_date = pattern.fullmatch(last) is not None
+        only_auditor = any(
+            last.startswith(marker) for marker in policy.attribution.auditor_markers
+        ) or any(last.startswith(form) for form in policy.attribution.auditor_forms)
+        if not (only_date or only_auditor):
+            break
+        found.pop()
+    return found
+
+
+def _line_at(offsets: list[int], offset: int) -> int:
+    """Номер строки, начинающейся не раньше этого смещения."""
+    return sum(1 for item in offsets if item < offset)
+
+
+def _auditor_of(block: list[str], policy: AuditPolicy) -> tuple[str, int]:
+    """Наименование аудитора и место строки; пусто — реквизиты не найдены."""
+    for index, line in enumerate(block):
+        for marker in policy.attribution.auditor_markers:
+            if line.startswith(marker):
+                return line[len(marker) :].strip(), index
+    for index, line in enumerate(block):
+        if any(line.startswith(form) for form in policy.attribution.auditor_forms):
+            return line.strip(), index
+    return "", -1
+
+
+def _signed_on(block: list[str], policy: AuditPolicy, after: int) -> str:
+    """Дата подписания заключения; пусто — не найдена.
+
+    **Дата берётся только из блока подписи** — то есть после строки
+    с реквизитами аудитора и отдельной короткой строкой. Без этой привязки
+    датой подписания становилась отчётная дата из текста мнения: у ФосАгро
+    «31 декабря 2025 года». Ложная дата в цитате хуже отсутствующей —
+    читатель проверить её не может, а поверит.
+    """
+    if after < 0:
+        return ""
+    pattern = re.compile(
+        "".join(policy.attribution.date_pattern.split()), re.IGNORECASE
+    )
+    found = [
+        match.group()
+        for line in block[after + 1 :]
+        if len(line) <= policy.attribution.date_line_max_length
+        and (match := pattern.search(line))
+    ]
+    return found[-1] if found else ""
 
 
 def _lines_with_offsets(text: str) -> tuple[list[str], list[int]]:

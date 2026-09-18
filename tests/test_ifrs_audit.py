@@ -121,3 +121,50 @@ def test_signal_does_not_fire_without_the_marker() -> None:
     found = read_audit_report(text)
     assert "emphasis_of_matter" in found.sections
     assert found.signals == ()
+
+
+SIGNED = """
+Аудиторское заключение независимых аудиторов
+Независимый аудитор: АО «Кэпт»
+Мнение
+Отчетность за год, закончившийся 31 декабря 2025 года, отражает достоверно.
+Важные обстоятельства – пересмотр раскрываемой отчетности
+Мы обращаем внимание на пояснение 2 (а).
+8 мая 2026 года
+Заявление об ответственности руководства
+Руководство отвечает за подготовку отчетности.
+"""
+
+
+def test_section_text_is_taken_whole_and_quoted_with_the_source() -> None:
+    """Текст раздела берётся целиком, а цитата называет раздел и подпись."""
+    policy = load_audit_policy()
+    found = read_audit_report(SIGNED, policy=policy)
+    text = found.text_of("emphasis_of_matter")
+    assert text is not None and text.found
+    assert text.text == "Мы обращаем внимание на пояснение 2 (а)."
+    quote = found.quote("emphasis_of_matter", policy)
+    assert "Важные обстоятельства" in quote
+    assert "АО «Кэпт»" in quote
+    assert "8 мая 2026 года" in quote
+    assert "«Мы обращаем внимание на пояснение 2 (а).»" in quote
+
+
+def test_report_ends_before_the_responsibility_section() -> None:
+    """Заключение кончается заголовком следующего раздела, а не формой."""
+    found = read_audit_report(SIGNED)
+    text = found.text_of("emphasis_of_matter")
+    assert "Руководство отвечает" not in text.text
+
+
+def test_signing_date_is_not_taken_from_the_opinion_text() -> None:
+    """Отчётная дата из текста мнения датой подписания не становится.
+
+    У ФосАгро «31 декабря 2025 года» стоит в самом мнении, и без привязки
+    к блоку подписи она становилась датой заключения. Ложная дата в цитате
+    хуже отсутствующей: проверить её читатель не может, а поверит.
+    """
+    without = SIGNED.replace("8 мая 2026 года\n", "")
+    found = read_audit_report(without)
+    assert found.signed_on == ""
+    assert "31 декабря 2025" not in found.quote("emphasis_of_matter", load_audit_policy())

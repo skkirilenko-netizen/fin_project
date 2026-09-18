@@ -58,18 +58,27 @@ def main(argv: list[str] | None = None) -> int:
         f"сигналов {len(policy.signals)}"
     )
 
+    # Разбирается каждый документ папки, а не первый попавшийся: выбор молча
+    # — тот самый дефект, которым эмитент исчезает из замера без сообщения.
+    # Здесь замер именно по документам: заключение — свойство документа,
+    # а не комплекта, и текстовая выгрузка его может не содержать вовсе.
     found: list[tuple[str, AuditReport]] = []
     for folder in sorted(item for item in args.path.iterdir() if item.is_dir()):
         documents = [
-            item for item in sorted(folder.iterdir()) if item.suffix.lower() == ".pdf"
+            item
+            for item in sorted(folder.iterdir())
+            if item.suffix.lower() in (".pdf", ".txt", ".md")
         ]
         if not documents:
+            print(f"\n{folder.name}: документов нет — замер по папке не проводился")
             continue
-        outcome = measure(documents[0])
-        if isinstance(outcome, str):
-            print(f"\n{folder.name}: замер не состоялся — {outcome}")
-            continue
-        found.append((folder.name, outcome))
+        for document in documents:
+            outcome = measure(document)
+            name = f"{folder.name} / {document.name}"
+            if isinstance(outcome, str):
+                print(f"\n{name}: замер не состоялся — {outcome}")
+                continue
+            found.append((name, outcome))
 
     if not found:
         print(
@@ -89,6 +98,13 @@ def main(argv: list[str] | None = None) -> int:
         for code in report.signals:
             signal = next(item for item in policy.signals if item.code == code)
             print(f"      сигнал [{signal.level}] {signal.name}")
+        if report.auditor or report.signed_on:
+            print(
+                f"      подпись: {report.auditor or 'аудитор не назван'}"
+                f", {report.signed_on or 'дата не найдена'}"
+            )
+        for item in report.texts:
+            print(f"      текст: {item.describe()}")
 
     states = Counter(item.determination for _, item in found)
     print("\nТРИ СОСТОЯНИЯ ОПРЕДЕЛЁННОСТИ")
@@ -107,6 +123,29 @@ def main(argv: list[str] | None = None) -> int:
         "  тип задания: "
         + ", ".join(f"{name} {count}" for name, count in engagements.items())
     )
+
+    print("\nДОСЛОВНЫЙ ТЕКСТ РАЗДЕЛОВ")
+    wanted = sum(len(item.sections) for _, item in found)
+    taken = sum(1 for _, item in found for text in item.texts if text.found)
+    print(f"  извлечено целиком {taken} из {wanted} найденных разделов")
+    for name, item in found:
+        for text in item.texts:
+            if not text.found:
+                print(f"      {name}: {text.describe()}")
+    example = next(
+        (
+            (name, item)
+            for name, item in found
+            for text in item.texts
+            if text.found and text.code == "going_concern_uncertainty"
+        ),
+        None,
+    )
+    if example is not None:
+        name, item = example
+        quote = item.quote("going_concern_uncertainty", policy)
+        print(f"  пример цитаты ({name}):")
+        print(f"      {quote[:300]}…")
 
     print("\nРАЗДЕЛЫ-ПРИЗНАКИ")
     sections = Counter(code for _, item in found for code in item.sections)

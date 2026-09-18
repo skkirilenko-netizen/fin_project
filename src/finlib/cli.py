@@ -6,6 +6,7 @@
 """
 
 import logging
+import re
 import sys
 from datetime import date
 from decimal import Decimal
@@ -447,7 +448,21 @@ def ifrs_markup_command(
 def _load_issuers(
     path: Path, grouping: dict[str, str] | None = None
 ) -> tuple[list, list[tuple[str, str]]]:
-    """Готовит эмитентов к разметке; непринятые документы называются отдельно.
+    """Готовит эмитентов к разметке; всё непринятое называется поимённо.
+
+    **Папка — это организация, а не комплект.** Отчётная дата и вид отчётности
+    берутся из содержимого документа, а не из имени файла или папки: правило
+    то же, что в РСБУ, где имя выгрузки не значит ничего. Поэтому в папке
+    эмитента лежит сколько угодно документов, и все они разбираются.
+
+    **Выбор между документами не делается молча.** Прежде брался первый PDF,
+    а всё остальное исчезало без единого сообщения: в каждой папке рядом
+    с PDF лежит `report.txt`, и какой из них разобран, по выводу прогона
+    было не установить. Теперь разбирается каждый, а одинаковые комплекты
+    сводятся по объявленному правилу — предпочитается документ со страницами
+    и координатами, потому что у текстовой выгрузки нет ни того ни другого,
+    и потеря страницы по ней не обнаруживается. Отвергнутая доставка
+    называется вместе с причиной.
 
     `grouping` — заданные вручную конвенции по ИНН: выход для документа,
     разметка чисел которого не читается ни голосованием, ни арифметикой.
@@ -458,29 +473,82 @@ def _load_issuers(
 
     grouping = grouping or {}
     issuers, skipped = [], []
+
+    stray = [
+        item
+        for item in sorted(path.iterdir())
+        if item.is_file() and item.suffix.lower() in (".pdf", ".txt", ".md")
+    ]
+    for item in stray:
+        skipped.append(
+            (item.name, "файл лежит вне папки организации и не разбирается")
+        )
+
     for folder in sorted(p for p in path.iterdir() if p.is_dir()):
+        if not re.fullmatch(r"\d{10}|\d{12}", folder.name):
+            # Имя папки — это ИНН и ничто иное: оно попадает в ключ комплекта
+            # и в отчёт. Суффикс вида «_interim» стал бы частью ИНН, а вид
+            # отчётности определяется по содержимому документа, а не по имени.
+            skipped.append(
+                (
+                    folder.name,
+                    "имя папки не ИНН: организация определяется папкой, "
+                    "а период и вид отчётности — содержимым документа",
+                )
+            )
+            continue
         documents = [
             item
             for item in sorted(folder.iterdir())
             if item.suffix.lower() in (".pdf", ".txt", ".md")
         ]
-        chosen = next(
-            (item for item in documents if item.suffix.lower() == ".pdf"),
-            documents[0] if documents else None,
-        )
-        if chosen is None:
+        if not documents:
+            skipped.append((folder.name, "в папке организации нет документов"))
             continue
         chosen_grouping = grouping.get(folder.name)
-        found = load_issuer(
-            chosen,
-            folder.name,
-            Grouping(chosen_grouping) if chosen_grouping else None,
-        )
-        if isinstance(found, Rejection):
-            skipped.append((chosen.name, found.reason))
-            continue
-        issuers.append(found)
+        accepted: list = []
+        for document in documents:
+            found = load_issuer(
+                document,
+                folder.name,
+                Grouping(chosen_grouping) if chosen_grouping else None,
+            )
+            if isinstance(found, Rejection):
+                skipped.append((document.name, found.reason))
+                continue
+            accepted.append(found)
+        issuers.extend(_one_per_report(accepted, skipped))
     return issuers, skipped
+
+
+def _one_per_report(accepted: list, skipped: list[tuple[str, str]]) -> list:
+    """Сводит доставки одного комплекта в одну, называя отвергнутые.
+
+    Комплект различается отчётной датой и видом отчётности — тем, что
+    прочитано из документа. Две доставки одного комплекта (PDF и текстовая
+    выгрузка) — это один комплект, и брать оба значило бы посчитать эмитента
+    дважды; брать любой молча — потерять сведения о том, какой разобран.
+    """
+    by_report: dict[tuple, list] = {}
+    for item in accepted:
+        key = (item.profile.report_dates[0], item.profile.reporting_kind)
+        by_report.setdefault(key, []).append(item)
+
+    found = []
+    for group in by_report.values():
+        # Документ со страницами старше текстовой выгрузки: у выгрузки нет
+        # ни страниц, ни координат, и потеря страницы по ней не видна.
+        group.sort(key=lambda item: (item.path.suffix.lower() != ".pdf", item.path.name))
+        found.append(group[0])
+        for other in group[1:]:
+            skipped.append(
+                (
+                    other.name if hasattr(other, "name") else other.path.name,
+                    f"та же отчётность, что «{group[0].path.name}»: разобран "
+                    "документ со страницами и координатами",
+                )
+            )
+    return found
 
 
 def _markup_loop(issuers: list, who: str, limit: int) -> None:

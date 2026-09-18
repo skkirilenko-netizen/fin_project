@@ -181,6 +181,32 @@ REGISTRY: dict[CheckCode, Wiring] = {
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Wiring(
         WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_review.py",)
     ),
+    # --- сведения из аудиторского заключения (задача 25) --------------------
+    # Заключение читается (`sources/ifrs_audit.py`), виды мнения и разделы
+    # объявлены методикой, но записывать их некуда: расчётного слоя МСФО
+    # ещё нет, и оценка, в которую эти сведения идут, появляется в задаче 27.
+    # Числятся неподключёнными честно — иначе их отсутствие в журнале читалось
+    # бы как «оговорок нет», а это ровно та подмена, против которой задача 25
+    # и делалась.
+    **{
+        code: Wiring(
+            WiringStatus.NOT_WIRED,
+            date(2026, 9, 18),
+            reason=(
+                "заключение читается, но записывать сведения некуда: "
+                "расчётного слоя и оценки по МСФО ещё нет"
+            ),
+            planned_in="задача 27",
+        )
+        for code in (
+            CheckCode.AUDIT_OPINION_MODIFIED,
+            CheckCode.AUDIT_GOING_CONCERN,
+            CheckCode.AUDIT_STATEMENTS_RESTATED,
+            CheckCode.AUDIT_REPORT_NOT_READABLE,
+            CheckCode.AUDIT_REPORT_ABSENT,
+            CheckCode.AUDIT_REVIEW_ENGAGEMENT,
+        )
+    },
 }
 
 

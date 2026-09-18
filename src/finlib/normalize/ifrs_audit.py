@@ -54,6 +54,26 @@ class AuditSignal(BaseModel):
     calibration_status: str = Field(min_length=1)
 
 
+class Attribution(BaseModel):
+    """Чем подписано заключение и как цитата печатается в документе."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    auditor_markers: tuple[str, ...] = Field(min_length=1)
+    auditor_forms: tuple[str, ...] = Field(min_length=1)
+    date_pattern: str = Field(min_length=1)
+    date_line_max_length: int = Field(ge=10)
+    quote_template: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _template_names_its_parts(self) -> Self:
+        """Шаблон цитаты обязан называть раздел, текст и подпись."""
+        for part in ("{section}", "{text}", "{signed}"):
+            if part not in self.quote_template:
+                raise ValueError(f"шаблон цитаты не содержит {part}")
+        return self
+
+
 class AuditPolicy(BaseModel):
     """Правила чтения аудиторского заключения."""
 
@@ -62,6 +82,8 @@ class AuditPolicy(BaseModel):
     version: str = Field(min_length=1)
     report_headings: dict[str, tuple[str, ...]]
     before_forms: bool
+    ends_before: tuple[str, ...] = Field(min_length=1)
+    attribution: Attribution
     opinions: tuple[OpinionKind, ...] = Field(min_length=1)
     sections: tuple[ReportSection, ...] = Field(min_length=1)
     signals: tuple[AuditSignal, ...] = Field(min_length=1)

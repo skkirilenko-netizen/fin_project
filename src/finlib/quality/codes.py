@@ -87,6 +87,25 @@ class CheckCode(StrEnum):
     LINE_MAPPING = "line_mapping"
     PERIOD_VALUE_MISMATCH = "period_value_mismatch"
     FACT_OVERWRITE = "fact_overwrite"
+    # --- аудиторское заключение (задача 25) ---------------------------------
+    # Мнение аудитора модифицировано: оговорка, отрицательное мнение либо
+    # отказ от выражения мнения. Относится к самой отчётности, на которой
+    # построен расчёт, и потому идёт в журнал комплекта.
+    AUDIT_OPINION_MODIFIED = "audit_opinion_modified"
+    # Существенная неопределённость в отношении непрерывности деятельности:
+    # объявляется отдельным разделом и мнения не модифицирует. Признак
+    # независимый и по тяжести старше вида мнения.
+    AUDIT_GOING_CONCERN = "audit_going_concern"
+    # Аудитор обратил внимание на пересмотр ранее выпущенной отчётности.
+    AUDIT_STATEMENTS_RESTATED = "audit_statements_restated"
+    # Заключение в документе есть, но прочесть его нельзя: страницы без
+    # текстового слоя. Не то же самое, что отсутствие оговорок.
+    AUDIT_REPORT_NOT_READABLE = "audit_report_not_readable"
+    # Заключения в документе нет вовсе — третье состояние, со своим смыслом.
+    AUDIT_REPORT_ABSENT = "audit_report_absent"
+    # Отчётность прошла обзорную проверку, а не аудит: объём процедур меньше,
+    # мнения о достоверности аудитор не выражает.
+    AUDIT_REVIEW_ENGAGEMENT = "audit_review_engagement"
 
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
@@ -124,6 +143,16 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     # или исправления, содержательный сигнал для заключения.
     CheckCode.PERIOD_VALUE_MISMATCH: Severity.WARNING,
     CheckCode.FACT_OVERWRITE: Severity.INFO,
+    # Сведения из аудиторского заключения. Ни одно из них не отменяет расчёт:
+    # отчётность с оговоркой остаётся отчётностью, а нечитаемое заключение
+    # ничего не говорит о самой отчётности. Но в заключение они обязаны
+    # попасть, поэтому уровень — предупреждение, а не сведение к сведению.
+    CheckCode.AUDIT_OPINION_MODIFIED: Severity.WARNING,
+    CheckCode.AUDIT_GOING_CONCERN: Severity.WARNING,
+    CheckCode.AUDIT_STATEMENTS_RESTATED: Severity.WARNING,
+    CheckCode.AUDIT_REPORT_NOT_READABLE: Severity.WARNING,
+    CheckCode.AUDIT_REPORT_ABSENT: Severity.WARNING,
+    CheckCode.AUDIT_REVIEW_ENGAGEMENT: Severity.WARNING,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -161,6 +190,12 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.LINE_MAPPING: "сопоставление кодов источника со справочником",
     CheckCode.PERIOD_VALUE_MISMATCH: "расхождение сравнительного значения с отчётным",
     CheckCode.FACT_OVERWRITE: "перезапись ранее загруженного значения",
+    CheckCode.AUDIT_OPINION_MODIFIED: "модификация мнения аудитора",
+    CheckCode.AUDIT_GOING_CONCERN: "существенная неопределённость о непрерывности",
+    CheckCode.AUDIT_STATEMENTS_RESTATED: "пересмотр ранее выпущенной отчётности",
+    CheckCode.AUDIT_REPORT_NOT_READABLE: "чтение аудиторского заключения",
+    CheckCode.AUDIT_REPORT_ABSENT: "наличие аудиторского заключения",
+    CheckCode.AUDIT_REVIEW_ENGAGEMENT: "тип аудиторского задания",
 }
 
 
