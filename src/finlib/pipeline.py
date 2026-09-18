@@ -288,6 +288,7 @@ def accept_ifrs_document(
     raw_path: str | None = None,
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
+    document: object | None = None,
 ) -> IfrsIntake:
     """Проводит документ МСФО через приём, разбор форм и экран сверки.
 
@@ -308,13 +309,21 @@ def accept_ifrs_document(
         if on_stage is not None:
             on_stage(StageResult(stage, message, ok))
 
-    profile = identify(text)
+    # `document` нужен одной проверке, которую по плоскому тексту сделать
+    # нельзя: не потеряна ли страница внутри форм. Без него эта проверка
+    # в цикле всегда отвечала «потерь нет» — то есть не работала вовсе,
+    # хотя выглядела работающей: у Автодора так пропала вся сторона пассива,
+    # у Самолёта — две страницы внутри форм.
+    profile = identify(text, document=document)
     if isinstance(profile, Rejection):
         report(Stage.LOAD, f"документ отклонён: {profile.reason}", ok=False)
         return IfrsIntake(False, profile.reason, profile.code.value)
     report(Stage.LOAD, f"документ принят: {profile.describe()}")
 
-    extraction = extract(text, profile.report_dates, profile.grouping)
+    columns = getattr(document, "columns_of", None)
+    extraction = extract(
+        text, profile.dates_by_form, profile.grouping, columns=columns
+    )
     report(Stage.LOAD, extraction.describe())
 
     # Аудиторское заключение читается здесь же: его сведения относятся

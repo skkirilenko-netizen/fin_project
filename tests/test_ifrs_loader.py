@@ -62,6 +62,44 @@ HEADER = (
     + "\nПримечания к консолидированной финансовой отчётности.\n" * 40
 )
 
+# Комплект следующего года: сравнительная колонка повторяет отчётную колонку
+# прежнего комплекта. Это и есть столкновение, ради которого существует
+# правило приоритета, — и до сих пор оно ни разу не происходило на данных.
+LATER = """
+Консолидированный отчёт о финансовом положении
+(в миллионах российских рублей)
+Пояснения      31 декабря 2025 года      31 декабря 2024 года
+Основные средства                       800 000        700 000
+Итого внеоборотные активы               800 000        700 000
+Запасы                                  350 000        300 000
+Денежные средства и их эквиваленты      550 000        500 000
+Итого оборотные активы                  900 000        800 000
+Итого активы                          1 700 000      1 500 000
+Акционерный капитал                     400 000        400 000
+Нераспределённая прибыль                300 000        200 000
+Итого капитал                           700 000        600 000
+Долгосрочные кредиты и займы            600 000        500 000
+Итого долгосрочные обязательства        600 000        500 000
+Краткосрочные кредиты и займы           400 000        400 000
+Итого краткосрочные обязательства       400 000        400 000
+Итого обязательства                   1 000 000        900 000
+Итого капитал и обязательства         1 700 000      1 500 000
+
+Консолидированный отчёт о прибыли или убытке
+(в миллионах российских рублей)
+Выручка                               1 300 000      1 200 000
+Себестоимость продаж                    (850 000)      (800 000)
+Валовая прибыль                         450 000        400 000
+Коммерческие расходы                     (45 000)       (40 000)
+Административные расходы                 (65 000)       (60 000)
+Операционная прибыль                    340 000        300 000
+Финансовые доходы                        12 000         10 000
+Финансовые расходы                       (52 000)       (50 000)
+Прибыль до налогообложения              300 000        260 000
+Расход по налогу на прибыль              (60 000)       (52 000)
+Прибыль за период                       240 000        208 000
+"""
+
 
 @pytest.fixture(autouse=True)
 def clean(db_conn):
@@ -202,6 +240,21 @@ def test_journal_records_counters_not_only_failures(db_conn) -> None:
 # --- сравнительные данные -------------------------------------------------------
 
 
+def later_set(text: str = LATER):
+    """Комплект следующего года: даты в шапках сдвинуты на год вперёд.
+
+    Отчётный период прежнего комплекта приходит здесь сравнительной колонкой —
+    ровно то столкновение, ради которого существует правило приоритета.
+    Даты берутся из шапок форм самим приёмом: задать их в обход разбора
+    значило бы проверить правило на данных, которых разбор не даёт.
+    """
+    document = text + HEADER.replace("2024 года и 31 декабря 2023", "2025 года и 31 декабря 2024")
+    profile = identify(document)
+    assert profile.accepted, getattr(profile, "reason", "")
+    extraction = extract(document, profile.dates_by_form, Grouping.RUSSIAN)
+    return extraction, profile, review(extraction, profile)
+
+
 def test_revision_against_previous_report_is_logged(db_conn) -> None:
     """Расхождение сравнительных данных с загруженными попадает в журнал.
 
@@ -212,13 +265,14 @@ def test_revision_against_previous_report_is_logged(db_conn) -> None:
     extraction, profile, decision = prepared()
     load_extraction(INN, extraction, profile, decision, db_conn)
 
-    revised = BALANCE.replace(
-        "Итого активы                          1 500 000      1 360 000",
-        "Итого активы                          1 500 000      1 111 111",
+    # Комплект следующего года пересмотрел сравнительную величину 2024 года.
+    revised = LATER.replace(
+        "Итого активы                          1 700 000      1 500 000",
+        "Итого активы                          1 700 000      1 111 111",
     )
-    again = prepared(revised)
-    result = load_extraction(INN, *again, db_conn)
+    result = load_extraction(INN, *later_set(revised), db_conn)
 
+    assert result.collisions.checked, "сверять было не с чем — столкновения не было"
     assert result.revisions, "расхождение не замечено"
     assert any("ifrs.total_assets" in item for item in result.revisions)
     rows = fetch_all(
@@ -228,6 +282,83 @@ def test_revision_against_previous_report_is_logged(db_conn) -> None:
         conn=db_conn,
     )
     assert rows, "расхождение не записано в журнал"
+
+
+def test_sign_convention_is_not_counted_as_a_revision(db_conn) -> None:
+    """Величина та же, знак обратный — это соглашение о печати, а не пересмотр.
+
+    По коду `period_value_mismatch` считается интенсивность пересмотра
+    отчётности. Расходная статья печатается то в скобках, то без них, и одна
+    организация делает это в разные годы по-разному; считая такое пересмотром,
+    сигнал мерил бы наше соглашение о знаке, а не эмитента.
+    """
+    extraction, profile, decision = prepared()
+    load_extraction(INN, extraction, profile, decision, db_conn)
+
+    # Тот же расход за 2024 год, напечатанный в новом комплекте без скобок.
+    # Проверено на РСБУ: одна и та же организация печатает налог на прибыль
+    # в одном году в скобках, в другом без них.
+    flipped = LATER.replace(
+        "Расход по налогу на прибыль              (60 000)       (52 000)",
+        "Расход по налогу на прибыль              (60 000)        52 000",
+    )
+    result = load_extraction(INN, *later_set(flipped), db_conn)
+
+    assert not any("income_tax" in item for item in result.revisions)
+    assert any("income_tax" in item.describe() for item in result.collisions.sign_only)
+    rows = fetch_all(
+        "SELECT check_code, line_code FROM dq_log WHERE src_file_id = %(id)s "
+        "AND check_code IN ('sign_convention_mismatch', 'period_value_mismatch')",
+        {"id": result.src_file_id},
+        conn=db_conn,
+    )
+    assert any(row["check_code"] == "sign_convention_mismatch" for row in rows)
+
+
+def test_collision_counter_stands_next_to_the_findings(db_conn) -> None:
+    """Число сверенных величин уходит в журнал рядом с числом расхождений.
+
+    Ноль расхождений при неизвестном числе сверок не означает ничего:
+    правило приоритета выглядело работающим, ни разу не сработав.
+    """
+    extraction, profile, decision = prepared()
+    result = load_extraction(INN, extraction, profile, decision, db_conn)
+
+    row = fetch_one(
+        "SELECT message, details FROM dq_log WHERE src_file_id = %(id)s "
+        "AND check_code = 'period_priority'",
+        {"id": result.src_file_id},
+        conn=db_conn,
+    )
+    assert row is not None, "сводка столкновений не записана"
+    assert row["details"]["checked"] == 0
+    assert "ранее загруженных величин за эти периоды нет" in row["message"]
+
+
+def test_reloading_the_same_set_is_an_overwrite_not_a_revision(db_conn) -> None:
+    """Повторная загрузка того же комплекта — перезапись, а не пересмотр.
+
+    Величину изменил наш разбор, а не эмитент, и приписывать ему правку
+    парсера нельзя.
+    """
+    extraction, profile, decision = prepared()
+    load_extraction(INN, extraction, profile, decision, db_conn)
+
+    revised = BALANCE.replace(
+        "Итого активы                          1 500 000      1 360 000",
+        "Итого активы                          1 500 000      1 111 111",
+    )
+    result = load_extraction(INN, *prepared(revised), db_conn)
+
+    assert not result.revisions
+    assert result.collisions.rewritten
+    rows = fetch_all(
+        "SELECT check_code FROM dq_log WHERE src_file_id = %(id)s "
+        "AND check_code = 'fact_overwrite'",
+        {"id": result.src_file_id},
+        conn=db_conn,
+    )
+    assert rows, "перезапись не записана в журнал"
 
 
 def test_comparative_value_does_not_overwrite_the_reported_one(db_conn) -> None:
@@ -245,21 +376,15 @@ def test_comparative_value_does_not_overwrite_the_reported_one(db_conn) -> None:
         conn=db_conn,
     )
 
-    # Тот же период приходит сравнительным: он стоит второй колонкой.
-    later = BALANCE.replace(
-        "Итого активы                          1 500 000      1 360 000",
-        "Итого активы                          1 900 000      1 500 000",
+    # Тот же период приходит сравнительным: он стоит второй колонкой,
+    # и величина в ней другая.
+    later = LATER.replace(
+        "Итого активы                          1 700 000      1 500 000",
+        "Итого активы                          1 700 000      1 111 111",
     )
-    profile_later = identify(
-        later
-        + "\n(в миллионах российских рублей)\n"
-        + "по состоянию на 31 декабря 2025 года и 31 декабря 2024 года\n"
-        + "\nПримечания к консолидированной финансовой отчётности.\n" * 40
-    )
-    dates_later = (date(2025, 12, 31), date(2024, 12, 31))
-    extraction_later = extract(later, dates_later, Grouping.RUSSIAN)
-    decision_later = review(extraction_later, profile_later)
-    load_extraction(INN, extraction_later, profile_later, decision_later, db_conn)
+    result = load_extraction(INN, *later_set(later), db_conn)
+    assert result.collisions.checked, "столкновения не произошло — проверять нечего"
+    assert result.collisions.kept_by_priority, "приоритет не сработал ни разу"
 
     after = fetch_one(
         "SELECT value, period_role FROM fact_report WHERE inn = %(i)s "

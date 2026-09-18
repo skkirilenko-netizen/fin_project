@@ -128,7 +128,7 @@ def measure(path: Path, inn: str) -> DocumentNotes | str:
 
     extraction = extract(
         document.text,
-        profile.report_dates,
+        profile.dates_by_form,
         profile.grouping,
         columns=document.columns_of,
     )

@@ -202,3 +202,42 @@ def test_document_without_text_records_no_model(tmp_path) -> None:
     path = next(iter(tmp_path.glob("*.docx")))
     text = "\n".join(item.text for item in Document(path).paragraphs)
     assert "Языковая модель текстовой части: не привлекалась" in text
+
+
+# --- проверка PDF до выгрузки в проект ---------------------------------------
+
+
+def test_pdf_check_says_a_missing_file_is_not_readable(tmp_path) -> None:
+    """Файл, который не прочитан, к загрузке не готов и назван по имени."""
+    broken = tmp_path / "нечитаемый.pdf"
+    broken.write_bytes(b"not a pdf at all")
+    result = runner.invoke(app, ["pdf-check", str(broken)])
+    assert result.exit_code == 1
+    assert "файл не прочитан" in result.output
+    assert "к загрузке не готовы 1" in result.output
+
+
+def test_pdf_check_refuses_a_document_that_is_not_statements(tmp_path) -> None:
+    """Годовой отчёт эмитента отклоняется с кодом контроля и причиной.
+
+    Текстовый слой у него есть, и числа в нём настоящие: «слой есть»
+    и «формы извлекаются» — разные вещи, и команда существует ради этого
+    различия.
+    """
+    annual = tmp_path / "годовой.txt"
+    annual.write_text(
+        "Годовой отчёт публичного акционерного общества за 2025 год\n"
+        "Выручка группы составила 507 718 млн рублей\n" * 60,
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["pdf-check", str(annual)])
+    assert result.exit_code == 1
+    assert "отказ приёма" in result.output
+    assert "file_not_statements" in result.output or "текстов" in result.output
+
+
+def test_pdf_check_takes_a_folder_and_finds_nothing(tmp_path) -> None:
+    """Пустой каталог не выдаётся за проверенный: файлов не найдено."""
+    result = runner.invoke(app, ["pdf-check", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "ни одного файла не найдено" in result.output

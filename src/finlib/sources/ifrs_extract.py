@@ -19,7 +19,7 @@
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -236,7 +236,7 @@ class Extraction:
 
 def extract(
     text: str,
-    report_dates: tuple[date, ...],
+    report_dates: tuple[date, ...] | Mapping[str, tuple[date, ...]],
     grouping: Grouping,
     catalog: IfrsCatalog | None = None,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
@@ -246,6 +246,13 @@ def extract(
     report_dates и grouping приходят от приёма файла: разбирать числа,
     не зная конвенции, нельзя, а раскладывать их по периодам, не зная дат,
     не во что.
+
+    **Даты передаются по формам, а не одной парой на документ.** В годовом
+    комплекте разницы нет и достаточно кортежа; в промежуточном даты вторых
+    колонок у форм разные, и общая пара кладёт величину баланса на конец
+    года под дату полугодия. Словарь отдаёт приём файла
+    (`DocumentProfile.dates_by_form`), кортеж остаётся для случая, когда
+    даты у всех форм заведомо одни.
 
     `columns` отдаёт ячейки строки по координатам PDF. Это **свидетельство,
     а не догадка**: в плоском тексте разделитель разрядов и разделитель
@@ -259,8 +266,20 @@ def extract(
 
     result = Extraction()
     for form_code, lines in blocks.items():
+        dates = (
+            report_dates.get(form_code, ())
+            if isinstance(report_dates, Mapping)
+            else report_dates
+        )
+        if not dates:
+            # Форма без дат величин не даёт: раскладывать их по периодам
+            # не во что. Молчать об этом нельзя — форма из документа
+            # не исчезает, она остаётся пустой.
+            logger.warning("форма %s: отчётные даты не определены", form_code)
+            result.forms[form_code] = ExtractedForm(form_code)
+            continue
         result.forms[form_code] = _extract_form(
-            form_code, lines, report_dates, grouping, catalog, columns
+            form_code, lines, dates, grouping, catalog, columns
         )
     logger.info("разбор документа: %s", result.describe())
     return result
@@ -712,6 +731,16 @@ def split_row(
 def join_name(pending: list[str], name: str) -> str:
     """Склейка наименования, разорванного переносом, — та же, что в формах."""
     return _joined(pending, name)
+
+
+def is_table_header(name: str) -> bool:
+    """Шапка таблицы, а не статья, — то же определение, что у разбора форм.
+
+    Нужна приёму: отчётные даты формы стоят в шапке её таблицы, и кончается
+    шапка там, где начинается первая статья. Два определения одного и того же
+    неминуемо разойдутся — это уже случалось с поиском заголовков форм.
+    """
+    return _is_table_header(name)
 
 
 def _joined(pending: list[str], name: str) -> str:

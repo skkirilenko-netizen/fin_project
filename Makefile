@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest regression regression-full
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest pdf-check regression regression-full
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -24,6 +24,9 @@ check-conclusion:  ## Прогнать модель на ИНН и разобр�
 
 llm-stats:  ## Статистика обращений к модели по журналу llm_log
 	uv run python eval/llm_stats.py
+
+pdf-check:  ## Проверить PDF до выгрузки в проект: make pdf-check FILE="путь/к/отчётности.pdf"
+	uv run fin-analysis pdf-check $(FILE) $(ARGS)
 
 ingest:  ## Загрузить поданные вручную файлы из data/inbox: make ingest ARGS="--inn 7736050003"
 	uv run fin-analysis ingest $(ARGS)

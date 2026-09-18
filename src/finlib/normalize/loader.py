@@ -23,6 +23,7 @@ from finlib.normalize.mapper import (
 from finlib.normalize.report import LoadReport
 from finlib.quality.codes import MAPPING_CODES, CheckCode, CheckStatus, Severity
 from finlib.quality.journal import CheckRecord, log_records
+from finlib.quality.values import sign_only_difference
 from finlib.sources.model import (
     PERIOD_OFFSETS,
     FormData,
@@ -585,10 +586,17 @@ def _decide(
         existing_rank = PERIOD_RANK[previous.period_role]
         changed = previous.value != fact.value or previous.value_status != fact.value_status.value
 
+        sign_only = sign_only_difference(previous.value, fact.value)
+
         if incoming_rank > existing_rank:
             # Сравнительное значение не трогает загруженное отчётное.
             result.facts_kept_by_priority += 1
-            if changed:
+            if changed and sign_only:
+                result.sign_conventions += 1
+                records.append(
+                    _sign_record(report, fact, previous, report_date, src_file_id)
+                )
+            elif changed:
                 result.period_mismatches += 1
                 records.append(
                     _mismatch_record(
@@ -606,7 +614,15 @@ def _decide(
         if not changed:
             continue
 
-        if incoming_rank < existing_rank:
+        if sign_only:
+            # Величина та же, знак обратный: соглашение о печати, а не
+            # пересмотр. Значение при этом пишется по общему правилу —
+            # спорен знак, а не то, какая доставка свежее.
+            result.sign_conventions += 1
+            records.append(
+                _sign_record(report, fact, previous, report_date, src_file_id)
+            )
+        elif incoming_rank < existing_rank:
             # Отчётное значение вытесняет ранее загруженное сравнительное.
             # Это то же расхождение периодов, только обнаруженное с другой
             # стороны: журнал не должен зависеть от порядка загрузки.
@@ -656,6 +672,46 @@ def _mismatch_record(
             "winner": winner,
             "kept_period_role": kept_role,
             "rejected_period_role": rejected_role,
+            "source_report_year": report.report_year,
+            "source_line_code": fact.source_line_code,
+        },
+    )
+
+
+def _sign_record(
+    report: ReportSet,
+    fact: Fact,
+    previous: _Existing,
+    report_date: date,
+    src_file_id: int,
+) -> CheckRecord:
+    """Величина совпала, знак обратный: соглашение о печати, а не пересмотр.
+
+    Проверено на данных: у ПАО «Газпром» строка 2411 за 2023 год приходит
+    как 14 235 635 и как −14 235 635 из двух доставок одного периода.
+    Величина не пересмотрена — расходится способ печати расхода: одна и та же
+    организация печатает налог на прибыль в одном году в скобках, в другом
+    без них. Прежде это шло кодом `period_value_mismatch`, по которому
+    считается интенсивность пересмотра, и сигнал мерил соглашение о знаке,
+    а не эмитента.
+    """
+    return CheckRecord(
+        inn=report.inn,
+        check_code=CheckCode.SIGN_CONVENTION_MISMATCH,
+        status=CheckStatus.WARNING,
+        src_file_id=src_file_id,
+        report_date=report_date,
+        form_code=fact.form_code,
+        line_code=fact.line_code,
+        previous_value=previous.value,
+        new_value=fact.value,
+        message=(
+            "Величина совпадает, знак обратный: расхождение соглашения "
+            "о печати знака, а не пересмотр отчётности"
+        ),
+        details={
+            "stored_period_role": previous.period_role,
+            "incoming_period_role": fact.period_role,
             "source_report_year": report.report_year,
             "source_line_code": fact.source_line_code,
         },

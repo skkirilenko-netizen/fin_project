@@ -18,7 +18,7 @@
 
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -81,6 +81,17 @@ class DocumentProfile:
     report_dates: tuple[date, ...]
     reporting_kind: ReportingKind
     grouping_detection: GroupingDetection
+    # Отчётные даты **каждой формы в отдельности**. В годовом комплекте они
+    # у всех форм одни, в промежуточном — нет: МСФО (IAS) 34 требует
+    # сравнивать отчёт о прибыли с тем же периодом прошлого года, а отчёт
+    # о финансовом положении — с концом прошлого года. Колонок две у обеих
+    # форм, а даты у вторых колонок разные, и одна пара дат на весь документ
+    # кладёт настоящую величину под чужую дату.
+    dates_by_form: dict[str, tuple[date, ...]] = field(default_factory=dict)
+    # Формы, которые своих дат не объявили и взяли даты документа. Счётчик
+    # стоит рядом: ноль унаследовавших форм и «дат никто не искал» — разные
+    # сведения, и различать их должен журнал, а не память.
+    inherited_dates: tuple[str, ...] = ()
     # Страницы без текстового слоя, попавшие внутрь форм. Не пустые страницы,
     # а страницы, содержимого которых мы не видим: у Автодора так потерялась
     # вся сторона пассива — баланс занимает страницы 8 и 9, слой есть только
@@ -97,13 +108,50 @@ class DocumentProfile:
         """Принят ли документ."""
         return True
 
+    def dates_of(self, form_code: str) -> tuple[date, ...]:
+        """Отчётные даты формы; у промежуточного баланса они свои.
+
+        Правило то же, что у комплекта РСБУ (`sources.model.ReportSet.
+        report_dates`): глубина и состав периодов — свойство формы, а не
+        документа. В ГИР БО это видно по балансу, у которого периодов три,
+        а у отчёта о финансовых результатах два; в МСФО — по промежуточной
+        отчётности, где сравнительные колонки форм относятся к разным датам.
+        """
+        return self.dates_by_form.get(form_code) or self.report_dates
+
+    @property
+    def all_dates(self) -> tuple[date, ...]:
+        """Все отчётные даты комплекта, от свежей к ранней.
+
+        Дат комплекта больше, чем дат любой его формы: у промежуточного
+        комплекта их три — отчётная, конец прошлого года и то же полугодие
+        прошлого года, — и выборка ранее загруженного обязана покрывать все.
+        """
+        found = set(self.report_dates)
+        for item in self.dates_by_form.values():
+            found.update(item)
+        return tuple(sorted(found, reverse=True))
+
     def describe(self) -> str:
         """Однострочная сводка для журнала."""
         dates = ", ".join(f"{item:%d.%m.%Y}" for item in self.report_dates)
+        own = "; ".join(
+            f"{code.removeprefix('ifrs.')}: "
+            + ", ".join(f"{item:%d.%m.%Y}" for item in found)
+            for code, found in sorted(self.dates_by_form.items())
+            if found != self.report_dates
+        )
         return (
             f"формы: {len(self.forms)}, валюта {self.currency}, единица "
             f"{self.unit_code}, {self.grouping_detection.describe()}, "
             f"периоды: {dates}, вид отчётности: {self.reporting_kind.value}"
+            + (f", даты форм врозь — {own}" if own else "")
+            + (
+                f", дат не объявили форм {len(self.inherited_dates)} из "
+                f"{len(self.forms)}"
+                if self.inherited_dates
+                else ""
+            )
         )
 
 
@@ -314,6 +362,13 @@ def identify(
             policy.periods.reasons["not_determined"],
         )
 
+    # Даты документа определены — теперь то же делается по каждой форме
+    # в отдельности. Дат документа они не отменяют: отчётная дата у форм
+    # одна, расходятся сравнительные.
+    by_form, inherited = form_dates(
+        text, headings, policy, detection.convention, dates
+    )
+
     span = _form_span(document, text, headings, policy)
     profile = DocumentProfile(
         forms=forms,
@@ -323,6 +378,8 @@ def identify(
         report_dates=dates,
         reporting_kind=_reporting_kind(lowered, policy),
         grouping_detection=detection,
+        dates_by_form=by_form,
+        inherited_dates=inherited,
         pages_without_text=_lost_pages(document, span),
         form_pages=(span[1] - span[0] + 1) if span is not None else 0,
     )
@@ -659,6 +716,67 @@ def forms_text(
     return "\n".join("\n".join(lines) for lines in blocks.values())
 
 
+def table_header_of(lines: list[str], grouping: Grouping) -> list[str]:
+    """Шапка таблицы формы: строки от её заголовка до первой статьи.
+
+    Границу объявляет строение таблицы, а не число строк: шапка кончается
+    там, где начинается статья — строка с наименованием и величинами,
+    не сложенная из слов шапки. Опора на структуру здесь обязательна,
+    потому что подписи колонок сами выглядят строками с величинами:
+    «В млн руб. Пояснения 2026 г. 2025 г.» несёт два числа, и по числам
+    от статьи её не отличить.
+    """
+    from finlib.sources.ifrs_extract import is_table_header, split_row
+
+    for index, line in enumerate(lines):
+        name, values, _, _ = split_row(line, grouping)
+        if values and name.strip() and not is_table_header(name):
+            return lines[:index]
+    return list(lines)
+
+
+def form_dates(
+    text: str,
+    headings: dict[str, int],
+    policy: ParsingPolicy,
+    grouping: Grouping,
+    fallback: tuple[date, ...],
+) -> tuple[dict[str, tuple[date, ...]], tuple[str, ...]]:
+    """Отчётные даты каждой формы и перечень форм, взявших даты документа.
+
+    **Даты определяются по форме, а не по документу.** В годовом комплекте
+    разницы нет, в промежуточном она есть всегда: отчёт о прибыли сравнивается
+    с тем же периодом прошлого года, отчёт о финансовом положении — с концом
+    прошлого года. Одна пара дат на весь документ кладёт величину баланса
+    на 31 декабря под дату 30 июня: число настоящее, контроли сходятся,
+    а периода такого у баланса нет.
+
+    Форма, о своих датах умолчавшая, берёт даты документа, и это объявляется
+    перечнем: молча унаследованная дата неотличима от прочитанной.
+    """
+    blocks = form_blocks(text, headings, policy)
+    found: dict[str, tuple[date, ...]] = {}
+    inherited: list[str] = []
+    for code in headings:
+        header = table_header_of(blocks.get(code, []), grouping)
+        dates = _report_dates("\n".join(header), policy)
+        if not dates:
+            inherited.append(code)
+            dates = fallback
+        found[code] = dates
+    logger.info(
+        "отчётные даты по формам: %s; дат не объявили форм %d из %d",
+        "; ".join(
+            f"{code.removeprefix('ifrs.')} — "
+            + ", ".join(f"{item:%d.%m.%Y}" for item in dates)
+            for code, dates in sorted(found.items())
+        ),
+        len(inherited),
+        len(headings),
+    )
+    return found, tuple(inherited)
+
+
 def resolve_by_both_separators(
     text: str, detection: GroupingDetection
 ) -> GroupingDetection | None:
@@ -849,6 +967,15 @@ def _report_dates(text: str, policy: ParsingPolicy) -> tuple[date, ...]:
         best = max(pairs, key=lambda items: (len(items), max(items)))
         ordered = sorted(best, reverse=True)[: policy.periods.max_count]
         return tuple(ordered)
+
+    # Пары одинаковых дня с месяцем не бывает у промежуточного баланса:
+    # МСФО (IAS) 34 требует сравнивать отчёт о финансовом положении с концом
+    # прошлого года, и колонки подписаны «30 июня 2026 г.» и «31 декабря
+    # 2025 г.». Даты в шапке названы обе, и достраивать здесь нечего —
+    # прежде шапка уходила в достройку голыми годами, и к двум настоящим
+    # датам добавлялась выдуманная 30.06.2025, которой у баланса нет.
+    if len(found) >= policy.periods.min_count:
+        return tuple(sorted(found, reverse=True)[: policy.periods.max_count])
 
     # Полная дата в шапке может стоять одна, а колонки подписаны голыми
     # годами: у Норникеля «ЗА ГОДЫ, ЗАКОНЧИВШИЕСЯ 31 ДЕКАБРЯ 2025, 2024

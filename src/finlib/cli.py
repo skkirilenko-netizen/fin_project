@@ -1065,6 +1065,125 @@ def _save_confirmation(
         )
 
 
+@app.command("pdf-check")
+def pdf_check_command(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="Файлы PDF либо каталоги с ними"),
+    ],
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Проверяет документ МСФО до выгрузки в проект: извлекаются ли формы.
+
+    **«Текстовый слой есть» и «формы извлекаются» — разные вещи.** Слой
+    бывает у всего документа и при этом отсутствует у отдельных страниц
+    внутри форм: у Автодора баланс занимает страницы 8 и 9, слой есть
+    только у восьмой, и вся сторона пассива не существовала — актив при
+    этом сходился сам с собой. У Самолёта таких страниц две. Скан
+    отбраковывается на входе, а потеря одной страницы не отбраковывается
+    ничем: половина формы извлеклась, контроли по ней прошли, заметить
+    нечем.
+
+    Поэтому команда печатает и то и другое: страницы без слоя отдельно
+    от тех, что попали внутрь форм, и рядом — что из документа извлеклось:
+    формы, отчётные даты каждой из них, опознанные строки, сведённые итоги.
+    В базу не пишется ничего.
+    """
+    _setup_logging(verbose)
+    from finlib.sources.pdf_text import read_document
+
+    documents: list[Path] = []
+    for item in paths:
+        if item.is_dir():
+            documents.extend(sorted(item.rglob("*.pdf")))
+        else:
+            documents.append(item)
+    if not documents:
+        _fail("ни одного файла не найдено")
+
+    bad = 0
+    for path in documents:
+        if not _echo_pdf_check(path, read_document(path)):
+            bad += 1
+    typer.echo(
+        f"\nПроверено файлов {len(documents)}, к загрузке не готовы {bad}."
+    )
+    if bad:
+        raise typer.Exit(code=1)
+
+
+def _echo_pdf_check(path: Path, document) -> bool:
+    """Печатает разбор одного файла; возвращает готовность к загрузке."""
+    from finlib.pipeline import accept_ifrs_document
+
+    typer.echo(typer.style(f"\n{path}", bold=True))
+    if not document.readable:
+        typer.echo(
+            typer.style(f"  файл не прочитан: {document.error}", fg=typer.colors.RED)
+        )
+        return False
+    typer.echo(f"  {document.describe()}")
+
+    intake = accept_ifrs_document(document.text, inn=None, document=document)
+    if not intake.accepted:
+        typer.echo(
+            typer.style(
+                f"  отказ приёма [{intake.check_code}]: {intake.reason}",
+                fg=typer.colors.RED,
+            )
+        )
+        return False
+
+    profile = intake.profile
+    typer.echo(f"  форм найдено {len(profile.forms)}, страниц под ними {profile.form_pages}")
+    for code, dates in sorted(profile.dates_by_form.items()):
+        inherited = code in profile.inherited_dates
+        mark = " — даты документа, своих форма не объявила" if inherited else ""
+        typer.echo(
+            f"    {code.removeprefix('ifrs.'):34}"
+            + ", ".join(f"{item:%d.%m.%Y}" for item in dates)
+            + mark
+        )
+
+    # Страницы без слоя называются все, но готовность отменяют только те,
+    # что попали внутрь форм: аудиторское заключение сканом разбору не мешает.
+    empty = document.pages_without_text
+    inside = profile.pages_without_text
+    typer.echo(
+        f"  страниц без текстового слоя {len(empty)}"
+        + (f": {', '.join(str(item) for item in empty)}" if empty else "")
+    )
+    if inside:
+        typer.echo(
+            typer.style(
+                "  ВНУТРИ ФОРМ страницы-изображения: "
+                + ", ".join(str(item) for item in inside)
+                + " — содержимое не извлечено вовсе",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+        )
+
+    decision, extraction = intake.review, intake.extraction
+    typer.echo(
+        f"  извлечено: строк опознано {decision.rows_recognised} из "
+        f"{decision.rows_total}, величин {len(extraction.values)}, итогов "
+        f"сверено {decision.totals_checked}, из них не сошлось "
+        f"{len(decision.totals_failed)}"
+    )
+    if decision.automatic:
+        typer.echo(typer.style("  принимается автоматически", fg=typer.colors.GREEN))
+    else:
+        typer.echo(
+            typer.style(
+                "  потребует подтверждения человеком: "
+                + ", ".join(item.value for item in decision.reasons),
+                fg=typer.colors.YELLOW,
+            )
+        )
+    return not inside
+
+
 def main() -> int:
     """Запуск приложения."""
     app()

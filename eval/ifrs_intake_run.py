@@ -182,7 +182,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
             path, False, rejection=profile.reason, check_code=profile.code.value
         )
 
-    extraction = extract(document.text, profile.report_dates, profile.grouping)
+    extraction = extract(document.text, profile.dates_by_form, profile.grouping)
     decision = review(extraction, profile)
 
     found = DocumentRun(

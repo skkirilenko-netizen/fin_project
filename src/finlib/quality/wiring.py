@@ -142,8 +142,22 @@ REGISTRY: dict[CheckCode, Wiring] = {
             "scoring/engine.py",
         ),
     ),
+    # Расхождение знака при равной величине разводится обоими загрузчиками:
+    # признак один на два стандарта, и определение у него одно
+    # (`quality/values.py::sign_only_difference`).
+    CheckCode.SIGN_CONVENTION_MISMATCH: Wiring(
+        WiringStatus.WIRED,
+        date(2026, 9, 18),
+        ("normalize/loader.py", "normalize/ifrs_loader.py"),
+    ),
+    # Сводка столкновений периодов: знаменатель к правилу приоритета.
+    CheckCode.PERIOD_PRIORITY: Wiring(
+        WiringStatus.WIRED, date(2026, 9, 18), ("normalize/ifrs_loader.py",)
+    ),
     CheckCode.FACT_OVERWRITE: Wiring(
-        WiringStatus.WIRED, date(2026, 8, 26), ("normalize/loader.py",)
+        WiringStatus.WIRED,
+        date(2026, 8, 26),
+        ("normalize/loader.py", "normalize/ifrs_loader.py"),
     ),
     # --- ветка МСФО ----------------------------------------------------------
     # Определитель конвенции написан и покрыт тестами, но разбора форм, из

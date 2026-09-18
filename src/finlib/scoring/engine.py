@@ -317,9 +317,19 @@ def _confidence(
     return level, reasons
 
 
+# Считается пересмотренная величина, а не строка журнала. Записи журнала —
+# история, и повторная загрузка того же комплекта кладёт их заново: сигнал
+# рос бы от наших прогонов, а не от пересмотров эмитента. Одна и та же
+# величина, названная дважды, — одно расхождение; разные величины за один
+# период — разные. Расхождение соглашения о знаке сюда не попадает вовсе:
+# у него свой код, потому что величина при нём не пересматривалась.
 _MISMATCHES = """
-SELECT count(*) AS n FROM dq_log
-WHERE inn = %(inn)s AND check_code = 'period_value_mismatch'
+SELECT count(*) AS n FROM (
+    SELECT DISTINCT report_date, form_code, line_code, previous_value, new_value,
+           message
+    FROM dq_log
+    WHERE inn = %(inn)s AND check_code = 'period_value_mismatch'
+) AS distinct_revisions
 """
 
 _SETS = """

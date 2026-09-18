@@ -19,6 +19,11 @@ class LoadReport:
     facts_kept_by_priority: int = 0
     overwritten: int = 0
     period_mismatches: int = 0
+    # Расхождения, в которых величина совпадает, а знак обратный. Это способ
+    # печати расходной статьи, а не пересмотр отчётности, и в число
+    # пересмотров такая запись не входит: по ним считается интенсивность
+    # пересмотра, и сигнал мерил бы соглашение о знаке, а не эмитента.
+    sign_conventions: int = 0
     unknown_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Игнорируемые коды — принятое решение методики, предупреждением не считаются.
     ignored_codes: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -39,6 +44,7 @@ class LoadReport:
             or self.ambiguous_codes
             or self.line_conflicts
             or self.period_mismatches
+            or self.sign_conventions
             or self.not_recognized
         )
 
@@ -56,6 +62,8 @@ class LoadReport:
             parts.append(f"перезаписано {self.overwritten}")
         if self.period_mismatches:
             parts.append(f"расхождений периодов {self.period_mismatches}")
+        if self.sign_conventions:
+            parts.append(f"расхождений знака {self.sign_conventions}")
         if self.unknown_codes:
             total = sum(len(codes) for codes in self.unknown_codes.values())
             parts.append(f"неизвестных кодов {total}")
