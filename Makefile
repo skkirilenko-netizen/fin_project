@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest pdf-check regression regression-full ifrs-set ifrs-regression
+.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest pdf-check regression regression-full ifrs-set ifrs-regression ifrs-scale
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -42,6 +42,9 @@ ifrs-set:  ## Состав набора МСФО: сколько докумен�
 
 ifrs-regression:  ## Прогон набора МСФО без модели: make ifrs-regression ARGS=--write
 	uv run python eval/ifrs_regression_run.py $(ARGS)
+
+ifrs-scale:  ## Масштаб разметки: сколько работы одного эмитента достаётся другим
+	uv run python eval/ifrs_markup_scale.py
 
 report:  ## Сформировать заключение в docx: make report INN=7736050003
 	uv run python -c "from finlib.report.document import build_report; \
