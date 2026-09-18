@@ -43,6 +43,10 @@ from finlib.sources.ifrs_markup import (
     restore,
     review_saved,
 )
+from finlib.sources.ifrs_numbers import (
+    ExtractionCompletenessPolicy,
+    load_parsing_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,63 @@ SIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Completeness:
+    """Полнота извлечения одного комплекта.
+
+    Мера отдельная от полноты справочника: потерянная страница и
+    незаведённая позиция лечатся по-разному, и одно число на оба дефекта
+    скрывало бы, какой из них сработал.
+    """
+
+    inn: str
+    form_pages: int
+    lost_pages: tuple[int, ...]
+    partial: tuple[tuple[str, str], ...]
+
+    @property
+    def lost_share(self) -> Decimal | None:
+        """Доля страниц форм без текстового слоя; None — форм не найдено."""
+        if not self.form_pages:
+            return None
+        return Decimal(len(self.lost_pages)) / Decimal(self.form_pages)
+
+    def whole(self, policy: ExtractionCompletenessPolicy) -> bool:
+        """Извлечён ли комплект полностью по обоим порогам методики."""
+        share = self.lost_share
+        return (
+            share is not None
+            and share <= policy.max_pages_without_text_share
+            and len(self.partial) <= policy.max_partial_forms
+        )
+
+
+def completeness_of(
+    issuer: IssuerMarkup, catalog: IfrsCatalog, policy: ExtractionCompletenessPolicy
+) -> Completeness:
+    """Считает полноту извлечения: потерянные страницы и неполные формы.
+
+    Замыкающий итог считается извлечённым и тогда, когда его опознала
+    разметка: неподписанный итог — дело обычное, и человек читает его
+    по строению формы. Потерянную страницу разметка не восстанавливает —
+    строки, которой нет в разборе, не размечает никто.
+    """
+    values = issuer.values(catalog)
+    partial = tuple(
+        (form, code)
+        for form, required in policy.required_totals.items()
+        if form in issuer.extraction.forms
+        for code in required
+        if values.get(code) is None
+    )
+    return Completeness(
+        issuer.inn,
+        issuer.profile.form_pages,
+        issuer.profile.pages_without_text,
+        partial,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +493,33 @@ def main(argv: list[str] | None = None) -> int:
                 f"({lowest[0]}) до {_percent(highest[1])} ({highest[0]}), "
                 f"разница {_points(highest[1] - lowest[1])}"
             )
+
+    print("\n4. ПОЛНОТА ИЗВЛЕЧЕНИЯ")
+    # Критерий отдельный и с собственным порогом: пропущенная страница стоила
+    # половины баланса и была найдена внешним источником, а не нами. Это
+    # измеримый дефект, а не обстоятельство, и мерить его покрытием валюты
+    # баланса нельзя — лечение у двух дефектов разное.
+    policy = load_parsing_policy().extraction_completeness
+    whole = 0
+    for issuer in issuers:
+        found = completeness_of(issuer, catalog, policy)
+        if found.whole(policy):
+            whole += 1
+        print(
+            f"   {issuer.inn}: страниц форм {found.form_pages}, без текстового "
+            f"слоя {len(found.lost_pages)} ({_percent(found.lost_share)}), "
+            f"форм извлечено частично {len(found.partial)}"
+        )
+        for form, code in found.partial:
+            print(
+                f"      {form}: нет замыкающего итога "
+                f"{_name_of(code, catalog)} ({code})"
+            )
+    print(
+        f"   извлечено полностью {whole} из {len(issuers)} при пороге "
+        f"{_percent(policy.max_pages_without_text_share)} страниц и "
+        f"{policy.max_partial_forms} частичных форм"
+    )
 
     print("\nЧТО ЗАКРЫВАЕТ CBONDS, А ЧТО ТРЕБУЕТ PDF")
     wanted = tuple(

@@ -238,6 +238,22 @@ class ReportingKindPolicy(BaseModel):
     limitations: dict[str, str]
 
 
+class ExtractionCompletenessPolicy(BaseModel):
+    """Когда извлечение считается полным.
+
+    Мера отдельная от полноты справочника намеренно: потерянная страница
+    и незаведённая позиция лечатся по-разному, и один показатель на оба
+    дефекта скрывал бы, какой из них сработал.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_pages_without_text_share: Decimal = Field(ge=0)
+    max_partial_forms: int = Field(ge=0)
+    required_totals: dict[str, tuple[str, ...]] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
 class ParsingPolicy(BaseModel):
     """Правила разбора файла консолидированной отчётности."""
 
@@ -254,6 +270,7 @@ class ParsingPolicy(BaseModel):
     reporting_kind: ReportingKindPolicy
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy
+    extraction_completeness: ExtractionCompletenessPolicy
 
 
 def default_path() -> Path:

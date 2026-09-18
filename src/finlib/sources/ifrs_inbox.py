@@ -87,6 +87,10 @@ class DocumentProfile:
     # у восьмой. Актив при этом сошёлся сам с собой, и ни один контроль
     # пропажи не заметил.
     pages_without_text: tuple[int, ...] = ()
+    # Сколько страниц занимают формы: знаменатель доли потерянных страниц.
+    # Без него ноль потерь неотличим от ненайденных форм — счётчик
+    # проверенного стоит рядом со счётчиком сработавшего.
+    form_pages: int = 0
 
     @property
     def accepted(self) -> bool:
@@ -310,6 +314,7 @@ def identify(
             policy.periods.reasons["not_determined"],
         )
 
+    span = _form_span(document, text, headings, policy)
     profile = DocumentProfile(
         forms=forms,
         currency=foreign or "RUB",
@@ -318,7 +323,8 @@ def identify(
         report_dates=dates,
         reporting_kind=_reporting_kind(lowered, policy),
         grouping_detection=detection,
-        pages_without_text=_lost_pages(document, text, headings, policy),
+        pages_without_text=_lost_pages(document, span),
+        form_pages=(span[1] - span[0] + 1) if span is not None else 0,
     )
     logger.info("документ принят: %s", profile.describe())
     if profile.pages_without_text:
@@ -329,23 +335,15 @@ def identify(
     return profile
 
 
-def _lost_pages(
+def _form_span(
     document: PdfDocument | None,
     text: str,
     headings: dict[str, int],
     policy: ParsingPolicy,
-) -> tuple[int, ...]:
-    """Страницы без текстового слоя, попавшие внутрь форм.
-
-    Считаются только страницы между первой и последней формой: аудиторское
-    заключение сканом — обычное дело и разбору не мешает, а страница
-    посреди баланса означает потерю половины формы.
-    """
+) -> tuple[int, int] | None:
+    """Первая и последняя страница, занятые формами; None — форм не найдено."""
     if document is None or not headings:
-        return ()
-    empty = set(document.pages_without_text)
-    if not empty:
-        return ()
+        return None
     blocks = form_blocks(text, headings, policy)
     ends = [
         start + sum(len(line) + 1 for line in blocks.get(code, ()))
@@ -353,7 +351,29 @@ def _lost_pages(
     ]
     first = document.page_at(min(headings.values()))
     last = document.page_at(max(ends) if ends else min(headings.values()))
-    return tuple(sorted(number for number in empty if first <= number <= last))
+    return first, last
+
+
+def _lost_pages(
+    document: PdfDocument | None,
+    span: tuple[int, int] | None,
+) -> tuple[int, ...]:
+    """Страницы без текстового слоя, попавшие внутрь форм.
+
+    Считаются только страницы между первой и последней формой: аудиторское
+    заключение сканом — обычное дело и разбору не мешает, а страница
+    посреди баланса означает потерю половины формы.
+    """
+    if document is None or span is None:
+        return ()
+    first, last = span
+    return tuple(
+        sorted(
+            number
+            for number in document.pages_without_text
+            if first <= number <= last
+        )
+    )
 
 
 def form_headings(
