@@ -176,13 +176,23 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
             check_code=CheckCode.FILE_NOT_PARSED.value,
         )
 
-    profile = identify(document.text)
+    # Страницы передаются приёму: без них проверка потерянной страницы внутри
+    # форм всегда отвечает «потерь нет», то есть не работает вовсе. У Автодора
+    # так не существовала вся сторона пассива, у Самолёта потеряны две страницы
+    # внутри форм — а доля автоматического прохождения считалась так, будто
+    # документы целы.
+    profile = identify(document.text, document=document)
     if isinstance(profile, Rejection):
         return DocumentRun(
             path, False, rejection=profile.reason, check_code=profile.code.value
         )
 
-    extraction = extract(document.text, profile.dates_by_form, profile.grouping)
+    extraction = extract(
+        document.text,
+        profile.dates_by_form,
+        profile.grouping,
+        columns=document.columns_of,
+    )
     decision = review(extraction, profile)
 
     found = DocumentRun(
