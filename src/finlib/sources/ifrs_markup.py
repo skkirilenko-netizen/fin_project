@@ -932,8 +932,13 @@ def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition | None]:
     return found
 
 
+# Отчётная дата выбирается наравне с ИНН: у эмитента бывает несколько
+# комплектов, и разметка принадлежит тому, на котором сделана. Индекс строки
+# у другого комплекта означает другую строку, поэтому перенос присвоения
+# между комплектами — не помощь, а тихое присвоение чужого кода.
 _SAVED = """
-SELECT code, inn, source_name, form_code, row_index, relation, related_codes
+SELECT code, inn, report_date, source_name, form_code, row_index,
+       relation, related_codes
 FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
 """
 
@@ -980,13 +985,13 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
     """
     from finlib.db import fetch_all
 
-    by_inn = {item.inn: item for item in issuers}
-    if not by_inn:
+    by_report = _by_report(issuers)
+    if not by_report:
         return []
     catalog = load_ifrs_lines()
     found: list[SavedMarkup] = []
-    for row in fetch_all(_SAVED, {"inns": list(by_inn)}, conn=conn):
-        issuer = by_inn.get(row["inn"])
+    for row in fetch_all(_SAVED, {"inns": _inns(issuers)}, conn=conn):
+        issuer = by_report.get((row["inn"], row["report_date"]))
         if issuer is None:
             continue
         position = catalog.match_by_name(row["source_name"], form=row["form_code"])
@@ -1029,13 +1034,13 @@ def restore(issuers: list[IssuerMarkup], conn=None) -> int:
     """
     from finlib.db import fetch_all
 
-    by_inn = {item.inn: item for item in issuers}
-    if not by_inn:
+    by_report = _by_report(issuers)
+    if not by_report:
         return 0
-    rows = fetch_all(_SAVED, {"inns": list(by_inn)}, conn=conn)
+    rows = fetch_all(_SAVED, {"inns": _inns(issuers)}, conn=conn)
     restored = 0
     for row in rows:
-        issuer = by_inn.get(row["inn"])
+        issuer = by_report.get((row["inn"], row["report_date"]))
         if issuer is None:
             continue
         key = _restore_key(issuer, row)
@@ -1132,9 +1137,25 @@ def shared_specific(conn=None) -> dict[str, tuple[str, ...]]:
 
 
 _LAST = """
-SELECT inn, source_name, code, form_code, row_index FROM ifrs_line_confirmation
+SELECT inn, report_date, source_name, code, form_code, row_index
+FROM ifrs_line_confirmation
 WHERE inn = ANY(%(inns)s) ORDER BY confirmed_at DESC, id DESC LIMIT 1
 """
+
+
+def _by_report(issuers: list[IssuerMarkup]) -> dict[tuple[str, date], IssuerMarkup]:
+    """Комплекты по паре «ИНН, отчётная дата».
+
+    Ключом был один ИНН, и пока у эмитента был один комплект, разницы
+    не было. С появлением промежуточной отчётности рядом с годовой такой
+    словарь оставлял один комплект из двух, а разметку второго молча терял.
+    """
+    return {(item.inn, item.report_date): item for item in issuers}
+
+
+def _inns(issuers: list[IssuerMarkup]) -> list[str]:
+    """Перечень ИНН без повторов — для отбора в запросе."""
+    return sorted({item.inn for item in issuers})
 
 
 def last_confirmation(
@@ -1151,8 +1172,7 @@ def last_confirmation(
     if not rows:
         return None
     row = rows[0]
-    by_inn = {item.inn: item for item in issuers}
-    issuer = by_inn.get(row["inn"])
+    issuer = _by_report(issuers).get((row["inn"], row.get("report_date")))
     key = _restore_key(issuer, row) if issuer is not None else None
     return row["inn"], row["source_name"], key or (row["form_code"], -1)
 

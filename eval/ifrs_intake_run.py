@@ -56,11 +56,23 @@ class DocumentRun:
     material_items: tuple[str, ...] = ()
     notes: int = 0
     src_file_id: int | None = None
+    # Комплект, которым документ оказался. Читается из содержимого, а не из
+    # имени файла: две доставки одного комплекта различаются именем, но не
+    # отчётной датой и не видом отчётности.
+    report_date: str = ""
+    reporting_kind: str = ""
+    # Доставка того же комплекта, отложенная в пользу другой: причина.
+    set_aside: str | None = None
 
     @property
     def automatic(self) -> bool:
         """Прошёл ли документ без участия человека."""
         return self.accepted and self.outcome == ReviewOutcome.AUTOMATIC.value
+
+    @property
+    def counted(self) -> bool:
+        """Идёт ли документ в замер: отложенная доставка — не второй комплект."""
+        return self.set_aside is None
 
 
 @dataclass
@@ -71,8 +83,8 @@ class IntakeReport:
 
     @property
     def accepted(self) -> list[DocumentRun]:
-        """Документы, признанные отчётностью."""
-        return [item for item in self.runs if item.accepted]
+        """Комплекты, признанные отчётностью; отложенные доставки не в счёт."""
+        return [item for item in self.runs if item.accepted and item.counted]
 
     def render(self) -> str:
         """Отчёт для человека."""
@@ -81,6 +93,7 @@ class IntakeReport:
         automatic = [item for item in accepted if item.automatic]
         manual = [item for item in accepted if not item.automatic]
         rejected = [item for item in self.runs if not item.accepted]
+        set_aside = [item for item in self.runs if item.set_aside]
 
         lines = [
             "# Прогон приёма документов МСФО",
@@ -88,7 +101,12 @@ class IntakeReport:
             f"- документов просмотрено: {total}",
             f"- признано отчётностью: {len(accepted)}",
             f"- отклонено на приёме: {len(rejected)}",
+            f"- отложено как повторная доставка: {len(set_aside)}",
         ]
+        if set_aside:
+            lines += ["", "## Повторные доставки того же комплекта", ""]
+            for item in set_aside:
+                lines.append(f"- {item.path.name}: {item.set_aside}")
         if accepted:
             share = len(automatic) / len(accepted) * 100
             lines.append(
@@ -178,6 +196,10 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         totals_failed=len(decision.totals_failed),
         material_items=tuple(item.describe() for item in decision.material_items),
         notes=len(extraction.notes),
+        report_date=profile.report_dates[0].isoformat() if profile.report_dates else "",
+        reporting_kind=profile.reporting_kind.value
+        if hasattr(profile.reporting_kind, "value")
+        else str(profile.reporting_kind),
     )
 
     if write and inn:
@@ -188,13 +210,19 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
 
 
 def run(directory: Path, write: bool = False) -> IntakeReport:
-    """Проводит по одному документу на эмитента.
+    """Проводит каждый документ эмитента; повторные доставки сводятся.
 
-    Рядом с PDF часто лежит текстовая выгрузка того же комплекта. Считать
-    оба значило бы удвоить статистику: доля автоматического прохождения
-    посчиталась бы по документам, а не по эмитентам, а это разные величины.
-    Предпочитается PDF как первоисточник; текстовая выгрузка берётся, когда
-    PDF нет.
+    **Папка — это организация, а не комплект.** Прежде здесь брался один
+    документ на папку, и это было верно, пока в папке лежал один комплект
+    в двух доставках. С появлением промежуточной отчётности рядом с годовой
+    правило стало терять комплект молча: у ФосАгро разбиралась годовая,
+    а полугодовая исчезала без сообщения.
+
+    Комплект различается тем, что прочитано из документа, — отчётной датой
+    и видом отчётности. Две доставки одного комплекта сводятся в одну,
+    и предпочитается документ со страницами и координатами: у текстовой
+    выгрузки нет ни того ни другого, и потеря страницы по ней не видна.
+    Отложенная доставка называется вместе с причиной.
     """
     report = IntakeReport()
     for folder in sorted({path.parent for path in directory.rglob("*")}):
@@ -207,18 +235,41 @@ def run(directory: Path, write: bool = False) -> IntakeReport:
         ]
         if not found:
             continue
-        chosen = next(
-            (path for path in found if path.suffix.lower() == ".pdf"), found[0]
-        )
-        if len(found) > 1:
-            logger.info(
-                "у эмитента %s документов %d, разбирается %s",
-                inn or folder.name,
-                len(found),
-                chosen.name,
-            )
-        report.runs.append(run_one(chosen, write=write, inn=inn))
+        runs = [run_one(path, write=False, inn=inn) for path in found]
+        for item in _fold_deliveries(runs):
+            if write and inn and item.accepted and item.counted:
+                # Запись в базу делается только по оставленному комплекту:
+                # повторная доставка дала бы второй src_file на ту же дату.
+                item.src_file_id = run_one(
+                    item.path, write=True, inn=inn
+                ).src_file_id
+            report.runs.append(item)
     return report
+
+
+def _fold_deliveries(runs: list[DocumentRun]) -> list[DocumentRun]:
+    """Помечает повторные доставки одного комплекта, ни одну не пряча."""
+    by_report: dict[tuple[str, str], list[DocumentRun]] = {}
+    for item in runs:
+        if not item.accepted:
+            continue
+        by_report.setdefault((item.report_date, item.reporting_kind), []).append(item)
+
+    for group in by_report.values():
+        if len(group) < 2:
+            continue
+        kept = next(
+            (item for item in group if item.path.suffix.lower() == ".pdf"), group[0]
+        )
+        for item in group:
+            if item is kept:
+                continue
+            item.set_aside = (
+                f"та же отчётность, что «{kept.path.name}»: отчётная дата "
+                f"{item.report_date}, вид {item.reporting_kind}"
+            )
+            logger.info("%s отложен: %s", item.path.name, item.set_aside)
+    return runs
 
 
 def main(argv: list[str] | None = None) -> int:

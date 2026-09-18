@@ -21,7 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from finlib.cli import _load_issuers
-from finlib.metrics.ifrs import Inputs, compute_all
+from finlib.metrics.ifrs import Inputs, compute_all, months_of
 from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.normalize.ifrs_note_lines import load_note_lines
@@ -155,6 +155,12 @@ def main(argv: list[str] | None = None) -> int:
             len(issuer.profile.report_dates),
         )
         verdict = determine_type(values, document.text, None)
+        # Комплект называется датой и видом: у эмитента их бывает два,
+        # и один ИНН не отвечает, о каком из них строка отчёта. Вид же
+        # задаёт и число месяцев периода.
+        kind = getattr(
+            issuer.profile.reporting_kind, "value", issuer.profile.reporting_kind
+        )
         # Знаменатель покрытия процентов собирается из примечаний здесь:
         # в расчётный слой он приходит готовым, и подставить величину
         # из формы там нечем — её в этом словаре нет.
@@ -163,7 +169,13 @@ def main(argv: list[str] | None = None) -> int:
         if accrued is not None:
             notes["interest_accrued"] = accrued
         computed = compute_all(
-            Inputs(values, notes, verdict.code, months=12), policy
+            Inputs(
+                values,
+                notes,
+                verdict.code,
+                months=months_of(issuer.report_date, kind, policy),
+            ),
+            policy,
         )
 
         # Неприменимость стоп-фактора по типу и по обстановке действует
@@ -188,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         readable = report.determination is AuditState.DETERMINED
 
-        print(f"\n{issuer.inn} [{verdict.code}]")
+        print(f"\n{issuer.inn} {issuer.report_date} {kind} [{verdict.code}]")
         for item in computed:
             print(f"      {item.describe()}")
         for item in outcomes:

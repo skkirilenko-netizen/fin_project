@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     girbo_base_url: str = "https://bo.nalog.gov.ru"
     girbo_contact: str = ""
 
+    # Cbonds: нормализованная отчётность как вторая опора. Доступ платный
+    # и именной, поэтому логин с паролем только в .env. Пустые значения —
+    # штатный случай: без них клиент отказывается обращаться к источнику
+    # и говорит об этом, а чтение сохранённых ответов работает по-прежнему.
+    cbonds_base_url: str = "https://ws.cbonds.info/services/json"
+    cbonds_login: str = ""
+    cbonds_password: str = ""
+
     http_timeout_s: float = 30.0
     http_retries: int = 3
     http_backoff_s: float = 1.0
@@ -46,6 +54,11 @@ class Settings(BaseSettings):
 
         base = f"fin-analysis/{__version__}"
         return f"{base} (+{self.girbo_contact})" if self.girbo_contact else base
+
+    @property
+    def cbonds_ready(self) -> bool:
+        """Есть ли доступ к Cbonds: без логина и пароля обращаться не к чему."""
+        return bool(self.cbonds_login and self.cbonds_password)
 
     @property
     def base_dir(self) -> Path:

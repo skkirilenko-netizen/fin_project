@@ -59,6 +59,17 @@ def _fired(values: dict[str, Decimal]) -> dict[str, bool]:
     }, cover
 
 
+def _label(issuer) -> str:
+    """ИНН вместе с отчётной датой и видом: комплект, а не эмитент.
+
+    У эмитента бывает годовая отчётность и промежуточная. Строка отчёта,
+    названная одним ИНН, не отвечает на вопрос, о каком из комплектов речь,
+    а ответы у них разные.
+    """
+    kind = issuer.profile.reporting_kind
+    return f"{issuer.inn} {issuer.report_date} {getattr(kind, 'value', kind)}"
+
+
 def _known_values(issuer, catalog) -> dict[str, Decimal]:
     """Все известные величины комплекта, включая специфические статьи.
 
@@ -110,14 +121,16 @@ def main(argv: list[str] | None = None) -> int:
     changed: list[str] = []
 
     print("\nТИП ЭМИТЕНТА")
+    # Ключ — комплект, а не эмитент: у ИНН бывает два комплекта, и словарь
+    # по ИНН оставлял вердикт последнего, приписывая его обоим.
     verdicts = {}
     for issuer in issuers:
         document = text_of(issuer.path)
         verdict = determine_type(_known_values(issuer, catalog), document.text, types)
-        verdicts[issuer.inn] = (verdict, document)
+        verdicts[_label(issuer)] = (verdict, document)
         determined[verdict.determination] += 1
         confirmations += 1 if verdict.needs_confirmation else 0
-        print(f"  {issuer.inn}: {verdict.describe()}")
+        print(f"  {_label(issuer)}: {verdict.describe()}")
     print(
         f"  определено структурно {determined[Determination.STRUCTURAL]} "
         f"из {len(issuers)}, по умолчанию {determined[Determination.DEFAULT]}; "
@@ -128,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\nСТОП-ФАКТОРЫ И ИХ ПРИМЕНИМОСТЬ")
     for issuer in issuers:
-        verdict, document = verdicts[issuer.inn]
+        verdict, document = verdicts[_label(issuer)]
         values = _known_values(issuer, catalog)
         fired, cover = _fired(values)
         headings = form_headings(document.text, catalog, load_parsing_policy())
@@ -136,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             document.text, document, before=min(headings.values(), default=0)
         )
         readable = report.determination is AuditState.DETERMINED
-        print(f"  {issuer.inn} [{verdict.code}]:")
+        print(f"  {_label(issuer)} [{verdict.code}]:")
         if not any(fired.values()):
             print("      стоп-факторы не сработали")
         for code, is_fired in fired.items():

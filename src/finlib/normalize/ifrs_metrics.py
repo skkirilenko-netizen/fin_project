@@ -169,6 +169,8 @@ class Annualisation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    months_from: str = Field(pattern="^report_date_month$")
+    months_origin: str = Field(min_length=1)
     scaled: tuple[str, ...] = Field(min_length=1)
     never_scaled: tuple[str, ...] = Field(min_length=1)
     never_scaled_reason: str = Field(min_length=1)

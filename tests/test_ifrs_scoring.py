@@ -7,9 +7,10 @@
 не присваивается.
 """
 
+from datetime import date
 from decimal import Decimal
 
-from finlib.metrics.ifrs import Inputs, Reason, compute_all
+from finlib.metrics.ifrs import Inputs, Reason, compute_all, months_of
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.scoring.ifrs import assess
 
@@ -124,6 +125,36 @@ def test_excluded_metric_does_not_enter_the_score() -> None:
         item.code != "debt_service" for group in without.groups for item in group.metrics
     )
     assert value_of(computed, "interest_cover_accrued").calculable
+
+
+def test_число_месяцев_берётся_из_отчётной_даты() -> None:
+    """Период промежуточного комплекта считается по методике, а не задаётся.
+
+    Аннуализация была написана в задаче 27 и не срабатывала ни разу: число
+    месяцев приходило в расчёт двенадцатью, и величины полугодия шли в балл
+    как годовые. Ноль срабатываний был неотличим от невыполненного правила.
+    """
+    assert months_of(date(2026, 6, 30), "interim") == 6
+    assert months_of(date(2026, 3, 31), "interim") == 3
+    assert months_of(date(2025, 12, 31), "full") == 12
+    # Годовая отчётность на 30 июня годом и остаётся: приведение относится
+    # к виду отчётности, а не к месяцу отчётной даты.
+    assert months_of(date(2026, 6, 30), "full") == 12
+
+
+def test_промежуточные_величины_приводятся_к_году() -> None:
+    """Потоковая величина полугодия удваивается, балансовая — нет."""
+    policy = load_ifrs_metrics()
+    half = compute_all(
+        Inputs(HEALTHY, {"interest_accrued": Decimal(30974)}, months=6), policy
+    )
+    whole = compute_all(
+        Inputs(HEALTHY, {"interest_accrued": Decimal(30974)}, months=12), policy
+    )
+    assert value_of(half, "equity_ratio").value == value_of(whole, "equity_ratio").value
+    assert value_of(half, "ebitda_margin").annualised
+    # FFO на промежуточной отчётности не считается вовсе — решение методики.
+    assert not value_of(half, "ffo_to_debt").calculable
 
 
 def test_divergence_gap_is_reported_even_below_the_threshold() -> None:

@@ -96,6 +96,27 @@ class Inputs:
         return self.months != 12
 
 
+def months_of(
+    report_date, reporting_kind: str, policy: IfrsMetricsPolicy | None = None
+) -> int:
+    """Число месяцев периода комплекта: из отчётной даты у промежуточного.
+
+    Правило живёт в методике (`annualisation.months_from`), а не в коде:
+    число месяцев, задаваемое снаружи, однажды задают двенадцатью — и
+    аннуализация перестаёт срабатывать, не сообщая об этом.
+    """
+    policy = policy or load_ifrs_metrics()
+    if reporting_kind != "interim":
+        return 12
+    if policy.annualisation.months_from != "report_date_month":
+        raise ValueError(
+            f"правило числа месяцев {policy.annualisation.months_from} "
+            "не реализовано: молча вернуть двенадцать значило бы не привести "
+            "величины к году и не сказать об этом"
+        )
+    return report_date.month
+
+
 def compute_all(
     inputs: Inputs, policy: IfrsMetricsPolicy | None = None
 ) -> tuple[MetricValue, ...]:
