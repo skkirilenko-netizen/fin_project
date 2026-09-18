@@ -142,6 +142,12 @@ class MetricNeed:
     code: str
     name: str
     needs: tuple[str, ...]
+    # Входит ли показатель в критерий вывода на разбор. Покрытие процентов
+    # не входит с 18.09.2026: его нет в номенклатуре внешнего источника
+    # вовсе, а по основным формам оно недостоверно — у Автодора 131 млн
+    # в отчёте против 26 430 млн в примечании. Показатель, недоступный
+    # ни скринингом, ни разбором основных форм, критерием быть не может.
+    in_routing: bool = True
     # Позиция, которой можно заменить недостающую, и что тогда меняется.
     # Замена не засчитывается в измерение: она названа, чтобы человек видел
     # цену отказа, а не чтобы поднять долю.
@@ -164,6 +170,7 @@ METRICS: tuple[MetricNeed, ...] = (
         "interest_cover",
         "Покрытие процентов",
         ("ifrs.operating_profit", "ifrs.finance_costs"),
+        in_routing=False,
         fallback=(
             "ifrs.interest_paid",
             "проценты уплаченные из ОДДС вместо финансовых расходов",
@@ -464,6 +471,16 @@ def main(argv: list[str] | None = None) -> int:
             1 for issuer in issuers if readiness_of(issuer, catalog, metric).ready
         )
         print(f"      {metric.name}: {count} из {len(issuers)}")
+    routing = [metric for metric in METRICS if metric.in_routing]
+    ready_routing = sum(
+        1
+        for issuer in issuers
+        if all(readiness_of(issuer, catalog, metric).ready for metric in routing)
+    )
+    print(
+        f"   по критерию вывода на разбор ({', '.join(item.name for item in routing)}): "
+        f"{ready_routing} из {len(issuers)}"
+    )
 
     print("\n3. РАЗБРОС ПОКРЫТИЯ")
     shares = [(item.inn, item.overall) for item in measured if item.overall is not None]
