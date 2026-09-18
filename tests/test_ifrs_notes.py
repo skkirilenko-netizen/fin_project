@@ -217,3 +217,36 @@ def test_reference_inside_the_name_does_not_break_recognition() -> None:
         "Проценты по облигационным займам (прим. 21) 42 683",
     )
     assert _accrued(text, (2,)).value == Decimal(11699) + Decimal(42683)
+
+
+def test_wrapped_contents_entry_is_read() -> None:
+    """Запись оглавления, перенесённая на вторую строку, читается.
+
+    У Автодора «20 Заемные средства и обязательства по долгосрочным
+    инвестиционным и» / «концессионным соглашениям 38» без склейки
+    не читалась вовсе, и примечание числилось необъявленным — то есть
+    мнимая потеря заслоняла бы настоящую.
+    """
+    text = DOCUMENT.replace(
+        "26 Оценочные обязательства 40",
+        "26 Оценочные обязательства и обязательства по долгосрочным\n"
+        "инвестиционным соглашениям 40",
+    )
+    index = index_notes(text)
+    assert 26 in {item.number for item in index.contents}
+
+
+def test_source_note_names_the_note_and_its_number() -> None:
+    """Оговорка об источнике называет и номер примечания, и наименование."""
+    found = _accrued(NOTE_TABLE, (2,))
+    text = found.source_note("54 382", "414", "Финансовые расходы")
+    assert "примечания 2" in text
+    assert "Финансовые доходы и расходы" in text
+    assert "54 382" in text and "414" in text
+
+
+def test_source_note_of_a_refusal_says_the_value_is_not_substituted() -> None:
+    """При отказе оговорка говорит, что величина из формы не берётся."""
+    text = _accrued(NOTE_TABLE, (99,)).source_note("", "934", "Финансовые расходы")
+    assert "не рассчитан" in text
+    assert "не берётся" in text

@@ -129,6 +129,10 @@ class NoteValue:
     note: int | None = None
     rows: tuple[str, ...] = ()
     refusal: Refusal | None = None
+    # Наименование примечания, как оно стоит в документе: оговорка обязана
+    # назвать и номер, и наименование — по номеру одному читатель примечания
+    # не найдёт, у разных эмитентов под одним номером стоит разное.
+    note_title: str = ""
 
     @property
     def found(self) -> bool:
@@ -141,6 +145,37 @@ class NoteValue:
             return f"{self.code} = {self.value} (примечание {self.note})"
         reason = REFUSAL_TEXT.get(self.refusal, "причина не названа")
         return f"{self.code}: отказ — {reason}"
+
+    def source_note(self, shown: str, form_value: str, form_line: str) -> str:
+        """Оговорка об источнике величины — готовой строкой, а не заново.
+
+        Читатель, сверяющий заключение с отчётностью, обязан понимать, почему
+        число не совпадает со строкой отчёта о прибыли или убытке. У Автодора
+        в форме стоит 414, а начислено 54 382, и без оговорки расхождение
+        выглядит ошибкой расчёта.
+
+        Строка набирается один раз и хранится готовой — по тому же правилу,
+        что величина надзорного сигнала: набранная второй раз, она разойдётся
+        с первой разрядностью или знаком.
+
+        Направление разницы не толкуется: величина примечания бывает и меньше
+        строки формы — у Сегежи в неё входят проценты по аренде и по опционным
+        соглашениям, — и объяснять это в оговорке значило бы утверждать
+        о составе строки то, чего мы не проверяли.
+        """
+        if not self.found:
+            reason = REFUSAL_TEXT.get(self.refusal, "причина не названа")
+            return (
+                f"Показатель не рассчитан: {reason}. Величина из строки "
+                f"«{form_line}» отчётности вместо неё не берётся."
+            )
+        title = f" «{self.note_title}»" if self.note_title else ""
+        return (
+            f"Величина взята из примечания {self.note}{title}: {shown}. "
+            f"По строке «{form_line}» отчётности показано {form_value}; "
+            "в расчёт берётся стоимость заёмных средств, раскрытая "
+            "примечанием."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,7 +415,9 @@ def value_from_notes(
                 number,
                 "; ".join(rows),
             )
-            return NoteValue(line.code, total, number, tuple(rows))
+            return NoteValue(
+                line.code, total, number, tuple(rows), note_title=note.title
+            )
     return NoteValue(line.code, note=seen[0], refusal=Refusal.LINE_NOT_FOUND)
 
 
@@ -427,9 +464,9 @@ def _contents_of(
     не значит; десяток подряд — значит.
     """
     candidates: list[tuple[int, ContentsEntry]] = []
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if len(stripped) > policy.heading_max_length:
+    for index in range(len(lines)):
+        stripped = _joined_entry(lines, index, policy)
+        if len(stripped) > policy.heading_max_length * 2:
             continue
         match = _CONTENTS.match(stripped)
         if match is None:
@@ -495,6 +532,30 @@ def _longest_run(
             best = current
             bounds = (start_index, index)
     return best, bounds
+
+
+def _joined_entry(lines: list[str], index: int, policy: NotesPolicy) -> str:
+    """Запись оглавления вместе с её продолжением на следующей строке.
+
+    Длинное наименование в оглавлении переносится, и номер страницы остаётся
+    на второй строке: «20 Заемные средства и обязательства по долгосрочным
+    инвестиционным и» / «концессионным соглашениям 38». Без склейки запись
+    не читается вовсе, примечание числится необъявленным, а настоящая
+    потеря — та, ради которой сверка и заведена, — тонет среди таких
+    мнимых. Склейка та же, что у наименований форм: продолжением считается
+    строка, начинающаяся со строчной буквы.
+    """
+    stripped = lines[index].strip()
+    if len(stripped) > policy.heading_max_length:
+        return stripped
+    if _CONTENTS.match(stripped) is not None or index + 1 >= len(lines):
+        return stripped
+    if _HEADING.match(stripped) is None:
+        return stripped
+    following = lines[index + 1].strip()
+    if not following or not following[:1].islower():
+        return stripped
+    return f"{stripped} {following}"
 
 
 def _has_digits(title: str) -> bool:
