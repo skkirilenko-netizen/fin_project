@@ -78,6 +78,10 @@ class ExtractedValue:
     report_date: date
     value: Decimal
     source_name: str
+    # Примечания, на которые ссылается строка формы. Ссылка — опора разбора
+    # расшифровок: по номеру примечание находится точно, по наименованию —
+    # с риском взять чужое число.
+    note_reference: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,8 @@ class UnrecognisedRow:
     # не применялось вовсе — строка возвращалась в очередь, хотя её величина
     # уже была учтена в итоге.
     index: int = 0
+    # Примечания, на которые ссылается строка формы.
+    note_reference: tuple[int, ...] = ()
 
     @property
     def key(self) -> tuple[str, int]:
@@ -290,11 +296,14 @@ def _extract_form(
     by_column = _columns_of_form(lines, report_dates, grouping, columns)
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
     alternatives: dict[int, tuple[Decimal, ...]] = {}
+    references: dict[int, tuple[int, ...]] = {}
     tail_from = 0
 
     pending: list[str] = []
     for index, line in enumerate(lines):
-        name, values, alternative = _split_row(line, grouping, len(report_dates))
+        name, values, alternative, reference = _split_row(
+            line, grouping, len(report_dates)
+        )
         # Координаты старше правил строения числа: они говорят, где кончается
         # колонка, а правила об этом только догадываются. Но величин от этого
         # не убывает: если ячейка не легла ни в одну колонку — у Норникеля
@@ -314,6 +323,8 @@ def _extract_form(
             continue
         if alternative:
             alternatives[len(rows)] = alternative
+        if reference:
+            references[len(rows)] = reference
         rows.append((_joined(pending, name), values, index))
         pending.clear()
         tail_from = index + 1
@@ -392,6 +403,7 @@ def _extract_form(
                     if position_index + 1 < len(rows)
                     else "",
                     index=position_index,
+                    note_reference=references.get(position_index, ()),
                 )
             )
             continue
@@ -405,7 +417,13 @@ def _extract_form(
             values = outcome.values
         for report_date, value in zip(report_dates, values, strict=False):
             form.values.append(
-                ExtractedValue(position.code, report_date, value, name.strip())
+                ExtractedValue(
+                    position.code,
+                    report_date,
+                    value,
+                    name.strip(),
+                    references.get(position_index, ()),
+                )
             )
 
     form.notes_under_form = _notes_after(lines[tail_from:])
@@ -799,8 +817,15 @@ def _column_edges(rights: list[float], periods: int) -> tuple[float, ...]:
 
 def _split_row(
     line: str, grouping: Grouping, periods: int = 0
-) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...]]:
-    """Делит строку таблицы на наименование, величины периодов и запасное чтение.
+) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...], tuple[int, ...]]:
+    """Делит строку на наименование, величины, запасное чтение и ссылку.
+
+    **Номер примечания не выбрасывается, а возвращается.** Он и есть ссылка
+    на расшифровку: «Амортизация 6, 7», «Процентные расходы 9». Разбор
+    и прежде отличал его от величины — иначе номер становился бы суммой, —
+    но, отличив, терял. Опора на строение документа дороже того, чтобы
+    её выкидывать: по ссылке примечание находится точно, а по наименованию
+    даёт чужое число.
 
     Величины ищутся в хвосте строки: наименование стоит слева и содержать
     чисел не обязано, а вот числа справа — это колонки периодов. Ячейка
@@ -814,12 +839,12 @@ def _split_row(
     """
     stripped = line.rstrip()
     if not stripped.strip():
-        return "", (), ()
+        return "", (), (), ()
 
     pattern = _cells_pattern(grouping)
     matches = list(pattern.finditer(stripped))
     if not matches:
-        return stripped.strip(), (), ()
+        return stripped.strip(), (), (), ()
 
     # Хвост числовых ячеек: подряд идущие числа в конце строки. Число внутри
     # наименования («Примечание 12») колонкой не является.
@@ -833,7 +858,7 @@ def _split_row(
         position = match.start()
     tail.reverse()
     if not tail:
-        return stripped.strip(), (), ()
+        return stripped.strip(), (), (), ()
 
     # Колонки склеиваются: разделитель разрядов и разделитель колонок — оба
     # пробел, и у «856 349 835 020» они неразличимы по ширине. Четыре группы
@@ -849,13 +874,21 @@ def _split_row(
         if value is not None
     )
     if not parsed:
-        return stripped.strip(), (), ()
+        return stripped.strip(), (), (), ()
 
     # Колонок с величинами столько, сколько периодов. Всё, что левее, —
     # не величина: у ФосАгро это номер примечания, «Основные средства
     # 12 395,831 357,577», и без отсечения слева номер примечания стал бы
     # величиной за отчётный период.
+    reference: list[int] = []
     if periods and len(parsed) > periods:
+        # Отсечённое слева — не величина, а номер примечания: он и есть
+        # ссылка на расшифровку, и теряться ей незачем.
+        reference.extend(
+            int(value)
+            for value in parsed[:-periods]
+            if _looks_like_note_number(value)
+        )
         parsed = parsed[-periods:]
         tail = tail[-periods:] if len(tail) >= periods else tail
     # Одинокое двузначное целое при двух и более колонках — номер примечания,
@@ -863,15 +896,28 @@ def _split_row(
     # величину 21 и попадал в очередь как статья. У настоящей статьи значение
     # есть за каждый период либо нет вовсе.
     if periods >= 2 and len(parsed) == 1 and _looks_like_note_number(parsed[0]):
-        return stripped.strip(), (), ()
+        return stripped.strip(), (), (), ()
 
     name = stripped[: tail[0].start()].strip()
     # К наименованию липнут номер примечания, знак сноски и прочерк «нет
     # значения». Каждый из них ломает опознание целиком: «Денежные средства
     # и их эквиваленты 18» справочник не узнаёт, хотя без номера узнаёт.
-    for pattern in (_NOTE_NUMBER, _FOOTNOTE_MARK, _TRAILING_DASH):
+    # Номер при этом сохраняется: из наименования он убирается, из строки —
+    # нет. «Амортизация 6, 7» ссылается на два примечания сразу.
+    while name and (trailing := _NOTE_NUMBER.search(name)) is not None:
+        # Ссылок бывает две: «Амортизация 6, 7» у ФосАгро. Отсекался прежде
+        # только последний номер, и наименование оставалось «Амортизация 6» —
+        # справочник такого не знает, и строка уходила в разметку.
+        reference.extend(int(part) for part in re.findall(r"\d{1,3}", trailing.group()))
+        name = _NOTE_NUMBER.sub("", name).strip()
+    for pattern in (_FOOTNOTE_MARK, _TRAILING_DASH):
         name = pattern.sub("", name).strip()
-    return name, parsed, (alternative if alternative != parsed else ())
+    return (
+        name,
+        parsed,
+        (alternative if alternative != parsed else ()),
+        tuple(dict.fromkeys(reference)),
+    )
 
 
 def _choose_reading_by_totals(

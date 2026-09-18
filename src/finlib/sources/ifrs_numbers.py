@@ -238,6 +238,20 @@ class ReportingKindPolicy(BaseModel):
     limitations: dict[str, str]
 
 
+class NotesPolicy(BaseModel):
+    """Как опознаются примечания и как они сверяются с оглавлением."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    heading_max_length: int = Field(ge=20)
+    max_number: int = Field(ge=1)
+    max_number_gap: int = Field(ge=1)
+    continuation_markers: tuple[str, ...] = Field(min_length=1)
+    contents_min_entries: int = Field(ge=1)
+    title_match_ratio: Decimal = Field(gt=0, le=1)
+    origin: str = Field(min_length=1)
+
+
 class ExtractionCompletenessPolicy(BaseModel):
     """Когда извлечение считается полным.
 
@@ -270,6 +284,7 @@ class ParsingPolicy(BaseModel):
     reporting_kind: ReportingKindPolicy
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy
+    notes: NotesPolicy
     extraction_completeness: ExtractionCompletenessPolicy
 
 
