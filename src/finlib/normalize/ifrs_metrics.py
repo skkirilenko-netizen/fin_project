@@ -29,6 +29,7 @@ class MetricAdjustment(BaseModel):
     adjusted_name: str = Field(min_length=1)
     exclude_from_numerator: tuple[dict, ...] = Field(min_length=1)
     requires: tuple[str, ...] = Field(min_length=1)
+    where: str = Field(min_length=1)
     on_missing: str = Field(pattern="^not_calculable$")
     reason_code: str = Field(min_length=1)
     limitation: str = Field(min_length=1)

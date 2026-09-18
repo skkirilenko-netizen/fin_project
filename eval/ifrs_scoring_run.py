@@ -24,6 +24,16 @@ from finlib.cli import _load_issuers
 from finlib.metrics.ifrs import Inputs, compute_all
 from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+from finlib.normalize.ifrs_note_lines import load_note_lines
+from finlib.quality.refusals import check_complete, section
+from finlib.report.refusals import (
+    from_assessment,
+    from_excluded,
+    from_ifrs_audit,
+    from_ifrs_metrics,
+    from_ifrs_notes,
+    totals,
+)
 from finlib.scoring.ifrs import assess
 from finlib.sources.ifrs_audit import Determination as AuditState
 from finlib.sources.ifrs_audit import read_audit_report
@@ -34,6 +44,18 @@ from finlib.sources.ifrs_notes import accrued_interest, index_notes, note_values
 from finlib.sources.ifrs_numbers import load_parsing_policy
 
 logger = logging.getLogger(__name__)
+
+# Производные величины называются словами, а не кодами: раздел читает человек.
+DERIVED_NAMES = {
+    "interest_accrued": "начисленные проценты по заёмным средствам "
+    "(примечание о финансовых доходах и расходах)",
+    "debt_due_within_year": "долг к погашению в ближайшие 12 месяцев "
+    "(таблица сроков в примечании о заёмных средствах)",
+    "net_debt": "чистый долг: заёмные средства за вычетом денежных",
+    "debt_total": "совокупный долг: долгосрочные и краткосрочные заёмные средства",
+    "ebitda": "EBITDA: операционная прибыль и амортизация",
+    "ffo": "FFO: поток от операционной деятельности до изменений оборотного капитала",
+}
 
 # Стоп-факторы считаются по тем же величинам, что и показатели: правило одно,
 # меняется только применимость (задача 26).
@@ -53,6 +75,28 @@ def _known(issuer, catalog) -> dict[str, Decimal]:
         if code and row.values:
             found[code] = row.values[0]
     return found
+
+
+def _class_where(result, policy, computed, profile) -> str:
+    """Чего не хватило для класса: групп, показателей и страниц — поимённо.
+
+    «Основание узкое» без перечня — потеря сведений: читатель обязан видеть,
+    какой группы не хватило и почему её показатель не рассчитан.
+    """
+    present = {item.code for item in result.groups}
+    parts: list[str] = []
+    missing = [
+        group.name for code, group in policy.groups.items() if code not in present
+    ]
+    if missing:
+        parts.append("не представлены группы: " + ", ".join(missing))
+    refused = [item.name for item in computed if item.in_scoring and not item.calculable]
+    if refused:
+        parts.append("не рассчитаны: " + ", ".join(refused))
+    if profile.pages_without_text:
+        pages = ", ".join(str(item) for item in profile.pages_without_text)
+        parts.append(f"страницы без текстового слоя внутри форм: {pages}")
+    return "; ".join(parts) if parts else "основание полное"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     divergences = 0
     gaps: list = []
     excluded_total = 0
+    produced_total = 0
+    named_total = 0
+    with_place = 0
     for issuer in issuers:
         document = text_of(issuer.path)
         values = _known(issuer, catalog)
@@ -166,9 +213,48 @@ def main(argv: list[str] | None = None) -> int:
         state, note = consistency("negative_nwc", report.sections, readable)
         print(f"      заключение: {state.value} — {note.split('.')[0]}.")
 
+        # Отказы собираются тем же механизмом, что и в РСБУ: раздел
+        # «Ограничения анализа» — перечень того, что нужно запросить.
+        names = {item.code: (catalog.get(item.code).name if catalog.get(item.code) else item.code)
+                 for item in computed}
+        names.update({
+            code: (catalog.get(code).name or code) if catalog.get(code) else code
+            for code in values
+        })
+        names.update(DERIVED_NAMES)
+        names.update({
+            item.code: item.name for item in catalog.positions
+        })
+        note_names = {
+            item.code: item.name for item in load_note_lines().lines
+        }
+        refusals = (
+            from_ifrs_metrics(computed, names, adjustments=policy.for_type(verdict.code))
+            + from_ifrs_notes(outcomes, names=note_names)
+            + from_ifrs_audit(report)
+            + from_assessment(result, _class_where(result, policy, computed, issuer.profile))
+            + from_excluded(
+                {code: by_code[code].name for code in excluded},
+                "неприменимость объявлена методикой по типу эмитента",
+            )
+        )
+        lines = section(refusals)
+        check_complete(refusals, lines)
+        produced_total += len(refusals)
+        named_total += len(refusals)
+        with_place += sum(1 for item in refusals if item.where and item.where != item.code)
+        print(f"      ОГРАНИЧЕНИЯ АНАЛИЗА ({len(refusals)} отказов, {len(lines)} строк):")
+        for line in lines:
+            print(f"          - {line}")
+        print(f"      по семействам: {totals(refusals)}")
+
     print(
         f"\nкласс присвоен {classed} из {len(issuers)}; "
         f"показателей исключено неприменимостью {excluded_total}"
+    )
+    print(
+        f"отказов произведено {produced_total}, с указанием места {with_place}, "
+        f"названо в разделе {named_total}"
     )
     compared = [item for item in gaps if item is not None]
     print(

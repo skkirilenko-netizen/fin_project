@@ -612,6 +612,68 @@ def _question_subjects(
     return ordered[: policy.questions.max_count]
 
 
+_REFUSED_METRICS = """
+SELECT metric_code, reason_code, reason
+FROM metric_value
+WHERE inn = %(inn)s AND report_date = %(date)s AND standard = %(standard)s
+  AND value IS NULL AND reason_code IS NOT NULL
+ORDER BY metric_code
+"""
+
+
+def _refusal_notes(
+    inn: str,
+    periods: list[date],
+    conn: PgConnection | None,
+    catalog: MetricsCatalog,
+    assessment: dict | None,
+    standard: Standard,
+) -> list[str]:
+    """Отказы расчёта и исключения из балла — строками раздела.
+
+    Собираются тем же механизмом, что и отказы ветки МСФО: отказ устроен
+    одинаково, и разводить контуры здесь нечем. Производные величины
+    (`_chg_pct`, `_share`) в перечень не идут — запрашивать по ним нечего,
+    и причина объясняется рядом с самой величиной.
+    """
+    from finlib.db import fetch_all
+    from finlib.quality.refusals import check_complete, load_refusals, section
+    from finlib.report.refusals import from_rsbu_exclusions, from_rsbu_metrics
+
+    if conn is None or not periods:
+        return []
+    names = {item.code: item.name for item in catalog.metrics}
+    rows = [
+        row
+        for row in fetch_all(
+            _REFUSED_METRICS,
+            {"inn": inn, "date": periods[-1], "standard": standard.value},
+            conn=conn,
+        )
+        if row["metric_code"] in names
+    ]
+    refusals = from_rsbu_metrics(rows, names)
+    if assessment is not None:
+        refusals += from_rsbu_exclusions(
+            [
+                {
+                    "metric_code": item["metric_code"],
+                    "name": names.get(item["metric_code"], item["metric_code"]),
+                    "included": item["included"],
+                    "exclusion_kind": item.get("exclusion_kind"),
+                    "exclusion_reason": item.get("exclusion_reason"),
+                }
+                for item in assessment["metrics"]
+            ]
+        )
+    catalog_of_refusals = load_refusals()
+    lines = section(refusals, catalog_of_refusals)
+    # Блокирующий контроль: потеря отказа по дороге тише всего остального —
+    # документ выглядит полным, и обнаружить пропажу нечем.
+    check_complete(refusals, lines)
+    return list(lines)
+
+
 def _limitations_block(
     inn: str,
     periods: list[date],
@@ -628,12 +690,15 @@ def _limitations_block(
     notes: list[str] = [" ".join(scoring.calibration_points.limitation_note.split())]
     notes.extend(period_limitations(inn, conn, standard))
 
-    if assessment is not None:
-        for metric in assessment["metrics"]:
-            if not metric["included"] and metric["exclusion_reason"]:
-                continue  # причины исключения приведены в блоке ПОКАЗАТЕЛИ
-        if assessment["confidence_reasons"]:
-            notes.extend(assessment["confidence_reasons"])
+    if assessment is not None and assessment["confidence_reasons"]:
+        notes.extend(assessment["confidence_reasons"])
+
+    # Отказы расчёта идут сюда, а не только в блок ПОКАЗАТЕЛИ. Раздел —
+    # перечень того, что нужно запросить у организации, и показатель,
+    # который не посчитан, есть первый пункт такого перечня. Прежде здесь
+    # стоял цикл, тело которого состояло из одного `continue`: написано так,
+    # будто решение исполнено, а исполнять было нечего.
+    notes.extend(_refusal_notes(inn, periods, conn, catalog, assessment, standard))
 
     # Оговорка о содержании показателя — безусловная, то есть верная для любой
     # организации. Условные формулировки живут в methodology_note и в промпт
