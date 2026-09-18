@@ -696,6 +696,24 @@ def _well_formed(groups: list[str]) -> bool:
     return all(len(part) == 3 for part in groups[1:])
 
 
+def split_row(
+    line: str, grouping: Grouping, periods: int = 0
+) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...], tuple[int, ...]]:
+    """Разбор строки таблицы — один на формы и на примечания.
+
+    Таблица примечания устроена так же, как таблица формы: наименование,
+    колонки периодов, номер примечания сноской. Второй разбор того же
+    неминуемо разошёлся бы с первым — это уже случалось с поиском
+    заголовков форм, который приём и разбор делали порознь.
+    """
+    return _split_row(line, grouping, periods)
+
+
+def join_name(pending: list[str], name: str) -> str:
+    """Склейка наименования, разорванного переносом, — та же, что в формах."""
+    return _joined(pending, name)
+
+
 def _joined(pending: list[str], name: str) -> str:
     """Склеивает наименование, разорванное переносом строки.
 

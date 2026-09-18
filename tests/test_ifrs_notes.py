@@ -141,3 +141,79 @@ def test_reference_in_brackets_is_read() -> None:
     assert references_in("Процентный расход по кредитам и облигациям (прим. 21)") == (21,)
     assert references_in("Амортизация 6, 7") == (6, 7)
     assert references_in("Выручка") == ()
+
+
+# --- строки примечаний и отказ вместо суррогата --------------------------------
+
+NOTE_TABLE = """
+Консолидированный отчёт о прибыли или убытке
+Выручка 500 000 480 000
+Себестоимость продаж 300 000 290 000
+Валовая прибыль 200 000 190 000
+Операционная прибыль 150 000 140 000
+Финансовые расходы 2 414 380
+Прибыль до налогообложения 138 586 130 000
+
+2 Финансовые доходы и расходы
+Проценты по концессионным и долговым инвестиционным соглашениям 11 699 12 151
+Проценты по облигационным займам 42 683 54 650
+Прочие финансовые расходы 374 408
+Общая сумма финансовых расходов 54 756 67 209
+"""
+
+
+def _accrued(text: str, references: tuple[int, ...]):
+    """Начисленные проценты по ссылке из строки формы."""
+    from finlib.normalize.ifrs_note_lines import load_note_lines
+    from finlib.sources.ifrs_notes import value_from_notes
+
+    catalog = load_note_lines()
+    line = catalog.get("ifrs.interest_expense_accrued")
+    index = index_notes(text)
+    return value_from_notes(line, index, references, text, Grouping.RUSSIAN, 2)
+
+
+def test_note_lines_are_summed_within_the_named_note() -> None:
+    """Две строки примечания складываются: взять одну значило бы занизить.
+
+    У Автодора начисленные проценты раскрыты двумя строками — по
+    концессионным соглашениям и по облигационным займам.
+    """
+    found = _accrued(NOTE_TABLE, (2,))
+    assert found.found
+    assert found.value == Decimal(11699) + Decimal(42683)
+    assert found.note == 2
+    assert len(found.rows) == 2
+
+
+def test_refusal_instead_of_the_value_from_the_form() -> None:
+    """Нет строки в примечании — отказ, а не величина из формы.
+
+    Правило то же, что в РСБУ при отсутствии амортизации: показатель
+    не считается, а не подменяется тем, что лежит рядом.
+    """
+    without = NOTE_TABLE.replace(
+        "Проценты по концессионным и долговым инвестиционным соглашениям 11 699 12 151\n",
+        "",
+    ).replace("Проценты по облигационным займам 42 683 54 650\n", "")
+    found = _accrued(without, (2,))
+    assert not found.found
+    assert found.value is None
+    assert found.refusal is not None
+
+
+def test_refusal_when_the_note_is_not_found() -> None:
+    """Примечания нет — отказ с собственной причиной, не с чужой."""
+    from finlib.sources.ifrs_notes import Refusal
+
+    assert _accrued(NOTE_TABLE, (99,)).refusal is Refusal.NOTE_NOT_FOUND
+    assert _accrued(NOTE_TABLE, ()).refusal is Refusal.NO_REFERENCE
+
+
+def test_reference_inside_the_name_does_not_break_recognition() -> None:
+    """«(прим. 21)» в наименовании — разметка, а не часть наименования."""
+    text = NOTE_TABLE.replace(
+        "Проценты по облигационным займам 42 683",
+        "Проценты по облигационным займам (прим. 21) 42 683",
+    )
+    assert _accrued(text, (2,)).value == Decimal(11699) + Decimal(42683)

@@ -20,12 +20,14 @@ import argparse
 import logging
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from finlib.normalize.ifrs_lines import load_ifrs_lines
+from finlib.normalize.ifrs_note_lines import load_note_lines
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import Rejection, form_headings, identify, text_of
-from finlib.sources.ifrs_notes import index_notes, references_in
+from finlib.sources.ifrs_notes import index_notes, references_in, value_from_notes
 from finlib.sources.ifrs_numbers import load_parsing_policy
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,20 @@ class DocumentNotes:
     references_dangling: tuple[str, ...]
     # Ключевые строки: те, ради расшифровки которых задача и делается.
     key_rows: tuple[tuple[str, tuple[int, ...], str], ...] = ()
+    # Покрытие процентов: что даёт форма и что даёт примечание.
+    operating_profit: Decimal | None = None
+    interest_in_form: Decimal | None = None
+    interest_accrued: Decimal | None = None
+    interest_parts: tuple[str, ...] = ()
+    refusal: str = ""
+    gaps: tuple[int, ...] = ()
+    lost_pages: tuple[int, ...] = ()
+
+    def cover(self, interest: Decimal | None) -> Decimal | None:
+        """Покрытие процентов при этой величине знаменателя."""
+        if self.operating_profit is None or not interest:
+            return None
+        return (self.operating_profit / interest).quantize(Decimal("0.01"))
 
     @property
     def share(self) -> float | None:
@@ -169,6 +185,68 @@ def measure(path: Path, inn: str) -> DocumentNotes | str:
         )
         key_rows.append((code, item.note_reference, note))
 
+    # Покрытие процентов по действительной стоимости долга: знаменатель
+    # собирается из примечаний по ссылке из строки формы, а не берётся
+    # из самой формы. Отказ — исход, а не неудача.
+    note_lines = load_note_lines()
+    by_code = {
+        item.code: item
+        for form in extraction.forms.values()
+        for item in form.values
+        if item.report_date == profile.report_dates[0]
+    }
+    finance = by_code.get("ifrs.finance_costs")
+    operating = by_code.get("ifrs.operating_profit")
+    # Ссылки берутся у всех строк формы, названных в `found_in`: у ФосАгро
+    # начисленный процентный расход стоит в примечании о финансовых расходах,
+    # а капитализированный — в примечании о кредитах и облигациях, и ссылка
+    # туда идёт от строки долга, а не от строки расходов.
+    def references_for(line) -> tuple[int, ...]:
+        found: list[int] = []
+        for code in line.found_in:
+            item = by_code.get(code)
+            if item is not None:
+                found.extend(item.note_reference)
+        return tuple(dict.fromkeys(found))
+
+    outcomes = {
+        line.code: value_from_notes(
+            line,
+            index,
+            references_for(line),
+            document.text,
+            profile.grouping,
+            len(profile.report_dates),
+        )
+        for line in note_lines.for_form_line("ifrs.finance_costs")
+    }
+    accrued: Decimal | None = None
+    parts: list[str] = []
+    refusal = ""
+    expense = outcomes.get("ifrs.interest_expense_accrued")
+    capitalised = outcomes.get("ifrs.interest_capitalised")
+    if expense is None or not expense.found:
+        refusal = expense.describe() if expense is not None else "строка не заведена"
+    elif _net_of_capitalised(expense, note_lines) and not (
+        capitalised is not None and capitalised.found
+    ):
+        # Капитализированные проценты обязательны там, где строка формы
+        # объявила себя очищенной от них: без них знаменатель занижен,
+        # а выглядит полным.
+        refusal = (
+            capitalised.describe()
+            if capitalised is not None
+            else "капитализированные проценты не заведены"
+        )
+    else:
+        accrued = expense.value
+        parts.append(f"{expense.code} {expense.value} (прим. {expense.note})")
+        if capitalised is not None and capitalised.found:
+            accrued += capitalised.value
+            parts.append(
+                f"{capitalised.code} {capitalised.value} (прим. {capitalised.note})"
+            )
+
     return DocumentNotes(
         path.name,
         inn,
@@ -182,6 +260,27 @@ def measure(path: Path, inn: str) -> DocumentNotes | str:
         resolved,
         tuple(dangling),
         tuple(key_rows),
+        operating.value if operating is not None else None,
+        abs(finance.value) if finance is not None else None,
+        accrued if accrued else None,
+        tuple(parts),
+        refusal,
+        gaps=index.gaps,
+        lost_pages=index.lost_pages,
+    )
+
+
+def _net_of_capitalised(outcome, note_lines) -> bool:
+    """Объявила ли себя строка формы очищенной от капитализированных процентов.
+
+    У Норникеля «Расходы по процентам, за вычетом капитализированных
+    процентов» — 537, а капитализировано 1 110, и величина раскрыта прозой
+    примечания об основных средствах, а не строкой таблицы. Знаменатель
+    без них занижен втрое, и показатель получает отказ.
+    """
+    return any(
+        marker.lower() in " ".join(outcome.rows).lower()
+        for marker in note_lines.interest_cover.requires_capitalised_when_net
     )
 
 
@@ -232,7 +331,9 @@ def main(argv: list[str] | None = None) -> int:
             f"  {item.inn}: найдено {item.notes}, объявлено оглавлением "
             f"{item.declared}, не найдено {len(item.missing)}, "
             f"нет в оглавлении {len(item.unexpected)}, "
-            f"наименование разошлось у {len(item.mismatched)}"
+            f"наименование разошлось у {len(item.mismatched)}; "
+            f"пропусков нумерации {len(item.gaps)}, "
+            f"страниц без текстового слоя внутри примечаний {len(item.lost_pages)}"
         )
         for line in item.missing:
             print(f"      не найдено: {line}")
@@ -240,6 +341,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"      нет в оглавлении: {line}")
         for line in item.mismatched:
             print(f"      наименование разошлось: {line}")
+        if item.gaps:
+            print(
+                "      пропуски нумерации: "
+                + ", ".join(str(number) for number in item.gaps)
+            )
+        if item.lost_pages:
+            print(
+                "      страницы без текстового слоя внутри примечаний: "
+                + ", ".join(str(number) for number in item.lost_pages)
+            )
 
     print("\nССЫЛКА ИЗ СТРОКИ ФОРМЫ В ПРИМЕЧАНИЕ")
     rows = sum(item.rows for item in found)
@@ -257,6 +368,38 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"  всего: строк {rows}, со ссылкой {with_reference} ({_percent(share)}), "
         f"из них разрешились {resolved}"
+    )
+
+    print("\nПОКРЫТИЕ ПРОЦЕНТОВ: ФОРМА ПРОТИВ ПРИМЕЧАНИЙ")
+    counted = 0
+    for item in found:
+        if item.operating_profit is None and item.interest_in_form is None:
+            continue
+        form_cover = item.cover(item.interest_in_form)
+        note_cover = item.cover(item.interest_accrued)
+        if item.interest_accrued is not None:
+            counted += 1
+        print(
+            f"  {item.inn}: операционная прибыль {item.operating_profit}; "
+            f"проценты по форме {item.interest_in_form}, "
+            f"начисленные {item.interest_accrued if item.interest_accrued else '—'}"
+        )
+        print(
+            f"      покрытие по форме {form_cover if form_cover is not None else '—'}, "
+            f"по начисленным {note_cover if note_cover is not None else '—'}"
+        )
+        for part in item.interest_parts:
+            print(f"      {part}")
+        if item.refusal:
+            print(f"      {item.refusal}")
+    measured = [
+        item
+        for item in found
+        if item.operating_profit is not None or item.interest_in_form is not None
+    ]
+    print(
+        f"  показатель посчитан у {counted} из {len(measured)}, "
+        f"отказ у {len(measured) - counted}"
     )
 
     print("\nКЛЮЧЕВЫЕ СТРОКИ И ИХ ПРИМЕЧАНИЯ")

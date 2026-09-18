@@ -31,10 +31,14 @@
 import logging
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 from difflib import SequenceMatcher
+from enum import StrEnum
 
+from finlib.normalize.ifrs_note_lines import NoteLine
 from finlib.normalize.lines import normalize_name
-from finlib.sources.ifrs_numbers import NotesPolicy, load_parsing_policy
+from finlib.sources.ifrs_extract import join_name, split_row
+from finlib.sources.ifrs_numbers import Grouping, NotesPolicy, load_parsing_policy
 from finlib.sources.pdf_text import PdfDocument
 
 logger = logging.getLogger(__name__)
@@ -87,6 +91,58 @@ class ContentsEntry:
         return f"{self.number}. {self.title} (оглавление, стр. {self.page})"
 
 
+class Refusal(StrEnum):
+    """Почему величина из примечания не получена.
+
+    **Отказ вместо суррогата — правило, а не усмотрение.** Оно объявлено
+    здесь, до расчёта показателей, намеренно: при написании расчёта соблазн
+    подставить величину из формы естественен — она есть, она рядом, она
+    выглядит той же. У Автодора это дало бы стоимость долга в сто тридцать
+    раз ниже действительной, и ни один контроль сходимости этого не заметил
+    бы. Правило то же, что действует в РСБУ: нет амортизации — «Чистый долг /
+    EBITDA» не считается, а не подменяется прибылью от продаж.
+
+    Распространяется на **все** показатели, которым нужна величина
+    из примечания, а не только на покрытие процентов.
+    """
+
+    NO_REFERENCE = "no_reference"
+    NOTE_NOT_FOUND = "note_not_found"
+    LINE_NOT_FOUND = "line_not_found"
+    NOT_IN_TABLE = "not_in_table"
+
+
+REFUSAL_TEXT: dict[Refusal, str] = {
+    Refusal.NO_REFERENCE: "строка формы не ссылается ни на одно примечание",
+    Refusal.NOTE_NOT_FOUND: "примечание, на которое идёт ссылка, в документе не найдено",
+    Refusal.LINE_NOT_FOUND: "в названном примечании такой строки нет",
+    Refusal.NOT_IN_TABLE: "величина раскрыта текстом примечания, а не строкой таблицы",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class NoteValue:
+    """Величина, взятая из примечания, либо отказ с названной причиной."""
+
+    code: str
+    value: Decimal | None = None
+    note: int | None = None
+    rows: tuple[str, ...] = ()
+    refusal: Refusal | None = None
+
+    @property
+    def found(self) -> bool:
+        """Получена ли величина."""
+        return self.value is not None
+
+    def describe(self) -> str:
+        """Однострочное описание для отчёта и журнала."""
+        if self.found:
+            return f"{self.code} = {self.value} (примечание {self.note})"
+        reason = REFUSAL_TEXT.get(self.refusal, "причина не названа")
+        return f"{self.code}: отказ — {reason}"
+
+
 @dataclass(frozen=True, slots=True)
 class NoteIndex:
     """Указатель примечаний вместе с итогом сверки с оглавлением."""
@@ -101,6 +157,15 @@ class NoteIndex:
     # Номер совпал, наименование разошлось: тоже сигнал, но другой —
     # примечание на месте, а опознано, возможно, не то.
     mismatched: tuple[Note, ...] = ()
+    # Пропуски в найденной цепочке номеров. Второй признак потери, и он
+    # нужен именно потому, что оглавление примечаний есть не у всех:
+    # из шести разобранных комплектов — у двух. Пропуск номера говорит
+    # о потере там, где сверять не с чем.
+    gaps: tuple[int, ...] = ()
+    # Страницы без текстового слоя, попавшие в диапазон примечаний. Примечание,
+    # начавшееся на такой странице, не найдётся никаким правилом — ни по
+    # заголовку, ни по ссылке, — и знать об этом можно только так.
+    lost_pages: tuple[int, ...] = ()
 
     def get(self, number: int) -> Note | None:
         """Примечание по номеру; None — такого в тексте нет."""
@@ -113,16 +178,26 @@ class NoteIndex:
 
     def describe(self) -> str:
         """Сводка со счётчиком проверенного рядом со счётчиком сработавшего."""
+        tail = (
+            f"; пропуски нумерации {', '.join(str(item) for item in self.gaps)}"
+            if self.gaps
+            else ""
+        ) + (
+            "; страницы без текстового слоя внутри примечаний "
+            + ", ".join(str(item) for item in self.lost_pages)
+            if self.lost_pages
+            else ""
+        )
         if not self.has_contents:
             return (
                 f"примечаний найдено {len(self.notes)}; оглавление не найдено, "
-                "сверять не с чем"
+                f"сверять не с чем{tail}"
             )
         return (
             f"примечаний найдено {len(self.notes)} из {len(self.contents)} "
             f"объявленных оглавлением; не найдено {len(self.missing)}, "
             f"нет в оглавлении {len(self.unexpected)}, "
-            f"наименование разошлось у {len(self.mismatched)}"
+            f"наименование разошлось у {len(self.mismatched)}{tail}"
         )
 
 
@@ -158,9 +233,53 @@ def index_notes(
         for item in notes
         if item.number in declared and not _same_title(item, contents, policy)
     )
-    index = NoteIndex(notes, contents, missing, unexpected, mismatched)
+    index = NoteIndex(
+        notes,
+        contents,
+        missing,
+        unexpected,
+        mismatched,
+        _gaps(notes),
+        _lost_pages_in_notes(notes, document),
+    )
     logger.info("указатель примечаний: %s", index.describe())
     return index
+
+
+def _gaps(notes: tuple[Note, ...]) -> tuple[int, ...]:
+    """Пропущенные номера внутри найденной цепочки.
+
+    Второй признак потери, независимый от оглавления. Нумерация примечаний
+    сплошная: пропуск означает, что примечание есть, а мы его не нашли.
+    Признак нужен именно там, где оглавления примечаний нет, — а нет его
+    у четырёх комплектов из шести.
+    """
+    if not notes:
+        return ()
+    numbers = {item.number for item in notes}
+    return tuple(
+        number
+        for number in range(min(numbers), max(numbers))
+        if number not in numbers
+    )
+
+
+def _lost_pages_in_notes(
+    notes: tuple[Note, ...], document: PdfDocument | None
+) -> tuple[int, ...]:
+    """Страницы без текстового слоя, попавшие в диапазон примечаний.
+
+    Примечание, начавшееся на такой странице, не найдётся ни заголовком,
+    ни ссылкой: его в тексте нет вовсе. Сказать о нём может только счёт
+    страниц.
+    """
+    if document is None or not notes:
+        return ()
+    first = min(item.page for item in notes)
+    last = document.pages[-1].number if document.pages else first
+    return tuple(
+        number for number in document.pages_without_text if first <= number <= last
+    )
 
 
 def lines_of(note: Note, text: str) -> tuple[str, ...]:
@@ -197,6 +316,72 @@ def find_in_note(
         if any(normalized.startswith(item) for item in wanted):
             found.append(line)
     return tuple(found)
+
+
+def rows_of_note(
+    note: Note, text: str, grouping: Grouping, periods: int
+) -> tuple[tuple[str, tuple[Decimal, ...]], ...]:
+    """Строки примечания, разобранные тем же кодом, что и строки форм.
+
+    Перенос наименования склеивается той же склейкой: у ЛСР строка
+    «Процентный расход (дополнительно начисленные проценты по кредитам
+    с эскроу и значительный компонент финансирования)» занимает три строки
+    вёрстки, и без склейки в справочник попадает обрывок.
+    """
+    found: list[tuple[str, tuple[Decimal, ...]]] = []
+    pending: list[str] = []
+    for line in lines_of(note, text):
+        name, values, _, _ = split_row(line, grouping, periods)
+        # Ссылка внутри наименования — «Процентный расход по кредитам
+        # и облигациям (прим. 21)» — часть разметки, а не наименования:
+        # с ней строка справочником не опознаётся.
+        name = _EXPLICIT_REFERENCE.sub("", name).strip()
+        if not values:
+            if name:
+                pending.append(name)
+            continue
+        found.append((join_name(pending, name), values))
+        pending.clear()
+    return tuple(found)
+
+
+def value_from_notes(
+    line: NoteLine,
+    index: NoteIndex,
+    references: tuple[int, ...],
+    text: str,
+    grouping: Grouping,
+    periods: int,
+) -> NoteValue:
+    """Величина строки примечания по ссылке из формы — либо отказ с причиной.
+
+    Отказ здесь не неудача, а исход: показатель, которому эта величина нужна,
+    не считается вовсе. Подставить величину из формы нельзя — ровно для этого
+    правило и объявлено.
+    """
+    if not references:
+        return NoteValue(line.code, refusal=Refusal.NO_REFERENCE)
+    seen = [number for number in references if index.get(number) is not None]
+    if not seen:
+        return NoteValue(line.code, refusal=Refusal.NOTE_NOT_FOUND)
+    for number in seen:
+        note = index.get(number)
+        total = Decimal(0)
+        rows: list[str] = []
+        for name, values in rows_of_note(note, text, grouping, periods):
+            if normalize_name(name) not in line.match_names or not values:
+                continue
+            rows.append(name)
+            total += abs(values[0])
+        if rows:
+            logger.info(
+                "%s взято из примечания %s по строкам: %s",
+                line.code,
+                number,
+                "; ".join(rows),
+            )
+            return NoteValue(line.code, total, number, tuple(rows))
+    return NoteValue(line.code, note=seen[0], refusal=Refusal.LINE_NOT_FOUND)
 
 
 def references_in(name: str, policy: NotesPolicy | None = None) -> tuple[int, ...]:
