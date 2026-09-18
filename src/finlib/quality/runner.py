@@ -23,8 +23,12 @@ _SET_STATUS = """
 UPDATE src_file SET status = %(status)s, quarantine_reason = %(reason)s WHERE id = %(id)s
 """
 
+# Стандарт входит в отбор наравне с организацией: ряды по РСБУ и по МСФО
+# несопоставимы, и комплект в карантине по одному стандарту о другом
+# не говорит ничего. Запрет смешения действует не только в показателях.
 _QUARANTINED = """
-SELECT id FROM src_file WHERE inn = %(inn)s AND status = 'quarantine'
+SELECT id FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND status = 'quarantine'
 """
 
 # Блокирующие записи журнала, которые оставил не прогон контролей, а загрузчик.
@@ -229,6 +233,20 @@ def _to_record(context: ReportContext, outcome: CheckOutcome) -> CheckRecord:
     )
 
 
-def quarantined_src_files(inn: str, conn: PgConnection | None = None) -> set[int]:
-    """Комплекты организации, отправленные в карантин: их факты в расчёт не идут."""
-    return {row["id"] for row in fetch_all(_QUARANTINED, {"inn": inn}, conn=conn)}
+def quarantined_src_files(
+    inn: str,
+    conn: PgConnection | None = None,
+    standard: Standard = Standard.RSBU,
+) -> set[int]:
+    """Комплекты организации, отправленные в карантин: их факты в расчёт не идут.
+
+    Стандарт задаётся явно: комплект МСФО в карантине к расчёту по РСБУ
+    отношения не имеет, и смешивать их нельзя — это то же правило, по
+    которому показатель не считается из величин двух стандартов.
+    """
+    return {
+        row["id"]
+        for row in fetch_all(
+            _QUARANTINED, {"inn": inn, "standard": standard.value}, conn=conn
+        )
+    }

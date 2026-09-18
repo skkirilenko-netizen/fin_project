@@ -14,7 +14,7 @@
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -22,9 +22,9 @@ from enum import StrEnum
 
 from finlib.metrics.definitions import MetricDef, MetricsCatalog, Unit
 from finlib.metrics.display import displayed, round_to
-from finlib.metrics.engine import MetricResult, MetricStatus, PeriodValues
+from finlib.metrics.engine import Baseline, MetricResult, MetricStatus, PeriodValues
 from finlib.metrics.formula import NotCalculableReason
-from finlib.normalize.lines import LinesCatalog, ReportingType
+from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.periods import PeriodConfidence
 
 logger = logging.getLogger(__name__)
@@ -112,11 +112,20 @@ def compute_derived(
     usable: Sequence[date],
     confidences: dict[date, PeriodConfidence],
     catalog: MetricsCatalog,
+    baselines: Mapping[date, Baseline] | None = None,
+    lines: LinesCatalog | None = None,
 ) -> list[MetricResult]:
     """Считает изменения и доли по пригодным периодам, от свежего к старому.
 
-    Периоды приходят отсортированными по убыванию: базой изменения служит
-    следующий в списке, то есть ближайший пригодный предыдущий период.
+    **База изменения определяется видом величины, а не порядком периодов.**
+    Прежде базой служил следующий в списке период — ближайший предыдущий
+    любой длины. Для строки на дату база — конец предыдущего годового
+    периода, для строки за период — сопоставимый отрезок прошлого года;
+    у показателя база потоковая: он характеризует период целиком, и сравнивать
+    полугодие с годом нельзя.
+
+    Базы приходят готовыми из расчёта показателей: считать их вторым способом
+    значило бы завести второе определение того же самого.
     """
     spec = catalog.derived
     # Строки отчётности отображаются целыми тысячами рублей, и изменения
@@ -124,22 +133,42 @@ def compute_derived(
     line_scale = catalog.display.scale_for(Unit.THOUSAND_RUB)
     by_metric = _metric_values(metrics, catalog) if spec.change.metrics else {}
 
+    lines = lines if lines is not None else load_lines()
     results: list[MetricResult] = []
     for index, report_date in enumerate(usable):
-        previous_date = usable[index + 1] if index + 1 < len(usable) else None
+        baseline = (baselines or {}).get(report_date)
+        if baseline is None:
+            # Базы не передали: прежнее поведение — ближайший предыдущий
+            # период. Оставлено для вызова без расчёта показателей и объявлено
+            # здесь, а не подразумевается.
+            nearest = usable[index + 1] if index + 1 < len(usable) else None
+            baseline = Baseline(
+                stock_date=nearest,
+                flow_date=nearest,
+                stock=periods[nearest].values if nearest in periods else {},
+                flow=periods[nearest].values if nearest in periods else {},
+                has_earlier=nearest is not None,
+            )
         current = periods[report_date].values if report_date in periods else {}
-        previous = (
-            periods[previous_date].values
-            if previous_date is not None and previous_date in periods
-            else None
-        )
-        confidence = _worse(confidences, report_date, previous_date)
 
         for code in spec.change.lines:
-            base = _line_value(previous, code, line_scale)
-            results += _change(
-                code, _line_value(current, code, line_scale), base, report_date, confidence
+            measure = lines.measure_of(code)
+            previous_date = baseline.date_for(measure)
+            base = _line_value(
+                baseline.values_for(measure) if previous_date else None,
+                code,
+                line_scale,
             )
+            results += _change(
+                code,
+                _line_value(current, code, line_scale),
+                base,
+                report_date,
+                _worse(confidences, report_date, previous_date),
+            )
+        # Доля в валюте баланса считается внутри периода: база ей не нужна,
+        # и уверенность у неё своя — только текущего периода.
+        confidence = _worse(confidences, report_date, None)
 
         total = _line_value(current, spec.share.denominator, line_scale)
         for code in spec.share.lines:
@@ -154,9 +183,18 @@ def compute_derived(
             if result is not None:
                 results.append(result)
 
+        # У показателя база потоковая: он описывает период целиком, и сравнение
+        # полугодия с годом дало бы верное число при ложном утверждении.
+        metric_base = baseline.flow_date
         for code, values in by_metric.items():
-            base = values.get(previous_date) if previous_date is not None else None
-            results += _change(code, values.get(report_date), base, report_date, confidence)
+            base = values.get(metric_base) if metric_base is not None else None
+            results += _change(
+                code,
+                values.get(report_date),
+                base,
+                report_date,
+                _worse(confidences, report_date, metric_base),
+            )
 
     logger.info("производные величины: рассчитано %d значений", len(results))
     return results

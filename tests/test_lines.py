@@ -148,6 +148,12 @@ def _catalog_dict(lines: list[dict[str, Any]]) -> dict[str, Any]:
             "forms": ["0710001", "0710002"],
             "origin": "тестовый справочник",
         },
+        "measures": {
+            "by_form": {"0710001": "stock", "0710002": "flow"},
+            "annual_end": "12-31",
+            "annual_end_origin": "тестовый справочник",
+            "origin": "тестовый справочник",
+        },
         "forms": {"0710001": {"name": "Бухгалтерский баланс"}},
         "reporting_types": {
             "full": {"name": "Полная", "forms": ["0710001"]},

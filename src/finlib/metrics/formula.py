@@ -23,6 +23,12 @@ class NotCalculableReason(StrEnum):
 
     MISSING_LINES = "missing_lines"
     NO_PREVIOUS_PERIOD = "no_previous_period"
+    # Предыдущий период есть, но он несопоставим: у величины за период нет
+    # отрезка той же длительности за прошлый год, у балансовой — конца
+    # предыдущего годового периода. Отличается от NO_PREVIOUS_PERIOD тем,
+    # что исправляется загрузкой сопоставимого комплекта, а не ожиданием
+    # следующего года.
+    NO_COMPARABLE_PERIOD = "no_comparable_period"
     ZERO_DENOMINATOR = "zero_denominator"
     NEGATIVE_DENOMINATOR = "negative_denominator"
     NOT_IN_FORM = "not_in_form"

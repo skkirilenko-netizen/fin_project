@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
@@ -19,6 +20,22 @@ class ReportingType(StrEnum):
 
     FULL = "full"
     SIMPLIFIED = "simplified"
+
+
+class Measure(StrEnum):
+    """Вид величины: на дату или за период.
+
+    От вида зависит, с чем величина сравнивается. Балансовая стоит на дату,
+    и началом периода ей служит конец предыдущего **годового** периода.
+    Величина за период сравнивается только с сопоставимым по длительности
+    отрезком прошлого года: полугодие с полугодием, год с годом.
+
+    Определение одно на оба стандарта: в МСФО кодов строк нет, а деление
+    на величины на дату и за период то же самое.
+    """
+
+    STOCK = "stock"
+    FLOW = "flow"
 
 
 class Sign(StrEnum):
@@ -85,6 +102,11 @@ class LineDef(BaseModel):
     form: str = Field(pattern=r"^\d{7}$")
     section: str = Field(min_length=1)
     sign: Sign = Sign.POSITIVE
+    # Вид величины, когда строка отличается от своей формы: остатки денежных
+    # средств стоят в отчёте за период, а являются величинами на дату.
+    # Умолчание задаёт форма (`measures.by_form`), и здесь его нет: пустое
+    # поле означает «как у формы», а не «неизвестно».
+    measure: Measure | None = None
     in_brackets: bool = False
     is_total: bool = False
     components: tuple[Component, ...] = ()
@@ -254,6 +276,43 @@ class UnitsDef(BaseModel):
         return UnitSource.UNKNOWN
 
 
+class MeasuresDef(BaseModel):
+    """Вид величины по формам отчётности.
+
+    Объявляется формой, а не выводится из кода строки: правило «код на 1 —
+    баланс» молча сломается на первой же форме с другой нумерацией и на МСФО,
+    где кодов нет вовсе. Строка, отличающаяся от своей формы, объявляет вид
+    сама — так устроены остатки денежных средств в отчёте о движении.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    by_form: dict[str, Measure] = Field(min_length=1)
+    annual_end: str = Field(pattern=r"^\d{2}-\d{2}$")
+    annual_end_origin: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    @property
+    def annual_month_day(self) -> tuple[int, int]:
+        """Месяц и день, которыми кончается годовой период."""
+        month, day = self.annual_end.split("-")
+        return int(month), int(day)
+
+    def is_annual_end(self, moment: date) -> bool:
+        """Кончается ли годовой период этой датой."""
+        return (moment.month, moment.day) == self.annual_month_day
+
+    def previous_annual_end(self, moment: date) -> date:
+        """Конец годового периода, предшествующего этой дате.
+
+        У годовой отчётности это прошлый год, у промежуточной — конец
+        прошлого года: и там и там последний день годового периода,
+        завершившегося до отчётной даты.
+        """
+        month, day = self.annual_month_day
+        return date(moment.year - 1, month, day)
+
+
 class LinesCatalog(BaseModel):
     """Справочник строк всех форм с индексами по коду и наименованию."""
 
@@ -261,6 +320,7 @@ class LinesCatalog(BaseModel):
 
     version: str = Field(min_length=1)
     units: UnitsDef
+    measures: MeasuresDef
     forms: dict[str, FormDef]
     reporting_types: dict[ReportingType, ReportingTypeDef]
     lines: tuple[LineDef, ...]
@@ -281,8 +341,23 @@ class LinesCatalog(BaseModel):
         self._check_components_exist()
         self._check_aggregates()
         self._check_meaning_declared()
+        self._check_measures_declared()
         _check_no_cycles(self._index)
         return self
+
+    def _check_measures_declared(self) -> None:
+        """У каждой формы объявлен вид величины.
+
+        Форма без объявления означала бы, что вид её строк выводится
+        умолчанием кода, а умолчание здесь недопустимо: от вида зависит,
+        с каким периодом величина сравнивается, и ошибка тихая — число
+        получается настоящее, а сравнение чужое.
+        """
+        missing = sorted(set(self.forms) - set(self.measures.by_form))
+        if missing:
+            raise ValueError(
+                "вид величины не объявлен для форм: " + ", ".join(missing)
+            )
 
     def _build_index(self) -> dict[tuple[ReportingType, str], LineDef]:
         """Индекс по паре (набор, код) с проверкой уникальности и форм."""
@@ -416,6 +491,23 @@ class LinesCatalog(BaseModel):
     ) -> LineDef | None:
         """Возвращает определение строки или None, если кода нет в наборе."""
         return self._index.get((reporting_type, code))
+
+    def measure_of(
+        self, code: str, reporting_type: ReportingType = ReportingType.FULL
+    ) -> Measure:
+        """Вид величины строки: на дату или за период.
+
+        Умолчание берётся от формы, собственное объявление строки его
+        перекрывает. Неизвестный код — величина за период: строки, которых
+        нет в справочнике, в формулах не встречаются, а гадать о виде
+        незачем — вопрос задаётся только о том, что в формуле стоит.
+        """
+        line = self.get(code, reporting_type) or self.get(code)
+        if line is None:
+            return Measure.FLOW
+        if line.measure is not None:
+            return line.measure
+        return self.measures.by_form[line.form]
 
     def require(self, code: str, reporting_type: ReportingType = ReportingType.FULL) -> LineDef:
         """Возвращает определение строки, иначе поднимает KeyError."""

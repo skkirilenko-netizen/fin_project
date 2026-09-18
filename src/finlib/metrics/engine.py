@@ -1,7 +1,7 @@
 """Расчёт показателей по периодам. Все вычисления в Decimal."""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -19,7 +19,12 @@ from finlib.metrics.formula import (
     evaluate,
     line_codes,
 )
-from finlib.normalize.lines import ReportingType
+from finlib.normalize.lines import (
+    LinesCatalog,
+    Measure,
+    ReportingType,
+    load_lines,
+)
 from finlib.quality.periods import PeriodConfidence, period_quality
 from finlib.quality.thresholds import Thresholds, load_thresholds
 from finlib.standards import Standard, load_standards
@@ -74,6 +79,50 @@ class MetricResult:
         return self.status is MetricStatus.OK
 
 
+@dataclass(frozen=True, slots=True)
+class Baseline:
+    """Начало периода: у величины на дату и у величины за период оно разное.
+
+    **Предыдущий период определяется видом величины, а не близостью даты.**
+    Балансовая величина стоит на дату, и её началом служит конец предыдущего
+    годового периода: у комплекта за полугодие это 31 декабря прошлого года.
+    Величина за период сравнивается только с сопоставимым по длительности
+    отрезком прошлого года: полугодие с полугодием, год с годом.
+
+    Прежде базой служил ближайший предыдущий период любой длины. Пока
+    в базе одна годовая отчётность, это то же самое; с промежуточной —
+    нет: годовая прибыль сравнивалась бы с полугодовым изменением капитала,
+    а средняя балансовая величина считалась бы по полугодию.
+
+    **Сопоставимого периода нет — отказ, а не подстановка ближайшего.**
+    Промежуточный комплект без прошлогоднего полугодия динамики не даёт,
+    и показатель получает `not_calculable` с названной причиной.
+    """
+
+    stock_date: date | None = None
+    flow_date: date | None = None
+    stock: dict[str, Decimal | None] = field(default_factory=dict)
+    flow: dict[str, Decimal | None] = field(default_factory=dict)
+    # Есть ли вообще более ранний пригодный период. Отличает «это самый
+    # ранний период организации» от «предыдущий период есть, но он
+    # несопоставим»: причины разные, и читателю заключения они говорят разное.
+    has_earlier: bool = False
+
+    def date_for(self, measure: Measure) -> date | None:
+        """Дата начала периода для величины этого вида."""
+        return self.stock_date if measure is Measure.STOCK else self.flow_date
+
+    def values_for(self, measure: Measure) -> dict[str, Decimal | None]:
+        """Величины начала периода для этого вида."""
+        return self.stock if measure is Measure.STOCK else self.flow
+
+    def describe(self) -> str:
+        """Сводка для журнала: с чем сравниваются величины обоих видов."""
+        stock = f"{self.stock_date:%d.%m.%Y}" if self.stock_date else "нет"
+        flow = f"{self.flow_date:%d.%m.%Y}" if self.flow_date else "нет"
+        return f"на дату — {stock}, за период — {flow}"
+
+
 @dataclass
 class PeriodValues:
     """Значения строк одного периода, плоско по кодам.
@@ -124,10 +173,11 @@ def compute_metric(
     reporting_type: ReportingType,
     report_date: date,
     current: dict[str, Decimal | None],
-    previous: dict[str, Decimal | None] | None,
+    previous: Baseline,
     confidence: PeriodConfidence,
     thresholds: Thresholds,
     standards: Mapping[str, str],
+    measure_of: Callable[[str], Measure],
 ) -> MetricResult | None:
     """Считает один показатель за один период.
 
@@ -138,7 +188,9 @@ def compute_metric(
 
     standards — стандарт отчётности каждой величины. Параметр обязателен
     намеренно: контроль смешения, который можно молча не передать,
-    неотличим от невыполненного.
+    неотличим от невыполненного. По той же причине обязателен `measure_of`:
+    от вида величины зависит, с каким периодом она сравнивается, и умолчание
+    здесь давало бы настоящее число при чужом сравнении.
     """
     tree = metric.tree_for(reporting_type)
     if tree is None:
@@ -156,22 +208,23 @@ def compute_metric(
             reason_code=NotCalculableReason.MIXED_STANDARDS.value,
         )
 
-    needs_previous = bool(average_codes(tree))
-    if needs_previous and previous is None:
+    baseline, without = _baseline_values(tree, previous, measure_of)
+    if without:
         return MetricResult(
             metric.code,
             report_date,
             None,
             MetricStatus.NOT_CALCULABLE,
             confidence,
-            reason=(
-                "Нет данных на начало периода: средняя балансовая величина требует "
-                "двух точек, подстановка значения на конец периода запрещена"
+            reason=_no_baseline_reason(previous, without, measure_of),
+            reason_code=(
+                NotCalculableReason.NO_PREVIOUS_PERIOD.value
+                if not previous.has_earlier
+                else NotCalculableReason.NO_COMPARABLE_PERIOD.value
             ),
-            reason_code=NotCalculableReason.NO_PREVIOUS_PERIOD.value,
         )
 
-    missing = _missing_codes(tree, current, previous)
+    missing = _missing_codes(tree, current, baseline)
     if missing:
         return MetricResult(
             metric.code,
@@ -187,7 +240,7 @@ def compute_metric(
         denominator = denominator_of(tree)
         if denominator is not None:
             try:
-                computed = evaluate(denominator, current, previous, thresholds.constants)
+                computed = evaluate(denominator, current, baseline, thresholds.constants)
             except (ZeroDenominatorError, FormulaError):
                 # Знаменатель сам не вычислился: причину назовёт основной
                 # расчёт ниже, у него формулировки точнее. Проверка знака —
@@ -208,7 +261,7 @@ def compute_metric(
                 )
 
     try:
-        value = evaluate(tree, current, previous, thresholds.constants)
+        value = evaluate(tree, current, baseline, thresholds.constants)
     except ZeroDenominatorError as exc:
         reason = f"Коэффициент не определён: {exc.expression} равен нулю"
         if metric.zero_denominator_note:
@@ -224,6 +277,59 @@ def compute_metric(
         )
 
     return MetricResult(metric.code, report_date, value, MetricStatus.OK, confidence)
+
+
+def _baseline_values(
+    tree, previous: Baseline, measure_of: Callable[[str], Measure]
+) -> tuple[dict[str, Decimal | None] | None, list[str]]:
+    """Собирает начало периода по видам величин и называет коды без базы.
+
+    Каждый код берёт свою базу: балансовый — конец предыдущего годового
+    периода, потоковый — сопоставимый период прошлого года. Интерпретатор
+    формул о видах не знает и знать не должен: он получает уже собранное
+    начало периода, а разрешает вид тот, кто знает справочник.
+    """
+    needed = average_codes(tree)
+    if not needed:
+        return None, []
+    values: dict[str, Decimal | None] = {}
+    without: list[str] = []
+    for code in sorted(needed):
+        measure = measure_of(code)
+        if previous.date_for(measure) is None:
+            without.append(code)
+            continue
+        values[code] = previous.values_for(measure).get(code)
+    return values, without
+
+
+def _no_baseline_reason(
+    previous: Baseline, without: list[str], measure_of: Callable[[str], Measure]
+) -> str:
+    """Почему начала периода нет: самый ранний период или несопоставимый.
+
+    Две причины, и путать их нельзя. «Это самый ранний период организации» —
+    свойство её истории; «предыдущий период есть, но он другой длины» —
+    свойство состава комплектов, и второе исправляется загрузкой
+    сопоставимого периода, а первое не исправляется ничем.
+    """
+    codes = ", ".join(without)
+    if not previous.has_earlier:
+        return (
+            "Нет данных на начало периода: средняя балансовая величина требует "
+            "двух точек, подстановка значения на конец периода запрещена. "
+            f"Строки: {codes}"
+        )
+    kinds = {measure_of(code) for code in without}
+    what = (
+        "сопоставимого периода прошлого года"
+        if Measure.FLOW in kinds
+        else "конца предыдущего годового периода"
+    )
+    return (
+        f"Нет {what}: сравнивать не с чем, а подстановка ближайшего периода "
+        f"другой длительности запрещена. Строки: {codes}"
+    )
 
 
 def _mixed_standards(tree, standards: Mapping[str, str]) -> str | None:
@@ -279,6 +385,7 @@ def compute_all(
     """
     catalog = catalog if catalog is not None else load_metrics()
     thresholds = thresholds if thresholds is not None else load_thresholds()
+    lines = load_lines()
 
     periods = load_period_values(inn, conn, standard)
     quality = period_quality(inn, conn, standard)
@@ -287,6 +394,7 @@ def compute_all(
     results: list[MetricResult] = []
     usable: list[date] = []
     confidences: dict[date, PeriodConfidence] = {}
+    baselines: dict[date, Baseline] = {}
     checked_for_mixing = 0
     for report_date in ordered:
         info = quality.get(report_date)
@@ -297,14 +405,21 @@ def compute_all(
         usable.append(report_date)
         confidences[report_date] = confidence
         reporting_type = reporting_type_of(inn, report_date, conn, standard)
-        previous_date = _previous_usable(report_date, ordered, quality)
-        previous = periods[previous_date].values if previous_date is not None else None
+        previous = baseline_of(report_date, periods, quality, lines)
+        baselines[report_date] = previous
+        logger.info(
+            "период %s: начало периода %s", report_date, previous.describe()
+        )
 
         # Стандарт величины хранится рядом с ней, и в проверку идут величины
         # обоих периодов: средняя балансовая берёт значение и на начало.
         standards = dict(periods[report_date].standards)
-        if previous_date is not None:
-            standards |= periods[previous_date].standards
+        for item in (previous.stock_date, previous.flow_date):
+            if item is not None:
+                standards |= periods[item].standards
+
+        def measure_of(code: str, _type: ReportingType = reporting_type) -> Measure:
+            return lines.measure_of(code, _type)
 
         for metric in catalog.for_type(reporting_type):
             result = compute_metric(
@@ -316,6 +431,7 @@ def compute_all(
                 confidence,
                 thresholds,
                 standards,
+                measure_of,
             )
             if result is not None:
                 results.append(result)
@@ -339,16 +455,71 @@ def compute_all(
         # и на уровне модуля вышел бы цикл.
         from finlib.metrics.derived import compute_derived
 
-        results += compute_derived(periods, results, usable, confidences, catalog)
+        results += compute_derived(
+            periods, results, usable, confidences, catalog, baselines, lines
+        )
     return results
 
 
-def _previous_usable(report_date: date, ordered: list[date], quality: dict) -> date | None:
-    """Ближайший предыдущий период, пригодный как база для средней величины."""
-    for candidate in ordered:
-        if candidate >= report_date:
-            continue
-        info = quality.get(candidate)
-        if info is None or info.is_usable:
-            return candidate
-    return None
+def period_months(moment: date, catalog: LinesCatalog) -> int:
+    """Длительность периода в месяцах по его отчётной дате.
+
+    Правило объявлено методикой, а не выведено из устройства программы:
+    годовой период кончается 31 декабря (402-ФЗ, статья 15), у прочих дат
+    длительность равна номеру месяца — то же правило, по которому
+    приводится к году промежуточная отчётность.
+    """
+    return 12 if catalog.measures.is_annual_end(moment) else moment.month
+
+
+def baseline_of(
+    report_date: date,
+    periods: Mapping[date, PeriodValues],
+    quality: Mapping[date, object],
+    catalog: LinesCatalog,
+) -> Baseline:
+    """Начало периода для величин обоих видов.
+
+    **Ближайший предыдущий период базой не служит.** Балансовая величина
+    сравнивается с концом предыдущего годового периода, величина за период —
+    с отрезком той же длительности за прошлый год. Совпадают они только
+    у годовой отчётности, и там правило ничего не меняет.
+
+    Периода нет либо он в карантине — базы нет, и показатель откажется
+    считаться. Подстановка ближайшего запрещена: она даёт настоящее число
+    при чужом сравнении, а такую ошибку не ловит ни один контроль.
+    """
+
+    def usable(moment: date | None) -> date | None:
+        if moment is None or moment not in periods:
+            return None
+        info = quality.get(moment)
+        return moment if info is None or getattr(info, "is_usable", True) else None
+
+    earlier = [
+        item
+        for item in sorted(periods, reverse=True)
+        if item < report_date and usable(item) is not None
+    ]
+    stock_date = usable(catalog.measures.previous_annual_end(report_date))
+    wanted = _year_earlier(report_date)
+    flow_date = usable(wanted)
+    if flow_date is not None and period_months(flow_date, catalog) != period_months(
+        report_date, catalog
+    ):
+        flow_date = None
+    return Baseline(
+        stock_date=stock_date,
+        flow_date=flow_date,
+        stock=periods[stock_date].values if stock_date is not None else {},
+        flow=periods[flow_date].values if flow_date is not None else {},
+        has_earlier=bool(earlier),
+    )
+
+
+def _year_earlier(moment: date) -> date:
+    """Та же дата годом раньше; 29 февраля переносится на 28-е."""
+    try:
+        return moment.replace(year=moment.year - 1)
+    except ValueError:  # pragma: no cover — только 29 февраля
+        return moment.replace(year=moment.year - 1, day=28)

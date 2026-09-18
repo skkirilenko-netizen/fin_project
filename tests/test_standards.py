@@ -294,9 +294,9 @@ def test_mixed_standards_block_the_metric() -> None:
     и всякая другая нехватка: частичных вычислений в методике нет.
     """
     from finlib.metrics.definitions import load_metrics
-    from finlib.metrics.engine import MetricStatus, compute_metric
+    from finlib.metrics.engine import Baseline, MetricStatus, compute_metric
     from finlib.metrics.formula import NotCalculableReason
-    from finlib.normalize.lines import ReportingType
+    from finlib.normalize.lines import ReportingType, load_lines
     from finlib.quality.periods import PeriodConfidence
     from finlib.quality.thresholds import load_thresholds
 
@@ -304,15 +304,17 @@ def test_mixed_standards_block_the_metric() -> None:
     values = {"1300": Decimal(400), "1700": Decimal(1000)}
     mixed = {"1300": Standard.IFRS.value, "1700": Standard.RSBU.value}
 
+    catalog = load_lines()
     result = compute_metric(
         metric,
         ReportingType.FULL,
         PERIOD,
         values,
-        None,
+        Baseline(),
         PeriodConfidence.VERIFIED,
         load_thresholds(),
         mixed,
+        catalog.measure_of,
     )
     assert result is not None
     assert result.status is MetricStatus.NOT_CALCULABLE
@@ -326,10 +328,11 @@ def test_mixed_standards_block_the_metric() -> None:
         ReportingType.FULL,
         PERIOD,
         values,
-        None,
+        Baseline(),
         PeriodConfidence.VERIFIED,
         load_thresholds(),
         same,
+        catalog.measure_of,
     )
     assert ok is not None and ok.status is MetricStatus.OK
 

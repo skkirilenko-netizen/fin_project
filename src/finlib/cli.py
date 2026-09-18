@@ -38,9 +38,13 @@ WHERE m.inn = %(inn)s AND m.standard = %(s)s
 ORDER BY m.metric_code, m.report_date DESC
 """
 
+# Стандарт комплекта берётся вместе с записью и печатается: организация
+# может сдавать отчётность по обоим, и запись журнала сама о своём стандарте
+# не говорит. Молча смешанный перечень выглядит как перечень одного ряда.
 _CHECKS = """
-SELECT d.check_code, d.severity, d.status, d.report_date, d.line_code, d.message
-FROM dq_log d
+SELECT d.check_code, d.severity, d.status, d.report_date, d.line_code, d.message,
+       coalesce(s.standard, '—') AS standard
+FROM dq_log d LEFT JOIN src_file s ON s.id = d.src_file_id
 WHERE d.inn = %(inn)s
 ORDER BY d.severity, d.check_code, d.report_date DESC NULLS LAST
 """
@@ -352,7 +356,10 @@ def quality_command(
     colors = {"fail": typer.colors.RED, "warning": typer.colors.YELLOW}
     for row in shown:
         period = f"{row['report_date']:%d.%m.%Y}" if row["report_date"] else "комплект"
-        line = f"  {row['status']:<8} {row['check_code']:<24} {period:<12} {row['message'][:70]}"
+        line = (
+            f"  {row['status']:<8} {row['standard']:<5} {row['check_code']:<24} "
+            f"{period:<12} {row['message'][:64]}"
+        )
         typer.echo(typer.style(line, fg=colors.get(row["status"])))
 
     typer.echo(

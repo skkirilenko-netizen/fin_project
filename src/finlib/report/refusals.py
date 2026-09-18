@@ -19,6 +19,7 @@ METRIC_REASONS: dict[str, str] = {
     "missing_input": "missing_input",
     "missing_lines": "missing_lines",
     "no_previous_period": "no_previous_period",
+    "no_comparable_period": "no_comparable_period",
     "zero_denominator": "zero_denominator",
     "negative_denominator": "negative_denominator",
     "sign_change": "sign_change",

@@ -6,13 +6,14 @@ from decimal import Decimal
 import pytest
 
 from finlib.metrics.definitions import load_metrics
-from finlib.metrics.engine import MetricStatus, compute_metric
-from finlib.normalize.lines import ReportingType
+from finlib.metrics.engine import Baseline, MetricStatus, compute_metric
+from finlib.normalize.lines import ReportingType, load_lines
 from finlib.quality.periods import PeriodConfidence
 from finlib.quality.thresholds import load_thresholds
 from finlib.standards import Standard
 
 PERIOD = date(2025, 12, 31)
+EARLIER = date(2024, 12, 31)
 
 # Отчётность ПАО «Газпром» за 2025 год, тысячи рублей, из сохранённой пробы.
 CURRENT: dict[str, Decimal | None] = {
@@ -69,15 +70,35 @@ def compute(
     if standards is None:
         codes = set(values or {}) | set(earlier or {})
         standards = dict.fromkeys(codes, Standard.RSBU.value)
+    catalog = load_lines()
     return compute_metric(
         metric,
         reporting_type,
         PERIOD,
         values,
-        earlier,
+        baseline(earlier),
         PeriodConfidence.VERIFIED,
         load_thresholds(),
         standards,
+        lambda code: catalog.measure_of(code, reporting_type),
+    )
+
+
+def baseline(values):
+    """Начало периода обоих видов из одного набора величин.
+
+    В контрольном примере отчётность годовая, и у величины на дату
+    и у величины за период начало периода одно — конец прошлого года.
+    Разводятся они только на промежуточной отчётности.
+    """
+    if values is None:
+        return Baseline()
+    return Baseline(
+        stock_date=EARLIER,
+        flow_date=EARLIER,
+        stock=values,
+        flow=values,
+        has_earlier=True,
     )
 
 
@@ -341,3 +362,94 @@ def test_debt_total_note_names_the_limitation() -> None:
     note = load_metrics().require("debt_total").note or ""
     assert "1410" in note and "1510" in note
     assert "аренд" in note
+
+
+# --- начало периода определяется видом величины --------------------------------
+
+
+def _periods(*dates: date) -> dict:
+    """Периоды с одинаковым составом величин — для проверки выбора базы."""
+    from finlib.metrics.engine import PeriodValues
+
+    return {item: PeriodValues(item, dict(CURRENT)) for item in dates}
+
+
+def test_annual_report_compares_both_kinds_with_the_previous_year() -> None:
+    """У годовой отчётности база одна на оба вида, и правило её не меняет."""
+    from finlib.metrics.engine import baseline_of
+
+    periods = _periods(date(2025, 12, 31), date(2024, 12, 31))
+    found = baseline_of(date(2025, 12, 31), periods, {}, load_lines())
+    assert found.stock_date == date(2024, 12, 31)
+    assert found.flow_date == date(2024, 12, 31)
+
+
+def test_interim_balance_compares_with_the_year_end() -> None:
+    """Балансовая величина полугодия сравнивается с концом прошлого года.
+
+    А величина за период — с тем же полугодием прошлого года. Одна база
+    на оба вида давала бы годовую прибыль против полугодового изменения
+    капитала.
+    """
+    from finlib.metrics.engine import baseline_of
+
+    periods = _periods(
+        date(2026, 6, 30), date(2025, 12, 31), date(2025, 6, 30), date(2024, 12, 31)
+    )
+    found = baseline_of(date(2026, 6, 30), periods, {}, load_lines())
+    assert found.stock_date == date(2025, 12, 31)
+    assert found.flow_date == date(2025, 6, 30)
+    assert "на дату — 31.12.2025" in found.describe()
+
+
+def test_missing_comparable_period_is_refused_not_substituted() -> None:
+    """Нет прошлогоднего полугодия — базы за период нет, ближайшая не годится.
+
+    Подстановка ближайшего даёт настоящее число при чужом сравнении,
+    и такую ошибку не ловит ни один контроль.
+    """
+    from finlib.metrics.engine import baseline_of
+
+    periods = _periods(date(2026, 6, 30), date(2025, 12, 31))
+    found = baseline_of(date(2026, 6, 30), periods, {}, load_lines())
+    assert found.stock_date == date(2025, 12, 31)
+    assert found.flow_date is None
+    assert found.has_earlier
+
+
+def test_period_of_another_length_is_not_a_comparable_one() -> None:
+    """Год назад в ту же дату, но период другой длины — не база.
+
+    Дата совпадает только у годовых периодов; проверяется и длительность,
+    иначе полугодие сравнивалось бы с годом при совпавшей дате.
+    """
+    from finlib.metrics.engine import period_months
+
+    catalog = load_lines()
+    assert period_months(date(2025, 12, 31), catalog) == 12
+    assert period_months(date(2026, 6, 30), catalog) == 6
+
+
+def test_metric_without_a_comparable_period_says_why() -> None:
+    """Показатель со средней величиной отказывается и называет причину."""
+    from finlib.metrics.formula import NotCalculableReason
+
+    result = compute("roa", previous=None)
+    assert result is not None
+    assert result.status is MetricStatus.NOT_CALCULABLE
+    assert result.reason_code == NotCalculableReason.NO_PREVIOUS_PERIOD.value
+
+
+def test_cash_balance_is_a_stock_inside_a_flow_form() -> None:
+    """Остаток денежных средств — величина на дату внутри отчёта за период.
+
+    Вид объявлен строкой, а не выведен из формы: строка отличается
+    от своей формы, и справочник это говорит прямо.
+    """
+    from finlib.normalize.lines import Measure
+
+    catalog = load_lines()
+    assert catalog.measure_of("4500") is Measure.STOCK
+    assert catalog.measure_of("4400") is Measure.FLOW
+    assert catalog.measure_of("1600") is Measure.STOCK
+    assert catalog.measure_of("2110") is Measure.FLOW

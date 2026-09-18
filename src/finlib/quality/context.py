@@ -44,10 +44,14 @@ FROM dq_log
 WHERE src_file_id = %(id)s AND check_code = ANY(%(codes)s)
 """
 
+# Стандарт входит в отбор: расхождение периодов по МСФО к комплекту РСБУ
+# отношения не имеет. Берётся он у комплекта, оставившего запись, — сама
+# запись журнала стандарта не хранит.
 _SELECT_MISMATCHES = """
-SELECT report_date, form_code, line_code, previous_value, new_value
-FROM dq_log
-WHERE inn = %(inn)s AND check_code = %(code)s AND report_date = ANY(%(dates)s)
+SELECT d.report_date, d.form_code, d.line_code, d.previous_value, d.new_value
+FROM dq_log d JOIN src_file s ON s.id = d.src_file_id
+WHERE d.inn = %(inn)s AND s.standard = %(standard)s AND d.check_code = %(code)s
+  AND d.report_date = ANY(%(dates)s)
 """
 
 
@@ -180,6 +184,7 @@ def build_context(
             _SELECT_MISMATCHES,
             {
                 "inn": src["inn"],
+                "standard": standard.value,
                 "code": CheckCode.PERIOD_VALUE_MISMATCH.value,
                 "dates": dates,
             },
