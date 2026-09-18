@@ -321,7 +321,7 @@ def _extract_form(
     known = catalog.for_form(form_code)
     recognised: dict[int, IfrsPosition] = {}
     for position_index, (name, _, _) in enumerate(rows):
-        found = catalog.match_by_name(name) if name else None
+        found = catalog.match_by_name(name, form=form_code) if name else None
         if found is not None and found.form == form_code:
             recognised[position_index] = found
 
@@ -1179,7 +1179,9 @@ def _resolve_by_section(
         below = next((place for place in closings if place > index), None)
         if below is None:
             continue
-        found = catalog.match_by_name(name, section=recognised[below].section)
+        found = catalog.match_by_name(
+            name, section=recognised[below].section, form=form_code
+        )
         if found is not None and found.form == form_code:
             recognised[index] = found
             logger.info(

@@ -974,7 +974,7 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
         issuer = by_inn.get(row["inn"])
         if issuer is None:
             continue
-        position = catalog.match_by_name(row["source_name"])
+        position = catalog.match_by_name(row["source_name"], form=row["form_code"])
         if position is not None and position.form == row["form_code"]:
             found.append(
                 SavedMarkup(

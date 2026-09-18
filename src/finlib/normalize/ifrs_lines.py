@@ -269,7 +269,9 @@ class IfrsCatalog(BaseModel):
             raise KeyError(f"позиции {code} нет в справочнике МСФО")
         return found
 
-    def match_by_name(self, name: str, section: str | None = None) -> IfrsPosition | None:
+    def match_by_name(
+        self, name: str, section: str | None = None, form: str | None = None
+    ) -> IfrsPosition | None:
         """Позиция по наименованию из отчётности; None — не опознана.
 
         Неопознанная статья не теряется: её обязан записать разбор файла,
@@ -279,9 +281,18 @@ class IfrsCatalog(BaseModel):
         («Кредиты и займы» — и в долгосрочных обязательствах, и
         в краткосрочных). Без него такое наименование не опознаётся вовсе:
         отдать первую попавшуюся позицию значит отдать произвольную.
+
+        `form` отсекает тёзок из других форм, и это не то же самое, что
+        раздел. «Прибыль до налогообложения» стоит и в отчёте о прибыли или
+        убытке, и первой строкой косвенного метода в отчёте о движении
+        денежных средств — это разные величины с разным смыслом. Без формы
+        такое наименование переставало опознаваться вовсе, и в ОПУ терялся
+        итог, который прежде опознавался.
         """
         normalized = normalize_name(name)
         found = [item for item in self.positions if normalized in item.match_names]
+        if form is not None:
+            found = [item for item in found if item.form == form]
         if not found:
             return None
         if len(found) == 1:

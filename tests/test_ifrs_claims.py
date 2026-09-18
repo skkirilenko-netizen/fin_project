@@ -58,11 +58,24 @@ REPEATED_ROW = """
 Прибыль за год                          320 000        280 000
 """
 
-# Долгосрочная дебиторская задолженность, которой в ядре нет: случай ЛСР.
+# Дебиторская задолженность в обоих разделах баланса: случай ЛСР. Позиции
+# теперь две, и различает их раздел.
 LONG_TERM_RECEIVABLE = """
 Консолидированный отчёт о финансовом положении
 Основные средства                       700 000        650 000
 Торговая и прочая дебиторская задолженность   1 410      2 219
+Итого внеоборотные активы               701 410        652 219
+Запасы                                  300 000        280 000
+Активы по договорам, торговая и прочая дебиторская задолженность  215 664  132 186
+Итого оборотные активы                  515 664        412 186
+Итого активы                          1 217 074      1 064 405
+"""
+
+# Строка внеоборотного раздела, которой в справочнике нет вовсе.
+UNKNOWN_NON_CURRENT_ROW = """
+Консолидированный отчёт о финансовом положении
+Основные средства                       700 000        650 000
+Средства в банках                         1 410          2 219
 Итого внеоборотные активы               701 410        652 219
 Запасы                                  300 000        280 000
 Итого оборотные активы                  300 000        280 000
@@ -217,30 +230,48 @@ def test_extraction_counts_repeated_row_once() -> None:
 # --- правило в разметке --------------------------------------------------------
 
 
-def test_markup_of_another_section_is_refused() -> None:
-    """Человеку правило раздела предъявляется так же, как автомату."""
+def test_receivables_of_both_sections_keep_their_own_positions() -> None:
+    """Дебиторская задолженность разных разделов — две позиции, не одна.
+
+    Прежде позиция была одна, оборотная, и строка внеоборотного раздела
+    не опознавалась вовсе: у ЛСР итог внеоборотных активов не сходился
+    ровно на 1 410, а размеченная кодом оборотной она завышала оборотные
+    активы на ту же величину.
+    """
     issuer = issuer_of(
         LONG_TERM_RECEIVABLE, ("ifrs.statement_of_financial_position",)
     )
-    candidate = candidate_named(issuer, "Торговая и прочая дебиторская задолженность")
+    values = issuer.extraction.totals(DATES[0])
+    assert values["ifrs.long_term_trade_receivables"] == Decimal(1410)
+    # Оборотная позиция при этом свободна: строка внеоборотного раздела
+    # её не занимает, а собственная строка ЛСР названа иначе и размечается.
+    assert "ifrs.trade_receivables" not in values
+
+
+def test_markup_of_another_section_is_refused() -> None:
+    """Человеку правило раздела предъявляется так же, как автомату."""
+    issuer = issuer_of(
+        UNKNOWN_NON_CURRENT_ROW, ("ifrs.statement_of_financial_position",)
+    )
+    candidate = candidate_named(issuer, "Средства в банках")
     catalog = load_ifrs_lines()
-    problem = markup_problem(issuer, candidate, "ifrs.trade_receivables", catalog)
+    problem = markup_problem(issuer, candidate, "ifrs.inventories", catalog)
     assert problem is not None
     assert "разделе" in problem
     with pytest.raises(ValueError):
-        apply_assignment(issuer, candidate, "ifrs.trade_receivables", catalog)
+        apply_assignment(issuer, candidate, "ifrs.inventories", catalog)
 
 
 def test_refused_markup_returns_the_row_to_the_queue() -> None:
     """Отклонённое присвоение не разметка: строка снова в очереди."""
     issuer = issuer_of(
-        LONG_TERM_RECEIVABLE, ("ifrs.statement_of_financial_position",)
+        UNKNOWN_NON_CURRENT_ROW, ("ifrs.statement_of_financial_position",)
     )
     catalog = load_ifrs_lines()
-    candidate = candidate_named(issuer, "Торговая и прочая дебиторская задолженность")
-    issuer.assignments[candidate.key] = "ifrs.trade_receivables"
+    candidate = candidate_named(issuer, "Средства в банках")
+    issuer.assignments[candidate.key] = "ifrs.inventories"
     assert candidate.key in issuer.rejects(catalog)
-    assert issuer.values(catalog).get("ifrs.trade_receivables") is None
+    assert issuer.values(catalog).get("ifrs.inventories") == Decimal(300000)
     assert any(
         item.key == candidate.key for item in candidates([issuer], catalog)
     )

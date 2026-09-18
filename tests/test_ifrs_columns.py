@@ -161,7 +161,10 @@ def test_position_outside_its_section_is_not_recognised() -> None:
 
     У ЛСР «Торговая и прочая дебиторская задолженность» стоит и во
     внеоборотных активах, и в оборотных под другим наименованием; справочник
-    знает её оборотной, и в расчёт уходило 1 410 вместо 215 664.
+    знал её только оборотной, и в расчёт уходило 1 410 вместо 215 664.
+
+    С появлением позиции долгосрочной задолженности строка опознаётся своей,
+    а не чужой: правило раздела осталось тем же, изменился справочник.
     """
     balance = """
 Консолидированный отчёт о финансовом положении
@@ -176,9 +179,7 @@ def test_position_outside_its_section_is_not_recognised() -> None:
 """
     found = extract(balance, DATES, Grouping.RUSSIAN)
     assert found.value_of("ifrs.trade_receivables", DATES[0]) is None
-    assert any(
-        "дебиторская" in row.source_name.lower() for row in found.unrecognised
-    )
+    assert found.value_of("ifrs.long_term_trade_receivables", DATES[0]) == Decimal(1410)
 
 
 def test_intermediate_subtotal_is_not_named_by_a_catalog_total() -> None:
