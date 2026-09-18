@@ -330,3 +330,66 @@ def test_neighbouring_years_are_not_mistaken_for_a_note_number() -> None:
     found = extraction_of(text)
     assert found.value_of("ifrs.finance_income", DATES[0]) == Decimal(1393)
     assert found.value_of("ifrs.finance_income", DATES[1]) == Decimal(49)
+
+
+# --- две спорные строки в одном разделе ----------------------------------------
+
+# Случай Сегежи: в разделе внеоборотных активов спорны сразу две строки,
+# и поодиночке ни одна итога не восстанавливает. «Гудвил 21 444» — это 21
+# и 444 за два года, «Авансы 11 129 1 650» — примечание 11 и величины
+# 129 и 1 650. Раздел сходится только при обеих исправленных сразу:
+# 700 000 + 21 + 129 = 700 150.
+TWO_CONTESTED = COMPLETE.replace(
+    "Итого внеоборотные активы               700 000        650 000",
+    "Гудвил 21 444\n"
+    "Авансы, выданные под внеоборотные активы 11 129 1 650\n"
+    "Итого внеоборотные активы 700 150 652 094",
+).replace(
+    "Итого активы                          1 500 000      1 360 000",
+    "Итого активы 1 500 150 1 362 094",
+)
+
+
+def test_two_contested_rows_of_one_section_are_resolved_together() -> None:
+    """Спорные строки раздела разбираются вместе, а не по одной.
+
+    Поодиночке ни одна итога не восстанавливает, и правка каждой
+    откатывалась: у Сегежи так и остались гудвил 21 444 вместо 21 и авансы
+    11 129 вместо 129 — числа настоящие на вид, при сходящемся балансе.
+    """
+    found = extraction_of(TWO_CONTESTED)
+    assert found.value_of("ifrs.goodwill", DATES[0]) == Decimal(21)
+    assert found.value_of("ifrs.goodwill", DATES[1]) == Decimal(444)
+    assert found.value_of("ifrs.advances_for_non_current_assets", DATES[0]) == Decimal(129)
+    assert found.value_of("ifrs.advances_for_non_current_assets", DATES[1]) == Decimal(1650)
+
+
+def test_note_reading_does_not_apply_to_a_negative_value() -> None:
+    """Номер примечания не бывает отрицательным и не бывает в скобках.
+
+    У ЛСР «Курсовые разницы при пересчете из других валют (9 202) 3 708»
+    читались как примечание 9 и величина 202: знак терялся вместе с первой
+    группой цифр, и совокупный доход переставал сходиться.
+    """
+    text = COMPLETE.replace(
+        "Финансовые расходы                       (50 000)       (48 000)",
+        "Финансовые расходы (9 202) (3 708)",
+    )
+    found = extraction_of(text)
+    assert found.value_of("ifrs.finance_costs", DATES[0]) == Decimal(-9202)
+
+
+def test_note_reading_is_not_applied_against_a_bound_alone() -> None:
+    """Чтение с отсечением группы цифр требует арифметики раздела, а не границы.
+
+    «Прибыль за год 10 778 28 598» по границе «слагаемое не больше итога»
+    читалась бы как примечание 10 и прибыль 778: у ЛСР совокупный доход
+    за год меньше прибыли, потому что прочий совокупный доход отрицателен.
+    Такое чтение допускается только против сходимости раздела.
+    """
+    text = COMPLETE.replace(
+        "Прибыль за период                       208 000        176 000",
+        "Прибыль за период 10 778 28 598",
+    )
+    found = extraction_of(text)
+    assert found.value_of("ifrs.profit_for_period", DATES[0]) == Decimal(10_778)

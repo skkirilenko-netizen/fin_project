@@ -323,12 +323,20 @@ def _confidence(
 # величина, названная дважды, — одно расхождение; разные величины за один
 # период — разные. Расхождение соглашения о знаке сюда не попадает вовсе:
 # у него свой код, потому что величина при нём не пересматривалась.
+#
+# **Числитель отбирается по тому же стандарту, что и знаменатель.** Прежде
+# расхождения брались по организации целиком, а комплекты — по стандарту
+# оценки: у Сегежи 9 пересмотров по МСФО ложились на 5 комплектов РСБУ,
+# и сигнал говорил о ряде, которого не описывал. Ряды по РСБУ и по МСФО
+# несопоставимы — это тот же запрет смешения, что у показателей.
 _MISMATCHES = """
 SELECT count(*) AS n FROM (
-    SELECT DISTINCT report_date, form_code, line_code, previous_value, new_value,
-           message
-    FROM dq_log
-    WHERE inn = %(inn)s AND check_code = 'period_value_mismatch'
+    SELECT DISTINCT d.report_date, d.form_code, d.line_code, d.previous_value,
+           d.new_value, d.message
+    FROM dq_log d
+    JOIN src_file s ON s.id = d.src_file_id
+    WHERE d.inn = %(inn)s AND s.standard = %(s)s
+      AND d.check_code = 'period_value_mismatch'
 ) AS distinct_revisions
 """
 
@@ -363,7 +371,7 @@ def _signals(
         _shares(previous),
         _line_names(),
     )
-    mismatches = fetch_all(_MISMATCHES, {"inn": inn}, conn=conn)
+    mismatches = fetch_all(_MISMATCHES, {"inn": inn, "s": standard.value}, conn=conn)
     sets = fetch_all(_SETS, {"inn": inn, "s": standard.value}, conn=conn)
     if mismatches and sets:
         revision = revision_intensity(int(mismatches[0]["n"]), int(sets[0]["n"]))

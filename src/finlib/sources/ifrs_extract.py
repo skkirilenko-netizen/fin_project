@@ -18,12 +18,15 @@
 """
 
 import logging
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
 from functools import lru_cache
+from itertools import product
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
@@ -38,6 +41,12 @@ logger = logging.getLogger(__name__)
 # и единственное, что их разделяет, — ширина промежутка. Внутри числа
 # пробел ровно один, между колонками — два и более.
 _NARROW_SPACE = "   "
+
+# Сколько спорных строк раздела перебирается разом. Перебор растёт вдвое
+# с каждой, а разделов с большим числом спорных строк в разобранных
+# комплектах нет: у Сегежи их две, у прочих одна. Превышение — не повод
+# гадать, а сигнал, что разбор колонок сломался целиком.
+MAX_CONTESTED_ROWS = 6
 
 # Прочерк на месте величины: в графе периода он означает ноль, а не пропуск
 # колонки. Без него у строки оказывается одна величина вместо двух, и она
@@ -315,6 +324,12 @@ def _extract_form(
     by_column = _columns_of_form(lines, report_dates, grouping, columns)
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
     alternatives: dict[int, tuple[Decimal, ...]] = {}
+    # Чтение, отбрасывающее первую группу цифр как номер примечания, живёт
+    # отдельно от чтения по колонкам: оно **сильнее меняет строку** и потому
+    # принимается только против арифметики раздела, а не против границы
+    # «слагаемое не больше итога». У ЛСР «Прибыль за год 10 778 28 598»
+    # по этой границе читалась бы как примечание 10 и прибыль 778.
+    note_readings: dict[int, tuple[Decimal, ...]] = {}
     references: dict[int, tuple[int, ...]] = {}
     tail_from = 0
 
@@ -332,7 +347,7 @@ def _extract_form(
         # потерять величину.
         by_coordinates = by_column.get(index)
         if by_coordinates and len(by_coordinates) >= len(values):
-            values, alternative = by_coordinates, ()
+            values, alternative = by_coordinates, ((), ())
         if not values:
             # Строка без величин — либо заголовок раздела, либо начало
             # наименования, перенесённого вёрсткой. Какая именно, станет
@@ -340,8 +355,10 @@ def _extract_form(
             if name:
                 pending.append(name)
             continue
-        if alternative:
-            alternatives[len(rows)] = alternative
+        if alternative[0]:
+            alternatives[len(rows)] = alternative[0]
+        if alternative[1]:
+            note_readings[len(rows)] = alternative[1]
         if reference:
             references[len(rows)] = reference
         rows.append((_joined(pending, name), values, index))
@@ -357,7 +374,7 @@ def _extract_form(
 
     _resolve_by_section(rows, recognised, catalog, form_code)
 
-    _choose_reading_by_totals(rows, alternatives, recognised, catalog)
+    _choose_reading_by_totals(rows, alternatives, note_readings, recognised, catalog)
 
     # Отсев «не статья» идёт **прежде** опознания итогов структурой.
     # Контрольная сумма без наименования равна сумме предшествующих строк
@@ -879,10 +896,16 @@ def _split_row(
     опознаётся по конвенции документа, иначе «700 000  650 000» слипается
     в одну величину.
 
-    Запасное чтение — то же самое при допущении, что в каждой колонке
-    стоит ровно одна группа цифр: «367 391» у Автодора это не триста
-    шестьдесят семь тысяч, а 367 и 391 за два года. Выбрать между чтениями
-    по виду строки нельзя, это выбирает арифметика итога.
+    Запасных чтений два, и оба — свидетельства о разметке, а не догадки.
+    Первое: в каждой колонке стоит ровно одна группа цифр — «367 391»
+    у Автодора это не триста шестьдесят семь тысяч, а 367 и 391 за два года.
+    Второе: первая группа цифр — номер примечания, слипшийся с величиной, —
+    «Авансы, выданные под внеоборотные активы 11 129 1 650» у Сегежи это
+    примечание 11 и величины 129 и 1 650.
+
+    Выбрать между чтениями по виду строки нельзя: номер примечания отделён
+    от величины тем же одиночным пробелом, что и разряды. Это выбирает
+    арифметика итога.
     """
     stripped = line.rstrip()
     if not stripped.strip():
@@ -913,7 +936,12 @@ def _split_row(
     # в восемьсот пятьдесят шесть миллиардов при валюте баланса в полтора.
     cells = [item.group() for item in tail]
     texts = _unglue(cells, periods, grouping)
-    alternative = _by_single_groups(cells, periods, grouping)
+    # Запасных чтений два, и оба — свидетельства о разметке колонок,
+    # а не догадки. Первое: в каждой колонке ровно одна группа цифр.
+    # Второе: первая группа — номер примечания, слипшийся с величиной.
+    # Выбирает между ними арифметика раздела, а не вид строки.
+    by_columns = _by_single_groups(cells, periods, grouping)
+    without_note = _without_leading_note(texts, periods, grouping)
 
     parsed = tuple(
         value
@@ -962,7 +990,10 @@ def _split_row(
     return (
         name,
         parsed,
-        (alternative if alternative != parsed else ()),
+        (
+            by_columns if by_columns != parsed else (),
+            without_note if without_note != parsed else (),
+        ),
         tuple(dict.fromkeys(reference)),
     )
 
@@ -970,6 +1001,7 @@ def _split_row(
 def _choose_reading_by_totals(
     rows: list[tuple[str, tuple[Decimal, ...], int]],
     alternatives: dict[int, tuple[Decimal, ...]],
+    note_readings: dict[int, tuple[Decimal, ...]],
     recognised: dict[int, IfrsPosition],
     catalog: IfrsCatalog,
 ) -> None:
@@ -987,7 +1019,7 @@ def _choose_reading_by_totals(
     итога. Чтение меняется только там, где первое чтение это нарушает,
     а второе нет, — иначе перебором подберётся что угодно.
     """
-    if not alternatives:
+    if not alternatives and not note_readings:
         return
     by_code = {position.code: index for index, position in recognised.items()}
     for total in catalog.totals(form=None):
@@ -1011,7 +1043,7 @@ def _choose_reading_by_totals(
                 )
                 rows[index] = (rows[index][0], other, rows[index][2])
 
-    _fix_overflowing_sections(rows, alternatives, by_code, catalog)
+    _fix_overflowing_sections(rows, alternatives, note_readings, by_code, catalog)
 
     # Тот же довод для строк, которых справочник не опознал. Итог раздела
     # для них неизвестен, но валюта баланса известна, и статья баланса больше
@@ -1038,6 +1070,7 @@ def _choose_reading_by_totals(
 def _fix_overflowing_sections(
     rows: list[tuple[str, tuple[Decimal, ...], int]],
     alternatives: dict[int, tuple[Decimal, ...]],
+    note_readings: dict[int, tuple[Decimal, ...]],
     by_code: dict[str, int],
     catalog: IfrsCatalog,
 ) -> None:
@@ -1046,9 +1079,25 @@ def _fix_overflowing_sections(
     Утверждение жёсткое и потому пригодное для проверки: нераскрытое
     слагаемое сумму только увеличивает, поэтому у итога, все слагаемые
     которого неотрицательны, раскрытая часть больше итога не бывает.
-    У Сегежи «Гудвил 21 444» — это примечание 21 и величина 444, и при
-    чтении «двадцать один миллион четыреста сорок четыре» сумма
-    внеоборотных активов превышала свой итог на двадцать тысяч.
+
+    **Спорные строки раздела разбираются вместе, а не по одной.** Поодиночке
+    ни одна из них итога не восстанавливает, и правка каждой откатывалась:
+    у Сегежи в разделе внеоборотных активов спорны сразу две строки —
+    «Гудвил 21 444» (примечание 21 и величина 444) и «Авансы, выданные под
+    внеоборотные активы 11 129 1 650» (примечание 11, затем 129 и 1 650), —
+    и раздел сходился только при обеих исправленных сразу. Это не единичный
+    случай, а класс: номер примечания липнет к величине у каждого эмитента,
+    печатающего примечания отдельной колонкой.
+
+    Решает арифметика, и порядок доводов объявлен. Сначала ищется чтение,
+    при котором раздел **сходится**: равенство суммы итогу — свидетельство
+    сильное, и второго такого чтения обычно нет. Если сойтись не может —
+    часть слагаемых не опознана справочником, и точной суммы нет вовсе, —
+    годится чтение, при котором сумма итога хотя бы не превышает. И в том
+    и в другом случае требуется **единственность**: два чтения, одинаково
+    отвечающие доводу, означают, что довод ничего не выбрал, и строки
+    уходят на экран сверки неразобранными. Перебором подбирается что угодно,
+    поэтому неоднозначность — отказ, а не выбор большинством.
 
     К отчёту о прибылях правило неприменимо: там слагаемые знаковые,
     и превышение суммы над итогом — обычное дело.
@@ -1066,24 +1115,131 @@ def _fix_overflowing_sections(
             value < 0 for index in parts for value in rows[index][1]
         ):
             continue
-        movable = [index for index in parts if index in alternatives]
-        for period in range(len(rows[place][1])):
-            for index in movable:
-                if not _overflows(rows, parts, place, period):
-                    break
-                keep = rows[index][1]
-                rows[index] = (rows[index][0], alternatives[index], rows[index][2])
-                if _overflows(rows, parts, place, period):
-                    rows[index] = (rows[index][0], keep, rows[index][2])
-                    continue
-                logger.info(
-                    "строка «%s» прочитана как %s: при чтении %s сумма раздела"
-                    " превышала итог %s",
-                    rows[index][0],
-                    alternatives[index],
-                    keep,
-                    total.code,
-                )
+        movable = [
+            index
+            for index in parts
+            if index in alternatives or index in note_readings
+        ]
+        if not movable:
+            continue
+        if len(movable) > MAX_CONTESTED_ROWS:
+            # Перебор растёт с каждой спорной строкой. Разделов с таким
+            # числом спорных строк в разобранных комплектах нет, и молчать
+            # о встреченном нельзя: это сигнал, что разбор колонок сломался
+            # целиком, а не в одной строке.
+            logger.warning(
+                "раздел %s: спорных строк %d, перебор не выполнялся",
+                total.code,
+                len(movable),
+            )
+            continue
+        _choose_section_reading(
+            rows, alternatives, note_readings, parts, place, movable, total.code
+        )
+
+
+def _choose_section_reading(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    alternatives: dict[int, tuple[Decimal, ...]],
+    note_readings: dict[int, tuple[Decimal, ...]],
+    parts: list[int],
+    place: int,
+    movable: list[int],
+    total_code: str,
+) -> None:
+    """Выбирает чтение спорных строк раздела разом; при неоднозначности — ничего."""
+    variants = [
+        [
+            rows[index][1],
+            *([alternatives[index]] if index in alternatives else []),
+            *([note_readings[index]] if index in note_readings else []),
+        ]
+        for index in movable
+    ]
+    matched: list[dict[int, tuple[Decimal, ...]]] = []
+    fitting: list[dict[int, tuple[Decimal, ...]]] = []
+    for combination in product(*variants):
+        reading = dict(zip(movable, combination, strict=True))
+        verdict = _section_fit(rows, parts, place, reading)
+        if verdict is _Fit.MATCHED:
+            matched.append(reading)
+        elif verdict is _Fit.WITHIN:
+            fitting.append(reading)
+
+    chosen = matched[0] if len(matched) == 1 else (
+        fitting[0] if not matched and len(fitting) == 1 else None
+    )
+    logger.info(
+        "раздел %s: спорных строк %d, чтений перебрано %d, сошлось %d, "
+        "не превышает итога %d",
+        total_code,
+        len(movable),
+        math.prod(len(item) for item in variants),
+        len(matched),
+        len(fitting),
+    )
+    if chosen is None:
+        return
+    for index, values in chosen.items():
+        if values == rows[index][1]:
+            continue
+        logger.info(
+            "строка «%s» прочитана как %s: при чтении %s раздел %s не сходился",
+            rows[index][0],
+            values,
+            rows[index][1],
+            total_code,
+        )
+        rows[index] = (rows[index][0], values, rows[index][2])
+
+
+class _Fit(StrEnum):
+    """Как раскрытая часть раздела относится к его итогу."""
+
+    # Сумма равна итогу в пределах допуска — свидетельство сильное.
+    MATCHED = "matched"
+    # Сумма итога не превышает: часть слагаемых может быть не опознана.
+    WITHIN = "within"
+    # Сумма больше итога хотя бы в одном периоде: чтение неверно.
+    OVER = "over"
+
+
+def _section_fit(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    parts: list[int],
+    place: int,
+    reading: dict[int, tuple[Decimal, ...]],
+) -> _Fit:
+    """Сходится ли раздел при этом чтении спорных строк — по всем периодам сразу.
+
+    По одному периоду совпадение бывает случайным, поэтому требуется
+    совпадение по всем: то же правило, по которому опознаётся неподписанный
+    итог.
+    """
+    totals = rows[place][1]
+    verdict = _Fit.MATCHED
+    for period in range(len(totals)):
+        computed = Decimal(0)
+        for index in parts:
+            values = reading.get(index, rows[index][1])
+            if period < len(values):
+                computed += values[period]
+        total = totals[period]
+        if computed > total + _tolerance(total):
+            return _Fit.OVER
+        if abs(computed - total) > _tolerance(total):
+            verdict = _Fit.WITHIN
+    return verdict
+
+
+def _tolerance(total: Decimal) -> Decimal:
+    """Допуск сходимости раздела: округление составителя, а не расхождение.
+
+    Тот же вид, что у экрана сверки: доля от итога плюс единица. Величины
+    приходят из документа целыми, и допуск нужен ровно на округление
+    последнего разряда у составителя отчётности.
+    """
+    return abs(total) / Decimal(1000) + Decimal(1)
 
 
 def _overflows(
@@ -1130,6 +1286,43 @@ def _exceeds(values: tuple[Decimal, ...], limits: tuple[Decimal, ...]) -> bool:
     return any(
         abs(value) > abs(limit) for value, limit in zip(values, limits, strict=False)
     )
+
+
+def _without_leading_note(
+    texts: list[str], periods: int, grouping: Grouping
+) -> tuple[Decimal, ...]:
+    """Чтение, при котором первая группа цифр — номер примечания.
+
+    «Авансы, выданные под внеоборотные активы 11 129 1 650» — это примечание
+    11 и величины 129 и 1 650, а читается как 11 129 и 1 650. Отсечение
+    номера слева такой случай не ловит: величин ровно столько, сколько
+    периодов, и лишней колонки, по которой номер опознаётся, здесь нет.
+
+    Чтение предлагается, только когда колонок уже ровно столько, сколько
+    периодов: иначе спор идёт о самой разметке колонок, и его решает первое
+    запасное чтение. Номером считается целое от 1 до 99 — то же определение,
+    по которому номер примечания отличается от величины в других местах
+    разбора.
+    """
+    if periods < 1 or len(texts) != periods:
+        return ()
+    # Номер примечания не бывает ни отрицательным, ни в скобках. Без этой
+    # оговорки у ЛСР «Курсовые разницы при пересчете из других валют
+    # (9 202) 3 708» читались как примечание 9 и величина 202: знак терялся
+    # вместе с первой группой цифр, и совокупный доход переставал сходиться.
+    if texts[0].lstrip().startswith(("-", "−", "(")):
+        return ()
+    groups = re.findall(r"\d+", texts[0])
+    if len(groups) < 2 or not _looks_like_note_number(Decimal(groups[0])):
+        return ()
+    head = texts[0]
+    rest = head[head.index(groups[0]) + len(groups[0]) :]
+    values = [_amount(rest, grouping)] + [
+        _amount(item, grouping) for item in texts[1:]
+    ]
+    if any(value is None for value in values):
+        return ()
+    return tuple(value for value in values if value is not None)
 
 
 def _by_single_groups(
