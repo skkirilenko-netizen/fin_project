@@ -424,6 +424,14 @@ def ifrs_markup_command(
             "ни голосованием, ни арифметикой",
         ),
     ] = [],  # noqa: B006 — typer требует list по умолчанию
+    priority: Annotated[
+        list[str],
+        typer.Option(
+            "--priority",
+            help="Показывать только эти приоритеты: IN_CBONDS_OTHER, "
+            "BREAKS_TOTAL, MATERIAL, OTHER. Можно повторять",
+        ),
+    ] = [],  # noqa: B006 — typer требует list по умолчанию
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Разметка неопознанных строк МСФО: присвоение кодов позициям модели.
@@ -431,6 +439,11 @@ def ifrs_markup_command(
     Строки показываются не по частоте, а по влиянию на арифметику: сначала
     те, без которых не сходится итог раздела. Это даёт двойную проверку —
     присвоил код, итог сошёлся, значит опознал верно.
+
+    `--priority` сужает очередь до названных приоритетов. Нужен, когда время
+    ограничено: «прочие Cbonds» и статьи сверх порога существенности стоят
+    в очереди третьими и четвёртыми по счёту строк, и без отбора до них
+    за присест не дойти.
     """
     _setup_logging(verbose)
     if not who.strip():
@@ -449,7 +462,17 @@ def ifrs_markup_command(
     for name, reason in skipped:
         typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
 
-    _markup_loop(issuers, who.strip(), limit)
+    from finlib.sources.ifrs_markup import Priority
+
+    wanted: set[Priority] = set()
+    for item in priority:
+        try:
+            wanted.add(Priority[item.strip().upper()])
+        except KeyError:
+            listed = ", ".join(sorted(member.name for member in Priority))
+            _fail(f"приоритет «{item}» неизвестен; допустимы: {listed}")
+
+    _markup_loop(issuers, who.strip(), limit, wanted)
 
 
 def _load_issuers(
@@ -558,8 +581,15 @@ def _one_per_report(accepted: list, skipped: list[tuple[str, str]]) -> list:
     return found
 
 
-def _markup_loop(issuers: list, who: str, limit: int) -> None:
-    """Разговор с человеком: список, ввод кода, подсказки, пересчёт итогов."""
+def _markup_loop(
+    issuers: list, who: str, limit: int, priority: set | None = None
+) -> None:
+    """Разговор с человеком: список, ввод кода, подсказки, пересчёт итогов.
+
+    `priority` сужает очередь; пустое множество означает всю очередь, а не
+    пустую — отбор, молча оставляющий ноль строк, неотличим от исчерпанной
+    разметки.
+    """
     from finlib.normalize.ifrs_lines import load_ifrs_lines
     from finlib.sources.ifrs_markup import (
         NOT_A_LINE_CODE,
@@ -583,11 +613,17 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
     # считались бы незакрытыми, и очередь выстроилась бы по недостаче,
     # которой уже нет.
     already = restore(issuers)
-    left = len(candidates(issuers, catalog))
+    whole = candidates(issuers, catalog)
+    left = [item for item in whole if not priority or item.priority in priority]
+    chosen = (
+        ""
+        if not priority
+        else " по приоритетам " + ", ".join(sorted(item.name for item in priority))
+    )
     typer.echo(
         typer.style(
-            f"\nРазмечено прежде: {already}. Осталось строк: {left}. "
-            f"Эмитентов: {len(issuers)}.",
+            f"\nРазмечено прежде: {already}. Осталось строк: {len(left)} "
+            f"из {len(whole)}{chosen}. Эмитентов: {len(issuers)}.",
             bold=True,
         )
     )
@@ -603,6 +639,7 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
             item
             for item in candidates(issuers, catalog)
             if (item.inn, item.key) not in skipped
+            and (not priority or item.priority in priority)
         ]
         if not queue:
             typer.echo(typer.style("\nОчередь пуста.", bold=True))
