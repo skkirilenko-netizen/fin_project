@@ -392,7 +392,9 @@ def _journal_records(
             message=(
                 f"Опознано позиций {review.rows_recognised} из {review.rows_total}; "
                 f"итогов сверено {review.totals_checked}, не сошлось "
-                f"{len(review.totals_failed)}; правдоподобие конвенции: "
+                f"{len(review.totals_failed)}; строк сложено с другими "
+                f"{len(extraction.merged)}, спорных позиций "
+                f"{len(extraction.contested)}; правдоподобие конвенции: "
                 f"{review.plausibility.describe() if review.plausibility else '—'}"
             ),
             src_file_id=src_file_id,
@@ -406,6 +408,14 @@ def _journal_records(
                     for form in extraction.forms.values()
                     for code in form.totals_by_structure
                 ],
+                # Сложение и спор — события разбора, и молчать о них нельзя:
+                # затирание величины было неотличимо от честного опознания
+                # ровно потому, что нигде не считалось.
+                "merged_rows": [
+                    {"code": code, "name": name, "kind": kind}
+                    for code, name, kind in extraction.merged
+                ],
+                "contested_codes": [code for code, _ in extraction.contested],
             },
         )
     ]

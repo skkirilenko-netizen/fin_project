@@ -30,6 +30,7 @@ from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lin
 from finlib.normalize.lines import normalize_name
 from finlib.quality.totals import TotalCheck, TotalVerdict, check_total
 from finlib.sources.cbonds import other_shares
+from finlib.sources.ifrs_claims import Claim, Fold, fold
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
 from finlib.sources.ifrs_numbers import Grouping
@@ -163,6 +164,58 @@ class IssuerMarkup:
     # не попадает в итог раздела, и разметка не двигает арифметику.
     specific: dict[tuple[str, int], str] = field(default_factory=dict)
 
+    def rejects(self, catalog: IfrsCatalog) -> dict[tuple[str, int], str]:
+        """Присвоения, отклонённые правилом формы и раздела.
+
+        Правило «статья чужого раздела не опознаётся вовсе» действовало
+        у автомата и не действовало у человека: размечая строку руками,
+        коду оборотных активов можно было отдать строку из внеоборотных.
+        У ЛСР так и вышло — дебиторская задолженность 1 410 из внеоборотных
+        легла к оборотной, и оба итога разошлись ровно на неё. Правило одно
+        на обе стороны, и живёт оно в `ifrs_claims`.
+
+        Отклонённая строка не пропадает: она возвращается в очередь
+        разметки — отказ означает «мы не знаем, чем эта строка является»,
+        а не «этой строки нет».
+        """
+        found: dict[tuple[str, int], str] = {}
+        for row in self.extraction.unrecognised:
+            code = (
+                self.assignments.get(row.key)
+                or self.parts.get(row.key)
+                or (self.aggregates.get(row.key) or (None,))[0]
+            )
+            if code is None:
+                continue
+            position = catalog.get(code)
+            if position is None:
+                # Код подтверждённой специфической статьи: позиции
+                # в справочнике у него нет, и форму с разделом взять неоткуда.
+                continue
+            outcome = fold(position, [self.claim(row, catalog, position)])
+            if outcome.kind is Fold.NONE:
+                found[row.key] = outcome.reason
+        return found
+
+    def claim(
+        self, row: UnrecognisedRow, catalog: IfrsCatalog, position: IfrsPosition
+    ) -> Claim:
+        """Притязание строки разметки: где она стоит и что несёт.
+
+        У итоговой строки раздел не спрашивается, и это не послабление:
+        раздел определяется ближайшим итогом **ниже** строки, а ниже итога
+        стоит итог объемлющий — «Итого краткосрочные обязательства» так
+        оказывалось бы строкой раздела «Итого обязательства». Итог, отданный
+        не тому разделу, ловится арифметикой: неверный состав не сойдётся.
+        """
+        return Claim(
+            row.source_name,
+            row.values,
+            row.form,
+            None if position.is_total else _section_at(row, self, catalog),
+            row.key,
+        )
+
     def decided(self, row: UnrecognisedRow) -> bool:
         """Решена ли строка — любым способом.
 
@@ -214,8 +267,9 @@ class IssuerMarkup:
         disclosed = self.extraction.totals(self.report_date)
         found = dict(disclosed)
         details: dict[str, Decimal] = {}
+        rejected = self.rejects(catalog)
         for row in self.extraction.unrecognised:
-            if not row.values:
+            if not row.values or row.key in rejected:
                 continue
             code = self.assignments.get(row.key) or (
                 self.aggregates.get(row.key) or (None,)
@@ -227,8 +281,13 @@ class IssuerMarkup:
             if part is not None:
                 details[part] = details.get(part, Decimal(0)) + row.values[0]
         for code, amount in details.items():
-            if code not in disclosed:
-                found[code] = found.get(code, Decimal(0)) + amount
+            # Детализация идёт в итог только тогда, когда своей строки
+            # у позиции нет вовсе — ни опознанной справочником, ни присвоенной
+            # человеком. Прежде смотрели только на справочник, и у ФосАгро
+            # «Прибыль за отчетный год» 114 243 складывалась со своей же
+            # разбивкой по акционерам: итог выходил ровно вдвое больше.
+            if code not in found:
+                found[code] = amount
         return found
 
     def extras(self, catalog: IfrsCatalog) -> dict[str, Decimal]:
@@ -343,9 +402,13 @@ def _for_issuer(
     broken = _unbalanced_totals(issuer, catalog)
     hidden = other_shares(issuer.inn, issuer.report_date)
 
+    # Присвоение, отклонённое правилом формы и раздела, разметкой не является:
+    # строка возвращается в очередь, иначе отказ был бы тихой потерей.
+    rejected = issuer.rejects(catalog)
+
     found: list[Candidate] = []
     for row in issuer.extraction.unrecognised:
-        if issuer.decided(row):
+        if issuer.decided(row) and row.key not in rejected:
             continue
         share = _relative_size(row, issuer, assets, revenue)
         total_code, gap = _belongs_to(row, issuer, broken, catalog)
@@ -601,17 +664,36 @@ def _relative_size(
     return abs(row.largest) / abs(base)
 
 
+def _total_places(
+    issuer: IssuerMarkup, form: str, catalog: IfrsCatalog
+) -> dict[str, int]:
+    """Места итогов в форме: опознанных справочником и размеченных человеком.
+
+    Разметка человека входит наравне с опознанием: у Норникеля итоги обоих
+    разделов обязательств не подписаны вовсе и опознаны руками. Без них
+    ближайшего итога ниже у строк пассива не находилось, и раздел определялся
+    по итогу из чужого места — то есть неверно.
+    """
+    places = {
+        code: place
+        for code, place in issuer.extraction.forms[form].recognised_at.items()
+        if (position := catalog.get(code)) is not None and position.is_total
+    }
+    for (row_form, index), code in issuer.assignments.items():
+        position = catalog.get(code)
+        if row_form == form and position is not None and position.is_total:
+            places.setdefault(code, index)
+    return places
+
+
 def _total_below(
     row: UnrecognisedRow, issuer: IssuerMarkup, catalog: IfrsCatalog
 ) -> str | None:
     """Код ближайшего итога ниже строки — итога её раздела."""
-    places = issuer.extraction.forms[row.form].recognised_at
     below = [
         (place, code)
-        for code, place in places.items()
+        for code, place in _total_places(issuer, row.form, catalog).items()
         if place > row.index
-        and (position := catalog.get(code)) is not None
-        and position.is_total
     ]
     return min(below)[1] if below else None
 
@@ -624,13 +706,10 @@ def _section_at(
     То же правило, по которому строится иерархия итогов: в МСФО слагаемые
     стоят над своим итогом.
     """
-    places = issuer.extraction.forms[row.form].recognised_at
     below = [
         (place, code)
-        for code, place in places.items()
+        for code, place in _total_places(issuer, row.form, catalog).items()
         if place > row.index
-        and (position := catalog.get(code)) is not None
-        and position.is_total
     ]
     if not below:
         return None
@@ -733,6 +812,9 @@ def apply_assignment(
     не закроет.
     """
     catalog = catalog or load_ifrs_lines()
+    problem = markup_problem(issuer, candidate, code, catalog)
+    if problem is not None:
+        raise ValueError(problem)
     before = issuer.totals_state(catalog)
     issuer.assignments[candidate.key] = code
     after = issuer.totals_state(catalog)
@@ -746,6 +828,32 @@ def apply_assignment(
         logger.info("после присвоения %s сошёлся итог %s", code, ", ".join(closed))
         return True, closed[0]
     return False, candidate.total_code
+
+
+def markup_problem(
+    issuer: IssuerMarkup, candidate: Candidate, code: str, catalog: IfrsCatalog
+) -> str | None:
+    """Почему строке нельзя присвоить этот код; None — можно.
+
+    Проверяется то же, что у автоматического опознания: код принадлежит форме
+    и разделу, а строка стоит там, где стоит. Человеку это правило прежде
+    не предъявлялось, и разметка обходила его молча.
+    """
+    position = catalog.get(code)
+    if position is None:
+        return None
+    row = next(
+        (
+            item
+            for item in issuer.extraction.unrecognised
+            if item.key == candidate.key
+        ),
+        None,
+    )
+    if row is None:
+        return None
+    outcome = fold(position, [issuer.claim(row, catalog, position)])
+    return outcome.reason if outcome.kind is Fold.NONE else None
 
 
 def normal_sign_of(catalog: IfrsCatalog) -> Callable[[str], int]:

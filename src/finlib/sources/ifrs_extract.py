@@ -27,6 +27,7 @@ from functools import lru_cache
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
+from finlib.sources.ifrs_claims import Claim, Fold, Folded, fold
 from finlib.sources.ifrs_numbers import Grouping, parse_amount
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,13 @@ class ExtractedForm:
     # для иерархии итогов — в отчётности по МСФО слагаемые стоят **над**
     # своим итогом, и без места строки «ближайший итог ниже» не определить.
     recognised_at: dict[str, int] = field(default_factory=dict)
+    # Строки, чья величина учтена в другой строке: сложена с ней или
+    # повторяет её. Хранятся, а не выбрасываются: сложение — событие,
+    # о котором должно быть известно, иначе оно неотличимо от затирания.
+    merged: list[tuple[str, str, str]] = field(default_factory=list)
+    # Позиции, за которые спорят несколько строк: величина не взята вовсе,
+    # строки возвращены в неопознанные и уйдут в очередь разметки.
+    contested: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +175,16 @@ class Extraction:
                 note for form in self.forms.values() for note in form.notes_under_form
             )
         )
+
+    @property
+    def merged(self) -> list[tuple[str, str, str]]:
+        """Строки, чья величина учтена в другой строке того же кода."""
+        return [item for form in self.forms.values() for item in form.merged]
+
+    @property
+    def contested(self) -> list[tuple[str, str]]:
+        """Позиции, за которые спорят строки: величина не взята."""
+        return [item for form in self.forms.values() for item in form.contested]
 
     @property
     def rows_total(self) -> int:
@@ -204,6 +222,8 @@ class Extraction:
             f"{len(self.values)}, строк не опознано {len(self.unrecognised)}, "
             f"итогов опознано структурой "
             f"{sum(len(form.totals_by_structure) for form in self.forms.values())}, "
+            f"строк сложено с другими {len(self.merged)}, "
+            f"спорных позиций {len(self.contested)}, "
             f"сносок под формами {len(self.notes)}"
         )
 
@@ -333,6 +353,21 @@ def _extract_form(
     _resolve_by_section(rows, recognised, catalog, form_code)
     _retract_wrong_section(rows, recognised, form_code)
 
+    # Несколько строк на одну позицию — сложение, повтор или спор, но
+    # не затирание: словарь оставлял последнюю величину, и у ЛСР капитал
+    # не сходился ровно на «Эмиссионный доход», затёртый «Добавочным».
+    folded, carrier = _fold_claims(rows, recognised, form_code)
+    for code, outcome in folded.items():
+        if outcome.kind is not Fold.CONTESTED:
+            continue
+        form.contested.append((code, outcome.reason))
+        for position_index in [
+            index
+            for index, position in recognised.items()
+            if position.code == code
+        ]:
+            recognised.pop(position_index)
+
     form.rows_total = len(rows)
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
@@ -362,6 +397,12 @@ def _extract_form(
             continue
         form.rows_recognised += 1
         form.recognised_at.setdefault(position.code, position_index)
+        outcome = folded.get(position.code)
+        if outcome is not None:
+            if carrier.get(position.code) != position_index:
+                form.merged.append((position.code, name.strip(), outcome.kind.value))
+                continue
+            values = outcome.values
         for report_date, value in zip(report_dates, values, strict=False):
             form.values.append(
                 ExtractedValue(position.code, report_date, value, name.strip())
@@ -369,6 +410,47 @@ def _extract_form(
 
     form.notes_under_form = _notes_after(lines[tail_from:])
     return form
+
+
+def _fold_claims(
+    rows: list[tuple[str, tuple[Decimal, ...], int]],
+    recognised: dict[int, IfrsPosition],
+    form_code: str,
+) -> tuple[dict[str, Folded], dict[str, int]]:
+    """Сводит строки, претендующие на один код, и называет строку-носителя.
+
+    Возвращается только то, за что спорят: код, на который легла ровно одна
+    строка, сводить не с чем, и разбор его не трогает.
+    """
+    claims: dict[str, list[tuple[int, Claim]]] = {}
+    for position_index, position in sorted(recognised.items()):
+        name, values, _ = rows[position_index]
+        claims.setdefault(position.code, []).append(
+            (
+                position_index,
+                Claim(
+                    name.strip(),
+                    values,
+                    form_code,
+                    position.section,
+                    (form_code, position_index),
+                ),
+            )
+        )
+    folded: dict[str, Folded] = {}
+    carrier: dict[str, int] = {}
+    for code, items in claims.items():
+        if len(items) == 1:
+            continue
+        position = recognised[items[0][0]]
+        outcome = fold(position, [claim for _, claim in items])
+        folded[code] = outcome
+        if outcome.accepted:
+            carrier[code] = next(
+                index for index, claim in items if claim is outcome.accepted[0]
+            )
+        logger.info("позиция %s: %s", code, outcome.reason)
+    return folded, carrier
 
 
 @lru_cache(maxsize=8)

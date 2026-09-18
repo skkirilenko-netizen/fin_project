@@ -600,6 +600,8 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
                         )
                     )
                 continue
+            if _refused(issuer, item, code, catalog):
+                continue
             # Решение применяется целиком либо не применяется вовсе: сначала
             # запись в журнал, затем влияние на итоги. Прежде величина
             # попадала в итог, а строка оставалась в очереди.
@@ -659,6 +661,8 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
                         fg=typer.colors.RED,
                     )
                 )
+                continue
+            if _refused(issuer, item, parts[0], catalog):
                 continue
             issuer.aggregates[item.key] = parts
             try:
@@ -760,6 +764,8 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
             )
             continue
 
+        if _refused(issuer, item, answer, catalog):
+            continue
         closed, total = apply_assignment(issuer, item, answer, catalog)
         try:
             _save_confirmation(issuer, item, answer, who)
@@ -782,6 +788,25 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
 
     _show_skipped(skipped, issuers, catalog)
     typer.echo(f"\nПрисвоений за присест: {saved}.")
+
+
+def _refused(issuer, item, code: str, catalog) -> bool:
+    """Называет причину, по которой код строке не присваивается; True — отказ.
+
+    Проверяется то же, что у автоматического опознания: форма и раздел
+    позиции. Человеку это правило прежде не предъявлялось вовсе.
+    """
+    from finlib.sources.ifrs_markup import markup_problem
+
+    problem = markup_problem(issuer, item, code, catalog)
+    if problem is None:
+        return False
+    typer.echo(
+        typer.style(
+            f"  {problem}: строка осталась неразмеченной", fg=typer.colors.RED
+        )
+    )
+    return True
 
 
 def _show_candidate(item, left: int) -> None:

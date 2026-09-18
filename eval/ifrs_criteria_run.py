@@ -497,24 +497,30 @@ def main(argv: list[str] | None = None) -> int:
     # по величине, заниженной в разы, при сходящемся балансе. Счёт идёт
     # по всем кодам сразу, а не по подозрительным: код, на который легли две
     # строки, обязан быть назван независимо от того, заметна ли разница.
-    collisions = 0
+    merged_total = 0
+    contested_total = 0
+    rejected_total = 0
     for issuer in issuers:
-        rows: dict[str, list[tuple[str, Decimal]]] = {}
-        for item in issuer.extraction.values:
-            if item.report_date != issuer.report_date:
-                continue
-            rows.setdefault(item.code, []).append((item.source_name, item.value))
-        for row in issuer.extraction.unrecognised:
-            code = issuer.assignments.get(row.key)
-            if code is not None and row.values:
-                rows.setdefault(code, []).append((row.source_name, row.values[0]))
-        doubled = {code: items for code, items in rows.items() if len(items) > 1}
-        collisions += len(doubled)
-        print(f"   {issuer.inn}: кодов с несколькими строками {len(doubled)}")
-        for code, items in doubled.items():
-            listed = "; ".join(f"«{name}» {value}" for name, value in items)
-            print(f"      {_name_of(code, catalog)} ({code}): {listed}")
-    print(f"   всего таких кодов: {collisions}")
+        merged = issuer.extraction.merged
+        contested = issuer.extraction.contested
+        rejected = issuer.rejects(catalog)
+        merged_total += len(merged)
+        contested_total += len(contested)
+        rejected_total += len(rejected)
+        print(
+            f"   {issuer.inn}: сложено строк {len(merged)}, спорных позиций "
+            f"{len(contested)}, присвоений отклонено {len(rejected)}"
+        )
+        for code, name, kind in merged:
+            print(f"      сложено: {_name_of(code, catalog)} ({code}) ← «{name}» [{kind}]")
+        for code, reason in contested:
+            print(f"      спор: {_name_of(code, catalog)} ({code}) — {reason}")
+        for key, reason in rejected.items():
+            print(f"      отклонено присвоение {key}: {reason}")
+    print(
+        f"   всего: сложено {merged_total}, спорных {contested_total}, "
+        f"отклонено присвоений {rejected_total}"
+    )
 
     print("\nОСТАТОК ОЧЕРЕДИ РАЗМЕТКИ")
     rows = candidates(issuers, catalog)
