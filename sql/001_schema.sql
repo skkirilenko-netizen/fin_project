@@ -528,18 +528,17 @@ ALTER TABLE ifrs_line_confirmation
     ADD COLUMN IF NOT EXISTS arithmetic_confirmed boolean;
 ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS row_index integer;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ifrs_line_confirmation'::regclass
-          AND conname = 'ifrs_line_confirmation_relation_check'
-    ) THEN
-        ALTER TABLE ifrs_line_confirmation
-            ADD CONSTRAINT ifrs_line_confirmation_relation_check
-            CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific'));
-    END IF;
-END $$;
+-- Перечень видов разметки 18.09.2026 пополнился решением «не статья»:
+-- прежде оно жило один присест и в базу не попадало вовсе, поэтому строка
+-- возвращалась в очередь и размечалась заново — иногда иначе. Ограничение
+-- снимается и ставится заново, а не добавляется при отсутствии: иначе
+-- в базе, заведённой раньше, остался бы прежний перечень, и догонка
+-- не состоялась бы.
+ALTER TABLE ifrs_line_confirmation
+    DROP CONSTRAINT IF EXISTS ifrs_line_confirmation_relation_check;
+ALTER TABLE ifrs_line_confirmation
+    ADD CONSTRAINT ifrs_line_confirmation_relation_check
+    CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific', 'not_a_line'));
 
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
     ON ifrs_line_confirmation (code);
@@ -567,6 +566,10 @@ SELECT
     max(share_of_assets)                     AS max_share,
     max(confirmed_at)                        AS last_confirmed_at
 FROM ifrs_line_confirmation
+-- Решение «не статья» хранится здесь же, но статьёй не является и
+-- кандидатом в ядро быть не может: иначе колонтитул, отмеченный у трёх
+-- эмитентов, выглядел бы позицией, созревшей для справочника.
+WHERE relation <> 'not_a_line'
 GROUP BY code;
 
 COMMENT ON VIEW ifrs_core_candidate IS

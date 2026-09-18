@@ -88,6 +88,17 @@ class Relation(StrEnum):
     PART_OF = "part_of"
     AGGREGATE_OF = "aggregate_of"
     SPECIFIC = "specific"
+    # Строка вообще не статья: колонтитул, номер страницы, промежуточный
+    # итог, уже учтённый составом. Решение хранится наравне с прочими —
+    # иначе оно живёт один присест, строка возвращается в очередь, и её
+    # размечают снова, на этот раз, может быть, неверно.
+    NOT_A_LINE = "not_a_line"
+
+
+# Код, под которым хранится решение «не статья». Позиции у него нет и быть
+# не может, поэтому из перечня доступных кодов он исключается: это отметка
+# об отсутствии статьи, а не статья.
+NOT_A_LINE_CODE = "ifrs.not_a_line"
 
 
 @dataclass(frozen=True, slots=True)
@@ -910,7 +921,11 @@ def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition | None]:
         item.code: item for item in catalog.positions
     }
     try:
-        for row in fetch_all("SELECT DISTINCT code FROM ifrs_line_confirmation", {}):
+        for row in fetch_all(
+            "SELECT DISTINCT code FROM ifrs_line_confirmation "
+            "WHERE relation <> 'not_a_line'",
+            {},
+        ):
             found.setdefault(row["code"], None)
     except Exception as failure:  # noqa: BLE001 — разметка без базы тоже работает
         logger.warning("подтверждённые коды не прочитаны: %s", failure)
@@ -1032,7 +1047,9 @@ def restore(issuers: list[IssuerMarkup], conn=None) -> int:
             )
             continue
         relation = row["relation"] or Relation.EXACT.value
-        if relation == Relation.PART_OF.value:
+        if relation == Relation.NOT_A_LINE.value:
+            issuer.dismissed[key] = Decision.NOT_A_LINE
+        elif relation == Relation.PART_OF.value:
             issuer.parts[key] = row["code"]
         elif relation == Relation.AGGREGATE_OF.value:
             issuer.aggregates[key] = tuple(row["related_codes"] or (row["code"],))

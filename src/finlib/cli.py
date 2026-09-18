@@ -487,6 +487,7 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
     """Разговор с человеком: список, ввод кода, подсказки, пересчёт итогов."""
     from finlib.normalize.ifrs_lines import load_ifrs_lines
     from finlib.sources.ifrs_markup import (
+        NOT_A_LINE_CODE,
         Decision,
         apply_assignment,
         candidates,
@@ -578,6 +579,16 @@ def _markup_loop(issuers: list, who: str, limit: int) -> None:
             continue
         if answer == "н":
             issuer.dismissed[item.key] = Decision.NOT_A_LINE
+            try:
+                _save_confirmation(
+                    issuer, item, NOT_A_LINE_CODE, who, relation="not_a_line"
+                )
+            except Exception as exc:  # noqa: BLE001 — откат и внятная причина
+                issuer.dismissed.pop(item.key, None)
+                typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
+                continue
+            history.append((item.inn, item.key, item.source_name))
+            saved += 1
             typer.echo(
                 f"  сохранено: «{item.source_name or '(без наименования)'}» → не статья"
             )
