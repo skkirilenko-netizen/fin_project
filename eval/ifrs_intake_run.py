@@ -27,6 +27,7 @@ from pathlib import Path
 from finlib.db import connection
 from finlib.normalize.ifrs_loader import load_extraction
 from finlib.quality.codes import CheckCode
+from finlib.sources.ifrs_confirmed import load_confirmed
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import Rejection, identify, text_of
 from finlib.sources.ifrs_review import ReviewOutcome, review
@@ -51,6 +52,9 @@ class DocumentRun:
     check_code: str | None = None
     rows_total: int = 0
     rows_recognised: int = 0
+    # Строки, принятые по ранее подтверждённому у этого же эмитента: опознание
+    # слабее справочника, и в отчёте оно стоит отдельной графой.
+    rows_confirmed: int = 0
     totals_checked: int = 0
     totals_failed: int = 0
     material_items: tuple[str, ...] = ()
@@ -137,6 +141,7 @@ class IntakeReport:
 
         if accepted:
             recognised = sum(item.rows_recognised for item in accepted)
+            confirmed = sum(item.rows_confirmed for item in accepted)
             rows = sum(item.rows_total for item in accepted)
             checked = sum(item.totals_checked for item in accepted)
             failed = sum(item.totals_failed for item in accepted)
@@ -146,7 +151,11 @@ class IntakeReport:
                 "",
                 f"- строк опознано справочником: {recognised} из {rows}"
                 + (f" ({recognised / rows * 100:.1f} %)" if rows else ""),
-                f"- строк не опознано: {rows - recognised}",
+                # Две силы опознания печатаются порознь: справочник утверждает
+                # о строке вообще, ранее подтверждённое — о строке этого
+                # эмитента, и доверие к ним разное.
+                f"- строк принято по ранее подтверждённому: {confirmed}",
+                f"- строк не опознано: {rows - recognised - confirmed}",
                 f"- итогов сверено: {checked}, из них не сошлось: {failed}",
                 f"- сносок под формами извлечено: "
                 f"{sum(item.notes for item in accepted)}",
@@ -198,7 +207,12 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         columns=document.columns_of,
         layouts=profile.columns_by_form,
     )
-    decision = review(extraction, profile)
+    # Ранее подтверждённое опознание участвует в решении наравне
+    # со справочником: замер обязан отвечать на тот же вопрос, что цикл,
+    # иначе доля автопрохождения в отчёте меньше настоящей.
+    decision = review(
+        extraction, profile, confirmed=load_confirmed(inn, extraction, profile)
+    )
 
     found = DocumentRun(
         path=path,
@@ -207,6 +221,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         reasons=tuple(item.value for item in decision.reasons),
         rows_total=decision.rows_total,
         rows_recognised=decision.rows_recognised,
+        rows_confirmed=len(decision.rows_confirmed),
         totals_checked=decision.totals_checked,
         totals_failed=len(decision.totals_failed),
         material_items=tuple(item.describe() for item in decision.material_items),

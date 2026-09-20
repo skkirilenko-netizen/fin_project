@@ -19,7 +19,7 @@
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -33,6 +33,7 @@ from finlib.quality.totals import (
     TotalCheck,
     TotalVerdict,
     check_total,
+    with_extra,
 )
 from finlib.sources.cbonds import other_shares
 from finlib.sources.ifrs_claims import Claim, Fold, fold
@@ -512,7 +513,7 @@ def best_composition(
     составы объявлены методикой поимённо, а не перебираются.
     """
     outcomes = [
-        _with_extra(
+        with_extra(
             check_total(
                 Composition(total.code, group),
                 values.get,
@@ -538,31 +539,6 @@ def best_composition(
 # Заведомо большее расхождение, чем любое настоящее: им помечается исход,
 # у которого расхождения нет вовсе — сравнивать его с числом нельзя.
 _FAR = Decimal("1e30")
-
-
-def _with_extra(outcome: TotalCheck, extra: Decimal) -> TotalCheck:
-    """Досчитывает к сумме состава то, чему кода в справочнике нет.
-
-    Специфическая статья стоит в форме и в итог раздела входит, но состав
-    итога о ней не знает — кода у неё в справочнике нет. Без этого разметка
-    режимом «с» не двигала недостачу вовсе, и выглядело это как потеря
-    величины.
-    """
-    if extra == 0 or outcome.computed is None or outcome.total is None:
-        return outcome
-    computed = outcome.computed + extra
-    difference = computed - outcome.total
-    tolerance = outcome.tolerance or Decimal(0)
-    return replace(
-        outcome,
-        computed=computed,
-        difference=difference,
-        verdict=(
-            TotalVerdict.MATCHED
-            if abs(difference) <= tolerance
-            else TotalVerdict.MISMATCHED
-        ),
-    )
 
 
 def _unbalanced_totals(

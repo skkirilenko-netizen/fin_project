@@ -270,6 +270,32 @@ def _grouping(organization: dict) -> str:
     return GROUPING_NAMES.get(found, found)
 
 
+def _recognition(organization: dict) -> str | None:
+    """Чем опознаны позиции комплекта: справочником и ранее подтверждённым.
+
+    **Две силы опознания печатаются порознь, потому что доверие к ним разное.**
+    Справочник утверждает: строка с таким наименованием означает это у любого
+    эмитента. Ранее подтверждённое утверждает меньше — у этого эмитента эта
+    строка означает это, — и читатель обязан видеть, сколько позиций принято
+    по слабейшему из двух оснований и на каком комплекте оно получено.
+
+    Графы нет вовсе там, где опознавать было нечем: у машинного источника
+    строка приходит с кодом. Ноль вместо этого читался бы как «ничего
+    не опознано».
+    """
+    found = (organization.get("meta") or {}).get("recognition")
+    if not found:
+        return None
+    where = ", ".join(found.get("confirmed_from") or ())
+    return (
+        f"Опознание позиций: справочником {found['by_catalog']}, "
+        f"по ранее подтверждённому {found['by_confirmation']} "
+        f"из {found['rows_total']} строк"
+        + (f" (подтверждено на комплектах {where})" if where else "")
+        + "."
+    )
+
+
 def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str]:
     """Происхождение документа: версии, источник, дата."""
     assessment = data.assessment
@@ -286,6 +312,7 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
         f"Набор форм: {forms}.",
         f"Единица измерения: {data.unit_name} ({unit}).",
         f"Запись чисел в исходном документе: {_grouping(organization)}.",
+        *filter(None, (_recognition(organization),)),
         f"Источник данных: "
         f"{SOURCE_NAMES.get(organization['source'], organization['source'])}.",
         f"Языковая модель текстовой части: {model}.",

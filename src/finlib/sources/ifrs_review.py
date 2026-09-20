@@ -16,6 +16,19 @@
 неопознанная позиция, статья сверх порога существенности или неполный вид
 отчётности означают ручное подтверждение. Каждое из четырёх — случай,
 когда машина не знает, что перед ней.
+
+**Опознание бывает двух сил, и слабейшей хватает для повторного комплекта
+того же эмитента.** Справочник утверждает: строка с таким наименованием
+означает это у любого эмитента. Ранее подтверждённое утверждает меньше:
+у этого эмитента эта строка означает это. Второе — не послабление условия
+«машина знает, что перед ней», а другой источник того же знания: человек
+уже смотрел ту же строку в той же форме той же организации. Границы объявлены
+в `ifrs_confirmed`: тот же эмитент, то же наименование, та же форма и раздел;
+на чужого эмитента не переносится, индекс строки в ключ не входит.
+
+Остальные основания это не затрагивает: неполный вид отчётности и страница
+без текстового слоя остаются блокирующими, потому что подтверждением строки
+они не снимаются — там не опознание, а состав раскрытий и потеря содержимого.
 """
 
 import logging
@@ -32,6 +45,7 @@ from finlib.quality.totals import (
     TotalVerdict,
     check_total,
 )
+from finlib.sources.ifrs_confirmed import Confirmed
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow
 from finlib.sources.ifrs_inbox import DocumentProfile, ReportingKind
 from finlib.sources.ifrs_numbers import PlausibilityCheck, check_plausibility
@@ -116,6 +130,11 @@ class ReviewResult:
     material_items: tuple[MaterialItem, ...] = ()
     plausibility: PlausibilityCheck | None = None
     problems: tuple[str, ...] = ()
+    # Строки, опознанные не справочником, а ранее подтверждённым у этого же
+    # эмитента. Считаются отдельно: две силы опознания — разные сведения,
+    # и в документе они печатаются порознь.
+    rows_confirmed: tuple[tuple[str, int], ...] = ()
+    confirmed_from: tuple[str, ...] = ()
     # Строки с отброшенными без объяснения величинами и знаменатель к ним —
     # строки с величинами вообще. Ноль потерь при неизвестном числе строк
     # неотличим от невыполненной проверки.
@@ -154,22 +173,36 @@ def review(
     extraction: Extraction,
     profile: DocumentProfile,
     catalog: IfrsCatalog | None = None,
+    confirmed: Confirmed | None = None,
 ) -> ReviewResult:
     """Решает, принять извлечение автоматически или отдать человеку.
 
     Проверки идут все и всегда: их итог нужен человеку на экране сверки
     даже тогда, когда первое же основание уже потребовало подтверждения.
     Останавливаться на первом значило бы показывать половину картины.
+
+    `confirmed` — ранее подтверждённое опознание у **этого же** эмитента
+    (`ifrs_confirmed.load_confirmed`). Строка, о которой человек уже сказал,
+    чем она является, опознанной считается, и её величина участвует в итогах
+    наравне с опознанными справочником: иначе сошедшиеся у ЛСР четырнадцать
+    итогов экран видел бы как провал контроля, а нулевая очередь разметки
+    не давала бы автопрохождения никогда.
     """
     catalog = catalog or load_ifrs_lines()
     report_date = profile.report_dates[0]
+    known = confirmed or Confirmed()
 
-    totals_checked, failed = _check_totals(extraction, catalog, report_date)
+    # Строки, опознанные ранее подтверждённым, из неопознанных выбывают:
+    # о них известно, чем они являются.
+    unrecognised = [
+        item for item in extraction.unrecognised if item.key not in known.rows
+    ]
+    totals_checked, failed = _check_totals(extraction, catalog, report_date, known)
     plausibility = check_plausibility(
-        extraction.totals(report_date),
+        _values_with(extraction, report_date, known),
         extraction.value_of("ifrs.revenue", report_date),
     )
-    material = _material_items(extraction, report_date, catalog)
+    material = _material_items(unrecognised, extraction, report_date, catalog)
 
     # Считаются строки таблиц, а не величины: у строки столько величин,
     # сколько периодов, и графа обязана считать то, как называется.
@@ -186,11 +219,11 @@ def review(
     if not plausibility.plausible:
         reasons.append(ReviewReason.IMPLAUSIBLE_GROUPING)
         problems.extend(plausibility.problems)
-    if extraction.unrecognised:
+    if unrecognised:
         reasons.append(ReviewReason.UNRECOGNISED_POSITION)
         problems.extend(
             f"строка не опознана справочником: «{item.source_name}»"
-            for item in extraction.unrecognised
+            for item in unrecognised
         )
     if material:
         reasons.append(ReviewReason.MATERIAL_SPECIFIC_ITEM)
@@ -234,13 +267,32 @@ def review(
         problems=tuple(problems),
         rows_with_values=extraction.rows_with_values,
         rows_with_dropped=len(extraction.dropped_values),
+        rows_confirmed=tuple(sorted(known.rows)),
+        confirmed_from=known.from_reports,
     )
     logger.info("экран сверки: %s", result.describe())
     return result
 
 
+def _values_with(
+    extraction: Extraction, report_date: date, known: Confirmed
+) -> dict[str, Decimal]:
+    """Величины отчётного периода вместе с ранее подтверждёнными.
+
+    Подтверждённое опознание — такое же опознание, поэтому величина
+    подтверждённой строки участвует в итогах. Своё опознание справочником
+    она не перебивает: величина уже взятая остаётся.
+    """
+    values = dict(known.values)
+    values.update(extraction.totals(report_date))
+    return values
+
+
 def _check_totals(
-    extraction: Extraction, catalog: IfrsCatalog, report_date: date
+    extraction: Extraction,
+    catalog: IfrsCatalog,
+    report_date: date,
+    known: Confirmed | None = None,
 ) -> tuple[int, list[TotalCheck]]:
     """Сверяет итоги форм с суммами их состава и тождества распределения.
 
@@ -254,8 +306,15 @@ def _check_totals(
     (МСФО (IAS) 1.81B): это два разных утверждения об одной величине, и оба
     обязаны сойтись. Объявить распределение запасным составом нельзя —
     сошедшееся распределение закрыло бы собой несошедшуюся цепочку прибыли.
+
+    Ранее подтверждённые величины входят в состав наравне с опознанными
+    справочником, а подтверждённые специфические статьи — через `extras`,
+    как и при разметке: кода справочника у них нет, а в итог раздела они
+    входят. Иначе у ЛСР все четырнадцать итогов сходились бы на экране
+    разметки и проваливались на экране сверки — по одним и тем же данным.
     """
-    values = extraction.totals(report_date)
+    known = known or Confirmed()
+    values = _values_with(extraction, report_date, known)
     checked = 0
     failed: list[TotalCheck] = []
 
@@ -268,14 +327,36 @@ def _check_totals(
         position = catalog.get(code)
         return position.normal_sign if position is not None else 1
 
-    lines: list[object] = list(catalog.totals())
-    lines.extend(
-        Composition(item.code, item.split_into)
-        for item in catalog.positions
-        if item.split_into
-    )
-    for total in lines:
-        found = check_total(total, values.get, lambda code: None, tolerance, sign_of)
+    # Итог сверяется по **лучшему из объявленных составов**, и эта арифметика
+    # одна на два экрана. Прежде экран разметки знал о запасных составах,
+    # а экран сверки нет, и один и тот же комплект получал два разных ответа:
+    # у ЛСР разметка показывала четырнадцать сошедшихся итогов из
+    # четырнадцати, а сверка — провал контроля. Составы объявлены методикой
+    # поимённо, потому что у Сегежи нет валовой прибыли, а у ФосАгро
+    # и Норникеля — строки «Итого обязательства».
+    from finlib.sources.ifrs_markup import best_composition
+
+    for total in catalog.totals():
+        found = best_composition(
+            total, values, catalog, known.extras.get(total.code, Decimal(0)), _TOLERANCE
+        )
+        if found.verdict in (TotalVerdict.MATCHED, TotalVerdict.MISMATCHED):
+            checked += 1
+        if found.verdict is TotalVerdict.MISMATCHED:
+            failed.append(found)
+
+    # Тождества распределения — запасных составов у них нет и быть не может:
+    # распределение объявлено одно.
+    for item in catalog.positions:
+        if not item.split_into:
+            continue
+        found = check_total(
+            Composition(item.code, item.split_into),
+            values.get,
+            lambda code: None,
+            tolerance,
+            sign_of,
+        )
         if found.verdict in (TotalVerdict.MATCHED, TotalVerdict.MISMATCHED):
             checked += 1
         if found.verdict is TotalVerdict.MISMATCHED:
@@ -283,14 +364,27 @@ def _check_totals(
     return checked, failed
 
 
+# Допуск сходимости на экране сверки: доля итога. Величины печатаются
+# округлёнными, и последняя цифра итога не обязана совпадать с суммой
+# слагаемых до единицы.
+_TOLERANCE = Decimal("0.001")
+
+
 def _material_items(
-    extraction: Extraction, report_date: date, catalog: IfrsCatalog
+    rows: list[UnrecognisedRow],
+    extraction: Extraction,
+    report_date: date,
+    catalog: IfrsCatalog,
 ) -> list[MaterialItem]:
     """Неопознанные статьи, превышающие порог существенности.
 
     Статья сверх порога никогда не сворачивается в «прочее»: у Автодора 85 %
     активов лежат в двух статьях, которых нет ни у кого другого. Порог задан
     методикой, доля считается от валюты баланса.
+
+    Считаются строки, оставшиеся неопознанными: статья, которой человек уже
+    присвоил код у этого эмитента, — та самая «вынесенная отдельной позицией»,
+    о которой говорит правило существенности, а не свёрнутая в «прочее».
     """
     assets = extraction.value_of("ifrs.total_assets", report_date)
     if assets is None or assets == 0:
@@ -300,7 +394,7 @@ def _material_items(
         return []
     threshold = catalog.materiality.share_of_total_assets
     found: list[MaterialItem] = []
-    for row in extraction.unrecognised:
+    for row in rows:
         share = row.largest / abs(assets)
         if share >= threshold:
             found.append(MaterialItem(row, share))

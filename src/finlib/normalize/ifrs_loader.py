@@ -251,7 +251,9 @@ def load_extraction(
         _ENSURE_ORGANIZATION, {"inn": inn, "name": organization_name}, conn=conn
     )
     report_date = profile.report_dates[0]
-    unconfirmed = _unconfirmed(extraction, confirmations or {})
+    unconfirmed = _unconfirmed(
+        extraction, confirmations or {}, frozenset(review.rows_confirmed)
+    )
     quarantined = not review.automatic and bool(unconfirmed or not confirmed_by)
 
     src_file_id = _write_src_file(
@@ -325,6 +327,15 @@ def _write_src_file(
         "review_reasons": [item.value for item in review.reasons],
         "notes_under_forms": list(profile.forms),
         "grouping_evidence": profile.grouping_detection.describe(),
+        # Опознание двух сил, порознь: справочник утверждает о строке вообще,
+        # ранее подтверждённое — о строке этого эмитента. В документ идут
+        # оба числа, потому что доверие к ним разное.
+        "recognition": {
+            "by_catalog": review.rows_recognised,
+            "by_confirmation": len(review.rows_confirmed),
+            "rows_total": review.rows_total,
+            "confirmed_from": list(review.confirmed_from),
+        },
     }
     row = fetch_one(
         _UPSERT_SRC_FILE,
@@ -524,12 +535,22 @@ def _roles(report_dates: tuple[date, ...]) -> dict[date, str]:
     }
 
 
-def _unconfirmed(extraction: Extraction, confirmations: dict[str, str]) -> list[str]:
-    """Неопознанные статьи, которым человек кода не присвоил."""
+def _unconfirmed(
+    extraction: Extraction,
+    confirmations: dict[str, str],
+    confirmed_rows: frozenset[tuple[str, int]] = frozenset(),
+) -> list[str]:
+    """Неопознанные статьи, которым человек кода не присвоил.
+
+    Присвоенным считается и код, подтверждённый прежде у **этого же**
+    эмитента: строки, о которых человек уже сказал, чем они являются,
+    неподтверждёнными не числятся — иначе комплект уходил бы в карантин
+    за то, что уже разобрано.
+    """
     return [
         row.source_name
         for row in extraction.unrecognised
-        if row.source_name not in confirmations
+        if row.source_name not in confirmations and row.key not in confirmed_rows
     ]
 
 
@@ -632,8 +653,18 @@ def _journal_records(
             status=CheckStatus.INFO,
             severity=Severity.INFO,
             message=(
-                f"Опознано позиций {review.rows_recognised} из {review.rows_total}; "
-                f"итогов сверено {review.totals_checked}, не сошлось "
+                # Две силы опознания печатаются порознь: справочник утверждает
+                # о строке вообще, подтверждение — о строке этого эмитента.
+                f"Опознано позиций "
+                f"{review.rows_recognised + len(review.rows_confirmed)} "
+                f"из {review.rows_total}: справочником {review.rows_recognised}, "
+                f"по ранее подтверждённому {len(review.rows_confirmed)}"
+                + (
+                    f" (подтверждения комплектов {', '.join(review.confirmed_from)})"
+                    if review.confirmed_from
+                    else ""
+                )
+                + f"; итогов сверено {review.totals_checked}, не сошлось "
                 f"{len(review.totals_failed)}; строк сложено с другими "
                 f"{len(extraction.merged)}, спорных позиций "
                 f"{len(extraction.contested)}; величины отброшены у "
@@ -645,6 +676,8 @@ def _journal_records(
             src_file_id=src_file_id,
             details={
                 "rows_recognised": review.rows_recognised,
+                "rows_confirmed": len(review.rows_confirmed),
+                "confirmed_from": list(review.confirmed_from),
                 "rows_total": review.rows_total,
                 "totals_checked": review.totals_checked,
                 "totals_failed": len(review.totals_failed),

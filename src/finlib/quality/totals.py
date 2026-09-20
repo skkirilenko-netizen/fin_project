@@ -15,7 +15,7 @@
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
@@ -108,6 +108,32 @@ class Composition:
     def is_total(self) -> bool:
         """Состав бывает только у итога."""
         return True
+
+
+def with_extra(outcome: TotalCheck, extra: Decimal) -> TotalCheck:
+    """Досчитывает к сумме состава то, чему кода в справочнике нет.
+
+    Специфическая статья стоит в форме и в итог раздела входит, но состав
+    итога о ней не знает — кода у неё в справочнике нет. Без этого разметка
+    режимом «с» не двигала недостачу вовсе, и выглядело это как потеря
+    величины; на экране сверки то же самое означало бы, что подтверждённая
+    человеком статья в итог не идёт.
+    """
+    if extra == 0 or outcome.computed is None or outcome.total is None:
+        return outcome
+    computed = outcome.computed + extra
+    difference = computed - outcome.total
+    tolerance = outcome.tolerance or Decimal(0)
+    return replace(
+        outcome,
+        computed=computed,
+        difference=difference,
+        verdict=(
+            TotalVerdict.MATCHED
+            if abs(difference) <= tolerance
+            else TotalVerdict.MISMATCHED
+        ),
+    )
 
 
 def _with_inferred_signs(

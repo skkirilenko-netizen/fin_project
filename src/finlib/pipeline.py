@@ -346,7 +346,16 @@ def accept_ifrs_document(
     audit = read_audit_report(text, before=min(headings.values(), default=0))
     report(Stage.LOAD, f"аудиторское заключение: {audit.describe()}")
 
-    decision = review(extraction, profile)
+    # Ранее подтверждённое опознание у этого же эмитента — такое же знание,
+    # как справочник, только слабее: оно говорит о строке этой организации,
+    # а не о строке вообще. Для повторного комплекта того же эмитента этого
+    # довольно, и без него автопрохождение недостижимо в принципе: экран
+    # видел бы неопознанными строки, о которых человек уже сказал, чем они
+    # являются, и сошедшиеся у ЛСР итоги читал бы как провал контроля.
+    from finlib.sources.ifrs_confirmed import load_confirmed
+
+    confirmed = load_confirmed(inn, extraction, profile)
+    decision = review(extraction, profile, confirmed=confirmed)
     report(
         Stage.QUALITY,
         decision.describe(),
