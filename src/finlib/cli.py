@@ -1013,15 +1013,18 @@ def _show_candidate(item, left: int) -> None:
         typer.echo(typer.style(f"    ↓ {item.next_name}", dim=True))
 
     values = ", ".join(str(value) for value in item.values)
-    # Мера у каждой формы своя, и называется она по имени: статья баланса
+    # Мера у каждой формы своя, и база её называется: статья баланса
     # соизмеряется с валютой баланса, строка ОПУ — с выручкой, а у потока
-    # денежных средств такой меры нет вовсе.
-    base = {
-        "ifrs.statement_of_financial_position": "доля активов",
-        "ifrs.statement_of_profit_or_loss": "доля выручки",
-    }.get(item.form, "доля")
-    share = f"{item.share_of_assets:.2%}" if item.share_of_assets else "—"
-    typer.echo(f"  величины: {values}; {base}: {share}")
+    # денежных средств базы нет вовсе, и мера не применяется. База берётся
+    # из методики, а не перечисляется здесь: перечень в коде разошёлся бы
+    # с тем, по которому решает экран сверки.
+    if item.materiality_share is None or not item.materiality_base:
+        typer.echo(f"  величины: {values}; мера существенности не применяется")
+    else:
+        typer.echo(
+            f"  величины: {values}; доля от {item.materiality_base}: "
+            f"{item.materiality_share:.2%}"
+        )
     if item.total_code:
         typer.echo(
             f"  входит в незакрытый итог {item.total_code}, недостача {item.total_gap}"
@@ -1179,7 +1182,7 @@ def _save_confirmation(
         )
         execute(
             "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
-            "form_code, value, share_of_assets, confirmed_by, relation, related_codes, "
+            "form_code, value, materiality_share, confirmed_by, relation, related_codes, "
             "arithmetic_confirmed, row_index) VALUES (%(code)s, %(inn)s, %(date)s, "
             "%(name)s, %(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, "
             "%(related)s, %(confirmed)s, %(index)s) "
@@ -1190,7 +1193,7 @@ def _save_confirmation(
             # её присест за присестом.
             "ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET "
             "code = EXCLUDED.code, source_name = EXCLUDED.source_name, "
-            "value = EXCLUDED.value, share_of_assets = EXCLUDED.share_of_assets, "
+            "value = EXCLUDED.value, materiality_share = EXCLUDED.materiality_share, "
             "confirmed_by = EXCLUDED.confirmed_by, relation = EXCLUDED.relation, "
             "related_codes = EXCLUDED.related_codes, "
             "arithmetic_confirmed = EXCLUDED.arithmetic_confirmed, confirmed_at = now()",
@@ -1201,7 +1204,9 @@ def _save_confirmation(
                 "name": candidate.source_name,
                 "form": candidate.form,
                 "value": candidate.amount,
-                "share": candidate.share_of_assets or 0,
+                # Мера, которой нет, пишется как NULL, а не как ноль: ноль
+                # означал бы «несущественна».
+                "share": candidate.materiality_share,
                 "who": who,
                 "relation": relation,
                 "related": list(related) if related else None,

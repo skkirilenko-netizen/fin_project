@@ -276,6 +276,47 @@ def test_materiality_and_core_candidate_declare_their_origin() -> None:
     assert CATALOG.core_candidate.distinct_issuers >= 2
 
 
+def test_every_form_declares_its_materiality_base() -> None:
+    """База существенности объявлена у каждой формы — или объявлено её отсутствие.
+
+    Молчание формы читалось бы как «базы нет», то есть наш пробел выглядел бы
+    решением методики.
+    """
+    bases = CATALOG.materiality.bases
+    assert set(bases) == set(CATALOG.forms)
+    balance = bases["ifrs.statement_of_financial_position"]
+    profit = bases["ifrs.statement_of_profit_or_loss"]
+    flows = bases["ifrs.statement_of_cash_flows"]
+    assert balance.base == "ifrs.total_assets"
+    assert profit.base == "ifrs.revenue"
+    # У потока базы нет, и причина названа словами: поток за период не доля
+    # ни от запаса, ни от оборота.
+    assert flows.base is None
+    assert flows.no_base_reason and flows.no_base_reason.strip()
+
+
+def test_form_without_a_declared_base_is_refused() -> None:
+    """Форма, о базе существенности умолчавшая, справочник не загружает."""
+    broken = raw()
+    broken["materiality"]["bases"].pop("ifrs.statement_of_cash_flows")
+    with pytest.raises(ValidationError, match="не объявили базу существенности"):
+        IfrsCatalog.model_validate(broken)
+
+
+def test_base_and_its_absence_cannot_be_declared_together() -> None:
+    """Объявляется ровно одно: база или причина, по которой её нет.
+
+    Оба сразу — противоречие: непонятно, мерится строка или нет; ни одного —
+    молчание, которое читалось бы как «базы нет».
+    """
+    broken = raw()
+    broken["materiality"]["bases"]["ifrs.statement_of_cash_flows"]["base"] = (
+        "ifrs.total_assets"
+    )
+    with pytest.raises(ValidationError, match="молчание и оба сразу не допускаются"):
+        IfrsCatalog.model_validate(broken)
+
+
 # --- два справочника живут порознь --------------------------------------------
 
 
@@ -301,7 +342,7 @@ def confirm(
 
     execute(
         "INSERT INTO ifrs_line_confirmation "
-        "(code, inn, report_date, source_name, form_code, value, share_of_assets, "
+        "(code, inn, report_date, source_name, form_code, value, materiality_share, "
         " confirmed_by, row_index) VALUES (%(c)s, %(i)s, '2024-12-31', %(n)s, "
         "'ifrs.statement_of_financial_position', 1000, %(s)s, 'аналитик', %(r)s)",
         {"c": code, "i": inn, "n": name, "s": share, "r": row},
@@ -320,7 +361,7 @@ def test_confirmation_keeps_the_wording_of_the_issuer(db_conn) -> None:
 
     confirm(db_conn, "ifrs.escrow_accounts", "7736050003", "Средства на счетах эскроу")
     rows = fetch_all(
-        "SELECT source_name, share_of_assets, confirmed_by FROM ifrs_line_confirmation "
+        "SELECT source_name, materiality_share, confirmed_by FROM ifrs_line_confirmation "
         "WHERE code = 'ifrs.escrow_accounts'",
         {},
         conn=db_conn,

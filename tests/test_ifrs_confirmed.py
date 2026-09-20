@@ -102,7 +102,7 @@ def confirm(conn, inn: str, name: str, code: str, relation: str = "specific") ->
     """Подтверждение человека о строке этого эмитента."""
     execute(
         "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
-        "form_code, value, share_of_assets, confirmed_by, relation) VALUES "
+        "form_code, value, materiality_share, confirmed_by, relation) VALUES "
         "(%(code)s, %(inn)s, %(date)s, %(name)s, %(form)s, %(value)s, %(share)s, "
         "%(who)s, %(relation)s)",
         {

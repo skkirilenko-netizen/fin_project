@@ -41,8 +41,9 @@ from finlib.sources.ifrs_extract import (
     Extraction,
     UnrecognisedRow,
     extract,
+    materiality_base,
+    materiality_share,
     nearest_total_below,
-    share_of_assets,
 )
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
 from finlib.sources.ifrs_numbers import Grouping
@@ -130,12 +131,14 @@ class Candidate:
     form: str
     source_name: str
     values: tuple[Decimal, ...]
-    # Насколько строка велика в своей форме: статья баланса — доля валюты
-    # баланса, строка отчёта о прибылях — доля выручки, поток — прочерк.
-    # Это мера для экрана и для порядка очереди, **и она не доля активов**:
-    # прежде поле называлось `share_of_assets`, и у строки ОПУ в графу
-    # «доля активов» журнала подтверждений попадала доля выручки.
-    relative_size: Decimal | None
+    # Мера существенности строки: её величина к базе своей формы. База
+    # объявлена методикой (`materiality.bases`) — статья баланса мерится
+    # валютой баланса, строка отчёта о прибылях выручкой, у строки потока
+    # базы нет вовсе, и тогда здесь `None`. Это одна и та же мера, по которой
+    # решает экран сверки, и одна функция её считает
+    # (`ifrs_extract.materiality_share`): прежде графа называлась долей
+    # активов и у строки ОПУ содержала долю выручки.
+    materiality_share: Decimal | None
     priority: Priority
     # Место строки в форме: по нему решение применяется именно к ней.
     index: int = 0
@@ -152,10 +155,10 @@ class Candidate:
     # а у строк без наименования это единственная опора.
     previous_name: str = ""
     next_name: str = ""
-    # Доля строки в валюте баланса — мера существенности из методики, та же
-    # самая, по которой решает экран сверки. Считается одной функцией
-    # (`ifrs_extract.share_of_assets`) и в журнал подтверждений идёт она.
-    share_of_assets: Decimal = Decimal(0)
+    # Позиция, которой мерилась существенность. Без неё величина «28,3 %»
+    # ничего не утверждает: у строк разных форм база разная. Пусто — базы
+    # у формы нет, и мера не считалась.
+    materiality_base: str = ""
 
     @property
     def amount(self) -> Decimal:
@@ -174,9 +177,16 @@ class Candidate:
 
     def describe(self) -> str:
         """Однострочное описание для списка."""
-        share = f"{self.relative_size:.1%}" if self.relative_size else "—"
+        # Мера называется вместе со своей базой: «28,3 % активов» у строки
+        # отчёта о прибылях означало долю выручки, и графа считала не то,
+        # как называлась. У строки потока базы нет — стоит прочерк.
+        share = (
+            f"{self.materiality_share:.1%} от {self.materiality_base}"
+            if self.materiality_share is not None and self.materiality_base
+            else "мера не применяется"
+        )
         total = f", в итоге {self.total_code}" if self.total_code else ""
-        return f"{self.source_name} — {self.amount} ({share} активов){total}"
+        return f"{self.source_name} — {self.amount} ({share}){total}"
 
 
 @dataclass
@@ -423,7 +433,7 @@ def candidates(
         key=lambda item: (
             item.priority,
             -abs(item.amount) if item.priority is Priority.BREAKS_TOTAL else 0,
-            -(item.relative_size or Decimal(0)),
+            -(item.materiality_share or Decimal(0)),
             -item.issuers,
             item.source_name,
         )
@@ -438,8 +448,11 @@ def _for_issuer(
     confirmed: tuple[tuple[str, str], ...] = (),
 ) -> list[Candidate]:
     """Кандидаты одного эмитента с привязкой к незакрытым итогам."""
-    assets = issuer.extraction.value_of("ifrs.total_assets", issuer.report_date)
-    revenue = issuer.extraction.value_of("ifrs.revenue", issuer.report_date)
+
+    def value_of(code: str) -> Decimal | None:
+        """Величина позиции за отчётный период комплекта."""
+        return issuer.extraction.value_of(code, issuer.report_date)
+
     threshold = catalog.materiality.share_of_total_assets
     broken = _unbalanced_totals(issuer, catalog)
     hidden = other_shares(issuer.inn, issuer.report_date)
@@ -452,7 +465,7 @@ def _for_issuer(
     for row in issuer.extraction.unrecognised:
         if issuer.decided(row) and row.key not in rejected:
             continue
-        share = _relative_size(row, issuer, assets, revenue)
+        share = materiality_share(row, catalog, value_of)
         total_code, gap = _belongs_to(row, issuer, broken, catalog)
         # Раздел берётся от места строки, а не от привязки к несошедшемуся
         # итогу: итог мог сойтись, а строка всё равно стоит в своём разделе.
@@ -490,8 +503,8 @@ def _for_issuer(
                 values=row.values,
                 index=row.index,
                 report_date=issuer.report_date,
-                relative_size=share,
-                share_of_assets=share_of_assets(row, assets),
+                materiality_share=share,
+                materiality_base=materiality_base(row.form, catalog) or "",
                 priority=priority,
                 total_code=total_code,
                 total_gap=gap,
@@ -642,32 +655,6 @@ def _totals_only(code: str, catalog: IfrsCatalog) -> bool:
         (item := catalog.get(component.code)) is not None and item.is_total
         for component in position.components
     )
-
-
-def _relative_size(
-    row: UnrecognisedRow,
-    issuer: IssuerMarkup,
-    assets: Decimal | None,
-    revenue: Decimal | None,
-) -> Decimal | None:
-    """Насколько строка велика — относительно того, с чем её сравнивают.
-
-    **Мера у каждой формы своя.** Статья баланса соизмеряется с валютой
-    баланса, строка отчёта о прибылях — с выручкой: себестоимость ФосАгро
-    как «48,89 % активов» не значит ничего и при разметке сбивает.
-    У отчёта о движении денежных средств такой меры нет вовсе — поток
-    за период не доля ни от запаса, ни от оборота, — и вместо числа стоит
-    прочерк.
-    """
-    if row.form == "ifrs.statement_of_profit_or_loss":
-        base = revenue
-    elif row.form == "ifrs.statement_of_financial_position":
-        base = assets
-    else:
-        return None
-    if base is None or base == 0:
-        return None
-    return abs(row.largest) / abs(base)
 
 
 def _total_places(

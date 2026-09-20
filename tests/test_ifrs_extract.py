@@ -8,8 +8,9 @@
 from datetime import date
 from decimal import Decimal
 
+from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.pipeline import accept_ifrs_document
-from finlib.sources.ifrs_extract import extract
+from finlib.sources.ifrs_extract import extract, materiality_base
 from finlib.sources.ifrs_inbox import identify
 from finlib.sources.ifrs_numbers import Grouping
 from finlib.sources.ifrs_review import ReviewOutcome, ReviewReason, review
@@ -203,8 +204,62 @@ def test_material_specific_item_is_named_with_its_share() -> None:
     assert ReviewReason.MATERIAL_SPECIFIC_ITEM in found.reasons
     assert found.material_items
     item = found.material_items[0]
-    assert item.share_of_assets > Decimal("0.05")
+    assert item.materiality_share > Decimal("0.05")
+    # База названа, и это база **формы строки**: приписка стоит в конце
+    # документа, то есть в отчёте о прибыли, и мерится выручкой.
+    assert item.base == materiality_base(item.row.form, load_ifrs_lines())
+    assert item.base in item.describe()
     assert "Затраты в интересах Принципала" in item.describe()
+    # Измеренные строки считаются рядом со сработавшими: ноль статей сверх
+    # порога при неизвестном числе измеренных ничего не означает.
+    assert found.rows_measured >= 1
+
+
+def test_cash_flow_row_is_never_material() -> None:
+    """У строки потока порога существенности нет вовсе, а не нулевой.
+
+    Поток за период правомерно кратен валюте баланса: у О'КЕЙ поступления
+    от покупателей составляют 336,9 % её, а выплаты поставщикам 301,5 %.
+    Прежде порог применялся ко строкам любой формы, и основание
+    `material_specific_item` держало комплект по мере, которой у формы
+    не существует: из 106 статей сверх порога 65 были строками потока.
+
+    Основание обязано **исчезнуть**, а не получить нулевой порог: нулевой
+    сработал бы на любой строке потока, то есть дал бы то же самое наоборот.
+    """
+    text = COMPLETE + (
+        "\nКонсолидированный отчёт о движении денежных средств\n"
+        "(в миллионах российских рублей)\n"
+        "Прибыль до налогообложения                260 000        220 000\n"
+        "Амортизация основных средств               40 000         38 000\n"
+        "Изменение запасов                         (20 000)       (18 000)\n"
+        "Проценты уплаченные                       (50 000)       (48 000)\n"
+        "Налог на прибыль уплаченный               (52 000)       (44 000)\n"
+        "Поступление денежных средств от покупателей  9 000 000  8 000 000\n"
+        "Денежные средства, выплаченные поставщикам  (8 000 000)  (7 100 000)\n"
+    )
+    extraction = extraction_of(text)
+    assert "ifrs.statement_of_cash_flows" in extraction.forms
+    found = review(extraction, profile_of(text))
+    flows = [
+        item
+        for item in found.material_items
+        if item.row.form == "ifrs.statement_of_cash_flows"
+    ]
+    assert not flows, [item.describe() for item in flows]
+    # Строка в очередь по-прежнему попадает — она не опознана, и об этом
+    # основание своё: исчезла мера, а не строка.
+    assert ReviewReason.UNRECOGNISED_POSITION in found.reasons
+    # И она не вошла в число измеренных: мерить её нечем. Знаменатель при этом
+    # печатается — ноль статей сверх порога при неизвестном числе измеренных
+    # строк не означает ничего.
+    unrecognised_flows = [
+        item
+        for item in extraction.unrecognised
+        if item.form == "ifrs.statement_of_cash_flows"
+    ]
+    assert unrecognised_flows
+    assert found.rows_measured == len(extraction.unrecognised) - len(unrecognised_flows)
 
 
 def test_failed_total_requires_confirmation() -> None:

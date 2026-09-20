@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from functools import partial
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, load_ifrs_lines
 from finlib.quality.codes import CheckCode
@@ -46,7 +47,12 @@ from finlib.quality.totals import (
     check_total,
 )
 from finlib.sources.ifrs_confirmed import Confirmed
-from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, share_of_assets
+from finlib.sources.ifrs_extract import (
+    Extraction,
+    UnrecognisedRow,
+    materiality_base,
+    materiality_share,
+)
 from finlib.sources.ifrs_inbox import DocumentProfile, ReportingKind
 from finlib.sources.ifrs_numbers import PlausibilityCheck, check_plausibility
 
@@ -102,13 +108,18 @@ class MaterialItem:
     """
 
     row: UnrecognisedRow
-    share_of_assets: Decimal
+    # Мера существенности: величина строки к базе **своей формы**. Прежде
+    # графа называлась долей валюты баланса и у строки потока её и содержала —
+    # отношение оборота за год к запасу на дату, правомерно превышающее сотню.
+    materiality_share: Decimal
+    # Позиция, которой мерилась существенность: без неё «12,4 %» не проверить.
+    base: str
 
     def describe(self) -> str:
         """Человеческое описание для экрана сверки."""
         return (
             f"«{self.row.source_name}» — {self.row.largest} "
-            f"({self.share_of_assets:.1%} валюты баланса)"
+            f"({self.materiality_share:.1%} от {self.base})"
         )
 
 
@@ -128,6 +139,10 @@ class ReviewResult:
     rows_total: int = 0
     rows_recognised: int = 0
     material_items: tuple[MaterialItem, ...] = ()
+    # Сколько неопознанных строк удалось измерить порогом существенности.
+    # Знаменатель обязателен: у строк потока базы нет вовсе, и ноль статей
+    # сверх порога без этого числа неотличим от невыполненной проверки.
+    rows_measured: int = 0
     plausibility: PlausibilityCheck | None = None
     problems: tuple[str, ...] = ()
     # Строки, опознанные не справочником, а ранее подтверждённым у этого же
@@ -168,7 +183,8 @@ class ReviewResult:
             f"{len(self.totals_failed)}; строк опознано {self.rows_recognised} "
             f"из {self.rows_total}, осознанно игнорируется {self.rows_ignored}; "
             f"статей сверх порога "
-            f"{len(self.material_items)}; величины отброшены у "
+            f"{len(self.material_items)} из {self.rows_measured} измеренных; "
+            f"величины отброшены у "
             f"{self.rows_with_dropped} строк из {self.rows_with_values} "
             "с величинами"
         )
@@ -207,7 +223,9 @@ def review(
         _values_with(extraction, report_date, known),
         extraction.value_of("ifrs.revenue", report_date),
     )
-    material = _material_items(unrecognised, extraction, report_date, catalog)
+    material, rows_measured = _material_items(
+        unrecognised, extraction, report_date, catalog
+    )
 
     # Считаются строки таблиц, а не величины: у строки столько величин,
     # сколько периодов, и графа обязана считать то, как называется.
@@ -268,6 +286,7 @@ def review(
         rows_total=rows_total,
         rows_recognised=extraction.rows_recognised,
         material_items=tuple(material),
+        rows_measured=rows_measured,
         plausibility=plausibility,
         problems=tuple(problems),
         rows_with_values=extraction.rows_with_values,
@@ -381,30 +400,47 @@ def _material_items(
     extraction: Extraction,
     report_date: date,
     catalog: IfrsCatalog,
-) -> list[MaterialItem]:
-    """Неопознанные статьи, превышающие порог существенности.
+) -> tuple[list[MaterialItem], int]:
+    """Неопознанные статьи сверх порога существенности и число измеренных строк.
 
     Статья сверх порога никогда не сворачивается в «прочее»: у Автодора 85 %
     активов лежат в двух статьях, которых нет ни у кого другого. Порог задан
-    методикой, доля считается от валюты баланса.
+    методикой, база — своя у каждой формы.
+
+    **У строки, мерить которую нечем, основания не возникает вовсе.** База
+    формы объявлена методикой, и у отчёта о движении денежных средств её нет:
+    поток за период не доля ни от запаса, ни от оборота. Нулевой порог был бы
+    не тем же самым — он срабатывал бы на любой строке потока, и именно так
+    основание и держало комплекты: из 106 статей сверх порога 65 были
+    строками потока, у О'КЕЙ — с долями 336,9 % и 301,5 % валюты баланса.
+
+    Возвращается и знаменатель — сколько строк удалось измерить: ноль статей
+    сверх порога при неизвестном числе измеренных строк не означает ничего.
 
     Считаются строки, оставшиеся неопознанными: статья, которой человек уже
     присвоил код у этого эмитента, — та самая «вынесенная отдельной позицией»,
     о которой говорит правило существенности, а не свёрнутая в «прочее».
     """
-    assets = extraction.value_of("ifrs.total_assets", report_date)
-    if assets is None or assets == 0:
-        # Валюты баланса нет — долю считать не от чего. Сами неопознанные
-        # строки при этом уже потребовали подтверждения, так что молчания
-        # здесь не возникает.
-        return []
     threshold = catalog.materiality.share_of_total_assets
+    value_of = partial(_value_at, extraction, report_date)
     found: list[MaterialItem] = []
+    measured = 0
     for row in rows:
-        # Доля считается одной функцией на весь проект: прежде то же
+        # Мера считается одной функцией на весь проект: прежде то же
         # выражение стояло здесь, в загрузчике и в разметке — и в разметке
         # знаменателем была выручка, а называлось это тоже долей активов.
-        share = share_of_assets(row, assets)
-        if share >= threshold:
-            found.append(MaterialItem(row, share))
-    return found
+        share = materiality_share(row, catalog, value_of)
+        if share is None:
+            continue
+        measured += 1
+        base = materiality_base(row.form, catalog)
+        if share >= threshold and base is not None:
+            found.append(MaterialItem(row, share, base))
+    return found, measured
+
+
+def _value_at(
+    extraction: Extraction, report_date: date, code: str
+) -> Decimal | None:
+    """Величина позиции за отчётный период — база для меры существенности."""
+    return extraction.value_of(code, report_date)

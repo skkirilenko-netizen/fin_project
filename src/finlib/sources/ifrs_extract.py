@@ -163,20 +163,45 @@ def nearest_total_below(index: int, places: dict[str, int]) -> str | None:
     return next(code for code, place in places.items() if place == nearest)
 
 
-def share_of_assets(row: UnrecognisedRow, assets: Decimal | None) -> Decimal:
-    """Доля строки в валюте баланса — мера существенности из методики.
+def materiality_base(form: str, catalog: IfrsCatalog) -> str | None:
+    """Код позиции, которой мерится существенность строк этой формы.
+
+    `None` — методика объявила, что базы у формы нет: у строки потока
+    существенность не измеряется вовсе. Форма, о базе умолчавшая, справочник
+    не загрузит, поэтому молчание и объявленное отсутствие здесь не путаются.
+    """
+    declared = catalog.materiality.bases.get(form)
+    return declared.base if declared is not None else None
+
+
+def materiality_share(
+    row: UnrecognisedRow,
+    catalog: IfrsCatalog,
+    value_of: Callable[[str], Decimal | None],
+) -> Decimal | None:
+    """Мера существенности строки: её величина к базе своей формы.
 
     **Определение одно на всех, кто ею пользуется.** Экран сверки решает
     по ней, вынесена ли статья отдельной позицией, загрузчик пишет её
     в журнал подтверждений, а разметка сортирует очередь. Три выражения
     одной величины расходятся, и расхождения не видно, пока их не сравнить.
 
-    Валюты баланса нет — доля нулевая: считать её не от чего, а `None`
-    в графу, объявленную обязательной, не положить.
+    **База своя у каждой формы, и у формы её может не быть вовсе.** Статья
+    баланса соизмеряется с валютой баланса, строка отчёта о прибыли —
+    с выручкой, а поток за период не доля ни от запаса, ни от оборота:
+    у О'КЕЙ поступления от покупателей составляют 336,9 % валюты баланса —
+    отношение верное, смысла в нём нет. Такая строка возвращает `None`,
+    и это не ноль: ноль означал бы «несущественна», а `None` — «мерить нечем».
+
+    `None` возвращается и там, где сама база не раскрыта: делить не на что.
     """
-    if assets is None or assets == 0:
-        return Decimal(0)
-    return abs(row.largest) / abs(assets)
+    base = materiality_base(row.form, catalog)
+    if base is None:
+        return None
+    amount = value_of(base)
+    if amount is None or amount == 0:
+        return None
+    return abs(row.largest) / abs(amount)
 
 
 @dataclass

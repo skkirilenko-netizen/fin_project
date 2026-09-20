@@ -18,9 +18,11 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 
 from finlib.db import PgConnection, execute, fetch_all, fetch_one
+from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.normalize.loader import PERIOD_RANK
 from finlib.quality.codes import (
     LOADER_SEVERITY,
@@ -31,7 +33,7 @@ from finlib.quality.codes import (
 )
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.values import sign_only_difference
-from finlib.sources.ifrs_extract import Extraction, share_of_assets
+from finlib.sources.ifrs_extract import Extraction, materiality_share
 from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
 from finlib.standards import Standard
@@ -140,7 +142,7 @@ DELETE FROM dq_log WHERE src_file_id = %(id)s AND check_code = ANY(%(codes)s)
 _INSERT_CONFIRMATION = """
 INSERT INTO ifrs_line_confirmation (
     code, inn, src_file_id, report_date, source_name, form_code, value,
-    share_of_assets, confirmed_by, note, row_index
+    materiality_share, confirmed_by, note, row_index
 ) VALUES (
     %(code)s, %(inn)s, %(src_file_id)s, %(report_date)s, %(source_name)s,
     %(form_code)s, %(value)s, %(share)s, %(confirmed_by)s, %(note)s, %(index)s
@@ -150,7 +152,7 @@ ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET
     source_name = EXCLUDED.source_name,
     src_file_id = EXCLUDED.src_file_id,
     value = EXCLUDED.value,
-    share_of_assets = EXCLUDED.share_of_assets,
+    materiality_share = EXCLUDED.materiality_share,
     confirmed_by = EXCLUDED.confirmed_by,
     note = EXCLUDED.note,
     confirmed_at = now()
@@ -843,16 +845,23 @@ def _save_confirmations(
 
     Наименование хранится дословно: по коду не увидеть, одну ли вещь
     подтверждали у разных эмитентов под разными названиями, — код присваивали
-    мы. Доля от валюты баланса хранится рядом: по ней видно, ради чего статья
-    вынесена отдельной позицией.
+    мы. Мера существенности хранится рядом: по ней видно, ради чего статья
+    вынесена отдельной позицией. База меры — своя у каждой формы, а у строки
+    потока её нет вовсе, и тогда в графе `NULL`: «мерить нечем» и «мера мала» —
+    разные сведения.
     """
-    assets = extraction.value_of("ifrs.total_assets", report_date)
+
+    def value_of(code: str) -> Decimal | None:
+        """Величина позиции за отчётный период комплекта."""
+        return extraction.value_of(code, report_date)
+
+    catalog = load_ifrs_lines()
     saved = 0
     for row in extraction.unrecognised:
         code = confirmations.get(row.source_name)
         if code is None:
             continue
-        share = share_of_assets(row, assets)
+        share = materiality_share(row, catalog, value_of)
         execute(
             _INSERT_CONFIRMATION,
             {

@@ -188,13 +188,36 @@ class FormDef(BaseModel):
         )
 
 
+class MaterialityBase(BaseModel):
+    """Чем мерится существенность строки этой формы — или почему нечем."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base: str | None = None
+    no_base_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_declared(self) -> Self:
+        """Объявлено ровно одно из двух: база или причина её отсутствия."""
+        if (self.base is None) == (self.no_base_reason is None):
+            raise ValueError(
+                "у формы объявляется либо база существенности, либо причина, "
+                "по которой её нет; молчание и оба сразу не допускаются"
+            )
+        return self
+
+
 class Materiality(BaseModel):
-    """Порог существенности специфической статьи."""
+    """Порог существенности специфической статьи и база его применения."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     share_of_total_assets: Decimal = Field(gt=0, lt=1)
     origin: str = Field(min_length=1)
+    # База по формам. Форма, о базе умолчавшая, существенность измерить
+    # не даёт — и это не то же самое, что база, объявленная отсутствующей:
+    # первое — наш пробел, второе — свойство формы.
+    bases: dict[str, MaterialityBase] = Field(min_length=1)
 
 
 class CoreCandidate(BaseModel):
@@ -229,7 +252,36 @@ class IfrsCatalog(BaseModel):
         self._check_components_exist()
         self._check_aliases_do_not_overlap()
         self._check_ignored_are_not_positions()
+        self._check_materiality_bases()
         return self
+
+    def _check_materiality_bases(self) -> None:
+        """У каждой формы объявлена база существенности либо её отсутствие.
+
+        Молчание формы читалось бы как «базы нет», то есть наш пробел
+        выглядел бы решением методики. База, названная позицией, которой
+        в справочнике нет, дала бы то же самое молча.
+        """
+        listed = set(self.materiality.bases)
+        silent = set(self.forms) - listed
+        if silent:
+            raise ValueError(
+                "формы не объявили базу существенности: "
+                + ", ".join(sorted(silent))
+            )
+        stray = listed - set(self.forms)
+        if stray:
+            raise ValueError(
+                "база существенности объявлена у неизвестных форм: "
+                + ", ".join(sorted(stray))
+            )
+        known = {item.code for item in self.positions}
+        for form, declared in sorted(self.materiality.bases.items()):
+            if declared.base is not None and declared.base not in known:
+                raise ValueError(
+                    f"база существенности формы {form} — неизвестная позиция "
+                    f"{declared.base}"
+                )
 
     def _check_ignored_are_not_positions(self) -> None:
         """Наименование не может быть и позицией, и игнорируемым.

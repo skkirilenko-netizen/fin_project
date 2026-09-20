@@ -492,7 +492,16 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     -- Раздел отчётности и величина, ради которой статья вынесена отдельно.
     form_code      text NOT NULL,
     value          numeric(20, 3),
-    share_of_assets numeric(10, 6) NOT NULL,
+    -- Мера существенности: величина строки к базе **своей формы**. База
+    -- объявлена методикой (`materiality.bases`): баланс мерится валютой
+    -- баланса, отчёт о прибыли — выручкой, у отчёта о движении денежных
+    -- средств базы нет вовсе, и тогда здесь NULL. NULL означает «мерить
+    -- нечем», а не «несущественна»: ноль означал бы второе.
+    --
+    -- Прежде графа называлась share_of_assets и у строки отчёта о прибыли
+    -- содержала долю выручки, а у строки потока — отношение оборота за год
+    -- к запасу на дату: у О'КЕЙ 336,9 % валюты баланса.
+    materiality_share numeric(10, 6),
     -- Вид разметки: чем строка приходится позиции справочника. От него
     -- зависит, как разметка проверяется арифметикой, и смешивать виды
     -- нельзя. exact — строка и есть позиция; part_of — строка вместе
@@ -532,6 +541,29 @@ ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS related_codes text[]
 ALTER TABLE ifrs_line_confirmation
     ADD COLUMN IF NOT EXISTS arithmetic_confirmed boolean;
 ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS row_index integer;
+
+-- Графа share_of_assets 21.09.2026 переименована в materiality_share и стала
+-- допускать NULL: мера считается от базы своей формы, а у отчёта о движении
+-- денежных средств базы нет вовсе. Переименование, а не новая графа: величины
+-- балансовых строк в ней верны, и терять их незачем. Догонка идёт блоком,
+-- потому что RENAME COLUMN не знает IF EXISTS.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'ifrs_line_confirmation' AND column_name = 'share_of_assets'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'ifrs_line_confirmation' AND column_name = 'materiality_share'
+    ) THEN
+        ALTER TABLE ifrs_line_confirmation
+            RENAME COLUMN share_of_assets TO materiality_share;
+    END IF;
+END $$;
+ALTER TABLE ifrs_line_confirmation
+    ADD COLUMN IF NOT EXISTS materiality_share numeric(10, 6);
+ALTER TABLE ifrs_line_confirmation
+    ALTER COLUMN materiality_share DROP NOT NULL;
 
 -- Перечень видов разметки 18.09.2026 пополнился решением «не статья»:
 -- прежде оно жило один присест и в базу не попадало вовсе, поэтому строка
@@ -583,8 +615,9 @@ COMMENT ON TABLE ifrs_line_confirmation IS
 COMMENT ON COLUMN ifrs_line_confirmation.source_name IS
     'Наименование статьи дословно, как в отчётности эмитента. Нужно, чтобы '
     'увидеть, одну ли вещь подтверждали у разных эмитентов под разными названиями';
-COMMENT ON COLUMN ifrs_line_confirmation.share_of_assets IS
-    'Доля валюты баланса, ради которой статья вынесена отдельной позицией';
+COMMENT ON COLUMN ifrs_line_confirmation.materiality_share IS
+    'Мера существенности: величина строки к базе своей формы (баланс — валюта '
+    'баланса, отчёт о прибыли — выручка). NULL — базы у формы нет, мерить нечем';
 
 -- Кандидат в ядро: статья, подтверждённая у нескольких эмитентов независимо.
 -- Признак машинный и никого ни к чему не обязывает — поднятие позиции в ядро
@@ -597,7 +630,7 @@ SELECT
     count(DISTINCT inn)                      AS issuers,
     count(*)                                 AS confirmations,
     array_agg(DISTINCT source_name ORDER BY source_name) AS source_names,
-    max(share_of_assets)                     AS max_share,
+    max(materiality_share)                   AS max_share,
     max(confirmed_at)                        AS last_confirmed_at
 FROM ifrs_line_confirmation
 -- Решение «не статья» хранится здесь же, но статьёй не является и

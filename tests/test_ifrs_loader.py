@@ -401,7 +401,7 @@ def test_comparative_value_does_not_overwrite_the_reported_one(db_conn) -> None:
 
 
 def test_confirmed_item_is_saved_with_its_wording(db_conn) -> None:
-    """Подтверждённая статья хранит наименование дословно и долю от активов."""
+    """Подтверждённая статья хранит наименование дословно и меру существенности."""
     text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
     extraction, profile, decision = prepared(text)
     result = load_extraction(
@@ -415,14 +415,14 @@ def test_confirmed_item_is_saved_with_its_wording(db_conn) -> None:
     )
     assert result.confirmations == 1
     row = fetch_one(
-        "SELECT code, source_name, share_of_assets, confirmed_by "
+        "SELECT code, source_name, materiality_share, confirmed_by "
         "FROM ifrs_line_confirmation WHERE inn = %(i)s",
         {"i": INN},
         conn=db_conn,
     )
     assert row["code"] == "ifrs.principal_receivable"
     assert row["source_name"] == "Задолженность Принципала"
-    assert row["share_of_assets"] > Decimal("0.05")
+    assert row["materiality_share"] > Decimal("0.05")
     assert row["confirmed_by"] == "аналитик"
 
 
