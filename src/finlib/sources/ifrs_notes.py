@@ -34,10 +34,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from difflib import SequenceMatcher
 from enum import StrEnum
+from functools import lru_cache
 
 from finlib.normalize.ifrs_note_lines import NoteLine
 from finlib.normalize.lines import normalize_name
 from finlib.sources.ifrs_extract import join_name, split_row
+from finlib.sources.ifrs_inbox import is_table_row
 from finlib.sources.ifrs_numbers import Grouping, NotesPolicy, load_parsing_policy
 from finlib.sources.pdf_text import PdfDocument
 
@@ -279,6 +281,31 @@ def index_notes(
     )
     logger.info("указатель примечаний: %s", index.describe())
     return index
+
+
+@lru_cache(maxsize=8)
+def first_note_start(
+    text: str, policy: NotesPolicy | None = None, after: int = 0
+) -> int | None:
+    """Где в документе начинаются примечания; None — заголовков не нашлось.
+
+    `after` обязателен по существу, хотя и имеет умолчание: до форм нумерованным
+    абзацем идёт аудиторское заключение — у Европлана «1. Мы не имели
+    возможности получить достаточные надлежащие аудиторские доказательства…»,
+    и без отсечки примечания начинались бы с него, то есть раньше самих форм.
+
+    Нужно приёму файла: **заголовок формы не может стоять внутри примечаний.**
+    У О'КЕЙ страница с отчётом о прибыли или убытке не имеет текстового слоя,
+    и заголовком формы стала проза примечания — «Сравнительные показатели
+    отчёта о прибыли или убытке… были пересчитаны», за которой идёт таблица
+    прекращённой деятельности. Блоком «формы» оказалось примечание целиком:
+    выручкой комплекта становилась выручка прекращённой деятельности.
+
+    Считается тем же указателем, что и сами примечания: второй способ найти
+    их начало разошёлся бы с первым.
+    """
+    index = index_notes(text, None, policy, after)
+    return min((item.start for item in index.notes), default=None)
 
 
 def _gaps(notes: tuple[Note, ...]) -> tuple[int, ...]:
@@ -698,6 +725,14 @@ def _headings_of(
         # «30. млн руб. (2024 год: 33 млн руб.)» занимало номер 30, и
         # настоящие примечания 28 и 29 после него уже не принимались.
         if not title[:1].isupper():
+            continue
+        # **Заголовок примечания величин не несёт.** Строка формы, у которой
+        # номер примечания напечатан слева, выглядит заголовком точно так же:
+        # у СИБУРа «4 Активы, предназначенные для продажи 12 605 -» — строка
+        # баланса, и по ней указатель начинал примечания на шестьдесят тысяч
+        # знаков раньше настоящего первого. Определение строки таблицы одно
+        # на весь проект и берётся у приёма файла.
+        if is_table_row(line):
             continue
         entry = declared.get(number)
         if entry is not None and not _close(entry.title, title, policy):
