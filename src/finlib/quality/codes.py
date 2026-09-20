@@ -75,6 +75,15 @@ class CheckCode(StrEnum):
     # Разобранные величины не согласуются между собой так, как согласуются
     # величины одной конвенции: признак того, что конвенция выбрана неверно.
     DIGIT_GROUPING_IMPLAUSIBLE = "digit_grouping_implausible"
+    # Графы формы приведены за период иной длительности, чем период комплекта:
+    # у промежуточного ФосАгро рядом с полугодием стоит квартал. Отказ, а не
+    # выбор: величины квартала, взятые за полугодие, согласованы сами с собой,
+    # и ни один контроль сходимости этого не покажет.
+    FILE_COLUMN_SPAN_MISMATCH = "file_column_span_mismatch"
+    # Граф с величинами больше, чем отчётных дат, а длительность их шапка
+    # не объявила: лишние отброшены вслепую. Нарушение, а не норма —
+    # отброшенной может оказаться как раз та графа, которая нужна.
+    EXTRA_COLUMNS_DROPPED = "extra_columns_dropped"
     # Код не привязывается к строке: неполон справочник.
     AMBIGUOUS_LINE_CODE = "ambiguous_line_code"
     # Несколько кодов раскрыли одну укрупнённую строку: аномалия самой отчётности.
@@ -138,6 +147,10 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     # Документ, числа которого прочесть нельзя, комплектом не становится.
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: Severity.BLOCKING,
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Severity.BLOCKING,
+    # Графы чужой длительности: комплекта из такого документа не возникает.
+    CheckCode.FILE_COLUMN_SPAN_MISMATCH: Severity.BLOCKING,
+    # Отброшенная вслепую графа — потеря величины, а не мелочь вёрстки.
+    CheckCode.EXTRA_COLUMNS_DROPPED: Severity.BLOCKING,
     # Документ, который не является отчётностью либо не поддаётся разбору,
     # комплектом не становится вовсе — фактов из него не пишется.
     CheckCode.FILE_TEXT_LAYER_MISSING: Severity.BLOCKING,
@@ -196,6 +209,8 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.FILE_NOT_PARSED: "разбор поданного файла отчётности",
     CheckCode.DIGIT_GROUPING_NOT_DETERMINED: "определение разделителя разрядов",
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: "правдоподобие разделителя разрядов",
+    CheckCode.FILE_COLUMN_SPAN_MISMATCH: "длительность граф формы",
+    CheckCode.EXTRA_COLUMNS_DROPPED: "полнота прочтения граф формы",
     CheckCode.FILE_TEXT_LAYER_MISSING: "наличие текстового слоя в документе",
     CheckCode.FILE_NOT_STATEMENTS: "документ является финансовой отчётностью",
     CheckCode.FINANCIAL_INSTITUTION: "организация в периметре методики",

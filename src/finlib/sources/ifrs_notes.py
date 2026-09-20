@@ -366,7 +366,7 @@ def rows_of_note(
     found: list[tuple[str, tuple[Decimal, ...]]] = []
     pending: list[str] = []
     for line in lines_of(note, text):
-        name, values, _, _ = split_row(line, grouping, periods)
+        name, values, _, _, _ = split_row(line, grouping, periods)
         # Ссылка внутри наименования — «Процентный расход по кредитам
         # и облигациям (прим. 21)» — часть разметки, а не наименования:
         # с ней строка справочником не опознаётся.

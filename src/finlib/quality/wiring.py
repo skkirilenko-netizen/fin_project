@@ -195,6 +195,17 @@ REGISTRY: dict[CheckCode, Wiring] = {
     CheckCode.DIGIT_GROUPING_IMPLAUSIBLE: Wiring(
         WiringStatus.WIRED, date(2026, 9, 17), ("sources/ifrs_review.py",)
     ),
+    # Длительность граф формы: отказ на приёме, если графы приведены
+    # за период иной длительности, чем период комплекта.
+    CheckCode.FILE_COLUMN_SPAN_MISMATCH: Wiring(
+        WiringStatus.WIRED, date(2026, 9, 20), ("sources/ifrs_inbox.py",)
+    ),
+    # Отброшенная без объяснения графа: нарушение, а не норма. Считается
+    # на экране сверки по разобранным формам, потому что видно её только
+    # там — в самих величинах потери не видно вовсе.
+    CheckCode.EXTRA_COLUMNS_DROPPED: Wiring(
+        WiringStatus.WIRED, date(2026, 9, 20), ("sources/ifrs_review.py",)
+    ),
     # --- сведения из аудиторского заключения (задачи 25 и 27) ---------------
     # Подключены задачей 27: заключение читается в цикле приёма документа
     # МСФО, и его сведения идут в журнал комплекта. До этого числились

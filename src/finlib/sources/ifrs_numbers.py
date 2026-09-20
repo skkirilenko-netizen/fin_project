@@ -227,6 +227,62 @@ class PeriodsPolicy(BaseModel):
     reasons: dict[str, str]
 
 
+class ColumnSpansPolicy(BaseModel):
+    """Как в шапке формы объявляется длительность её граф.
+
+    Графы различаются не только датой: промежуточная форма ФосАгро печатает
+    рядом полугодие и квартал. Длительность объявлена словами, и перечень
+    написаний живёт в методике — угадывать её по числу граф нельзя.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    markers: dict[str, int]
+    reasons: dict[str, str]
+    origin: str = Field(min_length=1)
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnLayout:
+    """Разметка граф формы: сколько их всего и какие из них наши.
+
+    `total` — граф с величинами в шапке, `taken` — сколько из них берётся
+    (число отчётных дат формы), `offset` — с какой графы они начинаются.
+    `spans` — длительности граф в порядке объявления, `months` — длительность
+    комплекта, которой они сверялись.
+
+    **Прочитана разметка или нет, объявляется полем, а не выводится из чисел.**
+    `total == taken` бывает и там, где шапку прочли, и там, где читать оказалось
+    нечего, а последствия разные: во втором случае лишние графы, если они
+    есть в строках, отбрасываются вслепую, и это нарушение.
+    """
+
+    total: int
+    taken: int
+    offset: int = 0
+    spans: tuple[int, ...] = ()
+    months: int | None = None
+
+    @property
+    def read(self) -> bool:
+        """Прочитана ли длительность граф из шапки."""
+        return bool(self.spans)
+
+    @property
+    def wider(self) -> bool:
+        """Граф в шапке больше, чем берётся."""
+        return self.total > self.taken
+
+    def describe(self) -> str:
+        """Однострочное описание для журнала."""
+        spans = ", ".join(f"{item} мес." for item in self.spans) or "не объявлена"
+        return (
+            f"граф {self.total}, берутся {self.taken} с {self.offset + 1}-й; "
+            f"длительность граф: {spans}; период комплекта "
+            f"{self.months if self.months is not None else '—'} мес."
+        )
+
+
 class ReportingKindPolicy(BaseModel):
     """Виды отчётности и оговорки, которые они влекут."""
 
@@ -280,6 +336,7 @@ class ParsingPolicy(BaseModel):
     currency: CurrencyPolicy
     units: UnitsPolicy
     periods: PeriodsPolicy
+    column_spans: ColumnSpansPolicy
     reporting_kind: ReportingKindPolicy
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy

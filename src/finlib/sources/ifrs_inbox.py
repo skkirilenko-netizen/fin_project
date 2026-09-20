@@ -28,6 +28,7 @@ from finlib.normalize.ifrs_lines import IfrsCatalog, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
 from finlib.quality.codes import CheckCode
 from finlib.sources.ifrs_numbers import (
+    ColumnLayout,
     Grouping,
     GroupingDetection,
     ParsingPolicy,
@@ -102,6 +103,12 @@ class DocumentProfile:
     # Без него ноль потерь неотличим от ненайденных форм — счётчик
     # проверенного стоит рядом со счётчиком сработавшего.
     form_pages: int = 0
+    # Разметка граф каждой формы: сколько их и какие из них за период
+    # комплекта. Граф бывает больше, чем отчётных дат, и различаются они
+    # длительностью: у промежуточного ФосАгро отчёт о прибыли печатает
+    # полугодие и квартал рядом. Без разметки брались последние графы,
+    # то есть квартальные, — величины настоящие, период чужой.
+    columns_by_form: dict[str, ColumnLayout] = field(default_factory=dict)
 
     @property
     def accepted(self) -> bool:
@@ -118,6 +125,18 @@ class DocumentProfile:
         отчётности, где сравнительные колонки форм относятся к разным датам.
         """
         return self.dates_by_form.get(form_code) or self.report_dates
+
+    def layout_of(self, form_code: str) -> ColumnLayout:
+        """Разметка граф формы; у формы без разметки граф столько, сколько дат.
+
+        Имя не `columns_of`: так называется чтение ячеек по координатам PDF
+        (`PdfDocument.columns_of`), и это другое — там ячейки строки, здесь
+        разметка граф формы.
+        """
+        dates = self.dates_of(form_code)
+        return self.columns_by_form.get(form_code) or ColumnLayout(
+            total=len(dates), taken=len(dates)
+        )
 
     @property
     def all_dates(self) -> tuple[date, ...]:
@@ -378,6 +397,68 @@ def identify(
         text, headings, policy, detection.convention, dates
     )
 
+    kind = _reporting_kind(lowered, policy)
+    # Длительность периода комплекта берётся из отчётной даты правилом
+    # методики показателей (`annualisation.months_from`). Правило одно
+    # на весь проект: второе, заведённое здесь, однажды разошлось бы
+    # с первым, и число месяцев у приёма и у расчёта стало бы разным.
+    from finlib.metrics.ifrs import months_of
+
+    months = months_of(dates[0], kind.value)
+    by_columns, mismatched = form_columns(
+        text, headings, policy, detection.convention, by_form, months
+    )
+    if mismatched and dates[0].month != months:
+        # **Объявление сильнее умолчания.** Вид отчётности определяется
+        # маркерами, и умолчание у него объявлено: полная. Но документ,
+        # у которого формы сами назвали длительность граф, о своём периоде
+        # заявил прямо — «за 6 месяцев, закончившихся 30 июня», — и
+        # предпочесть этому наше умолчание значило бы отказать документу
+        # за нашу же догадку. Длительность проверяется правилом отчётной
+        # даты (`annualisation.months_from`), и если графы сходятся с ним,
+        # комплект промежуточный, а маркера вида мы не знаем.
+        retry = dates[0].month
+        again, still = form_columns(
+            text, headings, policy, detection.convention, by_form, retry
+        )
+        if not still:
+            logger.warning(
+                "вид отчётности принят умолчанием (%s), а формы объявили графы "
+                "за %d мес.: комплект считается промежуточным",
+                kind.value,
+                retry,
+            )
+            kind, months, by_columns, mismatched = (
+                ReportingKind.INTERIM,
+                retry,
+                again,
+                (),
+            )
+    if mismatched:
+        # Графы формы приведены за период иной длительности, чем период
+        # комплекта: брать их значило бы выдать величины одного периода
+        # за величины другого. Ошибка не ловится ничем — графа согласована
+        # сама с собой, — поэтому отказ, а не выбор.
+        return Rejection(
+            CheckCode.FILE_COLUMN_SPAN_MISMATCH,
+            policy.column_spans.reasons["span_mismatch"],
+            {
+                # Обе длительности, с которыми сверялись графы: принятая
+                # по виду отчётности и данная отчётной датой. Они расходятся,
+                # когда вид принят умолчанием, и по одной цифре не понять,
+                # с чем именно графы не сошлись.
+                "months": months,
+                "report_month": dates[0].month,
+                "forms": [
+                    {
+                        "form": code,
+                        "spans": list(by_columns[code].spans),
+                    }
+                    for code in mismatched
+                ],
+            },
+        )
+
     span = _form_span(document, text, headings, policy)
     profile = DocumentProfile(
         forms=forms,
@@ -385,12 +466,13 @@ def identify(
         unit_code=unit,
         grouping=detection.convention,
         report_dates=dates,
-        reporting_kind=_reporting_kind(lowered, policy),
+        reporting_kind=kind,
         grouping_detection=detection,
         dates_by_form=by_form,
         inherited_dates=inherited,
         pages_without_text=_lost_pages(document, span),
         form_pages=(span[1] - span[0] + 1) if span is not None else 0,
+        columns_by_form=by_columns,
     )
     logger.info("документ принят: %s", profile.describe())
     if profile.pages_without_text:
@@ -760,7 +842,7 @@ def table_header_of(lines: list[str], grouping: Grouping) -> list[str]:
     from finlib.sources.ifrs_extract import is_table_header, split_row
 
     for index, line in enumerate(lines):
-        name, values, _, _ = split_row(line, grouping)
+        name, values, _, _, _ = split_row(line, grouping)
         if values and name.strip() and not is_table_header(name):
             return lines[:index]
     return list(lines)
@@ -806,6 +888,108 @@ def form_dates(
         len(headings),
     )
     return found, tuple(inherited)
+
+
+def form_columns(
+    text: str,
+    headings: dict[str, int],
+    policy: ParsingPolicy,
+    grouping: Grouping,
+    dates_by_form: dict[str, tuple[date, ...]],
+    months: int,
+) -> tuple[dict[str, ColumnLayout], tuple[str, ...]]:
+    """Разметка граф каждой формы и перечень форм с чужой длительностью.
+
+    **Граф в форме бывает больше, чем отчётных дат, и различаются они
+    длительностью периода.** Промежуточный отчёт ФосАгро о прибыли или убытке
+    печатает четыре графы — полугодие 2026, полугодие 2025, квартал 2026,
+    квартал 2025. Брались последние две, то есть квартальные, и комплект
+    за полугодие собирался из квартальных величин: ошибка тихая, потому что
+    графа согласована сама с собой и все итоги по ней сходятся.
+
+    Длительность читается из шапки таблицы словами (`column_spans.markers`),
+    а длительность комплекта — из отчётной даты правилом методики. Графы
+    берутся **объявленной длительности**, а не последние; форма, объявившая
+    только чужую длительность, называется во втором возвращаемом значении —
+    и документ отклоняется приёмом.
+
+    **Порядок длительностей берётся из шапки, и поэтому требуется, чтобы
+    они шли подряд.** Заголовок формы попадает в шапку вместе с подписями
+    граф, а в нём длительность упоминается тоже: у ФосАгро «за три и шесть
+    месяцев». Упоминания одной длительности, разорванные другой, означают,
+    что порядок прочитан неверно, и тогда разметка не считается прочитанной
+    вовсе: лучше блокирующая запись, чем взятые наугад графы.
+    """
+    blocks = form_blocks(text, headings, policy)
+    found: dict[str, ColumnLayout] = {}
+    mismatched: list[str] = []
+    for code in headings:
+        header = table_header_of(blocks.get(code, []), grouping)
+        taken = len(dates_by_form.get(code, ()))
+        spans = _column_spans(header, policy)
+        total = max(_labelled_columns(header), taken)
+        layout = ColumnLayout(
+            total=total or taken, taken=taken, spans=spans, months=months
+        )
+        if spans and months not in spans:
+            mismatched.append(code)
+        elif spans and layout.wider:
+            # Графы делятся на блоки по длительностям: сколько длительностей
+            # объявлено, столько и блоков, и в каждом — по одной графе
+            # на отчётную дату. Не делится — значит, шапку мы прочли неверно,
+            # и разметка не прочитана: подгонять её нельзя.
+            layout = (
+                replace(layout, offset=spans.index(months) * taken)
+                if taken and len(spans) * taken == total
+                else replace(layout, spans=())
+            )
+        found[code] = layout
+    logger.info(
+        "графы форм: %s",
+        "; ".join(
+            f"{code.removeprefix('ifrs.')} — {item.describe()}"
+            for code, item in sorted(found.items())
+        ),
+    )
+    return found, tuple(mismatched)
+
+
+def _column_spans(header: list[str], policy: ParsingPolicy) -> tuple[int, ...]:
+    """Длительности граф в порядке объявления; пусто — шапка о них молчит."""
+    text = normalize_name(" ".join(header))
+    seen: list[tuple[int, int]] = []
+    for marker, months in policy.column_spans.markers.items():
+        start = 0
+        needle = normalize_name(marker)
+        while (place := text.find(needle, start)) != -1:
+            seen.append((place, months))
+            start = place + len(needle)
+    ordered = [months for _, months in sorted(seen)]
+    # Упоминания одной длительности обязаны идти подряд: «6, 6, 3» — это
+    # заголовок формы и подписи двух блоков, а «6, 3, 6» означает, что порядок
+    # прочитан неверно, и опираться на него нельзя.
+    grouped: list[int] = []
+    for months in ordered:
+        if not grouped or grouped[-1] != months:
+            if months in grouped:
+                return ()
+            grouped.append(months)
+    return tuple(grouped)
+
+
+def _labelled_columns(header: list[str], span: range = range(1900, 2101)) -> int:
+    """Сколько граф подписано в шапке: наибольшее число годов в одной строке.
+
+    Подписи граф стоят одной строкой — «2026 2025 2026 2025» у ФосАгро,
+    «2025 2024 2023» у Норникеля. У формы, подписанной полными датами
+    («30 июня 2026 года» и «31 декабря 2025 года» отдельными строками),
+    такой строки нет, и число граф остаётся за отчётными датами.
+    """
+    best = 0
+    for line in header:
+        years = [int(item) for item in _YEAR.findall(line) if int(item) in span]
+        best = max(best, len(years))
+    return best
 
 
 def resolve_by_both_separators(

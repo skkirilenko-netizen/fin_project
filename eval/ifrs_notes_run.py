@@ -131,6 +131,7 @@ def measure(path: Path, inn: str) -> DocumentNotes | str:
         profile.dates_by_form,
         profile.grouping,
         columns=document.columns_of,
+        layouts=profile.columns_by_form,
     )
 
     # Ссылка берётся из разбора строки, а не ищется в наименовании заново:

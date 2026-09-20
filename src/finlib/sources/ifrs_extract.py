@@ -31,7 +31,7 @@ from itertools import product
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
 from finlib.sources.ifrs_claims import Claim, Fold, Folded, fold
-from finlib.sources.ifrs_numbers import Grouping, parse_amount
+from finlib.sources.ifrs_numbers import ColumnLayout, Grouping, parse_amount
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,16 @@ class ExtractedForm:
     # Позиции, за которые спорят несколько строк: величина не взята вовсе,
     # строки возвращены в неопознанные и уйдут в очередь разметки.
     contested: list[tuple[str, str]] = field(default_factory=list)
+    # Разметка граф формы: сколько их в шапке, сколько берётся и с какой.
+    # Хранится рядом с величинами, потому что по величинам её не увидеть:
+    # квартальная графа, взятая за полугодовую, согласована сама с собой.
+    layout: ColumnLayout | None = None
+    # Строки, у которых величины отброшены без объяснения: граф больше,
+    # чем берётся, а номером примечания отброшенное не является. Ноль таких
+    # строк при неизвестном числе строк с величинами ничего не значит,
+    # поэтому рядом стоит счётчик проверенного.
+    dropped_values: list[tuple[str, tuple[Decimal, ...]]] = field(default_factory=list)
+    rows_with_values: int = 0
 
 
 @dataclass
@@ -200,6 +210,26 @@ class Extraction:
     def contested(self) -> list[tuple[str, str]]:
         """Позиции, за которые спорят строки: величина не взята."""
         return [item for form in self.forms.values() for item in form.contested]
+
+    @property
+    def dropped_values(self) -> list[tuple[str, str, tuple[Decimal, ...]]]:
+        """Величины, отброшенные без объяснения: форма, строка, сами числа.
+
+        Граф в строке больше, чем берётся, а номером примечания отброшенное
+        не является. Прежде такие величины исчезали молча: у промежуточного
+        ФосАгро так пропадали шестимесячные графы, а квартальные шли
+        в комплект за полугодие.
+        """
+        return [
+            (form.code, name, values)
+            for form in self.forms.values()
+            for name, values in form.dropped_values
+        ]
+
+    @property
+    def rows_with_values(self) -> int:
+        """Строк с величинами — знаменатель к числу строк с потерями."""
+        return sum(form.rows_with_values for form in self.forms.values())
 
     @property
     def rows_total(self) -> int:
@@ -249,6 +279,7 @@ def extract(
     grouping: Grouping,
     catalog: IfrsCatalog | None = None,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
+    layouts: Mapping[str, ColumnLayout] | None = None,
 ) -> Extraction:
     """Разбирает документ по формам справочника.
 
@@ -262,6 +293,13 @@ def extract(
     года под дату полугодия. Словарь отдаёт приём файла
     (`DocumentProfile.dates_by_form`), кортеж остаётся для случая, когда
     даты у всех форм заведомо одни.
+
+    `layouts` — разметка граф каждой формы от приёма файла
+    (`DocumentProfile.columns_by_form`): сколько граф в шапке и какие из них
+    за период комплекта. Без неё берутся последние графы, а у промежуточного
+    ФосАгро последние — квартальные: в комплект за полугодие шли величины
+    квартала, согласованные сами с собой и потому никаким контролем
+    сходимости не отличимые от верных.
 
     `columns` отдаёт ячейки строки по координатам PDF. Это **свидетельство,
     а не догадка**: в плоском тексте разделитель разрядов и разделитель
@@ -288,7 +326,13 @@ def extract(
             result.forms[form_code] = ExtractedForm(form_code)
             continue
         result.forms[form_code] = _extract_form(
-            form_code, lines, dates, grouping, catalog, columns
+            form_code,
+            lines,
+            dates,
+            grouping,
+            catalog,
+            columns,
+            layouts.get(form_code) if layouts else None,
         )
     logger.info("разбор документа: %s", result.describe())
     return result
@@ -318,10 +362,11 @@ def _extract_form(
     grouping: Grouping,
     catalog: IfrsCatalog,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
+    layout: ColumnLayout | None = None,
 ) -> ExtractedForm:
     """Разбирает один блок формы: величины, неопознанные строки, сноски."""
-    form = ExtractedForm(form_code)
-    by_column = _columns_of_form(lines, report_dates, grouping, columns)
+    form = ExtractedForm(form_code, layout=layout)
+    by_column = _columns_of_form(lines, report_dates, grouping, columns, layout)
     rows: list[tuple[str, tuple[Decimal, ...], int]] = []
     alternatives: dict[int, tuple[Decimal, ...]] = {}
     # Чтение, отбрасывающее первую группу цифр как номер примечания, живёт
@@ -331,12 +376,15 @@ def _extract_form(
     # по этой границе читалась бы как примечание 10 и прибыль 778.
     note_readings: dict[int, tuple[Decimal, ...]] = {}
     references: dict[int, tuple[int, ...]] = {}
+    # Величины, отброшенные без объяснения, по месту строки: нарушением
+    # они становятся только у строк, оставшихся статьями.
+    losses: dict[int, tuple[Decimal, ...]] = {}
     tail_from = 0
 
     pending: list[str] = []
     for index, line in enumerate(lines):
-        name, values, alternative, reference = _split_row(
-            line, grouping, len(report_dates)
+        name, values, alternative, reference, dropped = _split_row(
+            line, grouping, len(report_dates), layout
         )
         # Координаты старше правил строения числа: они говорят, где кончается
         # колонка, а правила об этом только догадываются. Но величин от этого
@@ -361,7 +409,17 @@ def _extract_form(
             note_readings[len(rows)] = alternative[1]
         if reference:
             references[len(rows)] = reference
+        if dropped:
+            # Величины, отброшенные без объяснения: граф в строке больше,
+            # чем берётся, а номером примечания отброшенное не является.
+            # Складываются по месту строки и разбираются ниже, когда известен
+            # отсев «не статья»: у шапки таблицы «Млн руб. Прим. 2025 2024»
+            # лишнее число есть всегда, и потерей это не является.
+            losses[len(rows)] = dropped
         rows.append((_joined(pending, name), values, index))
+        # Знаменатель к числу строк с потерянными величинами: ноль потерь
+        # при неизвестном числе строк с величинами ничего не означает.
+        form.rows_with_values += 1
         pending.clear()
         tail_from = index + 1
 
@@ -416,6 +474,16 @@ def _extract_form(
             recognised.pop(position_index)
 
     form.rows_total = len(rows)
+    # Потеря величины считается по строкам, оставшимся статьями: у шапки
+    # таблицы и колонтитула лишнее число есть всегда, и молчание о них —
+    # не умалчивание, а отсев, о котором объявлено отдельно
+    # (`auto_dismissed`). Строка, которой мы не поняли вовсе, в счёт входит:
+    # что отброшенное не было величиной, сказать нечем.
+    form.dropped_values.extend(
+        (rows[position_index][0], values)
+        for position_index, values in sorted(losses.items())
+        if position_index not in dismissals
+    )
     for position_index, (name, values, _) in enumerate(rows):
         position = recognised.get(position_index)
         if position is None:
@@ -733,8 +801,17 @@ def _well_formed(groups: list[str]) -> bool:
 
 
 def split_row(
-    line: str, grouping: Grouping, periods: int = 0
-) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...], tuple[int, ...]]:
+    line: str,
+    grouping: Grouping,
+    periods: int = 0,
+    layout: ColumnLayout | None = None,
+) -> tuple[
+    str,
+    tuple[Decimal, ...],
+    tuple[Decimal, ...],
+    tuple[int, ...],
+    tuple[Decimal, ...],
+]:
     """Разбор строки таблицы — один на формы и на примечания.
 
     Таблица примечания устроена так же, как таблица формы: наименование,
@@ -742,7 +819,7 @@ def split_row(
     неминуемо разошёлся бы с первым — это уже случалось с поиском
     заголовков форм, который приём и разбор делали порознь.
     """
-    return _split_row(line, grouping, periods)
+    return _split_row(line, grouping, periods, layout)
 
 
 def join_name(pending: list[str], name: str) -> str:
@@ -817,13 +894,21 @@ def _columns_of_form(
     report_dates: tuple[date, ...],
     grouping: Grouping,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None,
+    layout: ColumnLayout | None = None,
 ) -> dict[int, tuple[Decimal, ...]]:
     """Величины строк формы, разложенные по колонкам периодов, — по координатам.
 
     Колонка опознаётся по правому краю: величины выровнены по нему, и края
     ячеек одной колонки сходятся у всех строк формы. Колонок берётся столько,
-    сколько периодов, и берутся **самые правые** — левее них стоит колонка
-    примечаний, которая величиной не является.
+    сколько их объявила шапка, и берутся **самые правые** — левее них стоит
+    колонка примечаний, которая величиной не является.
+
+    **Разметка граф нужна и здесь, а не только разбору по строению.** Координаты
+    отвечают, где кончается колонка, но не отвечают, за какой период она
+    приведена: у промежуточного ФосАгро самые правые графы — квартальные,
+    и чтение по координатам подставляло их вместо шестимесячных строкам,
+    где строение читалось хуже. Одна форма выходила собранной из двух разных
+    периодов: выручка за полугодие, финансовые доходы за квартал.
 
     Строка, у которой ячейки не легли ни в одну колонку, здесь не возвращается
     вовсе: тогда работает разбор по строению числа. Молчаливой подстановки
@@ -844,10 +929,13 @@ def _columns_of_form(
     if not cells:
         return {}
 
+    taken = len(report_dates)
+    total = layout.total if layout is not None and layout.wider else taken
+    offset = layout.offset if layout is not None and layout.wider else 0
     edges = _column_edges(
-        [right for row in cells.values() for _, right in row], len(report_dates)
+        [right for row in cells.values() for _, right in row], total
     )
-    if len(edges) < len(report_dates):
+    if len(edges) < total:
         return {}
 
     placed: dict[int, tuple[Decimal, ...]] = {}
@@ -860,8 +948,17 @@ def _columns_of_form(
         # Пропуск в середине разложить по периодам нечем: сдвиг влево отдал бы
         # величину чужому году. Такая строка остаётся разбору по строению.
         kept = [item for item in values if item is not None]
-        if kept and values[: len(kept)] == kept:
+        if not kept or values[: len(kept)] != kept:
+            continue
+        if total == taken:
             placed[index] = tuple(kept)
+            continue
+        # Граф больше, чем берётся: наши стоят по месту, а не подряд с начала.
+        # Строка, у которой наших граф нет, остаётся разбору по строению —
+        # подставить вместо них соседние значило бы взять чужой период.
+        window = values[offset : offset + taken]
+        if all(item is not None for item in window):
+            placed[index] = tuple(item for item in window if item is not None)
     return placed
 
 
@@ -880,9 +977,30 @@ def _column_edges(rights: list[float], periods: int) -> tuple[float, ...]:
 
 
 def _split_row(
-    line: str, grouping: Grouping, periods: int = 0
-) -> tuple[str, tuple[Decimal, ...], tuple[Decimal, ...], tuple[int, ...]]:
-    """Делит строку на наименование, величины, запасное чтение и ссылку.
+    line: str,
+    grouping: Grouping,
+    periods: int = 0,
+    layout: ColumnLayout | None = None,
+) -> tuple[
+    str,
+    tuple[Decimal, ...],
+    tuple[Decimal, ...],
+    tuple[int, ...],
+    tuple[Decimal, ...],
+]:
+    """Делит строку на наименование, величины, запасное чтение, ссылку и потерю.
+
+    **Графы берутся объявленной длительности, а не последние.** `layout`
+    говорит, сколько граф в форме и какие из них за период комплекта: у
+    промежуточного ФосАгро отчёт о прибыли печатает полугодие и квартал рядом,
+    и последние две графы — квартальные. Без разметки в комплект за полугодие
+    попадали квартальные величины: число настоящее, период чужой, и ни один
+    контроль сходимости этого не показывает.
+
+    Пятое возвращаемое значение — величины, **отброшенные без объяснения**:
+    строка несла больше граф, чем берётся, а номером примечания отброшенное
+    не является. Это потеря, и она обязана быть названа: ноль потерь при
+    неизвестном числе отброшенных величин ничего не значит.
 
     **Номер примечания не выбрасывается, а возвращается.** Он и есть ссылка
     на расшифровку: «Амортизация 6, 7», «Процентные расходы 9». Разбор
@@ -909,12 +1027,12 @@ def _split_row(
     """
     stripped = line.rstrip()
     if not stripped.strip():
-        return "", (), (), ()
+        return "", (), (), (), ()
 
     pattern = _cells_pattern(grouping)
     matches = list(pattern.finditer(stripped))
     if not matches:
-        return stripped.strip(), (), (), ()
+        return stripped.strip(), (), (), (), ()
 
     # Хвост числовых ячеек: подряд идущие числа в конце строки. Число внутри
     # наименования («Примечание 12») колонкой не является.
@@ -928,7 +1046,7 @@ def _split_row(
         position = match.start()
     tail.reverse()
     if not tail:
-        return stripped.strip(), (), (), ()
+        return stripped.strip(), (), (), (), ()
 
     # Колонки склеиваются: разделитель разрядов и разделитель колонок — оба
     # пробел, и у «856 349 835 020» они неразличимы по ширине. Четыре группы
@@ -949,20 +1067,45 @@ def _split_row(
         if value is not None
     )
     if not parsed:
-        return stripped.strip(), (), (), ()
+        return stripped.strip(), (), (), (), ()
 
     # Колонок с величинами столько, сколько периодов. Всё, что левее, —
     # не величина: у ФосАгро это номер примечания, «Основные средства
     # 12 395,831 357,577», и без отсечения слева номер примечания стал бы
     # величиной за отчётный период.
     reference: list[int] = []
-    if periods and len(parsed) > periods:
-        # Отсечённое слева — не величина, а номер примечания: он и есть
-        # ссылка на расшифровку, и теряться ей незачем.
+    dropped: tuple[Decimal, ...] = ()
+    if layout is not None and layout.wider and len(parsed) >= layout.total:
+        # Граф в форме больше, чем отчётных дат, и шапка сказала, какие
+        # из них за наш период. Берутся они, а не последние: у ФосАгро
+        # последние — квартальные, и комплект за полугодие собирался
+        # из величин квартала.
+        #
+        # Наименование при этом кончается там, где начинается **первая**
+        # графа величин, а не наша: иначе величины чужой длительности
+        # остались бы в наименовании, и справочник строку не узнал бы.
+        note_cells = len(parsed) - layout.total
         reference.extend(
             int(value)
-            for value in parsed[:-periods]
+            for value in parsed[:note_cells]
             if _looks_like_note_number(value)
+        )
+        columns = parsed[note_cells:]
+        parsed = columns[layout.offset : layout.offset + periods]
+        tail = tail[note_cells:] if len(tail) > note_cells else tail
+    elif periods and len(parsed) > periods:
+        # Отсечённое слева — не величина, а номер примечания: он и есть
+        # ссылка на расшифровку, и теряться ей незачем.
+        surplus = parsed[:-periods]
+        reference.extend(
+            int(value) for value in surplus if _looks_like_note_number(value)
+        )
+        # Величина, отброшенная как номер примечания, но номером примечания
+        # не являющаяся, — это потерянная графа. Молча отбросить её нельзя:
+        # прежде так пропадали шестимесячные графы ФосАгро, а квартальные
+        # шли в комплект за полугодие.
+        dropped = tuple(
+            value for value in surplus if not _looks_like_note_number(value)
         )
         parsed = parsed[-periods:]
         tail = tail[-periods:] if len(tail) >= periods else tail
@@ -971,7 +1114,12 @@ def _split_row(
     # величину 21 и попадал в очередь как статья. У настоящей статьи значение
     # есть за каждый период либо нет вовсе.
     if periods >= 2 and len(parsed) == 1 and _looks_like_note_number(parsed[0]):
-        return stripped.strip(), (), (), ()
+        return stripped.strip(), (), (), (), ()
+    if not parsed:
+        # Графы объявленной длительности в строке не оказалось вовсе: строка
+        # несёт величины, но не наши. Величин у неё нет, а отброшенное
+        # названо — по нему и сработает контроль.
+        return stripped.strip(), (), (), (), dropped
 
     name = stripped[: tail[0].start()].strip()
     # К наименованию липнут номер примечания, знак сноски и прочерк «нет
@@ -995,6 +1143,7 @@ def _split_row(
             without_note if without_note != parsed else (),
         ),
         tuple(dict.fromkeys(reference)),
+        dropped,
     )
 
 

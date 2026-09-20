@@ -380,7 +380,12 @@ def _issuer_type_feature(path: Path) -> str | None:
     profile = identify(document.text, document=document, any_currency=True)
     if isinstance(profile, Rejection):
         return None
-    found = extract(document.text, profile.dates_by_form, profile.grouping)
+    found = extract(
+        document.text,
+        profile.dates_by_form,
+        profile.grouping,
+        layouts=profile.columns_by_form,
+    )
     values = {
         item.code: item.value
         for item in found.values

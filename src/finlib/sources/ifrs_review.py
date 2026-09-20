@@ -52,6 +52,10 @@ class ReviewReason(StrEnum):
     # Страница внутри форм без текстового слоя: содержимого её мы не видим,
     # и что именно потеряно, машина сказать не может.
     LOST_PAGE = "lost_page"
+    # Величины, отброшенные без объяснения: граф в строке больше, чем
+    # отчётных дат, а шапка о длительности граф промолчала. Отброшенная
+    # графа может быть как раз той, которая нужна.
+    DROPPED_COLUMN = "dropped_column"
 
 
 # Основание ручного подтверждения и код контроля, которым оно уходит
@@ -65,6 +69,7 @@ REASON_CODES: dict[ReviewReason, CheckCode] = {
     ReviewReason.MATERIAL_SPECIFIC_ITEM: CheckCode.LINE_NOT_RECOGNIZED,
     ReviewReason.REPORTING_KIND: CheckCode.FILE_REPORTING_TYPE_UNKNOWN,
     ReviewReason.LOST_PAGE: CheckCode.FILE_TEXT_LAYER_MISSING,
+    ReviewReason.DROPPED_COLUMN: CheckCode.EXTRA_COLUMNS_DROPPED,
 }
 
 
@@ -106,6 +111,11 @@ class ReviewResult:
     material_items: tuple[MaterialItem, ...] = ()
     plausibility: PlausibilityCheck | None = None
     problems: tuple[str, ...] = ()
+    # Строки с отброшенными без объяснения величинами и знаменатель к ним —
+    # строки с величинами вообще. Ноль потерь при неизвестном числе строк
+    # неотличим от невыполненной проверки.
+    rows_with_values: int = 0
+    rows_with_dropped: int = 0
 
     @property
     def automatic(self) -> bool:
@@ -129,7 +139,9 @@ class ReviewResult:
             f"{head}; итогов сверено {self.totals_checked}, из них не сошлось "
             f"{len(self.totals_failed)}; строк опознано {self.rows_recognised} "
             f"из {self.rows_total}; статей сверх порога "
-            f"{len(self.material_items)}"
+            f"{len(self.material_items)}; величины отброшены у "
+            f"{self.rows_with_dropped} строк из {self.rows_with_values} "
+            "с величинами"
         )
 
 
@@ -178,6 +190,19 @@ def review(
     if material:
         reasons.append(ReviewReason.MATERIAL_SPECIFIC_ITEM)
         problems.extend(item.describe() for item in material)
+    if extraction.dropped_values:
+        # Граф в строке больше, чем берётся, и какая из них за наш период,
+        # шапка не объявила. Это потеря величины, а не мелочь вёрстки:
+        # у промежуточного ФосАгро так пропадали шестимесячные графы, а
+        # квартальные шли в комплект за полугодие — согласованные сами
+        # с собой и потому не отличимые от верных ни одним контролем.
+        reasons.append(ReviewReason.DROPPED_COLUMN)
+        problems.extend(
+            f"строка «{name or '(без наименования)'}» формы "
+            f"{form.removeprefix('ifrs.')}: отброшены величины "
+            + ", ".join(str(value) for value in values)
+            for form, name, values in extraction.dropped_values[:5]
+        )
     if profile.pages_without_text:
         reasons.append(ReviewReason.LOST_PAGE)
         problems.append(
@@ -202,6 +227,8 @@ def review(
         material_items=tuple(material),
         plausibility=plausibility,
         problems=tuple(problems),
+        rows_with_values=extraction.rows_with_values,
+        rows_with_dropped=len(extraction.dropped_values),
     )
     logger.info("экран сверки: %s", result.describe())
     return result

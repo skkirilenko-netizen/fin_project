@@ -601,6 +601,16 @@ def _audit_records(inn: str, src_file_id: int, audit) -> list[CheckRecord]:
     return found
 
 
+def _layouts(extraction: Extraction) -> str:
+    """Разметка граф по формам одной строкой — для сообщения журнала."""
+    found = [
+        f"{code.removeprefix('ifrs.')} — {form.layout.describe()}"
+        for code, form in sorted(extraction.forms.items())
+        if form.layout is not None
+    ]
+    return "; ".join(found) or "не определялась"
+
+
 def _journal_records(
     inn: str,
     src_file_id: int,
@@ -626,7 +636,10 @@ def _journal_records(
                 f"итогов сверено {review.totals_checked}, не сошлось "
                 f"{len(review.totals_failed)}; строк сложено с другими "
                 f"{len(extraction.merged)}, спорных позиций "
-                f"{len(extraction.contested)}; правдоподобие конвенции: "
+                f"{len(extraction.contested)}; величины отброшены у "
+                f"{review.rows_with_dropped} строк из {review.rows_with_values} "
+                f"с величинами; графы форм: {_layouts(extraction)}; "
+                f"правдоподобие конвенции: "
                 f"{review.plausibility.describe() if review.plausibility else '—'}"
             ),
             src_file_id=src_file_id,
@@ -648,6 +661,23 @@ def _journal_records(
                     for code, name, kind in extraction.merged
                 ],
                 "contested_codes": [code for code, _ in extraction.contested],
+                # Разметка граф и потерянные величины: по числу взятых граф
+                # не увидеть, те ли это графы. У промежуточного ФосАгро
+                # брались последние две из четырёх — квартальные.
+                "columns": {
+                    code: form.layout.describe()
+                    for code, form in extraction.forms.items()
+                    if form.layout is not None
+                },
+                "rows_with_values": review.rows_with_values,
+                "dropped_values": [
+                    {
+                        "form": form,
+                        "name": name,
+                        "values": [str(value) for value in values],
+                    }
+                    for form, name, values in extraction.dropped_values
+                ],
             },
         )
     ]

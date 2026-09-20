@@ -196,6 +196,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         profile.dates_by_form,
         profile.grouping,
         columns=document.columns_of,
+        layouts=profile.columns_by_form,
     )
     decision = review(extraction, profile)
 

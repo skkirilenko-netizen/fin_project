@@ -378,6 +378,7 @@ def load_issuer(
         profile.dates_by_form,
         profile.grouping,
         columns=document.columns_of,
+        layouts=profile.columns_by_form,
     )
     return IssuerMarkup(inn, path, profile, extraction)
 

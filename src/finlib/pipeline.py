@@ -326,7 +326,11 @@ def accept_ifrs_document(
 
     columns = getattr(document, "columns_of", None)
     extraction = extract(
-        text, profile.dates_by_form, profile.grouping, columns=columns
+        text,
+        profile.dates_by_form,
+        profile.grouping,
+        columns=columns,
+        layouts=profile.columns_by_form,
     )
     report(Stage.LOAD, extraction.describe())
 
