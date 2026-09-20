@@ -158,8 +158,17 @@ def test_total_disclosed_twice_gives_no_value() -> None:
     assert outcome.value is None
 
 
-def test_row_of_another_form_is_refused() -> None:
-    """Строка другой формы на позицию не претендует."""
+def test_row_of_another_form_keeps_its_own_value() -> None:
+    """Один код в двух формах правомерен, а величина принадлежит форме строки.
+
+    Неденежные корректировки отчёта о движении денежных средств по определению
+    повторяют статьи баланса и отчёта о прибыли. Прежде такое притязание
+    отклонялось, строка возвращалась в очередь и размечалась присест
+    за присестом — у ФосАгро «права пользования» так собрали три кода.
+
+    Принято — не значит «величина позиции»: в `values` она не входит вовсе,
+    иначе поток сложился бы с балансом.
+    """
     catalog = load_ifrs_lines()
     position = catalog.require("ifrs.finance_costs")
     outcome = fold(
@@ -173,9 +182,39 @@ def test_row_of_another_form_is_refused() -> None:
             )
         ],
     )
-    assert outcome.kind is Fold.NONE
-    assert outcome.refused[0][1] is Refusal.FOREIGN_FORM
+    assert outcome.kind is Fold.OTHER_FORM
     assert outcome.value is None
+    assert not outcome.refused
+    assert outcome.other_form[0].form == "ifrs.statement_of_cash_flows"
+
+
+def test_own_form_value_is_not_joined_by_another_form() -> None:
+    """Величина позиции своей формы притязанием чужой формы не меняется.
+
+    Одна и та же позиция в балансе и в потоке — два разных факта: сложение
+    дало бы величину, которой нет ни в одной форме, а подмена — величину
+    чужого периода деятельности.
+    """
+    catalog = load_ifrs_lines()
+    position = catalog.require("ifrs.finance_costs")
+    own = Claim(
+        "Финансовые расходы", (Decimal(50000),), position.form, position.section
+    )
+    outcome = fold(
+        position,
+        [
+            own,
+            Claim(
+                "Процентные расходы, отраженные в прибылях и убытках",
+                (Decimal(25488),),
+                "ifrs.statement_of_cash_flows",
+                "operating_cash_flow",
+            ),
+        ],
+    )
+    assert outcome.kind is Fold.SINGLE
+    assert outcome.value == Decimal(50000)
+    assert len(outcome.other_form) == 1
 
 
 def test_row_of_another_section_is_refused() -> None:

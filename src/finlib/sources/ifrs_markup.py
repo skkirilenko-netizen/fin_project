@@ -326,6 +326,16 @@ class IssuerMarkup:
                 self.aggregates.get(row.key) or (None,)
             )[0]
             if code is not None:
+                # **Величина принадлежит форме, а не коду.** Один код в двух
+                # формах правомерен — неденежные корректировки потока повторяют
+                # статьи баланса и отчёта о прибыли, — но строка потока
+                # величину балансовой позиции не задаёт и с ней не складывается:
+                # это два разных факта. Иначе «права пользования» из потока
+                # прибавились бы к правам пользования в балансе, и итог раздела
+                # разошёлся бы ровно на них.
+                position = catalog.get(code)
+                if position is not None and position.form != row.form:
+                    continue
                 found[code] = found.get(code, Decimal(0)) + row.values[0]
                 continue
             part = self.parts.get(row.key)

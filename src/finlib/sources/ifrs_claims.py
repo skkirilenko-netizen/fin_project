@@ -16,8 +16,21 @@
 | та же строка разобрана дважды | величина одна, повтор посчитан |
 | несколько строк одного раздела | **сумма** |
 | несколько строк у итоговой позиции | **спор**: величины нет |
-| строка чужой формы | притязание отклонено |
+| строка чужой формы | принято, но величина принадлежит её форме |
 | строка чужого раздела | притязание отклонено |
+
+**Один код в двух формах правомерен, а величина у них своя.** Неденежные
+корректировки отчёта о движении денежных средств по определению повторяют
+статьи баланса и отчёта о прибыли — амортизация, проценты, права
+пользования, — и плодить для них двойники справочника хуже, чем позволить
+один код двум формам. Но **одна и та же позиция в балансе и в потоке — два
+разных факта**: величины разных форм не складываются и не подменяют друг
+друга, поэтому притязание чужой формы в величину позиции не входит вовсе
+и уходит отдельным исходом (`Fold.OTHER_FORM`). Прежде оно отклонялось,
+и строка возвращалась в очередь присест за присестом.
+
+Раздел у чужой формы не сверяется: разделы двух форм несопоставимы, и
+«оборотные активы» в отчёте о движении денежных средств не означают ничего.
 
 **Форма и раздел проверяются у притязания, а не только у опознания.**
 Правило «статья чужого раздела не опознаётся вовсе» действовало у автомата
@@ -51,12 +64,15 @@ class Fold(StrEnum):
     REPEATED = "repeated"
     CONTESTED = "contested"
     NONE = "none"
+    # Притязание принято, но строка стоит в другой форме: величина принадлежит
+    # её форме, а не позиции. Это не отказ — строка опознана и в очередь
+    # не возвращается, — и не величина позиции: у баланса и у потока она своя.
+    OTHER_FORM = "other_form"
 
 
 class Refusal(StrEnum):
     """Почему притязание строки на позицию отклонено."""
 
-    FOREIGN_FORM = "foreign_form"
     FOREIGN_SECTION = "foreign_section"
     CONTESTED_TOTAL = "contested_total"
     # Позиция объявлена несуммируемой: одна и та же формулировка стоит
@@ -66,7 +82,6 @@ class Refusal(StrEnum):
 
 
 REFUSAL_TEXT: dict[Refusal, str] = {
-    Refusal.FOREIGN_FORM: "строка стоит в другой форме, чем позиция",
     Refusal.FOREIGN_SECTION: "строка стоит в другом разделе, чем позиция",
     Refusal.CONTESTED_TOTAL: "итог не может быть раскрыт несколькими строками",
     Refusal.NOT_SUMMABLE: "позиция не складывается из нескольких строк",
@@ -99,6 +114,9 @@ class Folded:
     accepted: tuple[Claim, ...] = ()
     repeated: tuple[Claim, ...] = ()
     refused: tuple[tuple[Claim, Refusal], ...] = field(default_factory=tuple)
+    # Притязания строк чужой формы: код тот же, величина принадлежит форме
+    # строки. В `values` они не входят и с величиной позиции не складываются.
+    other_form: tuple[Claim, ...] = ()
     reason: str = ""
 
     @property
@@ -117,9 +135,12 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
     """Сводит притязания строк на одну позицию в одну величину или в отказ."""
     kept: list[Claim] = []
     refused: list[tuple[Claim, Refusal]] = []
+    other_form: list[Claim] = []
     for claim in claims:
         if claim.form != position.form:
-            refused.append((claim, Refusal.FOREIGN_FORM))
+            # Величина принадлежит форме строки, а не позиции: раздел при этом
+            # не сверяется — разделы двух форм несопоставимы.
+            other_form.append(claim)
         elif claim.section is not None and claim.section != position.section:
             refused.append((claim, Refusal.FOREIGN_SECTION))
         else:
@@ -127,6 +148,20 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
 
     kept, repeated = _without_repeats(kept)
 
+    if not kept and other_form:
+        names = ", ".join(f"«{claim.name}»" for claim in other_form)
+        forms = ", ".join(sorted({claim.form for claim in other_form}))
+        return Folded(
+            position.code,
+            Fold.OTHER_FORM,
+            repeated=tuple(repeated),
+            refused=tuple(refused),
+            other_form=tuple(other_form),
+            reason=(
+                f"строки {names} стоят в форме {forms}: величина принадлежит ей, "
+                f"а не позиции формы {position.form}"
+            ),
+        )
     if not kept:
         return Folded(
             position.code,
@@ -134,6 +169,7 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
             accepted=(),
             repeated=tuple(repeated),
             refused=tuple(refused),
+            other_form=tuple(other_form),
             reason=_refusal_reason(refused),
         )
     if len(kept) == 1:
@@ -144,6 +180,7 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
             accepted=(kept[0],),
             repeated=tuple(repeated),
             refused=tuple(refused),
+            other_form=tuple(other_form),
             reason=(
                 f"строка «{kept[0].name}» разобрана {len(repeated) + 1} раза, "
                 "величина взята один раз"
@@ -170,6 +207,7 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
             Fold.CONTESTED,
             repeated=tuple(repeated),
             refused=tuple(refused),
+            other_form=tuple(other_form),
             reason=(
                 f"{REFUSAL_TEXT[refusal]}: {names}; величина не взята"
             ),
@@ -183,6 +221,7 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
         accepted=tuple(kept),
         repeated=tuple(repeated),
         refused=tuple(refused),
+        other_form=tuple(other_form),
         reason=f"величина сложена из {len(kept)} строк: {names}",
     )
 
