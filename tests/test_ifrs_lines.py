@@ -289,16 +289,22 @@ def test_catalogs_do_not_share_codes() -> None:
 # --- подтверждённые специфические статьи --------------------------------------
 
 
-def confirm(conn, code: str, inn: str, name: str, share: str = "0.30") -> None:
-    """Подтверждение специфической статьи человеком на экране сверки."""
+def confirm(
+    conn, code: str, inn: str, name: str, share: str = "0.30", row: int = 0
+) -> None:
+    """Подтверждение специфической статьи человеком на экране сверки.
+
+    Место строки передаётся: ключ уникальности строится по строке комплекта,
+    и без индекса подтверждения не сравниваются между собой вовсе.
+    """
     from finlib.db import execute
 
     execute(
         "INSERT INTO ifrs_line_confirmation "
         "(code, inn, report_date, source_name, form_code, value, share_of_assets, "
-        " confirmed_by) VALUES (%(c)s, %(i)s, '2024-12-31', %(n)s, "
-        "'ifrs.statement_of_financial_position', 1000, %(s)s, 'аналитик')",
-        {"c": code, "i": inn, "n": name, "s": share},
+        " confirmed_by, row_index) VALUES (%(c)s, %(i)s, '2024-12-31', %(n)s, "
+        "'ifrs.statement_of_financial_position', 1000, %(s)s, 'аналитик', %(r)s)",
+        {"c": code, "i": inn, "n": name, "s": share, "r": row},
         conn=conn,
     )
 
@@ -352,13 +358,48 @@ def test_core_candidate_counts_issuers_not_confirmations(db_conn) -> None:
     assert rows[0]["issuers"] < CATALOG.core_candidate.distinct_issuers
 
 
-def test_same_issuer_cannot_confirm_the_same_thing_twice(db_conn) -> None:
-    """Повторное подтверждение того же — исправление, а не второе наблюдение."""
+def test_one_row_holds_one_decision(db_conn) -> None:
+    """Одна строка комплекта — одно решение человека.
+
+    Повторное подтверждение той же строки — исправление, а не второе
+    наблюдение, и ключ уникальности строится **по строке**, а не по паре
+    «строка, код». Прежде исправление ложилось рядом с ошибкой: у ФосАгро
+    строка «права пользования» получила три кода за три присеста, разметка
+    не применялась ни одним из них, и человек размечал её заново.
+    """
     import psycopg2
 
     confirm(db_conn, "ifrs.option_liabilities", "7736050003", "Обязательства по опционам")
     with pytest.raises(psycopg2.errors.UniqueViolation):
         confirm(db_conn, "ifrs.option_liabilities", "7736050003", "Обязательства по опционам")
+
+
+def test_a_second_code_for_one_row_does_not_lie_beside_the_first(db_conn) -> None:
+    """Другой код для той же строки — тоже исправление, а не вторая запись."""
+    import psycopg2
+
+    confirm(db_conn, "ifrs.option_liabilities", "7736050003", "Обязательства по опционам")
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        confirm(db_conn, "ifrs.escrow_accounts", "7736050003", "Обязательства по опционам")
+
+
+def test_one_code_may_belong_to_two_rows_of_a_form(db_conn) -> None:
+    """Один код у двух строк формы правомерен: строки разные.
+
+    «Прочие расходы» встречаются в форме дважды, и прежний ключ — по коду
+    и наименованию — второе подтверждение отвергал, хотя это другая строка.
+    """
+    from finlib.db import fetch_all
+
+    confirm(db_conn, "ifrs.option_liabilities", "7736050003", "Прочие расходы", row=4)
+    confirm(db_conn, "ifrs.option_liabilities", "7736050003", "Прочие расходы", row=9)
+    rows = fetch_all(
+        "SELECT row_index FROM ifrs_line_confirmation WHERE inn = %(i)s "
+        "AND code = 'ifrs.option_liabilities' ORDER BY row_index",
+        {"i": "7736050003"},
+        conn=db_conn,
+    )
+    assert [item["row_index"] for item in rows] == [4, 9]
 
 
 def test_confirmed_codes_are_not_methodology(db_conn) -> None:

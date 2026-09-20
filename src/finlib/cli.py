@@ -667,6 +667,7 @@ def _markup_loop(
     # считались бы незакрытыми, и очередь выстроилась бы по недостаче,
     # которой уже нет.
     already = restore(issuers)
+    _show_lost_markup(issuers)
     whole = candidates(issuers, catalog)
     left = [item for item in whole if not priority or item.priority in priority]
     chosen = (
@@ -1033,6 +1034,40 @@ def _show_candidate(item, left: int) -> None:
             typer.echo(f"    {number}) {hint.code} — {hint.name}")
 
 
+def _show_lost_markup(issuers: list) -> None:
+    """Называет разметку, которая не применилась, — прежде она молчала.
+
+    Строка, чьё притязание отклонено правилом формы или раздела, возвращается
+    в очередь, и человек размечает её заново, не зная, что уже размечал.
+    У ФосАгро «права пользования» так получили три кода за три присеста:
+    первый, балансовый в отчёте о движении денежных средств, отклонялся
+    и держал строку в очереди, а два верных ложились рядом с ним.
+    """
+    from finlib.sources.ifrs_markup import review_saved
+
+    try:
+        saved = review_saved(issuers)
+    except Exception as failure:  # noqa: BLE001 — разметка работает и без базы
+        typer.echo(
+            typer.style(f"  журнал подтверждений недоступен: {failure}", fg=typer.colors.YELLOW)
+        )
+        return
+    lost = [item for item in saved if item.lost]
+    if not lost:
+        return
+    typer.echo(
+        typer.style(
+            f"\nНе применилось присвоений: {len(lost)} из {len(saved)}. "
+            "Эти строки вернулись в очередь, и размечать их заново незачем, "
+            "пока не устранена причина:",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+    )
+    for item in lost:
+        typer.echo(typer.style(f"  {item.describe()}", fg=typer.colors.YELLOW))
+
+
 def _show_skipped(skipped: set, issuers: list, catalog) -> None:
     """Пропущенные строки — отдельной очередью в конце присеста."""
     if not skipped:
@@ -1148,10 +1183,16 @@ def _save_confirmation(
             "arithmetic_confirmed, row_index) VALUES (%(code)s, %(inn)s, %(date)s, "
             "%(name)s, %(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, "
             "%(related)s, %(confirmed)s, %(index)s) "
-            "ON CONFLICT (code, inn, report_date, source_name) DO UPDATE SET "
+            # Ключ конфликта — строка комплекта, а не пара «строка, код»:
+            # исправление обязано **заменить** прежнее решение. Прежде оно
+            # ложилось рядом, восстановление применяло оба, и отклонённое
+            # правилом формы возвращало строку в очередь — человек размечал
+            # её присест за присестом.
+            "ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET "
+            "code = EXCLUDED.code, source_name = EXCLUDED.source_name, "
             "value = EXCLUDED.value, share_of_assets = EXCLUDED.share_of_assets, "
             "confirmed_by = EXCLUDED.confirmed_by, relation = EXCLUDED.relation, "
-            "related_codes = EXCLUDED.related_codes, row_index = EXCLUDED.row_index, "
+            "related_codes = EXCLUDED.related_codes, "
             "arithmetic_confirmed = EXCLUDED.arithmetic_confirmed, confirmed_at = now()",
             {
                 "code": code,

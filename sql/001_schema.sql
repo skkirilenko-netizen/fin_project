@@ -514,10 +514,15 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     confirmed_by   text NOT NULL,
     confirmed_at   timestamptz NOT NULL DEFAULT now(),
     note           text,
-    -- Один эмитент подтверждает статью за период один раз: повторное
-    -- подтверждение того же — исправление, а не второе наблюдение,
-    -- иначе признак кандидата в ядро набирался бы повторами одного случая.
-    CONSTRAINT ifrs_line_confirmation_uniq UNIQUE (code, inn, report_date, source_name)
+    -- **Одна строка комплекта — одно решение человека.** Ключ уникальности
+    -- строится по строке, а не по паре «строка, код»: иначе исправление
+    -- не заменяет прежнее решение, а добавляется рядом. У ФосАгро строка
+    -- «права пользования» так получила три кода — балансовый от 18.09,
+    -- детализацию и специфический от 20.09, — и разметка не применялась
+    -- вовсе: прежнее притязание отклонялось правилом формы и возвращало
+    -- строку в очередь. Человек размечал её три присеста подряд.
+    CONSTRAINT ifrs_line_confirmation_row_uniq
+        UNIQUE (inn, report_date, form_code, row_index)
 );
 
 -- Колонки заведены позже таблицы; правило догонки действует с 17.09.2026.
@@ -539,6 +544,35 @@ ALTER TABLE ifrs_line_confirmation
 ALTER TABLE ifrs_line_confirmation
     ADD CONSTRAINT ifrs_line_confirmation_relation_check
     CHECK (relation IN ('exact', 'part_of', 'aggregate_of', 'specific', 'not_a_line'));
+
+-- Ключ уникальности заменён 21.09.2026: был по паре «код, строка», стал
+-- по строке. Прежний позволял держать у одной строки несколько решений
+-- с разными кодами, и исправление не заменяло ошибку, а ложилось рядом:
+-- восстановление применяло все сразу, а отклонённое правилом формы
+-- возвращало строку в очередь молча. Догонка обязательна — в рабочей базе
+-- ограничение уже стоит, и `CREATE TABLE IF NOT EXISTS` его не тронет.
+--
+-- Дубли снимаются до постановки ограничения, и снимается **старое**:
+-- последнее решение человека и есть его решение, а прежние — исправленные
+-- ошибки. Строки без индекса (записи прежних сессий) ограничением
+-- не охватываются: NULL уникальности не нарушает, и трогать историю
+-- ради формы незачем.
+DELETE FROM ifrs_line_confirmation AS older
+USING ifrs_line_confirmation AS newer
+WHERE older.row_index IS NOT NULL
+  AND older.inn = newer.inn
+  AND older.report_date = newer.report_date
+  AND older.form_code = newer.form_code
+  AND older.row_index = newer.row_index
+  AND (older.confirmed_at, older.id) < (newer.confirmed_at, newer.id);
+
+ALTER TABLE ifrs_line_confirmation
+    DROP CONSTRAINT IF EXISTS ifrs_line_confirmation_uniq;
+ALTER TABLE ifrs_line_confirmation
+    DROP CONSTRAINT IF EXISTS ifrs_line_confirmation_row_uniq;
+ALTER TABLE ifrs_line_confirmation
+    ADD CONSTRAINT ifrs_line_confirmation_row_uniq
+    UNIQUE (inn, report_date, form_code, row_index);
 
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
     ON ifrs_line_confirmation (code);

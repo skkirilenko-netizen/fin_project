@@ -954,11 +954,34 @@ class SavedMarkup:
     # не найдена в разборе вовсе.
     fate: str
     catalog_code: str | None = None
+    reason: str = ""
 
     def describe(self) -> str:
         """Строка для отчёта."""
         tail = f" → справочник даёт {self.catalog_code}" if self.catalog_code else ""
+        if self.reason:
+            tail += f" — {self.reason}"
         return f"{self.inn} «{self.source_name}» = {self.code} [{self.fate}]{tail}"
+
+    @property
+    def lost(self) -> bool:
+        """Пропала ли работа человека: присвоение есть, а действия нет."""
+        return self.fate in (FATE_MISSING, FATE_REFUSED)
+
+
+# Что стало с присвоением прежней сессии. Исходов пять, и путать их нельзя:
+# «отклонено» — наша недоработка, из-за которой человек размечает строку
+# заново присест за присестом, а «опознано справочником» — обратное, работа,
+# которую справочник перенял.
+FATE_RESTORED = "восстановлено"
+FATE_RECOGNISED = "опознано справочником"
+FATE_OTHER_CODE = "справочник даёт другой код"
+FATE_MISSING = "строка в очереди, а разметка не применилась"
+FATE_REFUSED = "отклонено правилом формы и раздела"
+# Строки нет ни в очереди, ни под своим наименованием: её опознали
+# справочником под другим написанием либо разбор её больше не даёт.
+# Потерей это не считается — размечать нечего.
+FATE_GONE = "строки в очереди нет"
 
 
 def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
@@ -990,14 +1013,34 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
                     row["source_name"],
                     row["code"],
                     row["relation"] or Relation.EXACT.value,
-                    "опознано справочником"
+                    FATE_RECOGNISED
                     if position.code == row["code"]
-                    else "справочник даёт другой код",
+                    else FATE_OTHER_CODE,
                     position.code,
                 )
             )
             continue
         key = _restore_key(issuer, row)
+        # Отклонённое притязание — отдельный исход, и он хуже остальных:
+        # строка возвращается в очередь, а человек об этом не узнаёт. У ФосАгро
+        # «права пользования» получили балансовый код в отчёте о движении
+        # денежных средств, притязание отклонялось правилом формы, и строка
+        # размечалась заново три присеста подряд.
+        refused = issuer.rejects(catalog).get(key) if key is not None else None
+        if key is not None:
+            fate = FATE_REFUSED if refused is not None else FATE_RESTORED
+        else:
+            # Потеря — это когда строка в очереди стоит, а разметка к ней
+            # не применилась. Если строки в очереди нет вовсе, размечать
+            # нечего: её опознал справочник под другим написанием либо
+            # разбор её больше не даёт.
+            wanted = normalize_name(row["source_name"])
+            in_queue = any(
+                item.form == row["form_code"]
+                and normalize_name(item.source_name) == wanted
+                for item in issuer.extraction.unrecognised
+            )
+            fate = FATE_MISSING if in_queue else FATE_GONE
         found.append(
             SavedMarkup(
                 row["inn"],
@@ -1005,7 +1048,8 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
                 row["source_name"],
                 row["code"],
                 row["relation"] or Relation.EXACT.value,
-                "восстановлено" if key is not None else "строки нет в разборе",
+                fate,
+                reason=refused or "",
             )
         )
     return found
@@ -1057,19 +1101,48 @@ def restore(issuers: list[IssuerMarkup], conn=None) -> int:
 
 
 def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
-    """Ключ строки для восстановленной разметки.
+    """Ключ строки для восстановленной разметки: место и наименование вместе.
 
-    Индекс строки пишется с самого начала, но записи прежних сессий его
-    не имеют: для них строка ищется по форме и наименованию, а при пустом
-    имени — не ищется вовсе. Молчать об этом нельзя, иначе разметка тихо
-    пропадёт и покажется заново.
+    **Одного индекса мало, и одного наименования мало.** Индекс — устойчивый
+    ключ внутри одного разбора, но правка разбора его сдвигает: за один день
+    разбор менялся трижды — графы, склейка слова, граница примечаний, — и
+    присвоение легло бы на чужую строку молча. Наименование от правок разбора
+    не зависит, но у части строк его нет вовсе, а «Прочие расходы» встречаются
+    в форме дважды.
+
+    Поэтому: строка по индексу берётся, если наименование совпало; иначе
+    наименование ищется по форме и берётся, если оно там единственное; иначе
+    ключа нет — разметка не применяется, и `review_saved` называет это потерей.
+    Записи прежних сессий индекса не имеют и ищутся только по наименованию.
     """
+    same_form = [
+        item
+        for item in issuer.extraction.unrecognised
+        if item.form == row["form_code"]
+    ]
+    wanted = normalize_name(row["source_name"])
     if row.get("row_index") is not None:
-        return (row["form_code"], int(row["row_index"]))
-    for item in issuer.extraction.unrecognised:
-        if item.form == row["form_code"] and item.source_name == row["source_name"]:
-            return item.key
-    return None
+        key = (row["form_code"], int(row["row_index"]))
+        at_index = next((item for item in same_form if item.key == key), None)
+        if at_index is not None and normalize_name(at_index.source_name) == wanted:
+            return key
+        # Индекс сместился либо строка опознана справочником. Наименование
+        # переносит разметку, если оно в форме единственное: иначе решение
+        # применилось бы к произвольной из тёзок.
+        named = [item for item in same_form if normalize_name(item.source_name) == wanted]
+        if len(named) == 1:
+            if at_index is not None:
+                logger.info(
+                    "разметка «%s» (%s): индекс сместился %s → %s",
+                    row["source_name"],
+                    row["inn"],
+                    key[1],
+                    named[0].index,
+                )
+            return named[0].key
+        return None
+    named = [item for item in same_form if normalize_name(item.source_name) == wanted]
+    return named[0].key if len(named) == 1 and wanted else None
 
 
 def code_is_taken(

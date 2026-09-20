@@ -134,15 +134,20 @@ _CLEAR_STATE_RECORDS = """
 DELETE FROM dq_log WHERE src_file_id = %(id)s AND check_code = ANY(%(codes)s)
 """
 
+# Место строки пишется и здесь: ключ уникальности строится по строке
+# комплекта, и без индекса повторное подтверждение ложилось бы рядом
+# с прежним вместо того, чтобы его заменить.
 _INSERT_CONFIRMATION = """
 INSERT INTO ifrs_line_confirmation (
     code, inn, src_file_id, report_date, source_name, form_code, value,
-    share_of_assets, confirmed_by, note
+    share_of_assets, confirmed_by, note, row_index
 ) VALUES (
     %(code)s, %(inn)s, %(src_file_id)s, %(report_date)s, %(source_name)s,
-    %(form_code)s, %(value)s, %(share)s, %(confirmed_by)s, %(note)s
+    %(form_code)s, %(value)s, %(share)s, %(confirmed_by)s, %(note)s, %(index)s
 )
-ON CONFLICT (code, inn, report_date, source_name) DO UPDATE SET
+ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET
+    code = EXCLUDED.code,
+    source_name = EXCLUDED.source_name,
     src_file_id = EXCLUDED.src_file_id,
     value = EXCLUDED.value,
     share_of_assets = EXCLUDED.share_of_assets,
@@ -861,6 +866,7 @@ def _save_confirmations(
                 "share": share,
                 "confirmed_by": confirmed_by,
                 "note": None,
+                "index": row.index,
             },
             conn=conn,
         )
