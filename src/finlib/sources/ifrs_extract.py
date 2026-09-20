@@ -201,6 +201,10 @@ class ExtractedForm:
     auto_dismissed: list[tuple[str, tuple[Decimal, ...], str]] = field(
         default_factory=list
     )
+    # Строки, которые методика не использует осознанно: наименование, величины
+    # и предмет из `ignored` справочника. Хранятся отдельно от неопознанных —
+    # игнорируемое наименование это решение, неопознанное — недоработка.
+    ignored: list[tuple[str, tuple[Decimal, ...], str]] = field(default_factory=list)
     # Место опознанной позиции в таблице: код → номер строки. Нужно
     # для иерархии итогов — в отчётности по МСФО слагаемые стоят **над**
     # своим итогом, и без места строки «ближайший итог ниже» не определить.
@@ -260,6 +264,15 @@ class Extraction:
         return [item for form in self.forms.values() for item in form.contested]
 
     @property
+    def ignored(self) -> list[tuple[str, str, str]]:
+        """Строки, не используемые методикой осознанно: форма, строка, предмет."""
+        return [
+            (form.code, name, subject)
+            for form in self.forms.values()
+            for name, _values, subject in form.ignored
+        ]
+
+    @property
     def dropped_values(self) -> list[tuple[str, str, tuple[Decimal, ...]]]:
         """Величины, отброшенные без объяснения: форма, строка, сами числа.
 
@@ -313,6 +326,7 @@ class Extraction:
         return (
             f"форм разобрано {len(self.forms)}, величин извлечено "
             f"{len(self.values)}, строк не опознано {len(self.unrecognised)}, "
+            f"осознанно игнорируется {len(self.ignored)}, "
             f"итогов опознано структурой "
             f"{sum(len(form.totals_by_structure) for form in self.forms.values())}, "
             f"строк сложено с другими {len(self.merged)}, "
@@ -547,6 +561,15 @@ def _extract_form(
                 # искусственно завышали долю общих статей, потому что номер
                 # страницы встречается у всех эмитентов.
                 form.auto_dismissed.append((name, values, dismissal))
+                continue
+            ignored = catalog.ignored_subject(name)
+            if ignored is not None:
+                # Методика не использует этот предмет осознанно — прибыль
+                # на акцию, число акций. Такая строка не идёт ни в очередь
+                # разметки, ни в основания экрана сверки, но и не исчезает:
+                # она считается отдельно от неопознанных, потому что
+                # решение и недоработка — разные вещи.
+                form.ignored.append((name, values, ignored.subject))
                 continue
             form.unrecognised.append(
                 UnrecognisedRow(

@@ -663,6 +663,7 @@ def _journal_records(
                     if review.confirmed_from
                     else ""
                 )
+                + f", осознанно игнорируется {review.rows_ignored}"
                 + f"; итогов сверено {review.totals_checked}, не сошлось "
                 f"{len(review.totals_failed)}; строк сложено с другими "
                 f"{len(extraction.merged)}, спорных позиций "
@@ -676,6 +677,12 @@ def _journal_records(
             details={
                 "rows_recognised": review.rows_recognised,
                 "rows_confirmed": len(review.rows_confirmed),
+                # Осознанно игнорируемые строки — решение методики, и в журнале
+                # они стоят рядом с неопознанными, а не вместо них.
+                "rows_ignored": len(extraction.ignored),
+                "ignored_subjects": sorted(
+                    {subject for _form, _name, subject in extraction.ignored}
+                ),
                 "confirmed_from": list(review.confirmed_from),
                 "rows_total": review.rows_total,
                 "totals_checked": review.totals_checked,

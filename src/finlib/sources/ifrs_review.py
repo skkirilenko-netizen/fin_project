@@ -135,6 +135,10 @@ class ReviewResult:
     # и в документе они печатаются порознь.
     rows_confirmed: tuple[tuple[str, int], ...] = ()
     confirmed_from: tuple[str, ...] = ()
+    # Строки, которые методика не использует осознанно (прибыль на акцию,
+    # число акций). Считаются отдельно: решение и недоработка — разные вещи,
+    # и ноль игнорируемых строк не то же, что «их никто не искал».
+    rows_ignored: int = 0
     # Строки с отброшенными без объяснения величинами и знаменатель к ним —
     # строки с величинами вообще. Ноль потерь при неизвестном числе строк
     # неотличим от невыполненной проверки.
@@ -162,7 +166,8 @@ class ReviewResult:
         return (
             f"{head}; итогов сверено {self.totals_checked}, из них не сошлось "
             f"{len(self.totals_failed)}; строк опознано {self.rows_recognised} "
-            f"из {self.rows_total}; статей сверх порога "
+            f"из {self.rows_total}, осознанно игнорируется {self.rows_ignored}; "
+            f"статей сверх порога "
             f"{len(self.material_items)}; величины отброшены у "
             f"{self.rows_with_dropped} строк из {self.rows_with_values} "
             "с величинами"
@@ -269,6 +274,7 @@ def review(
         rows_with_dropped=len(extraction.dropped_values),
         rows_confirmed=tuple(sorted(known.rows)),
         confirmed_from=known.from_reports,
+        rows_ignored=len(extraction.ignored),
     )
     logger.info("экран сверки: %s", result.describe())
     return result

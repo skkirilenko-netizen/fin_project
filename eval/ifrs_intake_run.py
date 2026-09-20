@@ -55,6 +55,8 @@ class DocumentRun:
     # Строки, принятые по ранее подтверждённому у этого же эмитента: опознание
     # слабее справочника, и в отчёте оно стоит отдельной графой.
     rows_confirmed: int = 0
+    # Строки, которые методика не использует осознанно: решение, а не пробел.
+    rows_ignored: int = 0
     totals_checked: int = 0
     totals_failed: int = 0
     material_items: tuple[str, ...] = ()
@@ -142,6 +144,7 @@ class IntakeReport:
         if accepted:
             recognised = sum(item.rows_recognised for item in accepted)
             confirmed = sum(item.rows_confirmed for item in accepted)
+            ignored = sum(item.rows_ignored for item in accepted)
             rows = sum(item.rows_total for item in accepted)
             checked = sum(item.totals_checked for item in accepted)
             failed = sum(item.totals_failed for item in accepted)
@@ -155,7 +158,10 @@ class IntakeReport:
                 # о строке вообще, ранее подтверждённое — о строке этого
                 # эмитента, и доверие к ним разное.
                 f"- строк принято по ранее подтверждённому: {confirmed}",
-                f"- строк не опознано: {rows - recognised - confirmed}",
+                # Игнорируемое наименование — решение методики, и стоит оно
+                # рядом с неопознанными, а не среди них.
+                f"- строк методика не использует осознанно: {ignored}",
+                f"- строк не опознано: {rows - recognised - confirmed - ignored}",
                 f"- итогов сверено: {checked}, из них не сошлось: {failed}",
                 f"- сносок под формами извлечено: "
                 f"{sum(item.notes for item in accepted)}",
@@ -222,6 +228,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         rows_total=decision.rows_total,
         rows_recognised=decision.rows_recognised,
         rows_confirmed=len(decision.rows_confirmed),
+        rows_ignored=decision.rows_ignored,
         totals_checked=decision.totals_checked,
         totals_failed=len(decision.totals_failed),
         material_items=tuple(item.describe() for item in decision.material_items),

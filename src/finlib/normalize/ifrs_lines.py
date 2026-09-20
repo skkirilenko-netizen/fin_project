@@ -143,6 +143,31 @@ class IfrsPosition(BaseModel):
         return self
 
 
+class IgnoredSubject(BaseModel):
+    """Предмет, который методика осознанно не использует.
+
+    **Игнорируемое наименование — принятое решение, неопознанное —
+    недоработка**, и различать их обязательно: то же различие, что у РСБУ
+    между `ignored_codes` и `unknown_line_code`. Причина потому и обязательна:
+    без неё через полгода не отличить решение от забытой строки.
+
+    Перечень написаний может быть пуст: предмет объявлен, а строка в разобранных
+    комплектах не встречена. Это честнее выдуманного написания — игнорировать
+    нечего до первой встречи.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    subject: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    names: tuple[Alias, ...] = ()
+
+    @property
+    def match_names(self) -> tuple[str, ...]:
+        """Нормализованные написания, по которым строка игнорируется."""
+        return tuple(dict.fromkeys(normalize_name(item.name) for item in self.names))
+
+
 class FormDef(BaseModel):
     """Раздел консолидированной отчётности.
 
@@ -189,6 +214,10 @@ class IfrsCatalog(BaseModel):
     version: str = Field(min_length=1)
     forms: dict[str, FormDef]
     positions: tuple[IfrsPosition, ...] = Field(min_length=1)
+    # Наименования, которые методика не использует осознанно. Пусто быть
+    # не обязано: перечень объявлен, и ноль в нём означает «ничего
+    # не игнорируем», а не «не смотрели».
+    ignored: tuple[IgnoredSubject, ...] = ()
     materiality: Materiality
     core_candidate: CoreCandidate
 
@@ -199,7 +228,29 @@ class IfrsCatalog(BaseModel):
         self._check_forms_exist()
         self._check_components_exist()
         self._check_aliases_do_not_overlap()
+        self._check_ignored_are_not_positions()
         return self
+
+    def _check_ignored_are_not_positions(self) -> None:
+        """Наименование не может быть и позицией, и игнорируемым.
+
+        Такое наименование опознавалось бы и отбрасывалось одновременно,
+        а какое из двух случится — зависело бы от порядка проверок в коде.
+        Решение должно быть одно, и противоречие обязано находиться
+        при загрузке справочника, а не при разборе отчётности.
+        """
+        known = {name for item in self.positions for name in item.match_names}
+        clashing = sorted(
+            name
+            for subject in self.ignored
+            for name in subject.match_names
+            if name in known
+        )
+        if clashing:
+            raise ValueError(
+                "наименования объявлены и позицией, и игнорируемыми: "
+                + ", ".join(f"«{name}»" for name in clashing)
+            )
 
     def _check_codes_are_unique(self) -> None:
         """Один код — одна позиция."""
@@ -285,6 +336,20 @@ class IfrsCatalog(BaseModel):
     def get(self, code: str) -> IfrsPosition | None:
         """Позиция по коду; None — кода нет в справочнике."""
         return next((item for item in self.positions if item.code == code), None)
+
+    def ignored_subject(self, name: str) -> IgnoredSubject | None:
+        """Предмет, ради которого строка игнорируется; None — не игнорируется.
+
+        Сравнение дословное, приведёнными наименованиями — как у синонимов.
+        По вхождению слова игнорирование однажды проглотило бы настоящую
+        статью, а потеря величины здесь так же тиха, как везде в ветке.
+        """
+        normalized = normalize_name(name)
+        if not normalized:
+            return None
+        return next(
+            (item for item in self.ignored if normalized in item.match_names), None
+        )
 
     def require(self, code: str) -> IfrsPosition:
         """Позиция по коду; отсутствие — ошибка справочника."""
