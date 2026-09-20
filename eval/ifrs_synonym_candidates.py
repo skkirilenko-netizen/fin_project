@@ -17,6 +17,25 @@
 двух эмитентов о смысле. Синонимом такое объявить нельзя: статья ляжет
 в позицию, которая встретилась раньше, то есть произвольно.
 
+**Обрывок наименования синонимом не становится.** Вёрстка переносит длинные
+наименования, и человек размечал вторую половину: «права пользования»,
+«приобретение основных средств». Как подтверждение у своего эмитента это
+работает, как синоним — нет: обрывок подцепит у другого эмитента чужую
+строку, и сделает это тихо, потому что опознание по наименованию
+об обрывках не знает. Признак обрывка объявлен: наименование начинается
+со строчной буквы либо короче трёх слов, **и** у того же эмитента есть
+полное написание, в которое оно входит. Второе условие обязательно —
+без него отклонялись бы короткие настоящие наименования вроде «Резервы».
+
+Два признака к тому же роду отклоняются сами по себе, без второго условия,
+потому что тут доказывать нечего. **Незакрытая скобка** — это обрыв текста,
+а не наименование: «Платежи по обязательствам аренды (» у Автодора. И
+**родовое короткое слово, которому у нас уже присвоены разные коды**, —
+«Прочее» у ФосАгро значит долю в результатах объектов долевого участия
+в отчёте о прибыли и прочую инвестиционную деятельность в отчёте о движении
+денежных средств. Синонимом такое слово подцепит у другого эмитента
+что угодно, и сделает это тихо.
+
     uv run python eval/ifrs_synonym_candidates.py
     uv run python eval/ifrs_synonym_candidates.py --grouping 7736216869=english
 
@@ -40,6 +59,13 @@ _EXACT = """
 SELECT inn, source_name, form_code, code
 FROM ifrs_line_confirmation
 WHERE relation = 'exact' AND source_name <> ''
+"""
+
+# Все присвоения любого вида: по ним видно родовое слово — то, которому
+# у нас уже присвоены разные коды.
+_ASSIGNED = """
+SELECT source_name, code FROM ifrs_line_confirmation
+WHERE relation <> 'not_a_line' AND source_name <> ''
 """
 
 
@@ -84,20 +110,60 @@ def main(argv: list[str] | None = None) -> int:
             if key not in confirmed:
                 continue
             item = gap.setdefault(
-                key, {"name": row.source_name, "codes": set(), "own": set(), "other": set()}
+                key,
+                {
+                    "name": row.source_name,
+                    "codes": set(),
+                    "own": set(),
+                    "other": set(),
+                    # Кто присвоил код: по нему ищется полное написание —
+                    # обрывок ловится тем, что у **этого** эмитента есть
+                    # наименование длиннее.
+                    "by": set(),
+                },
             )
             for code, inn in confirmed[key]:
                 item["codes"].add(code)
+                item["by"].add(inn)
                 where = item["own"] if inn == issuer.inn else item["other"]
                 where.add(issuer.inn)
 
-    ready = {key: item for key, item in gap.items() if len(item["codes"]) == 1}
-    ambiguous = {key: item for key, item in gap.items() if len(item["codes"]) > 1}
+    # Все коды, которые человек присваивал этому наименованию, — любого вида
+    # и в любой форме. Родовое слово видно именно так: «Прочее» получило
+    # у нас два разных кода в двух формах одного эмитента.
+    all_codes: dict[str, set[str]] = defaultdict(set)
+    for row in fetch_all(_ASSIGNED, {}):
+        all_codes[normalize_name(row["source_name"])].add(row["code"])
+
+    spellings = _spellings(issuers, confirmed)
+    ready: dict[tuple[str, str], dict] = {}
+    ambiguous: dict[tuple[str, str], dict] = {}
+    fragments: dict[tuple[str, str], dict] = {}
+    known: dict[tuple[str, str], dict] = {}
+    for key, item in gap.items():
+        if len(item["codes"]) > 1:
+            ambiguous[key] = item
+            continue
+        position = catalog.get(next(iter(item["codes"])))
+        if position is not None and key[0] in position.match_names:
+            # Наименование справочник уже знает, и в очереди строка стоит
+            # не из-за него: не определился раздел. Поднимать нечего —
+            # лечится это разделом, а не синонимом.
+            known[key] = item
+            continue
+        whole = _whole_spelling(item, key[1], spellings, all_codes)
+        if whole is not None:
+            item["whole"] = whole
+            fragments[key] = item
+            continue
+        ready[key] = item
     cross = {key: item for key, item in ready.items() if item["other"]}
 
     print(
         f"наименований на подъём: {len(ready)}; из них не опознаны у чужого "
-        f"эмитента {len(cross)}; неоднозначных, поднимать нельзя: {len(ambiguous)}"
+        f"эмитента {len(cross)}; неоднозначных, поднимать нельзя: "
+        f"{len(ambiguous)}; обрывков наименования: {len(fragments)}; "
+        f"уже в справочнике (дело в разделе): {len(known)}"
     )
 
     print("\nПОДНИМАТЬ")
@@ -115,7 +181,80 @@ def main(argv: list[str] | None = None) -> int:
         print("\nНЕ ПОДНИМАТЬ: наименование подтверждено разными кодами")
         for item in sorted(ambiguous.values(), key=lambda value: value["name"]):
             print(f"  «{item['name']}» → {', '.join(sorted(item['codes']))}")
+
+    if fragments:
+        print("\nНЕ ПОДНИМАТЬ: обрывок наименования, перенесённого вёрсткой")
+        for item in sorted(fragments.values(), key=lambda value: value["name"]):
+            print(f"  «{item['name']}» — {item['whole']}")
+
+    if known:
+        print("\nНЕ ПОДНИМАТЬ: наименование уже в справочнике, не определился раздел")
+        for item in sorted(known.values(), key=lambda value: value["name"]):
+            print(f"  «{item['name']}» → {', '.join(sorted(item['codes']))}")
     return 0
+
+
+# Сколько слов должно быть в наименовании, чтобы оно не выглядело обрывком.
+_SHORT_NAME_WORDS = 3
+
+
+def _spellings(issuers: list, confirmed: dict) -> dict[tuple[str, str], set[str]]:
+    """Наименования, встреченные у каждого эмитента: строки форм и подтверждения.
+
+    Полным написанием считается то, что видел сам эмитент: строка его формы
+    либо его же подтверждение. Чужие написания здесь ни при чём — обрывок
+    ловится тем, что у **этого** эмитента есть строка длиннее.
+    """
+    found: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for issuer in issuers:
+        for row in issuer.extraction.unrecognised:
+            found[(issuer.inn, row.form)].add(normalize_name(row.source_name))
+        for value in issuer.extraction.values:
+            form = next(
+                (
+                    code
+                    for code, item in issuer.extraction.forms.items()
+                    if value in item.values
+                ),
+                None,
+            )
+            if form is not None:
+                found[(issuer.inn, form)].add(normalize_name(value.source_name))
+    for (name, form), owners in confirmed.items():
+        for _code, inn in owners:
+            found[(inn, form)].add(name)
+    return found
+
+
+def _whole_spelling(
+    item: dict, form: str, spellings: dict, all_codes: dict[str, set[str]]
+) -> str | None:
+    """Чем кандидат оказался обрывком или родовым словом; None — ни тем ни этим.
+
+    Обрывок опознаётся двумя признаками сразу: он выглядит незаконченным
+    (начинается со строчной буквы либо короче трёх слов) **и** у того же
+    эмитента есть наименование длиннее, в которое он входит. Одного первого
+    признака мало: «Резервы» — короткое, но настоящее наименование.
+
+    Два случая доказывать нечем, и они отклоняются сами: незакрытая скобка —
+    обрыв текста, а короткое слово, которому у нас уже присвоены разные коды, —
+    родовое.
+    """
+    name = item["name"]
+    if name.rstrip().endswith("("):
+        return "текст обрывается незакрытой скобкой"
+    short = name[:1].islower() or len(name.split()) < _SHORT_NAME_WORDS
+    if not short:
+        return None
+    codes = all_codes.get(normalize_name(name), set())
+    if len(codes) > 1:
+        return "родовое слово: у нас ему присвоены " + ", ".join(sorted(codes))
+    packed = normalize_name(name)
+    for inn in item["by"] | item["own"]:
+        for other in spellings.get((inn, form), ()):
+            if other != packed and packed in other:
+                return f"полное написание «{other}»"
+    return None
 
 
 if __name__ == "__main__":
