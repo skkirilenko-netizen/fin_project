@@ -59,12 +59,17 @@ class Refusal(StrEnum):
     FOREIGN_FORM = "foreign_form"
     FOREIGN_SECTION = "foreign_section"
     CONTESTED_TOTAL = "contested_total"
+    # Позиция объявлена несуммируемой: одна и та же формулировка стоит
+    # в форме дважды, у разных итогов, и сумма двух строк — величина,
+    # которой нет ни в отчётности, ни в природе.
+    NOT_SUMMABLE = "not_summable"
 
 
 REFUSAL_TEXT: dict[Refusal, str] = {
     Refusal.FOREIGN_FORM: "строка стоит в другой форме, чем позиция",
     Refusal.FOREIGN_SECTION: "строка стоит в другом разделе, чем позиция",
     Refusal.CONTESTED_TOTAL: "итог не может быть раскрыт несколькими строками",
+    Refusal.NOT_SUMMABLE: "позиция не складывается из нескольких строк",
 }
 
 
@@ -146,17 +151,28 @@ def fold(position: IfrsPosition, claims: Sequence[Claim]) -> Folded:
                 else _refusal_reason(refused)
             ),
         )
-    if position.is_total:
+    if position.is_total or not position.summable:
         # Итог, раскрытый двумя строками с разными величинами, — не сумма
         # этих строк: итог один, и какая из них он, отчётность не говорит.
-        refused.extend((claim, Refusal.CONTESTED_TOTAL) for claim in kept)
+        #
+        # То же у позиции, объявленной несуммируемой: распределение прибыли
+        # печатается одной строкой на блок, и та же формулировка стоит второй
+        # раз под общим совокупным доходом. У Акрона «Собственникам Компании»
+        # складывалось в 75 439 — величину, которой нет ни в отчётности,
+        # ни в природе.
+        refusal = (
+            Refusal.CONTESTED_TOTAL if position.is_total else Refusal.NOT_SUMMABLE
+        )
+        refused.extend((claim, refusal) for claim in kept)
         names = ", ".join(f"«{claim.name}»" for claim in kept)
         return Folded(
             position.code,
             Fold.CONTESTED,
             repeated=tuple(repeated),
             refused=tuple(refused),
-            reason=f"итог раскрыт несколькими строками: {names}; величина не взята",
+            reason=(
+                f"{REFUSAL_TEXT[refusal]}: {names}; величина не взята"
+            ),
         )
     values = _summed(kept)
     names = ", ".join(f"«{claim.name}»" for claim in kept)

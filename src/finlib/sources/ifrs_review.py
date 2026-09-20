@@ -26,7 +26,12 @@ from enum import StrEnum
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, load_ifrs_lines
 from finlib.quality.codes import CheckCode
-from finlib.quality.totals import TotalCheck, TotalVerdict, check_total
+from finlib.quality.totals import (
+    Composition,
+    TotalCheck,
+    TotalVerdict,
+    check_total,
+)
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow
 from finlib.sources.ifrs_inbox import DocumentProfile, ReportingKind
 from finlib.sources.ifrs_numbers import PlausibilityCheck, check_plausibility
@@ -237,27 +242,40 @@ def review(
 def _check_totals(
     extraction: Extraction, catalog: IfrsCatalog, report_date: date
 ) -> tuple[int, list[TotalCheck]]:
-    """Сверяет итоги форм с суммами их состава.
+    """Сверяет итоги форм с суммами их состава и тождества распределения.
 
     Арифметика та же, что у контролей РСБУ: `quality/totals.py` работает
     с любым справочником, потому что проверяет равенство суммы, а не природу
     кодов.
+
+    **Тождество распределения проверяется отдельно от состава.** Прибыль
+    за период набирается из прибыли до налогообложения и налога, а делится
+    между акционерами материнской компании и неконтролирующими долями
+    (МСФО (IAS) 1.81B): это два разных утверждения об одной величине, и оба
+    обязаны сойтись. Объявить распределение запасным составом нельзя —
+    сошедшееся распределение закрыло бы собой несошедшуюся цепочку прибыли.
     """
     values = extraction.totals(report_date)
     checked = 0
     failed: list[TotalCheck] = []
-    for total in catalog.totals():
-        found = check_total(
-            total,
-            values.get,
-            lambda code: None,
-            lambda amount: abs(amount) / Decimal(1000) + Decimal(1),
-            lambda code: (
-                position.normal_sign
-                if (position := catalog.get(code)) is not None
-                else 1
-            ),
-        )
+
+    def tolerance(amount: Decimal) -> Decimal:
+        """Допуск сходимости: доля итога и одна единица на округление."""
+        return abs(amount) / Decimal(1000) + Decimal(1)
+
+    def sign_of(code: str) -> int:
+        """Нормальный знак позиции; неизвестный код считается положительным."""
+        position = catalog.get(code)
+        return position.normal_sign if position is not None else 1
+
+    lines: list[object] = list(catalog.totals())
+    lines.extend(
+        Composition(item.code, item.split_into)
+        for item in catalog.positions
+        if item.split_into
+    )
+    for total in lines:
+        found = check_total(total, values.get, lambda code: None, tolerance, sign_of)
         if found.verdict in (TotalVerdict.MATCHED, TotalVerdict.MISMATCHED):
             checked += 1
         if found.verdict is TotalVerdict.MISMATCHED:

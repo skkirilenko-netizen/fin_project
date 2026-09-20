@@ -28,7 +28,12 @@ from pathlib import Path
 
 from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lines
 from finlib.normalize.lines import normalize_name
-from finlib.quality.totals import TotalCheck, TotalVerdict, check_total
+from finlib.quality.totals import (
+    Composition,
+    TotalCheck,
+    TotalVerdict,
+    check_total,
+)
 from finlib.sources.cbonds import other_shares
 from finlib.sources.ifrs_claims import Claim, Fold, fold
 from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
@@ -488,19 +493,6 @@ def _for_issuer(
     return found
 
 
-@dataclass(frozen=True, slots=True)
-class _Composition:
-    """Один из составов итога — вход для общей арифметики сходимости."""
-
-    code: str
-    components: tuple
-
-    @property
-    def is_total(self) -> bool:
-        """Состав бывает только у итога."""
-        return True
-
-
 def best_composition(
     total: IfrsPosition,
     values: dict[str, Decimal],
@@ -522,7 +514,7 @@ def best_composition(
     outcomes = [
         _with_extra(
             check_total(
-                _Composition(total.code, group),
+                Composition(total.code, group),
                 values.get,
                 lambda code: None,
                 lambda amount: abs(amount) * tolerance_share + Decimal(1),

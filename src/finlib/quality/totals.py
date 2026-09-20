@@ -92,6 +92,24 @@ class TotalCheck:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class Composition:
+    """Итог и один из его составов — вход для арифметики сходимости.
+
+    Нужна там, где состав берётся не из самой позиции: запасной состав
+    при разметке и тождество распределения на экране сверки. Определение
+    одно на оба случая: два одинаковых переходника неминуемо разойдутся.
+    """
+
+    code: str
+    components: tuple
+
+    @property
+    def is_total(self) -> bool:
+        """Состав бывает только у итога."""
+        return True
+
+
 def _with_inferred_signs(
     line: Total,
     value_of: Callable[[str], Decimal | None],
