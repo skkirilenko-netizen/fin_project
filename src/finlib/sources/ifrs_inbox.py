@@ -577,6 +577,15 @@ def form_headings(
         # в заголовки через собственный же перенос.
         if _is_contents_entry(stripped):
             continue
+        # **Оглавление опознаётся перечнем, а не отдельной строкой.** У Самолёта
+        # первая строка «Содержания» — «Консолидированный отчет о прибыли или
+        # убытке», перенос с номером страницы стоит ниже, и сама она признаку
+        # строки оглавления не отвечает: номера в ней нет. Отличает её то,
+        # что она стоит в перечне — под ней ещё четыре строки с номерами
+        # страниц. Таблицу под таким заголовком изображали телефоны с бланка
+        # аудитора, а настоящая форма не разбиралась вовсе.
+        if _inside_contents_list(lines, index, policy):
+            continue
         variants = [stripped]
         for ahead in range(1, policy.document_kind.heading_wrap_lines + 1):
             if index + ahead >= len(lines):
@@ -589,8 +598,17 @@ def form_headings(
         # вхождениями: слова в нём те же самые, и по словам его от заголовка
         # не отличить. Отличает его номер страницы в конце при отсутствии
         # других чисел — у заголовка формы такого вида не бывает.
+        # **Заголовок формы сам строкой таблицы не бывает.** У Брусники ядро
+        # нашлось в склейке «(по данным консолидированного отчета о движении |
+        # денежных средств) 14, 15 1 538 1 141» — это строка сверки EBITDA
+        # внутри другой формы, ссылающаяся на форму по имени. Блоком «отчёта
+        # о движении денежных средств» становились десять строк примечания,
+        # а настоящая форма стояла ниже и не разбиралась: фактов потока
+        # у эмитента не было ни одного.
         lowered = [
-            normalize_name(item) for item in variants if not _is_contents_entry(item)
+            normalize_name(item)
+            for item in variants
+            if not _is_contents_entry(item) and not _is_table_row(item)
         ]
         for code, cores in policy.document_kind.cores.items():
             if any(
@@ -745,6 +763,21 @@ def _is_table_row(line: str) -> bool:
 # Номер страницы в конце строки оглавления: «… о финансовом положении 6»,
 # «… о прибыли или убытке 7-8».
 _PAGE_NUMBER = re.compile(r"\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*$")
+
+
+def _inside_contents_list(
+    lines: list[str], index: int, policy: ParsingPolicy
+) -> bool:
+    """Стоит ли строка в перечне оглавления: рядом другие строки с номерами.
+
+    Признак строки оглавления по отдельности слаб — ему отвечает и номер
+    страницы сам по себе, — а перечень однозначен: столько строк с номером
+    в конце подряд бывает только в оглавлении.
+    """
+    kind = policy.document_kind
+    following = lines[index + 1 : index + 1 + kind.contents_list_window]
+    listed = sum(1 for line in following if _is_contents_entry(line.strip()))
+    return listed >= kind.contents_list_entries
 
 
 def _is_contents_entry(text: str) -> bool:
