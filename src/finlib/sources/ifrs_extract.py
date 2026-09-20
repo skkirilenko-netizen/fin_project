@@ -382,10 +382,15 @@ def _extract_form(
     tail_from = 0
 
     pending: list[str] = []
+    letters = _single_letter_words()
     for index, line in enumerate(lines):
         name, values, alternative, reference, dropped = _split_row(
             line, grouping, len(report_dates), layout
         )
+        # Слово, разорванное извлекателем, склеивается здесь: дальше
+        # наименование идёт и в справочник, и в подтверждения, и в очередь
+        # разметки, а разорванное не опознаётся ни там, ни там.
+        name = glue_word_breaks(name, letters)
         # Координаты старше правил строения числа: они говорят, где кончается
         # колонка, а правила об этом только догадываются. Но величин от этого
         # не убывает: если ячейка не легла ни в одну колонку — у Норникеля
@@ -654,6 +659,44 @@ def _is_table_header(name: str) -> bool:
     # хвостовых чисел их не убирает — между ними стоят слова.
     return all(
         word.strip("-") in _HEADER_WORDS or word.isdigit() for word in words
+    )
+
+
+def glue_word_breaks(name: str, letters: frozenset[str]) -> str:
+    """Склеивает слово, разорванное извлекателем пробелом.
+
+    **Разрыв внутри куска, а не между кусками, поэтому координаты здесь
+    не помогают.** У ФосАгро pypdf отдаёт «Г руппы» одним куском вместе
+    с пробелом, и наименование «Себестоимость реализованной продукции
+    Г руппы» не опознаётся ни справочником, ни ранее подтверждённым —
+    а это 194 587, двадцать восемь процентов валюты баланса.
+
+    Склеивается только то, что словом не бывает: `letters` — закрытый
+    перечень однобуквенных слов из методики, и буква из него не склеивается
+    никогда. Поэтому «В составе» и «С тавка» остаются как есть: отличить
+    там разрыв от предлога нечем, а испорченное наименование хуже
+    неопознанного — оно опознаётся **неверно**.
+    """
+    def glued(match: re.Match[str]) -> str:
+        letter = match.group(1)
+        return letter if letter.casefold() not in letters else match.group(0)
+
+    return _LONE_LETTER.sub(glued, name)
+
+
+# Одинокая буква перед словом: буква, отделённая от соседей границей слова,
+# пробел и продолжение с буквы. Цифры сюда не попадают — «6 месяцев»
+# разрывом слова не является.
+_LONE_LETTER = re.compile(r"(?<![^\W\d_])([^\W\d_])\s+(?=[^\W\d_])")
+
+
+@lru_cache(maxsize=1)
+def _single_letter_words() -> frozenset[str]:
+    """Однобуквенные слова методики — те, что склеивать нельзя."""
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    return frozenset(
+        item.casefold() for item in load_parsing_policy().word_breaks.single_letter_words
     )
 
 

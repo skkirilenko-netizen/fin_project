@@ -227,6 +227,21 @@ class PeriodsPolicy(BaseModel):
     reasons: dict[str, str]
 
 
+class WordBreaksPolicy(BaseModel):
+    """Какие одинокие буквы склеиваются со следующим словом.
+
+    Извлекатель вставляет пробел внутрь слова, и наименование перестаёт
+    опознаваться. Склеивается только то, что словом не бывает: перечень
+    однобуквенных слов закрыт, и всё, чего в нём нет, одинокой буквой
+    в наименовании стоять не может.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    single_letter_words: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
 class ColumnSpansPolicy(BaseModel):
     """Как в шапке формы объявляется длительность её граф.
 
@@ -336,6 +351,7 @@ class ParsingPolicy(BaseModel):
     currency: CurrencyPolicy
     units: UnitsPolicy
     periods: PeriodsPolicy
+    word_breaks: WordBreaksPolicy
     column_spans: ColumnSpansPolicy
     reporting_kind: ReportingKindPolicy
     digit_grouping: GroupingPolicy
