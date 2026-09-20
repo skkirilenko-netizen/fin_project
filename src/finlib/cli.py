@@ -606,7 +606,12 @@ def _markup_loop(
 
     catalog = load_ifrs_lines()
     codes = known_codes(catalog)
-    by_inn = {item.inn: item for item in issuers}
+    # Комплект, а не эмитент: ключом был один ИНН, и у эмитента с двумя
+    # комплектами решение по строке одного применялось к другому — вместе
+    # с его отчётной датой в журнале. У Сегежи так три присвоения
+    # промежуточного комплекта легли на годовой, а одно затёрло запись
+    # годового по ключу (код, ИНН, дата, наименование).
+    by_report = {(item.inn, item.report_date): item for item in issuers}
 
     # Разметка идёт в несколько присестов: сделанное прежде не показывается
     # повторно, а присвоенные коды участвуют в суммах — без них итоги
@@ -628,17 +633,19 @@ def _markup_loop(
         )
     )
 
-    # ИНН, ключ строки и наименование: ключ нужен, чтобы отменить именно эту
-    # строку, наименование — чтобы сказать человеку, что отменено.
-    history: list[tuple[str, tuple[str, int], str]] = []
-    skipped: set[tuple[str, tuple[str, int]]] = set()
+    # Комплект, ключ строки и наименование: ключ нужен, чтобы отменить именно
+    # эту строку, наименование — чтобы сказать человеку, что отменено.
+    # Комплект — потому что «форма и место в ней» у другого комплекта того же
+    # эмитента означают другую строку.
+    history: list[tuple[tuple[str, date | None], tuple[str, int], str]] = []
+    skipped: set[tuple[tuple[str, date | None], tuple[str, int]]] = set()
     saved = 0
 
     while True:
         queue = [
             item
             for item in candidates(issuers, catalog)
-            if (item.inn, item.key) not in skipped
+            if (item.issuer_key, item.key) not in skipped
             and (not priority or item.priority in priority)
         ]
         if not queue:
@@ -649,7 +656,7 @@ def _markup_loop(
             break
 
         item = queue[0]
-        issuer = by_inn[item.inn]
+        issuer = by_report[item.issuer_key]
         _show_candidate(item, len(queue))
 
         raw = typer.prompt(
@@ -669,21 +676,22 @@ def _markup_loop(
         if answer == "в":
             break
         if answer == "п":
-            skipped.add((item.inn, item.key))
+            skipped.add((item.issuer_key, item.key))
             typer.echo(f"  пропущено: «{item.source_name or '(без наименования)'}»")
             continue
         if answer == "о":
             # Отмена не ограничена присестом: ошибку замечают и через день,
             # а править журнал руками неудобно и опасно.
             if history:
-                inn, key, name = history.pop()
+                issuer_key, key, name = history.pop()
+                undone = by_report[issuer_key]
             else:
                 found = last_confirmation(issuers)
                 if found is None:
                     typer.echo("  отменять нечего")
                     continue
-                inn, name, key = found
-            forget(by_inn[inn], key, name)
+                undone, name, key = found
+            forget(undone, key, name)
             saved = max(0, saved - 1)
             typer.echo(
                 typer.style(f"  отменено: «{name}»", fg=typer.colors.YELLOW)
@@ -699,7 +707,7 @@ def _markup_loop(
                 issuer.dismissed.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
-            history.append((item.inn, item.key, item.source_name))
+            history.append((item.issuer_key, item.key, item.source_name))
             saved += 1
             typer.echo(
                 f"  сохранено: «{item.source_name or '(без наименования)'}» → не статья"
@@ -738,7 +746,7 @@ def _markup_loop(
                 issuer.parts.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
-            history.append((item.inn, item.key, item.source_name))
+            history.append((item.issuer_key, item.key, item.source_name))
             saved += 1
             typer.echo(f"  сохранено: «{item.source_name}» → детализация {code}")
             if matched is True:
@@ -796,7 +804,7 @@ def _markup_loop(
                 issuer.aggregates.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
-            history.append((item.inn, item.key, item.source_name))
+            history.append((item.issuer_key, item.key, item.source_name))
             saved += 1
             typer.echo(
                 typer.style(
@@ -814,7 +822,9 @@ def _markup_loop(
             if not code:
                 typer.echo("  код не введён: строка осталась неразмеченной")
                 continue
-            taken = code_is_taken(code, catalog, item.inn)
+            taken = code_is_taken(
+                code, catalog, item.inn, source_name=item.source_name
+            )
             if taken is not None:
                 typer.echo(typer.style(f"  код занят: {taken}", fg=typer.colors.RED))
                 continue
@@ -836,7 +846,7 @@ def _markup_loop(
                 issuer.specific.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
-            history.append((item.inn, item.key, item.source_name))
+            history.append((item.issuer_key, item.key, item.source_name))
             saved += 1
             # Код заведён и годится дальше: у эмитента бывает вторая строка
             # того же содержания, и её помечают детализацией этого же кода.
@@ -875,7 +885,7 @@ def _markup_loop(
                 issuer.specific.pop(item.key, None)
                 typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
                 continue
-            history.append((item.inn, item.key, item.source_name))
+            history.append((item.issuer_key, item.key, item.source_name))
             saved += 1
             elsewhere = _code_seen_elsewhere(answer, item.inn)
             typer.echo(
@@ -896,7 +906,7 @@ def _markup_loop(
             issuer.assignments.pop(item.key, None)
             typer.echo(typer.style(f"  не сохранено: {exc}", fg=typer.colors.RED))
             continue
-        history.append((item.inn, item.key, item.source_name))
+        history.append((item.issuer_key, item.key, item.source_name))
         saved += 1
         typer.echo(f"  сохранено: «{item.source_name}» → {answer}")
         if closed:
@@ -936,9 +946,12 @@ def _show_candidate(item, left: int) -> None:
     """Печатает строку со всем, что нужно для решения."""
     typer.echo("")
     typer.echo(typer.style("─" * 72, dim=True))
+    # Отчётная дата печатается наравне с ИНН: у эмитента комплектов сколько
+    # угодно, и «Прибыль за период» годового и промежуточного — разные строки
+    # с разными величинами. Без даты человек не знает, что размечает.
     typer.echo(
-        f"Осталось {left}. ИНН {item.inn}, форма {item.form}, "
-        f"очередь: {item.priority.name}"
+        f"Осталось {left}. ИНН {item.inn}, комплект {item.report_date}, "
+        f"форма {item.form}, очередь: {item.priority.name}"
     )
     # Соседи печатаются вокруг строки: «Прочие» или «Итого» без контекста
     # не опознать, а раздел виден по тому, что стоит рядом.
@@ -980,8 +993,8 @@ def _show_skipped(skipped: set, issuers: list, catalog) -> None:
     typer.echo("")
     typer.echo(typer.style(f"Пропущено строк: {len(skipped)}", bold=True))
     for item in candidates(issuers, catalog):
-        if (item.inn, item.key) in skipped:
-            typer.echo(f"  {item.inn}  {item.describe()}")
+        if (item.issuer_key, item.key) in skipped:
+            typer.echo(f"  {item.inn} {item.report_date}  {item.describe()}")
 
 
 # Однобуквенные команды разметки и их латинские двойники. Раскладку

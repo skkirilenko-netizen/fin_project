@@ -122,6 +122,10 @@ class Candidate:
     priority: Priority
     # Место строки в форме: по нему решение применяется именно к ней.
     index: int = 0
+    # Отчётная дата комплекта, из которого строка пришла. Одного ИНН мало:
+    # у эмитента комплектов сколько угодно, и решение по строке годового
+    # комплекта, применённое к промежуточному, — тихое присвоение чужого кода.
+    report_date: date | None = None
     # Итог, в состав которого строка предположительно входит, и его недостача.
     total_code: str | None = None
     total_gap: Decimal | None = None
@@ -141,6 +145,11 @@ class Candidate:
     def key(self) -> tuple[str, int]:
         """Устойчивый ключ строки — форма и место в ней."""
         return (self.form, self.index)
+
+    @property
+    def issuer_key(self) -> tuple[str, date | None]:
+        """Ключ комплекта, которому строка принадлежит: ИНН и отчётная дата."""
+        return (self.inn, self.report_date)
 
     def describe(self) -> str:
         """Однострочное описание для списка."""
@@ -458,6 +467,7 @@ def _for_issuer(
                 source_name=row.source_name,
                 values=row.values,
                 index=row.index,
+                report_date=issuer.report_date,
                 share_of_assets=share,
                 priority=priority,
                 total_code=total_code,
@@ -1086,7 +1096,11 @@ def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
 
 
 def code_is_taken(
-    code: str, catalog: IfrsCatalog, inn: str | None = None, conn=None
+    code: str,
+    catalog: IfrsCatalog,
+    inn: str | None = None,
+    conn=None,
+    source_name: str | None = None,
 ) -> str | None:
     """Занят ли код; возвращает объяснение, чем именно занят.
 
@@ -1100,6 +1114,14 @@ def code_is_taken(
     чем лучше идёт разметка. Занятым код считается только внутри одного
     эмитента: там второе присвоение означало бы две разные вещи под одним
     кодом.
+
+    **Та же статья в другом комплекте того же эмитента кода не занимает.**
+    Разметка принадлежит комплекту, и «Обязательства, относящиеся к опционным
+    соглашениям» размечаются и в годовом, и в промежуточном комплекте Сегежи
+    одним кодом: это одна статья, а не две. Поэтому строки с тем же
+    наименованием из счёта исключаются — иначе человеку пришлось бы заводить
+    второй код для одной вещи, то есть делать ровно то, от чего это правило
+    и охраняет.
     """
     from finlib.db import fetch_all
 
@@ -1107,7 +1129,12 @@ def code_is_taken(
     if position is not None:
         return f"это код ядра: {position.name}"
     rows = fetch_all(_TAKEN, {"code": code}, conn=conn)
-    mine = {row["source_name"] for row in rows if inn is None or row["inn"] == inn}
+    mine = {
+        row["source_name"]
+        for row in rows
+        if (inn is None or row["inn"] == inn)
+        and (source_name is None or row["source_name"] != source_name)
+    }
     if mine:
         listed = ", ".join(sorted(mine)[:3])
         return f"у этого эмитента код уже присвоен статье: {listed}"
@@ -1160,11 +1187,15 @@ def _inns(issuers: list[IssuerMarkup]) -> list[str]:
 
 def last_confirmation(
     issuers: list[IssuerMarkup], conn=None
-) -> tuple[str, str, tuple[str, int]] | None:
-    """Последнее присвоение по журналу: эмитент, наименование, код.
+) -> tuple[IssuerMarkup, str, tuple[str, int]] | None:
+    """Последнее присвоение по журналу: комплект, наименование, ключ строки.
 
     Отмена не ограничена текущим присестом: ошибку замечают и через день,
     а править журнал руками неудобно и опасно.
+
+    Возвращается сам комплект, а не ИНН: у эмитента их сколько угодно,
+    и отменять нужно в том, где присвоение сделано. Комплекта нет среди
+    разбираемых — отменять нечего, и это `None`, а не чужой комплект.
     """
     from finlib.db import fetch_all
 
@@ -1173,8 +1204,10 @@ def last_confirmation(
         return None
     row = rows[0]
     issuer = _by_report(issuers).get((row["inn"], row.get("report_date")))
-    key = _restore_key(issuer, row) if issuer is not None else None
-    return row["inn"], row["source_name"], key or (row["form_code"], -1)
+    if issuer is None:
+        return None
+    key = _restore_key(issuer, row)
+    return issuer, row["source_name"], key or (row["form_code"], -1)
 
 
 def forget(
