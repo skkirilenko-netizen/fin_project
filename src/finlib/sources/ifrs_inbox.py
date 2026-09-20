@@ -417,7 +417,11 @@ def identify(
         # за нашу же догадку. Длительность проверяется правилом отчётной
         # даты (`annualisation.months_from`), и если графы сходятся с ним,
         # комплект промежуточный, а маркера вида мы не знаем.
-        retry = dates[0].month
+        #
+        # Число месяцев берётся той же функцией, а не выражением рядом:
+        # два способа посчитать одну величину расходятся, и расхождения
+        # не видно, пока их не сравнить.
+        retry = months_of(dates[0], ReportingKind.INTERIM.value)
         again, still = form_columns(
             text, headings, policy, detection.convention, by_form, retry
         )

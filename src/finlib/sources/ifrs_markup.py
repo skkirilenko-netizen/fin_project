@@ -37,7 +37,13 @@ from finlib.quality.totals import (
 )
 from finlib.sources.cbonds import other_shares
 from finlib.sources.ifrs_claims import Claim, Fold, fold
-from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, extract
+from finlib.sources.ifrs_extract import (
+    Extraction,
+    UnrecognisedRow,
+    extract,
+    nearest_total_below,
+    share_of_assets,
+)
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
 from finlib.sources.ifrs_numbers import Grouping
 
@@ -124,7 +130,12 @@ class Candidate:
     form: str
     source_name: str
     values: tuple[Decimal, ...]
-    share_of_assets: Decimal | None
+    # Насколько строка велика в своей форме: статья баланса — доля валюты
+    # баланса, строка отчёта о прибылях — доля выручки, поток — прочерк.
+    # Это мера для экрана и для порядка очереди, **и она не доля активов**:
+    # прежде поле называлось `share_of_assets`, и у строки ОПУ в графу
+    # «доля активов» журнала подтверждений попадала доля выручки.
+    relative_size: Decimal | None
     priority: Priority
     # Место строки в форме: по нему решение применяется именно к ней.
     index: int = 0
@@ -141,6 +152,10 @@ class Candidate:
     # а у строк без наименования это единственная опора.
     previous_name: str = ""
     next_name: str = ""
+    # Доля строки в валюте баланса — мера существенности из методики, та же
+    # самая, по которой решает экран сверки. Считается одной функцией
+    # (`ifrs_extract.share_of_assets`) и в журнал подтверждений идёт она.
+    share_of_assets: Decimal = Decimal(0)
 
     @property
     def amount(self) -> Decimal:
@@ -159,7 +174,7 @@ class Candidate:
 
     def describe(self) -> str:
         """Однострочное описание для списка."""
-        share = f"{self.share_of_assets:.1%}" if self.share_of_assets else "—"
+        share = f"{self.relative_size:.1%}" if self.relative_size else "—"
         total = f", в итоге {self.total_code}" if self.total_code else ""
         return f"{self.source_name} — {self.amount} ({share} активов){total}"
 
@@ -408,7 +423,7 @@ def candidates(
         key=lambda item: (
             item.priority,
             -abs(item.amount) if item.priority is Priority.BREAKS_TOTAL else 0,
-            -(item.share_of_assets or Decimal(0)),
+            -(item.relative_size or Decimal(0)),
             -item.issuers,
             item.source_name,
         )
@@ -475,7 +490,8 @@ def _for_issuer(
                 values=row.values,
                 index=row.index,
                 report_date=issuer.report_date,
-                share_of_assets=share,
+                relative_size=share,
+                share_of_assets=share_of_assets(row, assets),
                 priority=priority,
                 total_code=total_code,
                 total_gap=gap,
@@ -679,13 +695,13 @@ def _total_places(
 def _total_below(
     row: UnrecognisedRow, issuer: IssuerMarkup, catalog: IfrsCatalog
 ) -> str | None:
-    """Код ближайшего итога ниже строки — итога её раздела."""
-    below = [
-        (place, code)
-        for code, place in _total_places(issuer, row.form, catalog).items()
-        if place > row.index
-    ]
-    return min(below)[1] if below else None
+    """Код ближайшего итога ниже строки — итога её раздела.
+
+    Правило берётся из одного места (`ifrs_extract.nearest_total_below`):
+    им же разбор разводит одинаковые наименования, и два выражения одного
+    правила однажды разошлись бы.
+    """
+    return nearest_total_below(row.index, _total_places(issuer, row.form, catalog))
 
 
 def _section_at(
@@ -694,18 +710,10 @@ def _section_at(
     """Раздел, в котором стоит строка: по ближайшему итогу ниже неё.
 
     То же правило, по которому строится иерархия итогов: в МСФО слагаемые
-    стоят над своим итогом.
+    стоят над своим итогом. Само правило — в `ifrs_extract`, одно на разбор,
+    разметку и проверку ранее подтверждённого.
     """
-    below = [
-        (place, code)
-        for code, place in _total_places(issuer, row.form, catalog).items()
-        if place > row.index
-    ]
-    if not below:
-        return None
-    nearest = min(below)[1]
-    position = catalog.get(nearest)
-    return position.section if position is not None else None
+    return _section_of(_total_below(row, issuer, catalog), catalog)
 
 
 def _section_of(code: str | None, catalog: IfrsCatalog) -> str | None:

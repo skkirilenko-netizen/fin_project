@@ -70,22 +70,12 @@ class MetricScale(BaseModel):
     def score_for(self, value: Decimal) -> Decimal:
         """Балл по значению с линейной интерполяцией между опорными точками.
 
-        За крайними точками балл не меняется: шкала не экстраполируется.
+        Арифметика одна на все справочники (`scoring/scale.py`): у шкалы МСФО
+        была своя, и они расходились на нулевой ширине отрезка.
         """
-        if value <= self.points[0][0]:
-            return self.points[0][1]
-        if value >= self.points[-1][0]:
-            return self.points[-1][1]
-        for (low_value, low_score), (high_value, high_score) in zip(
-            self.points, self.points[1:], strict=False
-        ):
-            if low_value <= value <= high_value:
-                span = high_value - low_value
-                if span == 0:
-                    return high_score
-                share = (value - low_value) / span
-                return low_score + (high_score - low_score) * share
-        return self.points[-1][1]  # pragma: no cover
+        from finlib.scoring.scale import interpolate
+
+        return interpolate(self.points, value)
 
 
 class CalibrationPoints(BaseModel):

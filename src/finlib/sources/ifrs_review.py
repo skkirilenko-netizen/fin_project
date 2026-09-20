@@ -46,7 +46,7 @@ from finlib.quality.totals import (
     check_total,
 )
 from finlib.sources.ifrs_confirmed import Confirmed
-from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow
+from finlib.sources.ifrs_extract import Extraction, UnrecognisedRow, share_of_assets
 from finlib.sources.ifrs_inbox import DocumentProfile, ReportingKind
 from finlib.sources.ifrs_numbers import PlausibilityCheck, check_plausibility
 
@@ -395,7 +395,10 @@ def _material_items(
     threshold = catalog.materiality.share_of_total_assets
     found: list[MaterialItem] = []
     for row in rows:
-        share = row.largest / abs(assets)
+        # Доля считается одной функцией на весь проект: прежде то же
+        # выражение стояло здесь, в загрузчике и в разметке — и в разметке
+        # знаменателем была выручка, а называлось это тоже долей активов.
+        share = share_of_assets(row, assets)
         if share >= threshold:
             found.append(MaterialItem(row, share))
     return found

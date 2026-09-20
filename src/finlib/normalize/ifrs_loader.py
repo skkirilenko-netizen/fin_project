@@ -18,7 +18,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
 from enum import StrEnum
 
 from finlib.db import PgConnection, execute, fetch_all, fetch_one
@@ -32,7 +31,7 @@ from finlib.quality.codes import (
 )
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.values import sign_only_difference
-from finlib.sources.ifrs_extract import Extraction
+from finlib.sources.ifrs_extract import Extraction, share_of_assets
 from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
 from finlib.standards import Standard
@@ -841,9 +840,7 @@ def _save_confirmations(
         code = confirmations.get(row.source_name)
         if code is None:
             continue
-        share = (
-            row.largest / abs(assets) if assets not in (None, 0) else Decimal(0)
-        )
+        share = share_of_assets(row, assets)
         execute(
             _INSERT_CONFIRMATION,
             {

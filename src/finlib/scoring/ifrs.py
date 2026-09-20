@@ -23,6 +23,7 @@ from decimal import Decimal
 
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, Scale, load_ifrs_metrics
+from finlib.scoring.scale import interpolate
 
 logger = logging.getLogger(__name__)
 
@@ -199,22 +200,9 @@ def _divergence(
 def _level(value: Decimal, scale: Scale) -> Decimal:
     """Балл уровня по кусочно-линейной шкале.
 
-    За крайними точками значение не меняется, между ними — линейная
-    интерполяция. Ступень дала бы скачок класса при изменении показателя
-    на сотую долю, и объяснить это читателю нельзя.
+    Арифметика та же, что у шкал РСБУ, и живёт она в одном месте
+    (`scoring/scale.py`). Прежде здесь была своя реализация того же правила,
+    и на нулевой ширине отрезка две давали разный балл: одна по верхней
+    точке, другая по нижней.
     """
-    points = sorted(scale.points, key=lambda item: item[0])
-    lower = points[0]
-    upper = points[-1]
-    if value <= lower[0]:
-        return Decimal(lower[1])
-    if value >= upper[0]:
-        return Decimal(upper[1])
-    for left, right in zip(points, points[1:], strict=False):
-        if left[0] <= value <= right[0]:
-            width = right[0] - left[0]
-            if width == 0:
-                return Decimal(left[1])
-            share = (value - left[0]) / width
-            return Decimal(left[1]) + share * (Decimal(right[1]) - Decimal(left[1]))
-    return Decimal(upper[1])
+    return interpolate(scale.points, value)

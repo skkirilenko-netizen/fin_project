@@ -131,6 +131,54 @@ class UnrecognisedRow:
         return max((abs(item) for item in self.values), default=Decimal(0))
 
 
+def _total_places_of(
+    recognised: dict[int, IfrsPosition], form_code: str
+) -> dict[str, int]:
+    """Места итогов формы, опознанных справочником: код → номер строки."""
+    return {
+        position.code: index
+        for index, position in recognised.items()
+        if position.is_total and position.form == form_code
+    }
+
+
+def nearest_total_below(index: int, places: dict[str, int]) -> str | None:
+    """Код ближайшего итога ниже строки — итога её раздела.
+
+    **Правило одно на все три места, где спрашивают про раздел.** Разбор
+    разводит им одинаковые наименования и опровергает опознание, разметка
+    определяет раздел строки в очереди, а ранее подтверждённое проверяет
+    им притязание. Три выражения одного правила расходятся, и расхождения
+    не видно, пока их не сравнить.
+
+    Разными остаются **входы**, и это объявлено: у разбора итоги только
+    опознанные справочником, у разметки к ним добавлены присвоенные
+    человеком — у Норникеля итоги обоих разделов обязательств не подписаны
+    вовсе, и без человека ближайшего итога ниже у строк пассива не находится.
+    """
+    below = [place for place in places.values() if place > index]
+    if not below:
+        return None
+    nearest = min(below)
+    return next(code for code, place in places.items() if place == nearest)
+
+
+def share_of_assets(row: UnrecognisedRow, assets: Decimal | None) -> Decimal:
+    """Доля строки в валюте баланса — мера существенности из методики.
+
+    **Определение одно на всех, кто ею пользуется.** Экран сверки решает
+    по ней, вынесена ли статья отдельной позицией, загрузчик пишет её
+    в журнал подтверждений, а разметка сортирует очередь. Три выражения
+    одной величины расходятся, и расхождения не видно, пока их не сравнить.
+
+    Валюты баланса нет — доля нулевая: считать её не от чего, а `None`
+    в графу, объявленную обязательной, не положить.
+    """
+    if assets is None or assets == 0:
+        return Decimal(0)
+    return abs(row.largest) / abs(assets)
+
+
 @dataclass
 class ExtractedForm:
     """Одна форма отчётности, разобранная в унифицированную модель."""
@@ -1652,17 +1700,14 @@ def _resolve_by_section(
     Проход второй, а не первый, потому что итоги разделов опознаются
     однозначно и должны быть уже на местах.
     """
-    closings = sorted(
-        index
-        for index, position in recognised.items()
-        if position.is_total and position.form == form_code
-    )
+    places = _total_places_of(recognised, form_code)
     for index, (name, _, _) in enumerate(rows):
         if index in recognised or not name or not catalog.ambiguous_name(name):
             continue
-        below = next((place for place in closings if place > index), None)
-        if below is None:
+        code = nearest_total_below(index, places)
+        if code is None:
             continue
+        below = places[code]
         found = catalog.match_by_name(
             name, section=recognised[below].section, form=form_code
         )
@@ -1694,16 +1739,15 @@ def _retract_wrong_section(
     наименованию, и структурой, иначе ближайшим итогом ниже оказался бы
     итог чужого раздела.
     """
-    closings = sorted(
-        index
-        for index, position in recognised.items()
-        if position.is_total and position.form == form_code
-    )
+    places = _total_places_of(recognised, form_code)
     for index, position in list(recognised.items()):
         if position.is_total or position.section not in _EXCLUSIVE_SECTIONS:
             continue
-        below = next((place for place in closings if place > index), None)
-        if below is None or recognised[below].section not in _EXCLUSIVE_SECTIONS:
+        code = nearest_total_below(index, places)
+        if code is None:
+            continue
+        below = places[code]
+        if recognised[below].section not in _EXCLUSIVE_SECTIONS:
             continue
         if recognised[below].section != position.section:
             logger.info(

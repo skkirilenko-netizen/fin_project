@@ -109,7 +109,7 @@ def candidate_named(issuer: IssuerMarkup, name: str) -> Candidate:
         form=row.form,
         source_name=row.source_name,
         values=row.values,
-        share_of_assets=None,
+        relative_size=None,
         priority=Priority.OTHER,
         index=row.index,
     )
