@@ -432,6 +432,26 @@ def ifrs_markup_command(
             "BREAKS_TOTAL, MATERIAL, OTHER. Можно повторять",
         ),
     ] = [],  # noqa: B006 — typer требует list по умолчанию
+    # Имя переменной не `inn`: ниже так называется ИНН из пары `--grouping`,
+    # и второе значение под тем же именем уже стоило разбора — отбор получал
+    # строку вместо перечня и распадался на отдельные цифры.
+    only_inn: Annotated[
+        list[str],
+        typer.Option(
+            "--inn",
+            help="Размечать только эти организации. Можно повторять. Каталог "
+            "остаётся общим: разметка одного эмитента опирается на коды, "
+            "подтверждённые у других",
+        ),
+    ] = [],  # noqa: B006 — typer требует list по умолчанию
+    report_date: Annotated[
+        str,
+        typer.Option(
+            "--report-date",
+            help="Размечать только комплект с этой отчётной датой, ГГГГ-ММ-ДД. "
+            "У эмитента комплектов несколько, и разметка принадлежит комплекту",
+        ),
+    ] = "",
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Разметка неопознанных строк МСФО: присвоение кодов позициям модели.
@@ -461,6 +481,35 @@ def ifrs_markup_command(
         _fail(f"в каталоге {path} нет документов, прошедших приём")
     for name, reason in skipped:
         typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
+
+    if only_inn:
+        # Отбор по организации: пройти четыреста строк, чтобы добраться
+        # до одной, незачем. Отбор, молча оставивший ноль комплектов,
+        # неотличим от исчерпанной разметки, поэтому он называет, что есть.
+        chosen = {item.strip() for item in only_inn if item.strip()}
+        listed = sorted({item.inn for item in issuers})
+        issuers = [item for item in issuers if item.inn in chosen]
+        if not issuers:
+            _fail(
+                "ни один комплект не подошёл под --inn "
+                f"{', '.join(sorted(chosen))}; в каталоге есть: {', '.join(listed)}"
+            )
+
+    if report_date.strip():
+        # Отбор по комплекту, а не по эмитенту: у ФосАгро их два, и строка,
+        # которая держит годовой комплект, стоит в очереди последней
+        # из семнадцати.
+        try:
+            wanted_date = date.fromisoformat(report_date.strip())
+        except ValueError:
+            _fail(f"--report-date принимает дату ГГГГ-ММ-ДД, получено «{report_date}»")
+        dates = sorted({str(item.report_date) for item in issuers})
+        issuers = [item for item in issuers if item.report_date == wanted_date]
+        if not issuers:
+            _fail(
+                f"комплекта с отчётной датой {wanted_date} нет; "
+                f"есть: {', '.join(dates)}"
+            )
 
     from finlib.sources.ifrs_markup import Priority
 
