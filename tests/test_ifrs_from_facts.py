@@ -17,9 +17,15 @@ from datetime import date
 from decimal import Decimal
 
 from finlib.db import fetch_all, fetch_one
-from finlib.metrics.ifrs_store import compute_from_facts, inputs_of, periods_of
+from finlib.metrics.ifrs_store import (
+    compute_from_facts,
+    confidence_of,
+    inputs_of,
+    periods_of,
+)
 from finlib.normalize.ifrs_loader import load_extraction
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+from finlib.quality.periods import PeriodConfidence
 from finlib.scoring.ifrs import assess
 from finlib.scoring.ifrs_store import save_ifrs_assessment, save_metrics
 from finlib.sources.ifrs_extract import extract
@@ -206,7 +212,12 @@ def test_metrics_and_assessment_come_from_the_facts(db_conn) -> None:
     loaded(db_conn, notes=(note,))
 
     policy = load_ifrs_metrics()
-    assert periods_of(INN, db_conn) == (DATES[0],)
+    # Периоды — оба: сравнительная колонка загружена фактами, и показатели
+    # по ней считаются. Доверие к ней ниже, и это объявлено признаком.
+    assert periods_of(INN, db_conn) == DATES
+    confidence = confidence_of(INN, db_conn)
+    assert confidence[DATES[0]] is PeriodConfidence.VERIFIED
+    assert confidence[DATES[1]] is PeriodConfidence.COMPARATIVE_ONLY
     inputs = inputs_of(INN, DATES[0], db_conn, policy)
     # Величина примечания пришла в свой словарь, а не в величины форм: в состав
     # итогов формы она не входит.
@@ -301,3 +312,86 @@ def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     assert "1410" not in plain and "1510" not in plain
     # Технических идентификаторов в тексте нет: показатель назван наименованием.
     assert "net_debt" not in plain and "debt_maturity_cover" not in plain
+
+
+def test_foreign_standard_marks_are_blocking(db_conn, tmp_path) -> None:
+    """Документ по МСФО не говорит словами РСБУ — правило структурное.
+
+    Дефект этого класса повторился семь раз: оговорка показателя, оговорка
+    строки, наименование показателя, наименование контроля, версия методики,
+    состав фактической базы, тезисы. Искать их по одному значило бы находить
+    их по одному и впредь, поэтому правило ищет приметы, а не перечень
+    известных случаев.
+    """
+    from finlib.llm.textcheck import Severity, TextRule, check_foreign_standard
+    from finlib.llm.textcheck import SEVERITY, TextContext
+    from finlib.standards import Standard
+
+    assert SEVERITY[TextRule.FOREIGN_STANDARD_MARK] is Severity.BLOCKING
+
+    context = TextContext(
+        foreign_names=frozenset({"Коэффициент текущей ликвидности"}),
+        foreign_versions=frozenset({"1.3.0"}),
+    )
+    # Код строки РСБУ, ссылка на строку, чужое наименование и чужая версия —
+    # четыре приметы, и каждая ловится отдельно.
+    found = check_foreign_standard(
+        "Валюта баланса (1600) — 1 500 000. По строке 1410 раскрыт долг. "
+        "Коэффициент текущей ликвидности 0,81. Версия справочника: 1.3.0.",
+        Standard.IFRS,
+        context,
+    )
+    assert len(found) == 4
+    assert all(item.rule is TextRule.FOREIGN_STANDARD_MARK for item in found)
+
+    # Год четырёхзначным кодом не считается: он стоит в датах и в периодах.
+    clean = check_foreign_standard(
+        "Отчётная дата 31.12.2025, сравнительный период — 2024 год.",
+        Standard.IFRS,
+        context,
+    )
+    assert clean == []
+
+    # К документу по РСБУ правило не применяется вовсе: там эти приметы свои.
+    assert check_foreign_standard("Валюта баланса (1600)", Standard.RSBU, context) == []
+
+
+def test_ifrs_theses_cover_the_scored_groups(db_conn) -> None:
+    """Тезисы ветки покрывают группы, по которым считается балл.
+
+    Долговая нагрузка и обслуживание долга несут 70 % веса: раздел без них
+    описывал бы не то, по чему присвоен класс. Основание тезиса — часть
+    калибровочной шкалы: бесспорных ориентиров у ветки нет, и абсолютных
+    нормативов методика не содержит принципиально.
+    """
+    from finlib.scoring.theses import build_ifrs_theses
+
+    note = NoteValue(
+        code="ifrs.interest_expense_accrued",
+        value=Decimal(70_000),
+        note=9,
+        rows=("Процентный расход",),
+        from_line="ifrs.finance_costs",
+    )
+    loaded(db_conn, notes=(note,))
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+
+    found = build_ifrs_theses(INN, db_conn, report_date=DATES[0])
+    groups = {name for name, _ in found.by_group()}
+    assert {"Долговая нагрузка", "Обслуживание долга"} <= groups
+    # Наименования показателей — свои: «Текущая ликвидность», а не
+    # «Коэффициент текущей ликвидности».
+    text = "\n".join(item.text for item in found.theses)
+    assert "Коэффициент текущей ликвидности" not in text
+    assert "калибровочной шкалы методики" in text
+
+
+def test_score_is_level_only_by_declared_rule() -> None:
+    """Балл МСФО равен уровню, динамика справочно — и это объявлено методикой."""
+    policy = load_ifrs_metrics()
+    assert policy.scoring.score_from == "level_only"
+    assert policy.scoring.dynamics_use == "reference_only"
+    assert policy.scoring.dynamics_in_score is False
+    assert policy.scoring.origin.strip() and policy.scoring.dynamics_origin.strip()

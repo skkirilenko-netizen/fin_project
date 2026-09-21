@@ -135,6 +135,18 @@ class CheckCode(StrEnum):
     # Сводка величин примечаний: сколько взято, сколько отказов. Счётчик
     # проверенного рядом со счётчиком сработавшего.
     NOTE_VALUES = "note_values"
+    # --- основания экрана сверки МСФО ---------------------------------------
+    # Свои коды, а не коды РСБУ. Прежде основания ветки писались кодами
+    # бухгалтерских контролей, и «Ключевой вывод» документа по МСФО называл
+    # их наименованиями: «определение типа отчётности по содержимому файла»
+    # вместо «вид отчётности неполный», «опознание строки по наименованию»
+    # вместо «позиция не опознана справочником». Два основания при этом делили
+    # один код, и различить их в журнале было нечем.
+    IFRS_TOTAL_MISMATCH = "ifrs_total_mismatch"
+    IFRS_UNRECOGNISED_POSITION = "ifrs_unrecognised_position"
+    IFRS_MATERIAL_ITEM = "ifrs_material_item"
+    IFRS_REPORTING_KIND = "ifrs_reporting_kind"
+    IFRS_LOST_PAGE = "ifrs_lost_page"
 
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
@@ -197,6 +209,14 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     # о нём нельзя — показатель без величины обязан назвать причину.
     CheckCode.NOTE_VALUE_NOT_EXTRACTED: Severity.WARNING,
     CheckCode.NOTE_VALUES: Severity.INFO,
+    # Уровень основания сверки задаёт сама запись: комплект, подтверждённый
+    # человеком, в карантин не уходит, и та же причина становится
+    # предупреждением. Здесь стоит умолчание.
+    CheckCode.IFRS_TOTAL_MISMATCH: Severity.BLOCKING,
+    CheckCode.IFRS_UNRECOGNISED_POSITION: Severity.BLOCKING,
+    CheckCode.IFRS_MATERIAL_ITEM: Severity.BLOCKING,
+    CheckCode.IFRS_REPORTING_KIND: Severity.BLOCKING,
+    CheckCode.IFRS_LOST_PAGE: Severity.BLOCKING,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -246,6 +266,11 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.AUDIT_REVIEW_ENGAGEMENT: "тип аудиторского задания",
     CheckCode.NOTE_VALUE_NOT_EXTRACTED: "извлечение величины из примечания",
     CheckCode.NOTE_VALUES: "величины, взятые из примечаний",
+    CheckCode.IFRS_TOTAL_MISMATCH: "сходимость итога формы МСФО",
+    CheckCode.IFRS_UNRECOGNISED_POSITION: "опознание позиции справочником МСФО",
+    CheckCode.IFRS_MATERIAL_ITEM: "статья сверх порога существенности",
+    CheckCode.IFRS_REPORTING_KIND: "полнота вида отчётности",
+    CheckCode.IFRS_LOST_PAGE: "страница внутри форм без текстового слоя",
 }
 
 

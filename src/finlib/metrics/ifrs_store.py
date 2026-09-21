@@ -24,6 +24,7 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import Inputs, MetricValue, compute_all, months_of
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.normalize.ifrs_note_lines import load_note_lines
+from finlib.quality.periods import PeriodConfidence
 from finlib.sources.ifrs_notes import accrued_interest
 from finlib.standards import Standard
 
@@ -40,11 +41,17 @@ WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
   AND s.status <> 'quarantine' AND s.is_actual
 """
 
+# Периоды, за которые есть величины: и отчётные, и сравнительные. **Роль
+# периода определяет доверие, а не участие в расчёте.** Сравнительная колонка
+# загружена фактами, и показатели по ней считаются — они нужны читателю
+# документа; блокирующими контролями такой период не проверялся, и это
+# отражается признаком доверия, как в РСБУ.
 _PERIODS = """
-SELECT DISTINCT f.report_date
+SELECT f.report_date, min(f.period_role) AS best_role
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.period_role = 'current'
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s
   AND s.status <> 'quarantine' AND s.is_actual
+GROUP BY f.report_date
 ORDER BY f.report_date DESC
 """
 
@@ -54,11 +61,34 @@ class IfrsPeriodMissingError(RuntimeError):
 
 
 def periods_of(inn: str, conn: PgConnection | None = None) -> tuple[date, ...]:
-    """Отчётные периоды комплектов МСФО вне карантина, свежий первым."""
+    """Периоды МСФО вне карантина, свежий первым: отчётные и сравнительные."""
     rows = fetch_all(
         _PERIODS, {"inn": inn, "standard": Standard.IFRS.value}, conn=conn
     )
     return tuple(row["report_date"] for row in rows)
+
+
+def confidence_of(
+    inn: str, conn: PgConnection | None = None
+) -> dict[date, PeriodConfidence]:
+    """Доверие к каждому периоду: проверен своим комплектом или восстановлен.
+
+    Правило то же, что в РСБУ: период, существующий только сравнительной
+    колонкой, блокирующими контролями не проверялся, и показатели по нему
+    приводятся с пониженным доверием. Признак объявляется, а не подразумевается:
+    без него ряд из трёх точек выглядит одинаково достоверным.
+    """
+    rows = fetch_all(
+        _PERIODS, {"inn": inn, "standard": Standard.IFRS.value}, conn=conn
+    )
+    return {
+        row["report_date"]: (
+            PeriodConfidence.VERIFIED
+            if row["best_role"] == "current"
+            else PeriodConfidence.COMPARATIVE_ONLY
+        )
+        for row in rows
+    }
 
 
 def inputs_of(

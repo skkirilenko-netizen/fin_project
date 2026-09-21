@@ -87,7 +87,40 @@ def limitations(
     conn: PgConnection | None = None,
     standard: Standard = Standard.RSBU,
 ) -> list[str]:
-    """Оговорки по периодам для раздела «Ограничения анализа» заключения."""
+    """Оговорки по периодам для раздела «Ограничения анализа» заключения.
+
+    **Оговорка о периоде, показателей за который нет, — не ограничение,
+    а лишнее утверждение.** «Показатели за этот период приведены с пониженным
+    доверием» верно только там, где они приведены; у периода, за который
+    не посчитано ни одного, доверие понижать не у чего, и фраза говорит
+    о величинах, которых в документе нет.
+    """
     quality = period_quality(inn, conn, standard)
-    notes = [item.limitation for item in sorted(quality.values(), key=lambda p: p.report_date)]
-    return [note for note in notes if note is not None]
+    computed = _periods_with_metrics(inn, conn, standard)
+    notes = [
+        item.limitation
+        for item in sorted(quality.values(), key=lambda p: p.report_date)
+        # Период в карантине оговорку сохраняет: она говорит не о доверии
+        # к показателям, а о том, что комплект в расчёт не вошёл вовсе.
+        if item.limitation is not None
+        and (item.report_date in computed or item.own_report_quarantined)
+    ]
+    return notes
+
+
+_WITH_METRICS = """
+SELECT DISTINCT report_date FROM metric_value
+WHERE inn = %(inn)s AND standard = %(standard)s AND status = 'ok'
+"""
+
+
+def _periods_with_metrics(
+    inn: str, conn: PgConnection | None, standard: Standard
+) -> set[date]:
+    """Периоды, за которые есть хотя бы один рассчитанный показатель."""
+    return {
+        row["report_date"]
+        for row in fetch_all(
+            _WITH_METRICS, {"inn": inn, "standard": standard.value}, conn=conn
+        )
+    }

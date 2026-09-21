@@ -178,6 +178,28 @@ class Annualisation(BaseModel):
     marker: str = Field(min_length=1)
 
 
+class ScoringRule(BaseModel):
+    """Из чего складывается балл показателя МСФО и куда идёт динамика.
+
+    **Правило объявлено, а не выведено из того, что ряда пока нет.** В РСБУ балл
+    складывается из уровня (0,6) и динамики (0,4); молчание здесь читалось бы
+    как «по МСФО так же, только динамика потерялась». Здесь сказано прямо: балл
+    равен уровню, а изменения считаются для читателя и в балл не входят.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    score_from: str = Field(pattern="^level_only$")
+    origin: str = Field(min_length=1)
+    dynamics_use: str = Field(pattern="^reference_only$")
+    dynamics_origin: str = Field(min_length=1)
+
+    @property
+    def dynamics_in_score(self) -> bool:
+        """Входит ли динамика в балл. Ответ один и объявлен методикой."""
+        return False
+
+
 class IfrsMetricsPolicy(BaseModel):
     """Справочник показателей по МСФО целиком."""
 
@@ -193,6 +215,9 @@ class IfrsMetricsPolicy(BaseModel):
     sufficiency: Sufficiency
     divergence: Divergence
     annualisation: Annualisation
+    # Балл равен уровню, динамика справочно: правило объявлено, а не выведено
+    # из отсутствия ряда.
+    scoring: ScoringRule
 
     @model_validator(mode="after")
     def _integrity(self) -> Self:

@@ -101,6 +101,21 @@ STATE_CODES: frozenset[CheckCode] = MAPPING_CODES | frozenset(
     }
 )
 
+# Коды, которыми основания экрана сверки писались **прежде**. Переименование
+# кода контроля не должно оставлять за собой старую запись: она описывает
+# то же состояние комплекта, и документ печатал оба имени разом — «полнота вида
+# отчётности» и «определение типа отчётности по содержимому файла» об одном
+# и том же основании. Удаление ограничено комплектом МСФО, поэтому те же коды
+# у контролей РСБУ не задеваются.
+RETIRED_REASON_CODES: frozenset[CheckCode] = frozenset(
+    {
+        CheckCode.SECTION_SUM,
+        CheckCode.LINE_NOT_RECOGNIZED,
+        CheckCode.FILE_REPORTING_TYPE_UNKNOWN,
+        CheckCode.FILE_TEXT_LAYER_MISSING,
+    }
+)
+
 # Организация по МСФО может быть новой: в базе РСБУ её нет, если отчётность
 # по ней не загружалась. Наименование не выдумывается — оно остаётся пустым
 # до тех пор, пока не будет извлечено из документа: назвать организацию
@@ -347,7 +362,14 @@ def load_extraction(
     revisions = [item.describe() for item in collisions.revisions]
 
     records = _journal_records(
-        inn, src_file_id, extraction, review, collisions, quarantined, notes or ()
+        inn,
+        src_file_id,
+        profile,
+        extraction,
+        review,
+        collisions,
+        quarantined,
+        notes or (),
     )
     records.extend(_audit_records(inn, src_file_id, audit))
     execute(
@@ -357,6 +379,7 @@ def load_extraction(
             "codes": sorted(
                 {code.value for code in STATE_CODES}
                 | {code.value for code in REASON_CODES.values()}
+                | {code.value for code in RETIRED_REASON_CODES}
             ),
         },
         conn=conn,
@@ -829,6 +852,7 @@ def _layouts(extraction: Extraction) -> str:
 def _journal_records(
     inn: str,
     src_file_id: int,
+    profile: DocumentProfile,
     extraction: Extraction,
     review: ReviewResult,
     collisions: Collisions,
@@ -929,6 +953,11 @@ def _journal_records(
                     + "; ".join(review.problems[:3])
                 ),
                 src_file_id=src_file_id,
+                # **Отчётная дата комплекта стоит в записи.** Без неё документ
+                # по годовому комплекту печатал основания промежуточного, и по
+                # «Ключевому выводу» нельзя было понять, какой период отбракован:
+                # графа «Затронутые отчётные даты» оставалась пустой.
+                report_date=profile.report_dates[0] if profile.report_dates else None,
             )
         )
 

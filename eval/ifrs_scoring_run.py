@@ -21,7 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from finlib.cli import _load_issuers
-from finlib.metrics.ifrs import Inputs, compute_all, months_of
+from finlib.metrics.ifrs import DERIVED_NAMES, Inputs, compute_all, months_of
 from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.normalize.ifrs_note_lines import load_note_lines
@@ -46,17 +46,9 @@ from finlib.sources.ifrs_numbers import load_parsing_policy
 logger = logging.getLogger(__name__)
 
 # Производные величины называются словами, а не кодами: раздел читает человек.
-DERIVED_NAMES = {
-    "interest_accrued": "начисленные проценты по заёмным средствам "
-    "(примечание о финансовых доходах и расходах)",
-    "debt_due_within_year": "долг к погашению в ближайшие 12 месяцев "
-    "(таблица сроков в примечании о заёмных средствах)",
-    "net_debt": "чистый долг: заёмные средства за вычетом денежных",
-    "debt_total": "совокупный долг: долгосрочные и краткосрочные заёмные средства",
-    "ebitda": "EBITDA: операционная прибыль и амортизация",
-    "ffo": "FFO: поток от операционной деятельности до изменений оборотного капитала",
-}
-
+# Перечень один на весь проект (`metrics/ifrs.py`): замер и документ обязаны
+# называть величину одинаково, иначе читатель сверяет одно с другим и не находит
+# соответствия.
 # Стоп-факторы считаются по тем же величинам, что и показатели: правило одно,
 # меняется только применимость (задача 26).
 STOP_FACTORS = {

@@ -13,6 +13,7 @@ from decimal import Decimal
 from finlib.metrics.definitions import Unit, load_metrics
 from finlib.metrics.display import format_metric
 from finlib.report.data import ReportData
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,15 @@ class Table:
     note: str | None = None
 
 
+def _catalog_of(data: ReportData):
+    """Справочник показателей своего стандарта: разрядность у них разная."""
+    if data.standard is Standard.IFRS:
+        from finlib.metrics.ifrs_view import IfrsMetricsView
+
+        return IfrsMetricsView()
+    return load_metrics()
+
+
 def metrics_table(data: ReportData) -> Table:
     """Показатели за периоды с ролью каждого в оценке.
 
@@ -76,7 +86,7 @@ def metrics_table(data: ReportData) -> Table:
     по наименованию, а не «в следующей таблице»: номер и место таблицы
     ставит сборщик документа, и соседство не гарантировано.
     """
-    catalog = load_metrics()
+    catalog = _catalog_of(data)
     periods = data.periods
     header = (
         "Код",
@@ -322,8 +332,18 @@ def provenance(data: ReportData, model: str, generated_at: datetime) -> list[str
             [
                 f"Версия справочника показателей: {assessment['metrics_version']}.",
                 f"Версия методики оценки: {assessment['scoring_version']}.",
-                f"Версия справочника флагов: {assessment['flags_version']}.",
             ]
+        )
+        # **Пустая графа версии не бывает.** Флагов в ветке МСФО нет вовсе,
+        # и «Версия справочника флагов: .» читалась как потерянная величина,
+        # а не как отсутствие предмета. Отсутствие объявляется словами.
+        version = assessment["flags_version"]
+        lines.append(
+            f"Версия справочника флагов: {version}."
+            if version
+            else "Флаги в ветке МСФО не применяются."
+            if data.standard is Standard.IFRS
+            else "Версия справочника флагов: не объявлена."
         )
     if data.accepted_sources:
         lines.append(f"Комплекты отчётности в расчёте: {_years(data.accepted_sources)}.")

@@ -224,6 +224,21 @@ REGISTRY: dict[CheckCode, Wiring] = {
             CheckCode.AUDIT_REVIEW_ENGAGEMENT,
         )
     },
+    # --- основания экрана сверки МСФО (задача 28) ---------------------------
+    # Свои коды вместо кодов бухгалтерских контролей: документ по МСФО называл
+    # основания наименованиями другого предмета, а два основания делили один код.
+    **{
+        code: Wiring(
+            WiringStatus.WIRED, date(2026, 9, 21), ("sources/ifrs_review.py",)
+        )
+        for code in (
+            CheckCode.IFRS_TOTAL_MISMATCH,
+            CheckCode.IFRS_UNRECOGNISED_POSITION,
+            CheckCode.IFRS_MATERIAL_ITEM,
+            CheckCode.IFRS_REPORTING_KIND,
+            CheckCode.IFRS_LOST_PAGE,
+        )
+    },
     # --- величины примечаний (задача 28) ------------------------------------
     # Величина, объявленная в примечании, идёт в факты, а отказ её извлечения —
     # в журнал: у Норникеля капитализированные проценты раскрыты прозой,

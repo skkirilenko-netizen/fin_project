@@ -197,6 +197,16 @@ def _divergence(
     return (f"{policy.divergence.note} Расхождение {gap:.0f} балла: {listed}.",), gap
 
 
+def level(value: Decimal, scale: Scale) -> Decimal:
+    """Балл уровня по калибровочной шкале — та же функция, что в оценке.
+
+    Названа открыто, потому что спрашивают её двое: оценка и тезис. Второе
+    выражение того же балла разошлось бы с первым, и тезис говорил бы
+    о другой части шкалы, чем класс.
+    """
+    return _level(value, scale)
+
+
 def _level(value: Decimal, scale: Scale) -> Decimal:
     """Балл уровня по кусочно-линейной шкале.
 

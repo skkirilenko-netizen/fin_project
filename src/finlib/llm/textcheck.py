@@ -52,6 +52,9 @@ class TextRule(StrEnum):
     RISK_WITHOUT_VALUE = "risk_without_value"
     THESIS_NOT_QUOTED = "thesis_not_quoted"
     GROUP_HEADING_MISSING = "group_heading_missing"
+    # Документ одного стандарта говорит словами другого: код строки РСБУ,
+    # ссылка на строку, наименование из справочника РСБУ, версия методики РСБУ.
+    FOREIGN_STANDARD_MARK = "foreign_standard_mark"
 
 
 SEVERITY: dict[TextRule, Severity] = {
@@ -80,6 +83,13 @@ SEVERITY: dict[TextRule, Severity] = {
     # а требование стало проверяемым: тезисы сохранялись дословно, и
     # thesis_not_quoted пропускал потерю структуры целиком.
     TextRule.GROUP_HEADING_MISSING: Severity.BLOCKING,
+    # Документ, говорящий словами другого стандарта, утверждает о читателе
+    # неправду: «в расчёт входят только строки 1410 и 1510» в заключении
+    # по консолидированной отчётности — утверждение о другой отчётности,
+    # а «Версия справочника показателей: 0.2.0» называет методику, по которой
+    # ничего не считалось. Класс дефекта повторяющийся: механизм РСБУ дотянулся
+    # до документа МСФО семь раз, и по одному их искать нельзя.
+    TextRule.FOREIGN_STANDARD_MARK: Severity.BLOCKING,
     TextRule.DAYS_DIRECTION: Severity.WARNING,
     TextRule.FLAG_CONFLICT_NOT_STATED: Severity.WARNING,
     # Дубль вопроса и вопрос о нераскрытии портят перечень, но документу
@@ -148,6 +158,12 @@ class TextContext:
     # Наименования групп показателей, по которым у организации есть тезисы.
     # Каждое обязано открывать свой абзац раздела 3 — в обоих режимах сборки.
     thesis_groups: tuple[str, ...] = ()
+    # Наименования и версии **чужого** стандарта: то, что есть в справочниках
+    # РСБУ и отсутствует в справочниках МСФО. Сверяются перечнями, а не
+    # вхождением слов: «Выручка» стоит в обоих справочниках, и запрещать
+    # её значило бы запретить писать о выручке.
+    foreign_names: frozenset[str] = frozenset()
+    foreign_versions: frozenset[str] = frozenset()
 
 
 _CLASS_ASSIGNED = re.compile(r"\bкласс\w*\s*[«\"'(]?\s*([A-E])\b", re.IGNORECASE)
@@ -316,6 +332,98 @@ def check_calculated(
     found += _questions_stay_in_the_form_set(sections, context)
     found += _questions_are_sound(sections, context)
     found += _groups_are_headed(sections, context)
+    return found
+
+
+# Код строки РСБУ в тексте: четыре цифры подряд, не являющиеся годом. Годы
+# 1900–2099 исключены — они стоят в датах и в наименованиях периодов.
+_RSBU_LINE_CODE = re.compile(r"(?<!\d)(?!19\d\d|20\d\d)\d{4}(?!\d)")
+
+# Ссылка на строку словами: «строка 1410», «по строке 2110», «стр. 1600».
+_RSBU_LINE_REFERENCE = re.compile(
+    r"\b(?:строк[аеиу]|строке|строки|стр\.)\s*№?\s*\d{4}\b", re.IGNORECASE
+)
+
+
+def check_foreign_standard(
+    text: str, standard, context: TextContext
+) -> list[TextIssue]:
+    """Документ стандарта МСФО не говорит словами РСБУ.
+
+    **Проверка структурная и ищет класс, а не перечень известных случаев.**
+    Механизм РСБУ дотянулся до документа МСФО семью разными путями: оговорка
+    показателя, оговорка строки, наименование показателя, наименование
+    контроля, версия методики, состав фактической базы, тезисы. Искать их
+    по одному значило бы находить их по одному и впредь.
+
+    Ищется четыре рода примет:
+
+    - **код строки РСБУ** — четыре цифры подряд. В консолидированной отчётности
+      кодов, утверждённых нормативным актом, нет вовсе, и четырёхзначное число
+      в таком документе может быть только чужим. Годы исключены: они стоят
+      в датах;
+    - **ссылка на строку словами** — «строка 1410», «по строке 2110»: она
+      обещает читателю то, чего в его отчётности нет;
+    - **наименование из справочников РСБУ**, которого нет в справочниках МСФО:
+      подставленное наименование выглядит верным и означает другое;
+    - **версия методики РСБУ** — документ называет справочник, по которому
+      ничего не считалось.
+
+    Наименования сверяются по перечням, а не по вхождению слов: «Выручка»
+    есть в обоих справочниках, и запрещать её было бы запретом писать
+    о выручке. Запрещено только то, что есть у РСБУ и **отсутствует**
+    у МСФО.
+    """
+    from finlib.standards import Standard
+
+    if standard is not Standard.IFRS or not text.strip():
+        return []
+    found: list[TextIssue] = []
+    codes = sorted(set(_RSBU_LINE_CODE.findall(text)))
+    if codes:
+        found.append(
+            TextIssue(
+                TextRule.FOREIGN_STANDARD_MARK,
+                "в документе по МСФО стоят четырёхзначные коды строк РСБУ: "
+                + ", ".join(codes),
+            )
+        )
+    references = sorted(set(_RSBU_LINE_REFERENCE.findall(text)))
+    if references:
+        found.append(
+            TextIssue(
+                TextRule.FOREIGN_STANDARD_MARK,
+                "в документе по МСФО есть ссылки на строки РСБУ: "
+                + ", ".join(references),
+            )
+        )
+    lowered = text.casefold()
+    foreign_names = sorted(
+        name
+        for name in context.foreign_names
+        if name and name.casefold() in lowered
+    )
+    if foreign_names:
+        found.append(
+            TextIssue(
+                TextRule.FOREIGN_STANDARD_MARK,
+                "в документе по МСФО стоят наименования из справочников РСБУ: "
+                + ", ".join(f"«{name}»" for name in foreign_names),
+            )
+        )
+    versions = sorted(
+        version
+        for version in context.foreign_versions
+        if version and version in text
+    )
+    if versions:
+        found.append(
+            TextIssue(
+                TextRule.FOREIGN_STANDARD_MARK,
+                "в документе по МСФО названы версии справочников РСБУ: "
+                + ", ".join(versions),
+            )
+        )
     return found
 
 

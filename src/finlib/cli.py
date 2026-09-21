@@ -1268,8 +1268,7 @@ def ifrs_assess_command(
         periods_of,
     )
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
-    from finlib.scoring.ifrs import assess
-    from finlib.scoring.ifrs_store import save_ifrs_assessment, save_metrics
+    from finlib.scoring.ifrs_store import assess_ifrs
 
     policy = load_ifrs_metrics()
     with connection() as conn:
@@ -1299,9 +1298,10 @@ def ifrs_assess_command(
         for item in computed:
             typer.echo(f"  {item.describe()}")
 
-        saved = save_metrics(inn, target, computed, conn, policy)
-        result = assess(computed, policy, ())
-        save_ifrs_assessment(inn, target, result, computed, conn, policy)
+        # Показатели считаются по всем периодам вне карантина, а балл — по
+        # уровню отчётного: правило объявлено методикой, изменения идут
+        # читателю, а не шкале.
+        result, saved = assess_ifrs(inn, conn, policy)
 
     typer.echo("")
     for group in result.groups:

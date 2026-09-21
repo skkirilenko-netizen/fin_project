@@ -212,6 +212,14 @@ def build_report(
     model = conclusion.model if conclusion is not None else NO_MODEL
     _write_appendix(document, data, model, written_at)
 
+    # **Документ одного стандарта не говорит словами другого.** Проверка
+    # структурная и идёт по всему тексту — включая приложение и происхождение
+    # документа, куда правила разделов не смотрят вовсе: коды строк РСБУ,
+    # ссылки на строки, наименования и версии чужого справочника попадали
+    # именно туда. Дефект этого класса повторился семь раз, и по одному
+    # их искать нельзя.
+    _check_standard_purity(document, data, standard)
+
     path = output_path(inn, data.report_date, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     document.save(path)
@@ -431,12 +439,9 @@ def _without_model(
     же: они механизм проверки, а не часть заключения.
     """
     from finlib.llm.cleanup import strip_identifiers
-    from finlib.scoring.theses import build_theses
 
     if number == 3:
-        found = build_theses(
-            inn, conn, report_date=data.report_date, standard=standard
-        )
+        found = _theses_of(inn, conn, data, standard)
         return [strip_identifiers(item) for item in found.narrative()]
     if number == 5:
         block = _limitations_text(inn, conn, data, standard)
@@ -457,6 +462,58 @@ class CalculatedTextError(RuntimeError):
             f"разделы расчёта не прошли контроль утверждений: {listed}"
         )
         self.problems = problems
+
+
+def _check_standard_purity(document, data: ReportData, standard: Standard) -> None:
+    """Блокирует документ, говорящий словами чужого стандарта.
+
+    Проверяется собранный документ целиком — абзацы и таблицы: приметы чужого
+    стандарта попадали и в приложение, где правила разделов не смотрят.
+    """
+    from finlib.llm.textcheck import blocking, check_foreign_standard
+    from finlib.metrics.definitions import load_metrics
+    from finlib.normalize.lines import ReportingType, load_lines
+
+    context = data.text_context(
+        load_lines(), ReportingType(data.organization["reporting_type"]), load_metrics()
+    )
+    parts = [item.text for item in document.paragraphs]
+    parts.extend(
+        cell.text
+        for table in document.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    problems = check_foreign_standard("\n".join(parts), standard, context)
+    if blocking(problems):
+        raise ForeignStandardError([item.message for item in blocking(problems)])
+
+
+class ForeignStandardError(RuntimeError):
+    """Документ говорит словами другого стандарта отчётности."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(
+            "документ стандарта не свободен от примет другого: "
+            + "; ".join(problems)
+        )
+        self.problems = problems
+
+
+def _theses_of(inn: str, conn, data: ReportData, standard: Standard):
+    """Предписанные тезисы **своего** стандарта.
+
+    Сборки две, и это не дублирование: показатели, шкалы и группы у стандартов
+    свои, а бесспорных ориентиров у ветки МСФО нет вовсе — тезис там опирается
+    на часть калибровочной шкалы. Тезис РСБУ, попавший в документ МСФО,
+    называл показатель не тем именем: «Коэффициент текущей ликвидности»
+    вместо «Текущая ликвидность».
+    """
+    from finlib.scoring.theses import build_ifrs_theses, build_theses
+
+    if standard is Standard.IFRS:
+        return build_ifrs_theses(inn, conn, report_date=data.report_date)
+    return build_theses(inn, conn, report_date=data.report_date, standard=standard)
 
 
 def _check_calculated_sections(
@@ -486,9 +543,7 @@ def _check_calculated_sections(
         QUESTIONS_SECTION: "\n".join(_question_texts(data)),
     }
     if not with_text:
-        from finlib.scoring.theses import build_theses
-
-        found = build_theses(inn, conn, report_date=data.report_date, standard=standard)
+        found = _theses_of(inn, conn, data, standard)
         sections[THESES_SECTION] = "\n".join(
             strip_identifiers(item) for item in found.narrative()
         )

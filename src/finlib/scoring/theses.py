@@ -265,6 +265,11 @@ class ThesesCatalog(BaseModel):
     short_names: dict[str, str] = Field(default_factory=dict)
     common: CommonTheses
     metrics: dict[str, MetricTheses] = Field(min_length=1)
+    # Тезисы ветки МСФО: справочник отдельный, потому что показатели у стандартов
+    # разные, а совпадающие коды означают разное. `cur_liq` есть у обоих, и
+    # наименование у него разное — тезис РСБУ в документе МСФО называет
+    # показатель не тем именем.
+    ifrs_metrics: dict[str, MetricTheses] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_slots(self) -> Self:
@@ -301,7 +306,7 @@ class ThesesCatalog(BaseModel):
     def _all_rules(self) -> list[ThesisRule]:
         """Все правила справочника одним перечнем."""
         rules = list(self.common.status + self.common.dynamics + self.common.sign_change)
-        for item in self.metrics.values():
+        for item in (*self.metrics.values(), *self.ifrs_metrics.values()):
             rules.extend(item.position + item.band + item.sign)
         return rules
 
@@ -351,6 +356,19 @@ class SignalThesis:
     related: tuple[str, ...]
 
 
+def _group_names(standard: Standard) -> dict[str, str]:
+    """Наименования групп показателей своего стандарта, в порядке методики."""
+    if standard is Standard.IFRS:
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+        policy = load_ifrs_metrics()
+        names = {code: item.name for code, item in policy.groups.items()}
+        names |= {code: item.name for code, item in policy.appendix_groups.items()}
+        return names
+    catalog = load_metrics()
+    return {code: item.name for code, item in catalog.groups.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class TheseSet:
     """Перечень тезисов организации за отчётный период."""
@@ -359,6 +377,11 @@ class TheseSet:
     report_date: date
     theses: tuple[Thesis, ...]
     signals: tuple[SignalThesis, ...]
+    # Стандарт, по которому собраны тезисы: наименования групп берутся
+    # из справочника своего стандарта. Перечень групп РСБУ, применённый
+    # к тезисам МСФО, оставил бы абзацы без наименований — а наименование
+    # группы обязано открывать абзац раздела 3.
+    standard: Standard = Standard.RSBU
 
     def block(self) -> str:
         """Блок ТЕЗИСЫ для контекста модели."""
@@ -385,12 +408,12 @@ class TheseSet:
         порядок абзацев раздела 3. Показатель без группы в перечень не попадёт,
         потому что группа у показателя обязательна.
         """
-        catalog = load_metrics()
-        grouped: dict[str, list[Thesis]] = {code: [] for code in catalog.groups}
+        names = _group_names(self.standard)
+        grouped: dict[str, list[Thesis]] = {code: [] for code in names}
         for item in self.theses:
             grouped.setdefault(item.group, []).append(item)
         return [
-            (catalog.groups[code].name if code in catalog.groups else code, tuple(items))
+            (names.get(code, code), tuple(items))
             for code, items in grouped.items()
             if items
         ]
@@ -667,6 +690,102 @@ def _pick(
             continue
         return rule
     return None
+
+
+def build_ifrs_theses(
+    inn: str,
+    conn: PgConnection | None = None,
+    *,
+    report_date: date | None = None,
+) -> TheseSet:
+    """Тезисы ветки МСФО: часть калибровочной шкалы и знак, без ориентиров.
+
+    **Отдельная сборка, а не ветка внутри РСБУ-шной.** Показатели, шкалы
+    и группы у стандартов свои, бесспорных ориентиров у ветки нет вовсе,
+    и признак тезиса здесь один — часть калибровочной шкалы, в которую попал
+    балл уровня. Долговая нагрузка и обслуживание долга несут 70 % веса балла,
+    и раздел без них описывал бы не то, по чему присвоен класс.
+
+    Динамика в тезисы пока не идёт: правило её участия объявлено в методике
+    (балл МСФО — уровень, динамика справочно), а сами изменения печатает
+    приложение. Тезис о динамике потребует своих формулировок, и выдумывать
+    их здесь, в коде, нельзя.
+    """
+    from finlib.metrics.ifrs_store import compute_from_facts, periods_of
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+    from finlib.scoring.ifrs import level as ifrs_level
+
+    policy = load_ifrs_metrics()
+    theses_catalog = load_theses()
+    dates = periods_of(inn, conn)
+    if not dates:
+        raise ValueError(f"для ИНН {inn} нет комплектов МСФО вне карантина")
+    target = report_date or dates[0]
+
+    built: list[Thesis] = []
+    for item in compute_from_facts(inn, target, conn, policy):
+        rules = theses_catalog.ifrs_metrics.get(item.code)
+        if rules is None or not item.calculable:
+            continue
+        scale = policy.calibration_points.metrics.get(item.code)
+        if scale is None:
+            continue
+        selectors = {
+            # Балл уровня считает та же функция, что и оценка: два выражения
+            # одной величины неминуемо разошлись бы, и тезис говорил бы
+            # о другой части шкалы, чем балл.
+            "band": theses_catalog.bands.of(ifrs_level(item.value, scale)),
+            "sign": (
+                "positive"
+                if item.value > 0
+                else "negative"
+                if item.value < 0
+                else "zero"
+            ),
+        }
+        state = _MetricState(
+            item.code,
+            selectors,
+            {
+                "code": item.code,
+                "value": format_metric(item.value, _ifrs_unit(item.code, policy), 3),
+                "name": item.name,
+            },
+        )
+        for kind, family in (
+            (ThesisKind.BAND, rules.band),
+            (ThesisKind.SIGN, rules.sign),
+        ):
+            rule = _pick(family, state, {}, _ifrs_unit(item.code, policy))
+            if rule is None:
+                continue
+            text = _render(rule, state, item.name, theses_catalog)
+            if text is None:
+                continue
+            built.append(
+                Thesis(
+                    code=rule.code,
+                    subject=item.code,
+                    kind=kind,
+                    text=text,
+                    group=item.group,
+                )
+            )
+    return TheseSet(
+        inn=inn,
+        report_date=target,
+        theses=tuple(built),
+        signals=(),
+        standard=Standard.IFRS,
+    )
+
+
+def _ifrs_unit(code: str, policy) -> Unit:
+    """Единица показателя МСФО в терминах единой точки округления."""
+    metric = next((item for item in policy.metrics if item.code == code), None)
+    if metric is None:
+        return Unit.RATIO
+    return Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
 
 
 def build_theses(

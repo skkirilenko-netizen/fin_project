@@ -87,13 +87,18 @@ class ReviewReason(StrEnum):
 # в журнал качества. Отображение объявлено здесь, а не подразумевается:
 # основание без кода контроля в `dq_log` не попадёт, и причина отбраковки
 # останется в памяти того, кто смотрел экран.
+# Коды свои, а не коды бухгалтерских контролей. Прежде основания ветки писались
+# кодами РСБУ, и документ по МСФО называл их наименованиями другого предмета:
+# «определение типа отчётности по содержимому файла» вместо «вид отчётности
+# неполный». Два основания — неопознанная позиция и статья сверх порога —
+# делили при этом один код, и различить их в журнале было нечем.
 REASON_CODES: dict[ReviewReason, CheckCode] = {
-    ReviewReason.CHECK_FAILED: CheckCode.SECTION_SUM,
+    ReviewReason.CHECK_FAILED: CheckCode.IFRS_TOTAL_MISMATCH,
     ReviewReason.IMPLAUSIBLE_GROUPING: CheckCode.DIGIT_GROUPING_IMPLAUSIBLE,
-    ReviewReason.UNRECOGNISED_POSITION: CheckCode.LINE_NOT_RECOGNIZED,
-    ReviewReason.MATERIAL_SPECIFIC_ITEM: CheckCode.LINE_NOT_RECOGNIZED,
-    ReviewReason.REPORTING_KIND: CheckCode.FILE_REPORTING_TYPE_UNKNOWN,
-    ReviewReason.LOST_PAGE: CheckCode.FILE_TEXT_LAYER_MISSING,
+    ReviewReason.UNRECOGNISED_POSITION: CheckCode.IFRS_UNRECOGNISED_POSITION,
+    ReviewReason.MATERIAL_SPECIFIC_ITEM: CheckCode.IFRS_MATERIAL_ITEM,
+    ReviewReason.REPORTING_KIND: CheckCode.IFRS_REPORTING_KIND,
+    ReviewReason.LOST_PAGE: CheckCode.IFRS_LOST_PAGE,
     ReviewReason.DROPPED_COLUMN: CheckCode.EXTRA_COLUMNS_DROPPED,
 }
 

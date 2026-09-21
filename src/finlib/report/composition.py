@@ -226,15 +226,50 @@ def _worth_naming(
         # наименованием. Код производной величины не печатается вовсе:
         # `2330_chg_pct` читателю не говорит ничего, а величина изменения
         # названа словами рядом.
-        title = (
-            f"{_line_name(parsed.base, lines, reporting_type)} ({parsed.base})"
-            if parsed.base_is_line
-            else (catalog.get(parsed.base).name if catalog.get(parsed.base) else parsed.base)
-        )
+        title = _title_of(parsed.base, data, lines, catalog, reporting_type)
+        if title is None:
+            # Наименования нет ни в одном справочнике — печатать код нельзя:
+            # технический идентификатор в тексте запрещён, и правило поймало бы
+            # именно его («ifrs.other_current_assets — изменение за период»).
+            continue
         found.append(
             f"{title} — изменение за период {percent(row['value'])} %"
         )
     return found
+
+
+def _title_of(
+    base: str,
+    data: ReportData,
+    lines: LinesCatalog,
+    catalog: MetricsCatalog,
+    reporting_type: ReportingType,
+) -> str | None:
+    """Как величина называется в тексте; None — наименования нет.
+
+    Строка РСБУ называется с кодом — «(1600)» привычная ссылка; статья МСФО
+    и показатель — одним наименованием, потому что их коды внутренние. Кода
+    производной в тексте нет вовсе: «2330_chg_pct» читателю не говорит ничего,
+    а величина изменения названа словами рядом.
+    """
+    if len(base) == 4 and base.isdigit():
+        return f"{_line_name(base, lines, reporting_type)} ({base})"
+    if base.startswith("ifrs."):
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+        from finlib.normalize.ifrs_note_lines import load_note_lines
+
+        position = load_ifrs_lines().get(base)
+        if position is not None:
+            return position.name
+        note_line = next(
+            (item for item in load_note_lines().lines if item.code == base), None
+        )
+        return note_line.name if note_line is not None else None
+    metric = catalog.get(base)
+    if metric is not None:
+        return metric.name
+    _ = data
+    return None
 
 
 def questions(

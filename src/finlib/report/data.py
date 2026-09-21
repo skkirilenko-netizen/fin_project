@@ -222,8 +222,13 @@ class ReportData:
         # позицией унифицированной модели, а показатели живут в своём
         # справочнике. Перечень РСБУ, применённый к тексту по МСФО, объявил бы
         # каждую статью неизвестной строкой и не нашёл бы ни одного показателя.
+        foreign_names: frozenset[str] = frozenset()
+        foreign_versions: frozenset[str] = frozenset()
         if self.standard is Standard.IFRS:
             known, names = self._ifrs_text_names()
+            foreign_names, foreign_versions = self._foreign_marks(
+                catalog, set(names.values())
+            )
         else:
             known = frozenset(
                 code
@@ -253,6 +258,11 @@ class ReportData:
             # В тексте документа показатель назван наименованием, а не кодом,
             # и правило состава ищет его так же.
             metric_names=names,
+            # Приметы чужого стандарта: наименования и версии РСБУ, которых
+            # в справочниках МСФО нет. Правило блокирующее, потому что дефект
+            # этого класса повторился семь раз.
+            foreign_names=foreign_names,
+            foreign_versions=foreign_versions,
             questions=load_policy().questions,
         )
 
@@ -278,6 +288,43 @@ class ReportData:
         names |= {item.code: item.name for item in note_lines}
         names |= {item.code: item.name for item in load_ifrs_metrics().metrics}
         return known, names
+
+    def _foreign_marks(
+        self, catalog, own_names: set[str]
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Наименования и версии РСБУ, которых у МСФО нет.
+
+        Сверяется разность, а не перечень РСБУ целиком: «Выручка» и «Чистый
+        долг» есть в обоих справочниках, и запрещать их значило бы запретить
+        писать о выручке. Запрещено то, что принадлежит только РСБУ:
+        подставленное наименование выглядит верным и означает другое.
+
+        **Берутся наименования показателей, а не строк.** Наименование строки
+        РСБУ — обычное словосочетание бухгалтерского языка: «кредиторская
+        задолженность» и «оценочные обязательства» стоят в оговорках самой
+        методики МСФО, и запрет на них ловил бы русскую речь, а не чужой
+        стандарт. У строки есть своя примета — код, и её ловит отдельное
+        правило. Наименование показателя устроено иначе: «Коэффициент текущей
+        ликвидности» против «Текущая ликвидность» — это два разных справочника,
+        и в документе МСФО первое означает, что тезис собран не по той методике.
+
+        Отбрасывается и то, что входит частью в наименование МСФО: такое
+        вхождение — совпадение слов, а не чужое наименование.
+        """
+        foreign = {item.name for item in catalog.metrics} - own_names
+        names = frozenset(
+            item
+            for item in foreign
+            if len(item.strip()) >= 3
+            and not any(item.casefold() in own.casefold() for own in own_names)
+        )
+
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+        from finlib.scoring.definitions import load_scoring
+
+        own_versions = {load_ifrs_metrics().version}
+        versions = {catalog.version, load_scoring().version} - own_versions
+        return names, frozenset(versions)
 
     def forbidden_templates(self, catalog) -> dict[str, str]:
         """Шаблонные блоки, условие применения которых не выполнено.
@@ -477,7 +524,17 @@ def load_report_data(
     from finlib.normalize.lines import load_lines
     from finlib.scoring.definitions import load_scoring
 
-    catalog = catalog if catalog is not None else load_metrics()
+    # Справочник показателей берётся по стандарту: коды `cur_liq`, `equity_ratio`,
+    # `debt_total` и `net_debt` есть у обоих, а означают разное — в приложении
+    # по МСФО печаталось «Коэффициент текущей ликвидности» вместо «Текущая
+    # ликвидность», а показатели, которых у РСБУ нет, из таблицы выпадали.
+    if catalog is None:
+        if standard is Standard.IFRS:
+            from finlib.metrics.ifrs_view import IfrsMetricsView
+
+            catalog = IfrsMetricsView()
+        else:
+            catalog = load_metrics()
     scoring = scoring if scoring is not None else load_scoring()
 
     params = {"inn": inn, "standard": standard.value}
@@ -513,7 +570,12 @@ def load_report_data(
     for row in values:
         by_metric.setdefault(row["metric_code"], []).append(row)
 
-    group_names = {code: item.name for code, item in scoring.groups.items()}
+    # Наименования групп — тоже по стандарту: у МСФО их четыре, и они свои.
+    group_names = (
+        {code: item.name for code, item in catalog.groups.items()}
+        if standard is Standard.IFRS
+        else {code: item.name for code, item in scoring.groups.items()}
+    )
     metrics = [
         _metric_row(code, by_metric[code], scored.get(code), catalog, group_names)
         for code in sorted(by_metric)

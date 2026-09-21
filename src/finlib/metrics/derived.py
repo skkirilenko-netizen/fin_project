@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 
 HUNDRED = Decimal(100)
 
-_CODE = re.compile(r"^(?P<base>[a-z0-9][a-z0-9_]*?)_(?P<kind>chg_abs|chg_pct|share)$")
+# База производной — код показателя, код строки РСБУ либо код позиции МСФО:
+# точка в нём законна («ifrs.total_assets_chg_pct»), и без неё производные
+# по МСФО не разбирались вовсе — изменение считалось, а прочитать его код
+# было нечем.
+_CODE = re.compile(
+    r"^(?P<base>[a-z0-9][a-z0-9_.]*?)_(?P<kind>chg_abs|chg_pct|share)$"
+)
 
 
 class DerivedKind(StrEnum):
