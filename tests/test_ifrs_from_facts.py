@@ -28,6 +28,7 @@ from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.quality.periods import PeriodConfidence
 from finlib.scoring.ifrs import assess
 from finlib.scoring.ifrs_store import save_ifrs_assessment, save_metrics
+from finlib.sources.ifrs_document import DocumentReading
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import identify
 from finlib.sources.ifrs_notes import NoteValue
@@ -104,10 +105,9 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = ()) -> None:
         profile,
         decision,
         db_conn,
+        DocumentReading(audit=None, notes=notes, issuer_type="corporate"),
         confirmed_by="аналитик",
         confirmations={"Амортизация основных средств": "ifrs.depreciation"},
-        notes=notes,
-        issuer_type="corporate",
     )
 
 

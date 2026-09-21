@@ -34,6 +34,7 @@ from finlib.quality.codes import (
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.values import sign_only_difference
 from finlib.sources.ifrs_confirmed import Confirmed, ConfirmedFact, match_key
+from finlib.sources.ifrs_document import DocumentReading
 from finlib.sources.ifrs_extract import Extraction, materiality_share
 from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_notes import NoteValue
@@ -300,6 +301,7 @@ def load_extraction(
     profile: DocumentProfile,
     review: ReviewResult,
     conn: PgConnection,
+    reading: DocumentReading,
     *,
     raw_path: str | None = None,
     checksum: str | None = None,
@@ -307,10 +309,7 @@ def load_extraction(
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
     confirmed: Confirmed | None = None,
-    notes: tuple[NoteValue, ...] | None = None,
-    issuer_type: str | None = None,
     organization_name: str | None = None,
-    audit=None,
 ) -> LoadResult:
     """Пишет принятый комплект МСФО одной транзакцией.
 
@@ -323,9 +322,19 @@ def load_extraction(
     опознания: прежде они не писались вовсе, и размеченные статьи в расчёт
     не попадали.
 
+    reading — прочитанное в документе помимо таблиц: аудиторское заключение,
+    величины примечаний, тип эмитента. Довод **обязательный и позиционный**:
+    прежде это были три названных довода с умолчаниями, цикл их передавал,
+    а прогон приёма — нет, и базу наполнял именно он. Шесть кодов заключения
+    не появились ни у одного комплекта, и журнал выглядел так, будто
+    оговорок нет.
+
     Комплект, не прошедший экран сверки без подтверждения, уходит в карантин:
     извлечение, о котором машина не знает, что перед ней, в расчёт не идёт.
     """
+    notes = reading.notes
+    issuer_type = reading.issuer_type
+    audit = reading.audit
     execute(
         _ENSURE_ORGANIZATION, {"inn": inn, "name": organization_name}, conn=conn
     )
@@ -357,7 +366,7 @@ def load_extraction(
         profile,
         conn,
         confirmed=(*(confirmed.facts if confirmed else ()), *fresh),
-        notes=notes or (),
+        notes=notes,
     )
     revisions = [item.describe() for item in collisions.revisions]
 
@@ -369,7 +378,7 @@ def load_extraction(
         review,
         collisions,
         quarantined,
-        notes or (),
+        notes,
     )
     records.extend(_audit_records(inn, src_file_id, audit))
     execute(

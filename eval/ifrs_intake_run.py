@@ -28,8 +28,10 @@ from finlib.db import connection
 from finlib.normalize.ifrs_loader import load_extraction
 from finlib.quality.codes import CheckCode
 from finlib.sources.ifrs_confirmed import load_confirmed
+from finlib.sources.ifrs_document import read_document
 from finlib.sources.ifrs_extract import extract
-from finlib.sources.ifrs_inbox import Rejection, identify, text_of
+from finlib.sources.ifrs_inbox import Rejection, form_headings, identify, text_of
+from finlib.sources.ifrs_numbers import load_parsing_policy
 from finlib.sources.ifrs_review import ReviewOutcome, review
 
 logger = logging.getLogger(__name__)
@@ -240,13 +242,25 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
     )
 
     if write and inn:
+        # **Прогон читает документ тем же чтением, что цикл.** Прежде он
+        # записи не давал ни заключения, ни величин примечаний, ни типа
+        # эмитента — а базу наполняет именно он: у ФосАгро мнение с оговоркой,
+        # и в журнале комплекта о ней не было ни строки.
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+
+        headings = form_headings(
+            document.text, load_ifrs_lines(), load_parsing_policy()
+        )
+        reading = read_document(
+            document.text, extraction, profile, headings, document=document
+        )
         with connection() as conn:
             # Подтверждённое опознание передаётся записи так же, как решению:
             # иначе комплект принимался бы с его учётом, а факты писались
             # без него — и в расчёт не попадали статьи, о которых человек
             # уже сказал, чем они являются.
             loaded = load_extraction(
-                inn, extraction, profile, decision, conn, confirmed=known
+                inn, extraction, profile, decision, conn, reading, confirmed=known
             )
             found.src_file_id = loaded.src_file_id
     return found

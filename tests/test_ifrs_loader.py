@@ -12,6 +12,7 @@ import pytest
 from finlib.db import execute, fetch_all, fetch_one
 from finlib.normalize.ifrs_loader import load_extraction
 from finlib.quality.runner import run_checks
+from finlib.sources.ifrs_document import DocumentReading
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import identify
 from finlib.sources.ifrs_numbers import Grouping
@@ -20,6 +21,13 @@ from finlib.standards import Standard
 
 INN = "7736050003"
 DATES = (date(2024, 12, 31), date(2023, 12, 31))
+
+# Документ здесь синтетический: ни заключения, ни примечаний в нём нет,
+# и тип эмитента по двум формам не определяется. Сказано это явно, потому
+# что «не читали» и «нет сведений» — разные вещи, и умолчание их смешивало:
+# прогон приёма молча не передавал заключение, и шесть кодов задачи 25
+# не дошли ни до одного комплекта.
+NOT_READ = DocumentReading(audit=None, notes=(), issuer_type=None)
 
 BALANCE = """
 Консолидированный отчёт о финансовом положении
@@ -138,7 +146,7 @@ def prepared(text: str = BALANCE):
 def test_facts_are_written_with_the_ifrs_standard(db_conn) -> None:
     """Факты пишутся со стандартом ifrs и не смешиваются с РСБУ."""
     extraction, profile, decision = prepared()
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     assert result.facts_written > 0
     rows = fetch_all(
@@ -156,7 +164,7 @@ def test_facts_are_written_with_the_ifrs_standard(db_conn) -> None:
 def test_period_roles_follow_the_column_order(db_conn) -> None:
     """Первая колонка — отчётный период, остальные сравнительные."""
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     roles = {
         (row["report_date"], row["line_code"]): row["period_role"]
@@ -174,7 +182,7 @@ def test_period_roles_follow_the_column_order(db_conn) -> None:
 def test_ifrs_does_not_collide_with_rsbu(db_conn) -> None:
     """Величина по МСФО не затирает величину по РСБУ за ту же дату."""
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     rsbu = fetch_one(
         "SELECT count(*) AS n FROM fact_report "
@@ -196,7 +204,7 @@ def test_ifrs_does_not_collide_with_rsbu(db_conn) -> None:
 def test_src_file_records_how_the_document_was_read(db_conn) -> None:
     """Комплект хранит вид отчётности, единицу и конвенцию записи чисел."""
     extraction, profile, decision = prepared()
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     row = fetch_one(
         "SELECT standard, reporting_kind, unit_code, unit_source, digit_grouping, "
@@ -222,7 +230,7 @@ def test_unconfirmed_extraction_goes_to_quarantine(db_conn) -> None:
     extraction, profile, decision = prepared(text)
     assert not decision.automatic
 
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
     assert result.quarantined
     row = fetch_one(
         "SELECT status FROM src_file WHERE id = %(id)s",
@@ -235,7 +243,7 @@ def test_unconfirmed_extraction_goes_to_quarantine(db_conn) -> None:
 def test_journal_records_counters_not_only_failures(db_conn) -> None:
     """В журнал уходит и число проверенного, а не только сработавшее."""
     extraction, profile, decision = prepared()
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     rows = fetch_all(
         "SELECT check_code, message, details FROM dq_log WHERE src_file_id = %(id)s",
@@ -275,14 +283,14 @@ def test_revision_against_previous_report_is_logged(db_conn) -> None:
     о переклассификации.
     """
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     # Комплект следующего года пересмотрел сравнительную величину 2024 года.
     revised = LATER.replace(
         "Итого активы                          1 700 000      1 500 000",
         "Итого активы                          1 700 000      1 111 111",
     )
-    result = load_extraction(INN, *later_set(revised), db_conn)
+    result = load_extraction(INN, *later_set(revised), db_conn, NOT_READ)
 
     assert result.collisions.checked, "сверять было не с чем — столкновения не было"
     assert result.revisions, "расхождение не замечено"
@@ -305,7 +313,7 @@ def test_sign_convention_is_not_counted_as_a_revision(db_conn) -> None:
     сигнал мерил бы наше соглашение о знаке, а не эмитента.
     """
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     # Тот же расход за 2024 год, напечатанный в новом комплекте без скобок.
     # Проверено на РСБУ: одна и та же организация печатает налог на прибыль
@@ -314,7 +322,7 @@ def test_sign_convention_is_not_counted_as_a_revision(db_conn) -> None:
         "Расход по налогу на прибыль              (60 000)       (52 000)",
         "Расход по налогу на прибыль              (60 000)        52 000",
     )
-    result = load_extraction(INN, *later_set(flipped), db_conn)
+    result = load_extraction(INN, *later_set(flipped), db_conn, NOT_READ)
 
     assert not any("income_tax" in item for item in result.revisions)
     assert any("income_tax" in item.describe() for item in result.collisions.sign_only)
@@ -334,7 +342,7 @@ def test_collision_counter_stands_next_to_the_findings(db_conn) -> None:
     правило приоритета выглядело работающим, ни разу не сработав.
     """
     extraction, profile, decision = prepared()
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     row = fetch_one(
         "SELECT message, details FROM dq_log WHERE src_file_id = %(id)s "
@@ -354,13 +362,13 @@ def test_reloading_the_same_set_is_an_overwrite_not_a_revision(db_conn) -> None:
     парсера нельзя.
     """
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     revised = BALANCE.replace(
         "Итого активы                          1 500 000      1 360 000",
         "Итого активы                          1 500 000      1 111 111",
     )
-    result = load_extraction(INN, *prepared(revised), db_conn)
+    result = load_extraction(INN, *prepared(revised), db_conn, NOT_READ)
 
     assert not result.revisions
     assert result.collisions.rewritten
@@ -380,7 +388,7 @@ def test_comparative_value_does_not_overwrite_the_reported_one(db_conn) -> None:
     от порядка загрузки комплектов.
     """
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
     before = fetch_one(
         "SELECT value FROM fact_report WHERE inn = %(i)s AND standard = 'ifrs' "
         "AND report_date = %(d)s AND line_code = 'ifrs.total_assets'",
@@ -394,7 +402,7 @@ def test_comparative_value_does_not_overwrite_the_reported_one(db_conn) -> None:
         "Итого активы                          1 700 000      1 500 000",
         "Итого активы                          1 700 000      1 111 111",
     )
-    result = load_extraction(INN, *later_set(later), db_conn)
+    result = load_extraction(INN, *later_set(later), db_conn, NOT_READ)
     assert result.collisions.checked, "столкновения не произошло — проверять нечего"
     assert result.collisions.kept_by_priority, "приоритет не сработал ни разу"
 
@@ -422,6 +430,7 @@ def test_confirmed_item_is_saved_with_its_wording(db_conn) -> None:
         profile,
         decision,
         db_conn,
+        NOT_READ,
         confirmed_by="аналитик",
         confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
     )
@@ -448,6 +457,7 @@ def test_confirmation_lifts_the_quarantine(db_conn) -> None:
         profile,
         decision,
         db_conn,
+        NOT_READ,
         confirmed_by="аналитик",
         confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
     )
@@ -471,6 +481,7 @@ def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:
         profile,
         decision,
         db_conn,
+        NOT_READ,
         confirmed_by="аналитик",
         confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
     )
@@ -512,7 +523,7 @@ def test_rsbu_checks_are_not_run_against_an_ifrs_set(db_conn) -> None:
     Молчание тоже не годится: комплект без записей выглядит проверенным.
     """
     extraction, profile, decision = prepared()
-    result = load_extraction(INN, extraction, profile, decision, db_conn)
+    result = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     report = run_checks(result.src_file_id, db_conn)
     assert report.outcomes == []
@@ -537,7 +548,7 @@ def test_ifrs_set_does_not_reach_rsbu_metrics(db_conn) -> None:
     from finlib.metrics.engine import load_period_values
 
     extraction, profile, decision = prepared()
-    load_extraction(INN, extraction, profile, decision, db_conn)
+    load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
 
     rsbu = load_period_values(INN, db_conn, Standard.RSBU)
     codes = {code for period in rsbu.values() for code in period.values}
