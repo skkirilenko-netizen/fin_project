@@ -109,6 +109,25 @@ class DocumentProfile:
     # полугодие и квартал рядом. Без разметки брались последние графы,
     # то есть квартальные, — величины настоящие, период чужой.
     columns_by_form: dict[str, ColumnLayout] = field(default_factory=dict)
+    # Формы, которые документ обещал, и откуда взят перечень. Обещание
+    # проверяется отдельно от найденного: у СИБУРа страница отчёта о прибылях
+    # без текстового слоя — 7-я из 60, — и первой найденной формой стал отчёт
+    # о совокупном доходе. Потеря оказалась **до** окна форм, и признак
+    # `pages_without_text` о ней молчал: форма, потерянная целиком, выглядит
+    # как форма, которой в документе нет.
+    expected_forms: tuple[str, ...] = ()
+    expected_from: str = ""
+
+    @property
+    def missing_forms(self) -> tuple[str, ...]:
+        """Формы, обещанные документом и не найденные в тексте.
+
+        Пусто, если не найдено ни одной: тогда это не потеря отдельной формы,
+        а документ, в котором форм нет вовсе, и об этом говорит приём.
+        """
+        if not self.forms:
+            return ()
+        return tuple(code for code in self.expected_forms if code not in self.forms)
 
     @property
     def accepted(self) -> bool:
@@ -169,6 +188,15 @@ class DocumentProfile:
                 f", дат не объявили форм {len(self.inherited_dates)} из "
                 f"{len(self.forms)}"
                 if self.inherited_dates
+                else ""
+            )
+            # Счётчик обещанного стоит рядом с найденным: «форм 3» само
+            # по себе не говорит, все ли обещанные формы разобраны.
+            + (
+                f", обещано форм {len(self.expected_forms)} "
+                f"({self.expected_from}), не найдено "
+                f"{len(self.missing_forms)}"
+                if self.expected_forms
                 else ""
             )
         )
@@ -464,6 +492,7 @@ def identify(
         )
 
     span = _form_span(document, text, headings, policy)
+    promised, promised_from = expected_forms(text, headings, policy)
     profile = DocumentProfile(
         forms=forms,
         currency=foreign or "RUB",
@@ -477,6 +506,8 @@ def identify(
         pages_without_text=_lost_pages(document, span),
         form_pages=(span[1] - span[0] + 1) if span is not None else 0,
         columns_by_form=by_columns,
+        expected_forms=promised,
+        expected_from=promised_from,
     )
     logger.info("документ принят: %s", profile.describe())
     if profile.pages_without_text:
@@ -763,6 +794,67 @@ def _is_table_row(line: str) -> bool:
 # Номер страницы в конце строки оглавления: «… о финансовом положении 6»,
 # «… о прибыли или убытке 7-8».
 _PAGE_NUMBER = re.compile(r"\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*$")
+
+
+def expected_forms(
+    text: str, headings: dict[str, int], policy: ParsingPolicy
+) -> tuple[tuple[str, ...], str]:
+    """Формы, которые документ обещал, и откуда взят перечень.
+
+    **Обещание документа надёжнее нашего перечисления.** Форма, обещанная
+    документом и не найденная в тексте, — это потеря, а не отсутствие: у СИБУРа
+    страница отчёта о прибылях 7-я из 60 лишена текстового слоя, и признак
+    потерянных страниц о ней молчал, потому что окно форм начинается с первой
+    **найденной**.
+
+    Порядок источников объявлен и есть часть правила:
+
+    1. аудиторское заключение — оно перечисляет проверенную отчётность
+       по составу, и это первоисточник;
+    2. оглавление — когда заключение нечитаемо (скан, как у Автодора);
+    3. обязательный состав МСФО (IAS) 1 — когда нет и оглавления.
+
+    Перечень сужен до форм, которые методика разбирает: отчёт об изменениях
+    капитала МСФО (IAS) 1 требует, а мы его не разбираем вовсе, и требовать
+    его наличия значило бы объявлять потерю там, где её нет.
+    """
+    kind = policy.document_kind
+    head = text[: min(headings.values())] if headings else text
+    prose: set[str] = set()
+    listed: set[str] = set()
+    lines = [line.strip() for line in head.split("\n")]
+    for index, stripped in enumerate(lines):
+        if not stripped:
+            continue
+        # **Обещание тоже переносится по строкам, и в обеих его формах.**
+        # В оглавлении у Самолёта «Консолидированный отчет о прибыли или
+        # убытке | и прочем совокупном доходе 12», в аудиторском заключении
+        # у него же «консолидированного отчета о прибыли или | убытке за 2025
+        # год»: без склейки ядро не находится ни там, ни там, и обещание
+        # теряется — то есть потеря формы остаётся незамеченной.
+        variants = [stripped]
+        for ahead in range(1, kind.heading_wrap_lines + 1):
+            if index + ahead < len(lines) and lines[index + ahead]:
+                variants.append(f"{stripped} {lines[index + ahead]}")
+        found = {
+            code
+            for code, cores in kind.cores.items()
+            for variant in variants
+            if any(normalize_name(core) in normalize_name(variant) for core in cores)
+        }
+        if not found:
+            continue
+        # Строка оглавления опознаётся по любому своему написанию: перенос
+        # уносит номер страницы во вторую строку, и по первой она выглядит
+        # прозой.
+        in_contents = any(_is_contents_entry(item) for item in variants)
+        (listed if in_contents else prose).update(found)
+    order = list(kind.cores)
+    if len(prose) >= kind.min_forms:
+        return tuple(code for code in order if code in prose), "audit_report"
+    if len(listed) >= kind.min_forms:
+        return tuple(code for code in order if code in listed), "contents"
+    return tuple(order), "ias1"
 
 
 def _inside_contents_list(

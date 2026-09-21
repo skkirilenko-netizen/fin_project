@@ -271,6 +271,26 @@ def review(
             + ", ".join(str(number) for number in profile.pages_without_text)
             + " — содержимое не извлечено вовсе"
         )
+    # **Форма, обещанная документом и не найденная, — тоже потеря.** Признак
+    # потерянных страниц её не ловит: окно считается между первой и последней
+    # **найденной** формой, а у СИБУРа потеряна страница самой первой — отчёта
+    # о прибылях, 7-й из 60. Форма, потерянная целиком, выглядела как форма,
+    # которой в документе нет.
+    if profile.missing_forms:
+        reasons.append(ReviewReason.LOST_PAGE)
+        promised = {
+            "audit_report": "аудиторским заключением",
+            "contents": "оглавлением",
+            "ias1": "обязательным составом МСФО (IAS) 1",
+        }.get(profile.expected_from, profile.expected_from)
+        problems.append(
+            "формы обещаны "
+            + promised
+            + ", но в тексте не найдены: "
+            + ", ".join(
+                code.removeprefix("ifrs.") for code in profile.missing_forms
+            )
+        )
     if profile.reporting_kind is not ReportingKind.FULL:
         reasons.append(ReviewReason.REPORTING_KIND)
         problems.append(

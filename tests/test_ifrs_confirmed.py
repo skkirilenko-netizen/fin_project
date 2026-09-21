@@ -95,9 +95,20 @@ def clean(db_conn):
     return db_conn
 
 
+# Оглавление: состав отчётности объявляет документ, и форма из перечня,
+# не найденная в тексте, считается потерянной. Без перечня состав берётся
+# обязательным по МСФО (IAS) 1.
+CONTENTS = """
+Содержание
+Консолидированный отчёт о финансовом положении 3
+Консолидированный отчёт о прибыли или убытке 4
+Примечания к консолидированной финансовой отчётности 5
+"""
+
+
 def prepared():
     """Документ, проведённый через приём и разбор."""
-    profile = identify(BALANCE + HEADER)
+    profile = identify(CONTENTS + BALANCE + HEADER)
     assert profile.accepted, getattr(profile, "reason", "")
     return extract(BALANCE, DATES, Grouping.RUSSIAN), profile
 

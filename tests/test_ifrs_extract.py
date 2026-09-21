@@ -164,9 +164,21 @@ HEADER = (
 )
 
 
-def profile_of(text: str):
+# Оглавление: документ объявляет состав отчётности сам, и форма из перечня,
+# в тексте не найденная, считается потерянной. Без перечня состав берётся
+# обязательным по МСФО (IAS) 1 — тогда синтетический комплект из двух форм
+# требовал бы и третьей.
+CONTENTS = """
+Содержание
+Консолидированный отчёт о финансовом положении 3
+Консолидированный отчёт о прибыли или убытке 4
+Примечания к консолидированной финансовой отчётности 5
+"""
+
+
+def profile_of(text: str, contents: str = CONTENTS):
     """Параметры документа для экрана сверки."""
-    found = identify(text + HEADER)
+    found = identify(contents + text + HEADER)
     assert found.accepted, getattr(found, "reason", "")
     return found
 
@@ -262,6 +274,37 @@ def test_cash_flow_row_is_never_material() -> None:
     assert found.rows_measured == len(extraction.unrecognised) - len(unrecognised_flows)
 
 
+def test_promised_form_that_is_missing_is_a_lost_page() -> None:
+    """Форма, обещанная документом и не найденная, — потеря, а не отсутствие.
+
+    У СИБУРа страница отчёта о прибылях — 7-я из 60 — лишена текстового слоя,
+    и первой найденной формой стал отчёт о совокупном доходе. Признак
+    потерянных страниц о ней молчал: окно считается между первой и последней
+    **найденной** формой, и потеря первой формы оказывается до окна. Форма,
+    потерянная целиком, выглядела как форма, которой в документе нет.
+    """
+    promised = CONTENTS + "Консолидированный отчёт о движении денежных средств 6\n"
+    # Документ обещает три формы, а в тексте их две.
+    profile = profile_of(COMPLETE, contents=promised)
+    assert profile.expected_from == "contents"
+    assert profile.missing_forms == ("ifrs.statement_of_cash_flows",)
+
+    found = review(extraction_of(COMPLETE), profile)
+    assert ReviewReason.LOST_PAGE in found.reasons
+    assert any("не найдены" in item for item in found.problems)
+
+
+def test_document_without_any_promise_expects_the_ias1_composition() -> None:
+    """Нет ни заключения, ни оглавления — состав берётся обязательным по IAS 1.
+
+    Умолчание здесь безопасно ровно потому, что ошибка обнаруживается сразу:
+    формы, которой нет, недостаёт и в расчёте.
+    """
+    profile = profile_of(COMPLETE, contents="")
+    assert profile.expected_from == "ias1"
+    assert profile.missing_forms == ("ifrs.statement_of_cash_flows",)
+
+
 def test_failed_total_requires_confirmation() -> None:
     """Несошедшийся итог — подтверждение, а не молчаливый пропуск."""
     broken = COMPLETE.replace(
@@ -312,7 +355,7 @@ def test_pipeline_accepts_a_document_end_to_end() -> None:
     Этим вызовом контроли ветки МСФО и стали достижимы: до него весь разбор
     был написан, покрыт тестами и никем не вызывался.
     """
-    text = COMPLETE + HEADER
+    text = CONTENTS + COMPLETE + HEADER
     stages: list[str] = []
     found = accept_ifrs_document(text, on_stage=lambda item: stages.append(item.message))
     assert found.accepted
