@@ -492,6 +492,17 @@ def ifrs_confirm_command(
     typer.echo(
         typer.style("\nКарантин снят, комплект идёт в расчёт", fg=typer.colors.GREEN)
     )
+    # **Снятый карантин не означает, что экран сверки всё принял.** Основания,
+    # которые остались, названы: комплект идёт в расчёт под ответственность
+    # подтвердившего, и он обязан видеть, что именно берёт на себя.
+    if intake.review.reasons:
+        typer.echo(
+            typer.style(
+                "  экран сверки принял комплект не сам, основания остались: "
+                + "; ".join(item.value for item in intake.review.reasons),
+                fg=typer.colors.YELLOW,
+            )
+        )
 
 
 @app.command("ifrs-markup")
