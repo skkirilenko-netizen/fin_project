@@ -33,6 +33,7 @@ from finlib.quality.codes import (
 )
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.values import sign_only_difference
+from finlib.sources.ifrs_confirmed import Confirmed, ConfirmedFact
 from finlib.sources.ifrs_extract import Extraction, materiality_share
 from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
@@ -43,6 +44,20 @@ logger = logging.getLogger(__name__)
 # Роли периодов по порядку колонок документа. Четвёртой и далее колонке роли
 # нет: модель хранит три, как и для РСБУ.
 PERIOD_ROLES: tuple[str, ...] = ("current", "previous", "before_previous")
+
+
+class Recognition(StrEnum):
+    """Чем строка опознана: справочником или подтверждением человека.
+
+    Две силы опознания, и доверие к ним разное: справочник утверждает о строке
+    с таким наименованием вообще, подтверждение — о строке **этого** эмитента.
+    В расчёт величины идут наравне, в документе печатаются порознь. Значение
+    хранится в `fact_report.recognition`, и свободных строк в коде для него
+    быть не должно.
+    """
+
+    CATALOG = "catalog"
+    CONFIRMATION = "confirmation"
 
 # Записи, описывающие **состояние** комплекта, а не событие: сводка
 # сопоставления строк, сводка столкновений периодов, основания экрана сверки
@@ -111,16 +126,18 @@ RETURNING id
 _UPSERT_FACT = """
 INSERT INTO fact_report (
     src_file_id, inn, standard, report_date, form_code, line_code,
-    source_line_code, value, value_status, period_role
+    source_line_code, value, value_status, period_role, recognition
 ) VALUES (
     %(src_file_id)s, %(inn)s, %(standard)s, %(report_date)s, %(form_code)s,
-    %(line_code)s, %(source_line_code)s, %(value)s, 'ok', %(period_role)s
+    %(line_code)s, %(source_line_code)s, %(value)s, 'ok', %(period_role)s,
+    %(recognition)s
 )
 ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     src_file_id = EXCLUDED.src_file_id,
     source_line_code = EXCLUDED.source_line_code,
     value = EXCLUDED.value,
     period_role = EXCLUDED.period_role,
+    recognition = EXCLUDED.recognition,
     updated_at = now()
 WHERE period_rank(EXCLUDED.period_role) <= period_rank(fact_report.period_role)
   AND fact_report.value IS DISTINCT FROM EXCLUDED.value
@@ -179,6 +196,10 @@ class Collisions:
     unchanged: int = 0
     # Совпали до копейки: столкновение было, спора не было.
     agreed: int = 0
+    # Сколько фактов записано не справочником, а по подтверждению человека.
+    # Графа отдельная, потому что доверие к двум силам опознания разное,
+    # а «фактов записано N» одним числом этого не показывает.
+    by_confirmation: int = 0
     # Приоритет оставил загруженное значение: входящее хуже по роли периода.
     kept_by_priority: int = 0
     # Входящее значение победило: роль не хуже загруженной.
@@ -220,8 +241,9 @@ class LoadResult:
         """Однострочная сводка со счётчиками проверенного."""
         return (
             f"ИНН {self.inn}, комплект {self.src_file_id}: фактов записано "
-            f"{self.facts_written} из {self.facts_total}, без изменений "
-            f"{self.collisions.unchanged}, "
+            f"{self.facts_written} из {self.facts_total}, из них "
+            f"по подтверждению человека {self.collisions.by_confirmation}, "
+            f"без изменений {self.collisions.unchanged}, "
             f"{self.collisions.describe()}, расхождений "
             f"со сравнительными данными {len(self.revisions)}, "
             f"подтверждённых статей {self.confirmations}, "
@@ -241,6 +263,7 @@ def load_extraction(
     correction_version: int = 0,
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
+    confirmed: Confirmed | None = None,
     organization_name: str | None = None,
     audit=None,
 ) -> LoadResult:
@@ -249,6 +272,11 @@ def load_extraction(
     confirmations — коды, присвоенные человеком неопознанным статьям:
     наименование в отчётности → код позиции. Пустой словарь означает, что
     подтверждения не было, и статьи остались неопознанными.
+
+    confirmed — ранее подтверждённое опознание того же эмитента. Его величины
+    идут в факты наравне с опознанными справочником, с пометкой источника
+    опознания: прежде они не писались вовсе, и размеченные статьи в расчёт
+    не попадали.
 
     Комплект, не прошедший экран сверки без подтверждения, уходит в карантин:
     извлечение, о котором машина не знает, что перед ней, в расчёт не идёт.
@@ -273,7 +301,17 @@ def load_extraction(
         quarantined=quarantined,
     )
 
-    written, collisions = _write_facts(inn, src_file_id, extraction, profile, conn)
+    # Присвоения этого присеста — такое же подтверждение человека, как и
+    # прежние: величина строки идёт в факты с той же пометкой.
+    fresh = _fresh_facts(extraction, confirmations or {})
+    written, collisions = _write_facts(
+        inn,
+        src_file_id,
+        extraction,
+        profile,
+        conn,
+        confirmed=(*(confirmed.facts if confirmed else ()), *fresh),
+    )
     revisions = [item.describe() for item in collisions.revisions]
 
     records = _journal_records(
@@ -376,12 +414,30 @@ def _write_src_file(
     return src_file_id
 
 
+def _fresh_facts(
+    extraction: Extraction, confirmations: dict[str, str]
+) -> tuple[ConfirmedFact, ...]:
+    """Величины строк, размеченных в этом присесте, для записи фактами.
+
+    Присвоение этого присеста ничем не слабее прежнего подтверждения: человек
+    сказал, чем строка является, и величина идёт в расчёт. Коды приходят
+    наименованиями, потому что так их называет экран разметки; строка без
+    величин фактом не становится.
+    """
+    return tuple(
+        ConfirmedFact(row.form, code, row.values, row.source_name, row.index)
+        for row in extraction.unrecognised
+        if (code := confirmations.get(row.source_name)) is not None and row.values
+    )
+
+
 def _write_facts(
     inn: str,
     src_file_id: int,
     extraction: Extraction,
     profile: DocumentProfile,
     conn: PgConnection,
+    confirmed: tuple[ConfirmedFact, ...] = (),
 ) -> tuple[int, Collisions]:
     """Пишет факты комплекта; возвращает число записанных и разбор столкновений.
 
@@ -447,11 +503,53 @@ def _write_facts(
                     "source_line_code": item.code,
                     "value": item.value,
                     "period_role": role,
+                    "recognition": Recognition.CATALOG.value,
                 },
                 conn=conn,
             )
             written += touched
             unchanged += not touched
+
+    # **Подтверждённое человеком идёт в факты наравне с опознанным.** Прежде
+    # факты писались только из строк, опознанных справочником, и статьи,
+    # о которых человек уже сказал, чем они являются, в расчёт не попадали
+    # вовсе: у Норникеля выпадали все 64 подтверждённые статьи, у Автодора —
+    # 39 из 40, включая две, в которых лежат 85 % активов. Различает их
+    # не участие в расчёте, а графа `recognition`: доверие к двум силам
+    # опознания разное, и в документе они печатаются порознь.
+    by_confirmation = 0
+    for fact in confirmed:
+        roles = _roles(profile.dates_of(fact.form))
+        dates = profile.dates_of(fact.form)
+        for index, value in enumerate(fact.values):
+            if index >= len(dates):
+                # Величин в строке больше, чем отчётных дат формы: лишние
+                # графы — предмет отдельного контроля, а не молчания.
+                break
+            report_date = dates[index]
+            role = roles.get(report_date)
+            if role is None:
+                continue
+            touched = execute(
+                _UPSERT_FACT,
+                {
+                    "src_file_id": src_file_id,
+                    "inn": inn,
+                    "standard": Standard.IFRS.value,
+                    "report_date": report_date,
+                    "form_code": fact.form,
+                    "line_code": fact.code,
+                    "source_line_code": fact.code,
+                    "value": value,
+                    "period_role": role,
+                    "recognition": Recognition.CONFIRMATION.value,
+                },
+                conn=conn,
+            )
+            written += touched
+            by_confirmation += touched
+            unchanged += not touched
+    collisions.by_confirmation = by_confirmation
     collisions.unchanged = unchanged
     collisions.revisions = tuple(revisions)
     collisions.sign_only = tuple(sign_only)

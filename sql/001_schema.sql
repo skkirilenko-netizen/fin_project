@@ -169,6 +169,16 @@ CREATE TABLE IF NOT EXISTS fact_report (
                  CHECK (value_status IN ('ok', 'not_disclosed', 'not_applicable')),
     period_role  text NOT NULL
                  CHECK (period_role IN ('current', 'previous', 'before_previous')),
+    -- Чем строка опознана. Две силы опознания, и доверие к ним разное:
+    -- catalog — справочник утверждает о строке с таким наименованием вообще;
+    -- confirmation — человек сказал, чем эта строка является **у этого
+    -- эмитента**. Величины участвуют в расчёте наравне, а в документе
+    -- печатаются порознь. Без этой графы подтверждённые статьи в факты
+    -- не писались вовсе: у Норникеля из расчёта выпадали все 64
+    -- подтверждённые статьи, у Автодора — 39 из 40, включая две,
+    -- в которых лежат 85 % активов.
+    recognition  text NOT NULL DEFAULT 'catalog'
+                 CHECK (recognition IN ('catalog', 'confirmation')),
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fact_report_uniq UNIQUE (inn, standard, report_date, form_code, line_code),
@@ -199,6 +209,18 @@ COMMENT ON COLUMN fact_report.source_line_code IS
 COMMENT ON COLUMN fact_report.value_status IS
     'ok — значение раскрыто; not_disclosed — прочерк, «X» или пустая ячейка; '
     'not_applicable — строка неприменима к данной форме отчётности организации';
+-- Графа заведена 21.09.2026; правило догонки действует с 17.09.2026.
+ALTER TABLE fact_report
+    ADD COLUMN IF NOT EXISTS recognition text NOT NULL DEFAULT 'catalog';
+ALTER TABLE fact_report DROP CONSTRAINT IF EXISTS fact_report_recognition_check;
+ALTER TABLE fact_report
+    ADD CONSTRAINT fact_report_recognition_check
+    CHECK (recognition IN ('catalog', 'confirmation'));
+
+COMMENT ON COLUMN fact_report.recognition IS
+    'catalog — строка опознана справочником, confirmation — принята по коду, '
+    'присвоенному человеком у этого же эмитента. Доверие разное, участие '
+    'в расчёте одинаковое';
 
 -- Журнал контролей качества --------------------------------------------------
 
@@ -502,6 +524,13 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     -- содержала долю выручки, а у строки потока — отношение оборота за год
     -- к запасу на дату: у О'КЕЙ 336,9 % валюты баланса.
     materiality_share numeric(10, 6),
+    -- По какому правилу посчитана мера. Журнал — доказательная база, и задним
+    -- числом он не правится: 290 записей, сделанных до 21.09.2026, хранят долю
+    -- валюты баланса у строк любой формы — правило, которое тогда действовало.
+    -- Переписать их значило бы подменить запись о том, что было; поэтому
+    -- правило названо рядом с величиной.
+    materiality_rule text NOT NULL DEFAULT 'per_form_base'
+                 CHECK (materiality_rule IN ('total_assets', 'per_form_base')),
     -- Вид разметки: чем строка приходится позиции справочника. От него
     -- зависит, как разметка проверяется арифметикой, и смешивать виды
     -- нельзя. exact — строка и есть позиция; part_of — строка вместе
@@ -564,6 +593,23 @@ ALTER TABLE ifrs_line_confirmation
     ADD COLUMN IF NOT EXISTS materiality_share numeric(10, 6);
 ALTER TABLE ifrs_line_confirmation
     ALTER COLUMN materiality_share DROP NOT NULL;
+
+-- Правило, по которому посчитана мера, называется рядом с ней. Догонка
+-- проставляет прежним записям прежнее правило и лишь потом объявляет
+-- умолчание: `ADD COLUMN ... DEFAULT` присвоил бы им нынешнее, то есть
+-- сказал бы о них неправду.
+ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS materiality_rule text;
+UPDATE ifrs_line_confirmation SET materiality_rule = 'total_assets'
+    WHERE materiality_rule IS NULL;
+ALTER TABLE ifrs_line_confirmation
+    ALTER COLUMN materiality_rule SET DEFAULT 'per_form_base';
+ALTER TABLE ifrs_line_confirmation
+    ALTER COLUMN materiality_rule SET NOT NULL;
+ALTER TABLE ifrs_line_confirmation
+    DROP CONSTRAINT IF EXISTS ifrs_line_confirmation_materiality_rule_check;
+ALTER TABLE ifrs_line_confirmation
+    ADD CONSTRAINT ifrs_line_confirmation_materiality_rule_check
+    CHECK (materiality_rule IN ('total_assets', 'per_form_base'));
 
 -- Перечень видов разметки 18.09.2026 пополнился решением «не статья»:
 -- прежде оно жило один присест и в базу не попадало вовсе, поэтому строка

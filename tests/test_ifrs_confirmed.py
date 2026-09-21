@@ -148,6 +148,44 @@ def test_prior_confirmation_of_the_same_issuer_is_knowledge(clean) -> None:
     assert decision.confirmed_from == ("31.12.2024",)
 
 
+def test_confirmed_row_carries_its_value_to_the_facts(clean) -> None:
+    """У подтверждённой статьи величина готова лечь в факты — с её формой.
+
+    Форма берётся у строки, а не у позиции: один код в двух формах правомерен,
+    и одна и та же позиция в балансе и в потоке — два разных факта.
+    """
+    confirm(clean, INN, "Задолженность Принципала", "ifrs.principal_receivable")
+    extraction, profile = prepared()
+    known = load_confirmed(INN, extraction, profile, conn=clean)
+
+    assert len(known.facts) == 1
+    fact = known.facts[0]
+    assert fact.code == "ifrs.principal_receivable"
+    assert fact.form == "ifrs.statement_of_financial_position"
+    assert fact.source_name == "Задолженность Принципала"
+    assert fact.values == (Decimal(160_000), Decimal(150_000))
+
+
+def test_detail_row_does_not_become_a_fact(clean) -> None:
+    """Детализация фактом не становится: её величина уже внутри своей позиции.
+
+    Записать её отдельным фактом того же кода значило бы подменить величину
+    позиции частью её же — и итог раздела сошёлся бы только случайно.
+    """
+    confirm(
+        clean,
+        INN,
+        "Задолженность Принципала",
+        "ifrs.long_term_trade_receivables",
+        relation="part_of",
+    )
+    extraction, profile = prepared()
+    known = load_confirmed(INN, extraction, profile, conn=clean)
+
+    assert known.rows, "подтверждение не применилось — проверять нечего"
+    assert known.facts == ()
+
+
 def test_confirmation_of_another_issuer_is_not_knowledge(clean) -> None:
     """У чужого эмитента то же наименование может означать другое."""
     confirm(clean, OTHER_INN, "Задолженность Принципала", "ifrs.principal_receivable")

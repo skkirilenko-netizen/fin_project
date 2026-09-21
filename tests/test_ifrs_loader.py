@@ -442,6 +442,52 @@ def test_confirmation_lifts_the_quarantine(db_conn) -> None:
     assert not result.quarantined
 
 
+def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:
+    """Подтверждённая статья попадает в факты с пометкой источника опознания.
+
+    Прежде факты писались только из строк, опознанных **справочником**,
+    и статьи, о которых человек уже сказал, чем они являются, в расчёт
+    не попадали вовсе: у Норникеля выпадали все 64 подтверждённые статьи,
+    у Автодора — 39 из 40, включая две, в которых лежат 85 % активов.
+    Снятый карантин при этом означал бы расчёт по неполным данным.
+    """
+    text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
+    extraction, profile, decision = prepared(text)
+    result = load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        confirmed_by="аналитик",
+        confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
+    )
+    assert result.collisions.by_confirmation > 0, "фактов по подтверждению не записано"
+
+    rows = fetch_all(
+        "SELECT report_date, value, recognition, period_role FROM fact_report "
+        "WHERE inn = %(i)s AND standard = 'ifrs' "
+        "AND line_code = 'ifrs.principal_receivable' ORDER BY report_date DESC",
+        {"i": INN},
+        conn=db_conn,
+    )
+    assert [row["value"] for row in rows] == [Decimal(400_000), Decimal(380_000)]
+    assert {row["recognition"] for row in rows} == {"confirmation"}
+    # Роль периода та же, что у опознанных справочником: величина второй графы
+    # сравнительная, и правило приоритета к ней применяется наравне.
+    assert [row["period_role"] for row in rows] == ["current", "previous"]
+
+    # Опознанное справочником помечено своей силой опознания, и графа считает
+    # то, как называется.
+    catalog = fetch_all(
+        "SELECT DISTINCT recognition FROM fact_report WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND line_code = 'ifrs.total_assets'",
+        {"i": INN},
+        conn=db_conn,
+    )
+    assert [row["recognition"] for row in catalog] == ["catalog"]
+
+
 # --- контроли качества на данных МСФО --------------------------------------------
 
 

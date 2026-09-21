@@ -51,6 +51,23 @@ ORDER BY form_code, source_name, confirmed_at DESC, id DESC
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmedFact:
+    """Величина подтверждённой строки, готовая лечь в факты комплекта.
+
+    **Форма берётся у строки, а не у позиции.** Один код в двух формах
+    правомерен, и одна и та же позиция в балансе и в потоке — два разных
+    факта: форма входит в ключ `fact_report`, и подменять её формой позиции
+    значило бы записать величину потока под балансовой датой.
+    """
+
+    form: str
+    code: str
+    values: tuple[Decimal, ...]
+    source_name: str
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
 class Confirmed:
     """Строки, опознанные по ранее подтверждённому у этого же эмитента."""
 
@@ -59,6 +76,13 @@ class Confirmed:
     # Величины по кодам справочника и сверх него — то же, что даёт разметка.
     values: dict[str, Decimal] = field(default_factory=dict)
     extras: dict[str, Decimal] = field(default_factory=dict)
+    # Величины подтверждённых строк для записи фактами. Точное присвоение
+    # и специфическая статья — величина самой строки, и она идёт в факты
+    # с пометкой источника опознания. Детализация и агрегат не идут:
+    # величина детализации уже входит в свою позицию, а агрегат покрывает
+    # несколько позиций, и разложить его нечем — фактом под одним кодом
+    # он был бы величиной не той статьи.
+    facts: tuple[ConfirmedFact, ...] = ()
     # Отчётные даты комплектов, на которых эти решения были приняты: без них
     # «принято по ранее подтверждённому» не проверить глазами.
     from_reports: tuple[str, ...] = ()
@@ -114,6 +138,7 @@ def load_confirmed(
     markup = IssuerMarkup(inn, Path(""), profile, extraction)
     codes: dict[tuple[str, int], str] = {}
     reports: set[str] = set()
+    facts: dict[tuple[str, int], ConfirmedFact] = {}
     for row in extraction.unrecognised:
         found = by_name.get((row.form, normalize_name(row.source_name)))
         if found is None:
@@ -131,6 +156,10 @@ def load_confirmed(
             markup.specific[row.key] = code
         else:
             markup.assignments[row.key] = code
+        if relation in (Relation.EXACT.value, Relation.SPECIFIC.value) and row.values:
+            facts[row.key] = ConfirmedFact(
+                row.form, code, row.values, row.source_name, row.index
+            )
         codes[row.key] = code
         reports.add(f"{found['report_date']:%d.%m.%Y}")
 
@@ -139,6 +168,7 @@ def load_confirmed(
     rejected = markup.rejects(catalog)
     for key in rejected:
         codes.pop(key, None)
+        facts.pop(key, None)
         markup.assignments.pop(key, None)
         markup.parts.pop(key, None)
         markup.aggregates.pop(key, None)
@@ -148,6 +178,7 @@ def load_confirmed(
         values=markup.values(catalog),
         extras=markup.extras(catalog),
         from_reports=tuple(sorted(reports)),
+        facts=tuple(facts.values()),
     )
     logger.info("%s: %s", inn, found.describe())
     return found

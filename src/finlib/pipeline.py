@@ -383,6 +383,7 @@ def accept_ifrs_document(
             raw_path=raw_path,
             confirmed_by=confirmed_by,
             confirmations=confirmations,
+            confirmed=confirmed,
             audit=audit,
         )
     report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
