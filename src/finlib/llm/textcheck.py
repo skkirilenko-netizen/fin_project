@@ -55,6 +55,10 @@ class TextRule(StrEnum):
     # Документ одного стандарта говорит словами другого: код строки РСБУ,
     # ссылка на строку, наименование из справочника РСБУ, версия методики РСБУ.
     FOREIGN_STANDARD_MARK = "foreign_standard_mark"
+    # В заключении об одной организации названа другая. Так в документ попадают
+    # наши рабочие пометки из методики: «у ЛСР расхождение между двумя мерами
+    # оказалось наибольшим» стояло в «Ограничениях анализа» по ФосАгро.
+    OTHER_ISSUER_MENTIONED = "other_issuer_mentioned"
 
 
 SEVERITY: dict[TextRule, Severity] = {
@@ -90,6 +94,7 @@ SEVERITY: dict[TextRule, Severity] = {
     # ничего не считалось. Класс дефекта повторяющийся: механизм РСБУ дотянулся
     # до документа МСФО семь раз, и по одному их искать нельзя.
     TextRule.FOREIGN_STANDARD_MARK: Severity.BLOCKING,
+    TextRule.OTHER_ISSUER_MENTIONED: Severity.BLOCKING,
     TextRule.DAYS_DIRECTION: Severity.WARNING,
     TextRule.FLAG_CONFLICT_NOT_STATED: Severity.WARNING,
     # Дубль вопроса и вопрос о нераскрытии портят перечень, но документу
@@ -164,6 +169,10 @@ class TextContext:
     # её значило бы запретить писать о выручке.
     foreign_names: frozenset[str] = frozenset()
     foreign_versions: frozenset[str] = frozenset()
+    # Опознавательные слова **других** организаций, известных базе: заключение
+    # об одной организации не называет другую. Родовые слова наименований
+    # («Группа», «Холдинг») сюда не входят — они объявлены в `report.yaml`.
+    other_issuers: frozenset[str] = frozenset()
 
 
 _CLASS_ASSIGNED = re.compile(r"\bкласс\w*\s*[«\"'(]?\s*([A-E])\b", re.IGNORECASE)
@@ -425,6 +434,45 @@ def check_foreign_standard(
             )
         )
     return found
+
+
+def check_other_issuers(text: str, context: TextContext) -> list[TextIssue]:
+    """Заключение об одной организации не называет другую.
+
+    **Правило против нашей пометки, а не против модели.** Оговорки методики
+    писались для нас и содержали наблюдения по набору: в «Ограничениях
+    анализа» по ФосАгро стояло «у ЛСР расхождение между двумя мерами
+    оказалось наибольшим из наблюдавшихся». Читателю заключения это говорит
+    о другой организации, и проверить он этого не может.
+
+    Ищется опознавательная часть наименований организаций, **известных
+    базе**: перечень ведётся не в коде. Родовые слова и организационные формы
+    объявлены методикой — «Группа» стоит у четырёх эмитентов набора. Часть
+    ищется целиком: отдельное слово наименования бывает обычным словом языка
+    («дом» у «ДОМ.РФ Ипотечный агент»), и запрет на него блокировал бы всякий
+    документ. Сравнение по границам слова: «ЛСР» внутри другого слова
+    упоминанием не считается.
+    """
+    if not context.other_issuers:
+        return []
+    lowered = text.casefold()
+    found = sorted(
+        phrase
+        for phrase in context.other_issuers
+        if re.search(
+            r"(?<!\w)" + r"\W+".join(re.escape(word) for word in phrase.split()) + r"(?!\w)",
+            lowered,
+        )
+    )
+    if not found:
+        return []
+    return [
+        TextIssue(
+            TextRule.OTHER_ISSUER_MENTIONED,
+            "в заключении названы другие организации: "
+            + ", ".join(f"«{word}»" for word in found),
+        )
+    ]
 
 
 def counted(sections: dict[int, str], context: TextContext) -> dict[str, int]:

@@ -301,6 +301,11 @@ def test_blocking_rules_match_the_specification() -> None:
         # «Версия справочника показателей: 1.3.0» называет методику, по которой
         # ничего не считалось.
         TextRule.FOREIGN_STANDARD_MARK,
+        # Тот же класс, что чужой стандарт: текст говорит верную вещь не о том
+        # предмете. Наши оговорки методики несли наблюдения по набору, и
+        # в «Ограничениях анализа» по ФосАгро стояло «у ЛСР расхождение между
+        # двумя мерами оказалось наибольшим».
+        TextRule.OTHER_ISSUER_MENTIONED,
     }
     assert {
         rule for rule, level in SEVERITY.items() if level is Severity.BLOCKING

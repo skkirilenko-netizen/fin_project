@@ -492,7 +492,11 @@ def _check_standard_purity(document, data: ReportData, standard: Standard) -> No
     Проверяется собранный документ целиком — абзацы и таблицы: приметы чужого
     стандарта попадали и в приложение, где правила разделов не смотрят.
     """
-    from finlib.llm.textcheck import blocking, check_foreign_standard
+    from finlib.llm.textcheck import (
+        blocking,
+        check_foreign_standard,
+        check_other_issuers,
+    )
     from finlib.metrics.definitions import load_metrics
     from finlib.normalize.lines import ReportingType, load_lines
 
@@ -506,7 +510,13 @@ def _check_standard_purity(document, data: ReportData, standard: Standard) -> No
         for row in table.rows
         for cell in row.cells
     )
-    problems = check_foreign_standard("\n".join(parts), standard, context)
+    text = "\n".join(parts)
+    problems = check_foreign_standard(text, standard, context)
+    # **Чужая организация в заключении — тот же класс, что чужой стандарт.**
+    # И там и здесь текст говорит верную вещь не о том предмете, о котором
+    # документ: «у ЛСР расхождение между двумя мерами оказалось наибольшим»
+    # стояло в «Ограничениях анализа» по ФосАгро.
+    problems += check_other_issuers(text, context)
     if blocking(problems):
         raise ForeignStandardError([item.message for item in blocking(problems)])
 

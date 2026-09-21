@@ -325,6 +325,23 @@ class NotesPolicy(BaseModel):
     origin: str = Field(min_length=1)
 
 
+class IssuerNamePolicy(BaseModel):
+    """Как опознаётся наименование эмитента в документе.
+
+    Опора структурная: наименование стоит на титульном листе и повторяется
+    колонтитулом каждой страницы. Одно упоминание признаком не считается —
+    в тексте отчётности называются и другие организации (дочерние, банки,
+    контрагенты), и по единственному упоминанию эмитента от них не отличить.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    legal_forms: tuple[str, ...] = Field(min_length=1)
+    min_occurrences: int = Field(ge=2)
+    max_length: int = Field(ge=10)
+    origin: str = Field(min_length=1)
+
+
 class ExtractionCompletenessPolicy(BaseModel):
     """Когда извлечение считается полным.
 
@@ -360,6 +377,7 @@ class ParsingPolicy(BaseModel):
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy
     notes: NotesPolicy
+    issuer_name: IssuerNamePolicy
     extraction_completeness: ExtractionCompletenessPolicy
 
 

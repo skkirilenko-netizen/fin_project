@@ -37,12 +37,14 @@ class DocumentReading:
     audit: AuditReport | None
     notes: tuple[NoteValue, ...]
     issuer_type: str | None
+    issuer_name: str | None = None
 
     def describe(self) -> str:
         """Однострочная сводка для журнала прогона."""
         taken = sum(1 for item in self.notes if item.found)
         audit = self.audit.describe() if self.audit is not None else "не читалось"
         return (
+            f"эмитент: {self.issuer_name or 'наименование не определено'}; "
             f"аудиторское заключение: {audit}; величины примечаний: "
             f"взято {taken} из {len(self.notes)} объявленных; "
             f"тип эмитента: {self.issuer_type or 'не определён'}"
@@ -70,7 +72,63 @@ def read_document(
     audit = read_audit_report(text, document=document, before=before)
     notes = _note_values(text, extraction, profile, headings)
     issuer = determine_type(extraction.totals(profile.report_dates[0]), text)
-    return DocumentReading(audit=audit, notes=notes, issuer_type=issuer.code)
+    return DocumentReading(
+        audit=audit,
+        notes=notes,
+        issuer_type=issuer.code,
+        issuer_name=issuer_name(text, before),
+    )
+
+
+def issuer_name(text: str, before: int = 0, policy=None) -> str | None:
+    """Наименование эмитента: титульный лист, подтверждённый колонтитулом.
+
+    **Опора структурная.** Наименование стоит первой строкой титульного листа
+    и повторяется колонтитулом каждой страницы, поэтому берётся не первое
+    подходящее написание, а самое частое: в тексте отчётности называются
+    и дочерние общества, и банки, и контрагенты, а колонтитул есть только
+    у эмитента. Единственное вхождение наименованием эмитента не считается —
+    правило то же, по которому неподписанный итог опознаётся совпадением
+    по всем периодам сразу, а не по одному.
+
+    `before` — смещение первой формы: титул и оглавление стоят до неё.
+    """
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    policy = (policy or load_parsing_policy()).issuer_name
+    limit = before or len(text)
+    head, forms = text[:limit], text[limit:]
+    counted: dict[str, int] = {}
+    for line in head.splitlines():
+        stripped = " ".join(line.split())
+        if not stripped or len(stripped) > policy.max_length:
+            continue
+        if "«" not in stripped and '"' not in stripped:
+            continue
+        if not any(stripped.startswith(form) for form in policy.legal_forms):
+            continue
+        # **Колонтитул проходит через формы, подпись аудитора — нет.**
+        # Наименование аудитора стоит в заключении и повторяется в нём же:
+        # по числу вхождений в титул и заключение оно выигрывало у эмитента
+        # трижды из семнадцати — «АО «Кэпт»» у Норникеля, «ООО «Б1 – Аудит»»
+        # у Европлана и Самолёта. Это тот же худший исход поиска по словам:
+        # не отсутствие ответа, а чужой ответ.
+        times = forms.count(stripped)
+        if times:
+            counted[stripped] = times
+    if not counted:
+        logger.info("наименование эмитента в документе не найдено")
+        return None
+    name, times = max(counted.items(), key=lambda item: (item[1], -len(item[0])))
+    if times < policy.min_occurrences:
+        logger.info(
+            "наименование «%s» встречено в формах %d раз: признаком "
+            "не считается, колонтитул даёт больше",
+            name,
+            times,
+        )
+        return None
+    return name
 
 
 def _note_values(

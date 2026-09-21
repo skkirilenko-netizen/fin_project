@@ -10,6 +10,7 @@
 """
 
 import logging
+import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -242,6 +243,42 @@ class FactBaseSection(BaseModel):
         """Вступление к величинам сверх обязательных."""
         return " ".join(self.extra_intro.split())
 
+
+class OtherIssuers(BaseModel):
+    """Правило «заключение об одной организации не называет другую».
+
+    Родовые слова наименований и наименьшая длина опознавательного слова
+    объявлены методикой, а не подобраны в коде: «Группа» стоит в наименовании
+    у четырёх эмитентов набора, и признаком она быть не может.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    generic_words: tuple[str, ...] = Field(min_length=1)
+    min_word_length: int = Field(ge=2)
+    origin: str = Field(min_length=1)
+
+    def phrase_of(self, name: str) -> str:
+        """Опознавательная часть наименования: без формы и родовых слов.
+
+        **Берётся часть целиком, а не отдельные слова.** Слово наименования
+        бывает обычным словом языка: у «ДОМ.РФ Ипотечный агент» это «дом»,
+        и запрет на него блокировал бы всякий документ. Оставшаяся часть
+        как целое — «дом рф ипотечный агент» — в чужом заключении не стоит,
+        а «лср» и «черкизово» стоят ровно там, где наша пометка протекла.
+
+        Перечень неопознавательных слов целиком в методике: организационная
+        форма стоит у большинства организаций, и по ней их не различить.
+        """
+        generic = {item.casefold() for item in self.generic_words}
+        words = [
+            word
+            for word in re.findall(r"[\w’']+", name.casefold())
+            if word not in generic
+        ]
+        phrase = " ".join(words)
+        return phrase if len(phrase.replace(" ", "")) >= self.min_word_length else ""
+
     def rank_of(self, subject: QuestionSubject) -> int:
         """Место основания в порядке; неизвестное уходит в конец."""
         order = list(self.subject_order)
@@ -281,6 +318,7 @@ class ReportPolicy(BaseModel):
     # как отсутствующие — проверка состава прошла бы, не проверив ничего.
     fact_base: dict[Standard, FactBase]
     fact_base_section: FactBaseSection
+    other_issuers: OtherIssuers
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)
 

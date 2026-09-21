@@ -334,7 +334,13 @@ def load_extraction(
     """
     notes = reading.notes
     execute(
-        _ENSURE_ORGANIZATION, {"inn": inn, "name": organization_name}, conn=conn
+        # Наименование организации приходит из самого документа: прежде оно
+        # передавалось названным доводом, которого не передавал никто, и у всех
+        # комплектов МСФО наименования в базе не было — заключение выходило
+        # с ИНН в шапке вместо наименования.
+        _ENSURE_ORGANIZATION,
+        {"inn": inn, "name": organization_name or reading.issuer_name},
+        conn=conn,
     )
     report_date = profile.report_dates[0]
     unconfirmed = _unconfirmed(

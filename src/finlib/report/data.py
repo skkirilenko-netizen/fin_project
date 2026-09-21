@@ -33,6 +33,13 @@ WHERE o.inn = %(inn)s
 LIMIT 1
 """
 
+# Прочие организации базы: их наименования нужны правилу «заключение
+# об одной организации не называет другую». Стандарт здесь не при чём —
+# организация одна на оба.
+_OTHER_ORGANIZATIONS = """
+SELECT name, short_name FROM organization WHERE inn <> %(inn)s
+"""
+
 _ASSESSMENT = """
 SELECT * FROM assessment
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = %(d)s
@@ -217,6 +224,10 @@ class ReportData:
     # обязан видеть источник — иначе величина не совпадает ни с одной строкой
     # формы и выглядит ошибкой расчёта.
     line_notes: dict[str, tuple[int, str]] = field(default_factory=dict)
+    # Опознавательные слова наименований **всех прочих** организаций базы.
+    # Перечень ведётся не в коде и не в методике: организации приходят
+    # загрузкой, и знать их наименования может только база.
+    other_issuer_words: frozenset[str] = frozenset()
 
     @property
     def audit_signals(self) -> tuple:
@@ -301,7 +312,33 @@ class ReportData:
             # этого класса повторился семь раз.
             foreign_names=foreign_names,
             foreign_versions=foreign_versions,
+            # Опознавательные слова других организаций базы: заключение
+            # об одной организации не называет другую.
+            other_issuers=self._other_issuers(),
             questions=load_policy().questions,
+        )
+
+    def _other_issuers(self) -> frozenset[str]:
+        """Опознавательные слова других организаций без слов своей.
+
+        Своя организация исключается целиком: «ФосАгро» в заключении
+        о ФосАгро — это она сама, а наименования пересекаются словами
+        («Группа ЛСР» и «Группа Черкизово» родовым словом уже не считаются).
+        """
+        from finlib.report.policy import load_policy
+
+        rule = load_policy().other_issuers
+        mine = {
+            rule.phrase_of(name)
+            for name in (
+                self.organization.get("name") or "",
+                self.organization.get("short_name") or "",
+            )
+        }
+        return frozenset(
+            phrase
+            for phrase in self.other_issuer_words
+            if phrase and not any(other and phrase in other for other in mine)
         )
 
     def _ifrs_text_names(self) -> tuple[frozenset[str], dict[str, str]]:
@@ -659,7 +696,27 @@ def load_report_data(
             for row in disclosed
             if row["recognition"] == "note" and row["note_number"] is not None
         },
+        other_issuer_words=_other_issuer_words(inn, conn),
     )
+
+
+def _other_issuer_words(inn: str, conn: PgConnection | None) -> frozenset[str]:
+    """Опознавательные слова наименований прочих организаций базы.
+
+    Нужны блокирующему правилу «заключение об одной организации не называет
+    другую»: наши оговорки методики несли наблюдения по набору, и в документ
+    по ФосАгро попадало «у ЛСР расхождение между двумя мерами оказалось
+    наибольшим».
+    """
+    from finlib.report.policy import load_policy
+
+    rule = load_policy().other_issuers
+    found: set[str] = set()
+    for row in fetch_all(_OTHER_ORGANIZATIONS, {"inn": inn}, conn=conn):
+        for name in (row["name"], row["short_name"]):
+            if name:
+                found.add(rule.phrase_of(name))
+    return frozenset(item for item in found if item)
 
 
 def _metric_row(
