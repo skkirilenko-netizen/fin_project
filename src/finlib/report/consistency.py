@@ -43,12 +43,49 @@ class Inconsistency:
 
 
 def check_document(data: ReportData, limitations: str) -> list[Inconsistency]:
-    """Проверяет согласованность разделов документа между собой."""
+    """Проверяет согласованность разделов документа между собой.
+
+    Единица измерения здесь не сверяется: её проверяет `check_unit`
+    по **собранному** документу — до сборки печатать ещё нечего.
+    """
     found: list[Inconsistency] = []
     found.extend(_sources_agree(data, limitations))
     found.extend(_verdict_is_single(data))
     found.extend(_deltas_match_levels(data))
     return found
+
+
+def check_unit(data: ReportData, text: str) -> list[Inconsistency]:
+    """Единица в тексте документа — единица комплекта, и никакая другая.
+
+    **Самая тихая из найденных ошибок.** У ФосАгро приём записал ОКЕИ 385
+    (миллионы), а документ печатал «663 888 тыс. руб.»: ни один контроль
+    сходимости этого не видит — баланс сходится, разделы сходятся,
+    коэффициенты верны, и неверны только абсолютные величины, в тысячу раз.
+    Поэтому контроль блокирующий и сверяет напечатанное с комплектом, а не
+    предположение с предположением.
+    """
+    from finlib.normalize.lines import load_lines
+
+    if not text.strip():
+        return [
+            Inconsistency(
+                "unit_not_checked",
+                "единица измерения не сверена: текста документа нет",
+            )
+        ]
+    own = data.unit_name
+    others = sorted(set(load_lines().units.names.values()) - {own})
+    wrong = [name for name in others if name in text]
+    if not wrong:
+        return []
+    return [
+        Inconsistency(
+            "unit_does_not_match_the_set",
+            f"в документе напечатана единица «{', '.join(wrong)}», "
+            f"а комплект составлен в «{own}»",
+        )
+    ]
 
 
 def _sources_agree(data: ReportData, limitations: str) -> list[Inconsistency]:

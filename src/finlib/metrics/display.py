@@ -84,10 +84,24 @@ def percent(value: Decimal) -> str:
     return digits(value, 1)
 
 
-def format_metric(value: Decimal, unit: Unit, scale: int | None = None) -> str:
-    """Значение показателя в его единице измерения и разрядности методики."""
+def format_metric(
+    value: Decimal,
+    unit: Unit,
+    scale: int | None = None,
+    money: str | None = None,
+) -> str:
+    """Значение показателя в его единице измерения и разрядности методики.
+
+    `money` — наименование денежной единицы **комплекта**: консолидированная
+    отчётность составляется в миллионах, и «тыс. руб.» в заключении по ней —
+    ошибка в тысячу раз, которую не ловит ни один контроль сходимости.
+    Умолчание одно и остаётся тысячами рублей: у РСБУ единица задана формой.
+    """
     if scale is None:
         from finlib.metrics.definitions import load_metrics
 
         scale = load_metrics().display.scale_for(unit)
-    return f"{digits(value, scale)}{UNIT_SUFFIX.get(unit, '')}"
+    suffix = UNIT_SUFFIX.get(unit, "")
+    if unit is Unit.THOUSAND_RUB and money:
+        suffix = f" {money}"
+    return f"{digits(value, scale)}{suffix}"

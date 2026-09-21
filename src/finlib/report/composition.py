@@ -100,7 +100,10 @@ def _render(
         value = facts.get(code)
         if value is None:
             return None
-        return f"{_line_name(code, lines, reporting_type)} ({code}) — {money(value)} тыс. руб."
+        return (
+            f"{_line_name(code, lines, reporting_type)} ({code}) — "
+            f"{money(value)} {data.unit_name}"
+        )
     if code.startswith("ifrs."):
         return _render_ifrs_line(code, data, facts)
     if data.standard is Standard.IFRS:
@@ -109,7 +112,9 @@ def _render(
     value = _value_of(data, code)
     if metric is None or value is None:
         return None
-    shown = format_metric(value, metric.unit, catalog.scale_for(code))
+    shown = format_metric(
+        value, metric.unit, catalog.scale_for(code), money=data.unit_name
+    )
     return f"{metric.name} — {shown}"
 
 
@@ -141,7 +146,7 @@ def _render_ifrs_line(
             (item for item in load_note_lines().lines if item.code == code), None
         )
         name = note_line.name if note_line is not None else code
-    shown = f"{name} — {money(value)} тыс. руб."
+    shown = f"{name} — {money(value)} {data.unit_name}"
     reference = data.line_notes.get(code)
     if reference is None:
         return shown
@@ -167,7 +172,7 @@ def _render_ifrs_metric(code: str, data: ReportData) -> str | None:
     # величину отчётности, то есть те же тысячи рублей, «ratio» — отношение.
     unit = Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
     scale = 0 if unit is Unit.THOUSAND_RUB else 3
-    return f"{metric.name} — {format_metric(value, unit, scale)}"
+    return f"{metric.name} — {format_metric(value, unit, scale, money=data.unit_name)}"
 
 
 def _worth_naming(

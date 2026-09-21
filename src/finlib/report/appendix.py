@@ -99,7 +99,8 @@ def metrics_table(data: ReportData) -> Table:
     for metric in data.metrics:
         scale = catalog.scale_for(metric.code)
         cells = [
-            _value(metric.values.get(period), metric.unit, scale) for period in periods
+            _value(metric.values.get(period), metric.unit, scale, data.unit_name)
+            for period in periods
         ]
         rows.append(
             (metric.code, metric.name, metric.group_name, *cells, _role(metric))
@@ -367,7 +368,9 @@ def _years(sources: list[dict]) -> str:
     )
 
 
-def _value(value: Decimal | None, unit: str, scale: int) -> str:
+def _value(
+    value: Decimal | None, unit: str, scale: int, money_name: str
+) -> str:
     """Значение показателя в единице и разрядности методики.
 
     Округление здесь не своё: оно одно на весь проект и приходит из
@@ -375,7 +378,7 @@ def _value(value: Decimal | None, unit: str, scale: int) -> str:
     """
     if value is None:
         return "—"
-    return format_metric(value, Unit(unit), scale)
+    return format_metric(value, Unit(unit), scale, money=money_name)
 
 
 def _role(metric) -> str:

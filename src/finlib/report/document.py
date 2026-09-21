@@ -219,6 +219,7 @@ def build_report(
     # именно туда. Дефект этого класса повторился семь раз, и по одному
     # их искать нельзя.
     _check_standard_purity(document, data, standard)
+    _check_unit(document, data)
 
     path = output_path(inn, data.report_date, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +463,27 @@ class CalculatedTextError(RuntimeError):
             f"разделы расчёта не прошли контроль утверждений: {listed}"
         )
         self.problems = problems
+
+
+def _check_unit(document, data: ReportData) -> None:
+    """Блокирует документ, напечатавший единицу не своего комплекта.
+
+    Самая тихая из найденных ошибок: у ФосАгро приём записал миллионы,
+    а документ печатал «663 888 тыс. руб.». Ни один контроль сходимости этого
+    не видит — сходится всё, кроме самих величин, и ровно в тысячу раз.
+    """
+    from finlib.report.consistency import check_unit
+
+    parts = [item.text for item in document.paragraphs]
+    parts.extend(
+        cell.text
+        for table in document.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    problems = check_unit(data, "\n".join(parts))
+    if problems:
+        raise InconsistentReportError([item.message for item in problems])
 
 
 def _check_standard_purity(document, data: ReportData, standard: Standard) -> None:

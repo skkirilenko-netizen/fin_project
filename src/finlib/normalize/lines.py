@@ -250,6 +250,27 @@ class UnitsDef(BaseModel):
     multiplier: Decimal = Field(gt=0)
     forms: tuple[str, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
+    # Наименования по коду ОКЕИ: документ печатает единицу **своего комплекта**.
+    # Консолидированная отчётность составляется в миллионах, и «663 888 тыс. руб.»
+    # там, где в отчётности 663 888 млн, — ошибка в тысячу раз, которую не ловит
+    # ни один контроль сходимости: сходится всё, кроме самих величин.
+    names: dict[str, str] = Field(min_length=1)
+    names_origin: str = Field(min_length=1)
+
+    def name_of(self, okei_code: str | None) -> str:
+        """Наименование единицы по коду; неизвестный код — ошибка, а не молчание.
+
+        Молчаливое умолчание здесь и было дефектом: документ печатал
+        наименование РСБУ при любой единице комплекта.
+        """
+        if okei_code is None:
+            raise ValueError("единица комплекта не задана: печатать нечего")
+        found = self.names.get(okei_code)
+        if found is None:
+            raise ValueError(
+                f"единица с кодом ОКЕИ {okei_code} в справочнике не объявлена"
+            )
+        return found
 
     def matches_declared(self, declared: str | None) -> bool:
         """Совпадает ли единица, объявленная источником, с единицей справочника.

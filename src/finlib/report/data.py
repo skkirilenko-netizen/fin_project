@@ -588,7 +588,10 @@ def load_report_data(
         report_date=target,
         standard=standard,
         organization=dict(organization),
-        unit_name=load_lines().units.name,
+        # Единица **комплекта**, а не единица РСБУ: «тыс. руб.» в заключении
+        # по консолидированной отчётности, составленной в миллионах, —
+        # ошибка в тысячу раз, и ни один контроль сходимости её не ловит.
+        unit_name=load_lines().units.name_of(organization["unit_code"]),
         assessment=dict(header) if header is not None else None,
         groups=groups,
         metrics=metrics,

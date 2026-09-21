@@ -147,6 +147,8 @@ def _catalog_dict(lines: list[dict[str, Any]]) -> dict[str, Any]:
             "multiplier": "1",
             "forms": ["0710001", "0710002"],
             "origin": "тестовый справочник",
+            "names": {"384": "тыс. руб.", "385": "млн руб."},
+            "names_origin": "тестовый справочник",
         },
         "measures": {
             "by_form": {"0710001": "stock", "0710002": "flow"},
