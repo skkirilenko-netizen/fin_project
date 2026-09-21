@@ -308,9 +308,9 @@ def _confidence_rule(scoring: ScoringCatalog, standard: Standard) -> str:
     не проверялось.
     """
     if standard is Standard.IFRS:
-        from finlib.normalize.ifrs_audit import load_audit_policy
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 
-        return " ".join(load_audit_policy().confidence.rule_text.split())
+        return " ".join(load_ifrs_metrics().confidence.rule_text.split())
     grounds = "; ".join(
         " ".join(rule.description.split()).rstrip(".")
         for rule in scoring.confidence.downgrade_on

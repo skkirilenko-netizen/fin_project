@@ -163,7 +163,10 @@ def stop_factor_of(code: str, standard: Standard) -> StopFactorView | None:
                 code=found.code,
                 name=found.name,
                 statement=" ".join(found.statement.split()),
-                metrics=(found.metric,),
+                # Показателя у стоп-фактора по разделу заключения нет вовсе:
+                # условие его — слова аудитора, и величины, которую следовало
+                # бы назвать в фактической базе, за ним не стоит.
+                metrics=(found.metric,) if found.metric else (),
             )
             if found is not None
             else None

@@ -68,10 +68,13 @@ class StopFactor(BaseModel):
     name: str = Field(min_length=1)
     # Показатель, по которому проверяется условие. Именно показатель, а не
     # статья: у эмитента, не раскрывшего капитал отдельной строкой, статьи
-    # нет, а показатель считается.
-    metric: str = Field(min_length=1)
-    condition: str = Field(pattern="^(lt|lte|gt|gte)$")
-    value: str = Field(min_length=1)
+    # нет, а показатель считается. У стоп-фактора по разделу заключения
+    # показателя нет вовсе — условие объявляет аудитор.
+    metric: str | None = None
+    condition: str = Field(pattern="^(lt|lte|gt|gte|audit_section)$")
+    value: str | None = None
+    # Раздел аудиторского заключения, наличие которого и есть условие.
+    section: str | None = None
     # Класс, которым ограничивается оценка при срабатывании.
     cap: str = Field(min_length=1)
     statement: str = Field(min_length=1)
@@ -92,13 +95,39 @@ class StopFactor(BaseModel):
         return self
 
     @property
+    def by_audit_section(self) -> bool:
+        """Проверяется ли стоп-фактор разделом заключения, а не величиной."""
+        return self.condition == "audit_section"
+
+    @model_validator(mode="after")
+    def _condition_names_what_it_needs(self) -> Self:
+        """Условие по величине требует показатель и отсечку, по разделу — раздел."""
+        if self.by_audit_section:
+            if not self.section:
+                raise ValueError(
+                    f"стоп-фактор {self.code}: условие по заключению без раздела"
+                )
+            if self.metric or self.value:
+                raise ValueError(
+                    f"стоп-фактор {self.code}: условие по заключению "
+                    "показателя и отсечки не имеет"
+                )
+            return self
+        if not self.metric or self.value is None:
+            raise ValueError(
+                f"стоп-фактор {self.code}: условие по величине требует "
+                "показатель и отсечку"
+            )
+        return self
+
+    @property
     def threshold(self) -> Decimal:
         """Отсечка условия величиной."""
         return Decimal(self.value)
 
     def holds(self, value: Decimal | None) -> bool:
         """Сработал ли стоп-фактор на этой величине; None — проверять нечем."""
-        if value is None:
+        if value is None or self.by_audit_section:
             return False
         threshold = self.threshold
         if self.condition == "lt":

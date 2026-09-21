@@ -119,8 +119,13 @@ class FactorCheck:
     reason: str = ""
 
     def describe(self) -> str:
-        """Строка для терминала: исход, величина, причина."""
-        shown = "величина не рассчитана" if self.value is None else f"{self.value:.3f}"
+        """Строка для терминала: исход, величина, причина.
+
+        Величина печатается, когда она есть; когда её нет, печатается причина,
+        а не «величина не рассчитана» — у стоп-фактора по разделу заключения
+        показателя нет вовсе, и ненайденная величина означала бы пробел
+        данных там, где его нет.
+        """
         if self.verdict == "triggered":
             head = f"сработал, класс ограничен {self.cap}"
         elif self.verdict == "not_applicable":
@@ -129,8 +134,12 @@ class FactorCheck:
             head = "не проверялся"
         else:
             head = "не сработал"
+        if self.value is not None:
+            head = f"{head} ({self.value:.3f})"
+        elif not self.reason:
+            head = f"{head} (величина не рассчитана)"
         tail = f" — {self.reason}" if self.reason else ""
-        return f"{self.name}: {head} ({shown}){tail}"
+        return f"{self.name}: {head}{tail}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +227,40 @@ def evaluate_stop_factors(
     checks: list[FactorCheck] = []
     cap: str | None = None
     code: str | None = None
+    # Сверяется с заключением стоп-фактор, выведенный **нами** из величин:
+    # вопрос сверки — видит ли аудитор то же, что видим мы. Стоп-фактор,
+    # условием которого служит сам раздел заключения, сверять с заключением
+    # не с чем, и спросив о нём, мы получили бы «подтверждения нет» у того
+    # самого обстоятельства, которое объявил аудитор.
+    measured: str | None = None
+    measured_cap: str | None = None
     for factor in types.stop_factors:
+        # **Условие по разделу заключения проверяется до применимости
+        # по показателю**: показателя у такого стоп-фактора нет вовсе,
+        # и нормы неприменимости к нему не относятся.
+        if factor.by_audit_section:
+            present = factor.section in audit_sections
+            checks.append(
+                FactorCheck(
+                    factor.code,
+                    factor.name,
+                    factor.section or "",
+                    "triggered" if present else "not_triggered"
+                    if audit_readable
+                    else "no_value",
+                    cap=factor.cap if present else None,
+                    reason="раздел заключения объявлен аудитором"
+                    if present
+                    else "раздела в заключении нет"
+                    if audit_readable
+                    else "аудиторское заключение не прочитано, раздела не видно",
+                )
+            )
+            if present:
+                triggered.append(factor.code)
+                if cap is None or ranks[factor.cap] > ranks[cap]:
+                    cap, code = factor.cap, factor.code
+            continue
         outcome = applicability(factor.code, issuer_type, values, types)
         if not outcome.applicable:
             excluded.append((factor.metric, " ".join(outcome.limitation.split())))
@@ -272,10 +314,12 @@ def evaluate_stop_factors(
         )
         if cap is None or ranks[factor.cap] > ranks[cap]:
             cap, code = factor.cap, factor.code
+        if measured_cap is None or ranks[factor.cap] > ranks[measured_cap]:
+            measured, measured_cap = factor.code, factor.cap
 
     state, note = ("", "")
-    if code is not None:
-        found, text = consistency(code, audit_sections, audit_readable, types)
+    if measured is not None:
+        found, text = consistency(measured, audit_sections, audit_readable, types)
         state, note = found.value, " ".join(text.split())
     return StopFactors(
         checked=len(types.stop_factors),

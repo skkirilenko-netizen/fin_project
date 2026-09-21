@@ -389,8 +389,13 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
         {"i": INN, "d": DATES[0]},
         conn=db_conn,
     )
-    assert stored["confidence"] == "medium"
+    # Оснований два: модифицированное мнение и группы из одного показателя.
+    # Второе — свойство ветки, а не этого комплекта, и молчать о нём нельзя:
+    # балл группы, опирающийся на единственное наблюдение, высшей уверенности
+    # не заслуживает сам по себе.
+    assert stored["confidence"] == "low"
     assert any("аудитор" in item.lower() for item in stored["confidence_reasons"])
+    assert any("по одному" in item for item in stored["confidence_reasons"])
 
     made = build_report(
         INN,
@@ -410,7 +415,8 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     assert "Из аудиторского заключения, раздел «Основание для выражения мнения»" in text
     # Порядок определения уверенности — свой у ветки: флаги и длина ряда,
     # которых ветка не считает, в основаниях стоять не вправе.
-    assert "модифицированным мнением аудитора" in text
+    assert "Основания заданы методикой" in text
+    assert "Мнение аудитора о достоверности отчётности модифицировано" in text
     assert "Сработал флаг" not in text
     # Надзорный сигнал даёт вопрос: иначе «Запрос пояснений» отсылает
     # к разделу, в котором «расчётом не выявлено».

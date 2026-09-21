@@ -236,6 +236,57 @@ class ScoringRule(BaseModel):
         return False
 
 
+class ConfidenceGround(BaseModel):
+    """Основание понижения уверенности в оценке."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class ConfidenceRule(BaseModel):
+    """Уверенность в оценке: основания и правило счёта.
+
+    Одно основание понижает до средней, два и более — до низкой; правило то же,
+    что в РСБУ. Оснований четыре, и три появились по соразмерности: уверенность
+    выходила высшей при классе E, объявленной неопределённости непрерывности
+    деятельности и комплекте, принятом решением человека.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    levels: tuple[str, ...] = Field(min_length=3)
+    default: str = Field(min_length=1)
+    downgrade_on: tuple[ConfidenceGround, ...] = Field(min_length=1)
+    single_metric_share: Decimal = Field(gt=0, le=1)
+    origin: str = Field(min_length=1)
+
+    def level_for(self, grounds: int) -> str:
+        """Уровень уверенности по числу оснований понижения."""
+        if grounds <= 0:
+            return self.default
+        return self.levels[1] if grounds == 1 else self.levels[2]
+
+    def text_of(self, code: str) -> str:
+        """Формулировка основания по коду."""
+        found = next((item for item in self.downgrade_on if item.code == code), None)
+        return " ".join(found.description.split()) if found is not None else code
+
+    @property
+    def rule_text(self) -> str:
+        """Порядок определения уверенности словами — для «Ключевого вывода»."""
+        grounds = "; ".join(
+            " ".join(item.description.split()).rstrip(".")
+            for item in self.downgrade_on
+        )
+        return (
+            "Уверенность определяется числом оснований для понижения: без "
+            "оснований — высокая, при одном — средняя, при двух и более — "
+            f"низкая. Основания заданы методикой: {grounds}."
+        )
+
+
 class IfrsMetricsPolicy(BaseModel):
     """Справочник показателей по МСФО целиком."""
 
@@ -254,6 +305,8 @@ class IfrsMetricsPolicy(BaseModel):
     # Балл равен уровню, динамика справочно: правило объявлено, а не выведено
     # из отсутствия ряда.
     scoring: ScoringRule
+    # Уверенность в оценке: основания понижения и правило счёта.
+    confidence: ConfidenceRule
 
     @model_validator(mode="after")
     def _integrity(self) -> Self:

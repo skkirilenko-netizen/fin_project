@@ -69,6 +69,15 @@ class AuditSignal(BaseModel):
                     f"сигнал {self.code}: условие по разделу требует раздел и слова"
                 )
             return self
+        if self.condition == "section_present":
+            # Наличие раздела и есть утверждение: МСА предписывают его
+            # наименование, и слов внутри искать не нужно.
+            if not self.section or self.markers:
+                raise ValueError(
+                    f"сигнал {self.code}: условие по наличию раздела требует "
+                    "раздел и слов не имеет"
+                )
+            return self
         if self.condition == "opinion_modified":
             if self.section or self.markers:
                 raise ValueError(
@@ -76,17 +85,6 @@ class AuditSignal(BaseModel):
                 )
             return self
         raise ValueError(f"сигнал {self.code}: условие {self.condition} неизвестно")
-
-
-class ConfidenceRule(BaseModel):
-    """Понижение уверенности в оценке по сведениям заключения."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    lowered_by_modified_opinion: bool
-    rule_text: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
-    origin: str = Field(min_length=1)
 
 
 class Attribution(BaseModel):
@@ -126,7 +124,6 @@ class AuditPolicy(BaseModel):
     quoted_sections: tuple[str, ...] = Field(min_length=1)
     # Заголовки подразделов, на которых цитата кончается.
     quote_ends_before: tuple[str, ...] = Field(min_length=1)
-    confidence: ConfidenceRule
     limitations: dict[str, str]
 
     @model_validator(mode="after")

@@ -43,10 +43,20 @@ def test_every_declared_stop_factor_names_an_existing_metric() -> None:
     Условие, ссылающееся на величину, которой не бывает, не срабатывает
     никогда и от невыполненного неотличимо: так норма неприменимости
     ссылалась на `interest_cover`, которого в ветке нет.
+
+    То же требование к стоп-фактору по разделу заключения, только предмет
+    у него другой: раздел, которого в справочнике заключения нет, не будет
+    объявлен ни у одного комплекта.
     """
+    from finlib.normalize.ifrs_audit import load_audit_policy
+
     codes = {item.code for item in load_ifrs_metrics().metrics}
+    sections = {item.code for item in load_audit_policy().sections}
     types = load_issuer_types()
     for factor in types.stop_factors:
+        if factor.by_audit_section:
+            assert factor.section in sections, f"{factor.code}: {factor.section}"
+            continue
         assert factor.metric in codes, f"{factor.code}: {factor.metric}"
     for norm in types.not_applicable:
         if norm.when is not None:
@@ -171,6 +181,54 @@ def test_inapplicable_stop_factor_does_not_lower_the_class() -> None:
     assert stops.cap is None
 
 
+def test_going_concern_section_is_a_stop_factor_of_its_own() -> None:
+    """Неопределённость непрерывности ограничивает класс, а не только журнал.
+
+    Прежде соразмерность выходила перевёрнутой: у Сегежи аудитор объявил
+    сомнение в способности продолжать деятельность, а уверенность в оценке
+    стояла высшей и эскалации не возникало, тогда как у ФосАгро
+    с нераскрытыми сегментами — средней и с эскалацией.
+    """
+    policy = load_ifrs_metrics()
+    metrics = (value("equity", Decimal(255)), value("equity_ratio", Decimal("0.36")))
+    declared = evaluate_stop_factors(
+        metrics, "corporate", ("going_concern_uncertainty",), True, policy
+    )
+    assert "going_concern_uncertainty" in declared.triggered
+    assert declared.cap == "D"
+    silent = evaluate_stop_factors(metrics, "corporate", (), True, policy)
+    assert silent.triggered == ()
+    assert silent.cap is None
+    # Величины у такого стоп-фактора нет, и «не рассчитана» о ней не пишется:
+    # условие здесь — слова аудитора, а не пробел данных.
+    check = next(
+        item for item in declared.checks if item.code == "going_concern_uncertainty"
+    )
+    assert "величина не рассчитана" not in check.describe()
+    assert "раздел заключения объявлен аудитором" in check.describe()
+
+
+def test_audit_consistency_is_asked_of_the_measured_factor() -> None:
+    """С заключением сверяется стоп-фактор, выведенный из величин.
+
+    Вопрос сверки — видит ли аудитор то же, что видим мы. Спросив его
+    о стоп-факторе, условием которого служит сам раздел заключения, документ
+    отвечал «внешнего подтверждения нет» ровно у того обстоятельства,
+    которое аудитор и объявил.
+    """
+    policy = load_ifrs_metrics()
+    metrics = (
+        value("equity", Decimal(255)),
+        value("nwc", Decimal(-42662)),
+        value("interest_cover_accrued", Decimal("-2.656")),
+    )
+    stops = evaluate_stop_factors(
+        metrics, "corporate", ("going_concern_uncertainty",), True, policy
+    )
+    assert stops.code == "going_concern_uncertainty"
+    assert stops.audit_state == "confirmed"
+
+
 def test_confirmation_by_the_audit_report_is_recorded() -> None:
     """Сверка сработавшего стоп-фактора с заключением идёт вместе с ним.
 
@@ -211,13 +269,16 @@ def test_every_declared_factor_reports_its_outcome() -> None:
     stops = evaluate_stop_factors(
         metrics, "corporate", ("going_concern_uncertainty",), True, policy
     )
-    assert len(stops.checks) == stops.checked == 4
+    assert len(stops.checks) == stops.checked == 5
     outcomes = {item.code: item.verdict for item in stops.checks}
     assert outcomes == {
         "negative_equity": "not_triggered",
         "negative_autonomy": "not_triggered",
         "negative_nwc": "triggered",
         "interest_cover_below_one": "triggered",
+        # Раздел заключения объявлен аудитором — условие проверяется им,
+        # а не величиной показателя.
+        "going_concern_uncertainty": "triggered",
     }
     # У каждого исхода стоит величина, по которой он получен, а у сработавшего
     # ещё и ограничение класса.

@@ -359,25 +359,45 @@ def _meta_of(inn: str, report_date: date, conn: PgConnection) -> dict:
 
 
 def _audit_confidence(
-    inn: str, report_date: date, conn: PgConnection
+    inn: str,
+    report_date: date,
+    conn: PgConnection,
+    policy: IfrsMetricsPolicy,
+    assessment: IfrsAssessment,
 ) -> tuple[Confidence, list[str]]:
-    """Уверенность в оценке с учётом мнения аудитора и причины понижения.
+    """Уверенность в оценке: основания понижения из методики и из обстановки.
 
-    Сведения заключения берутся **из базы**, а не доводом: довод с умолчанием
-    здесь означал бы, что понижение можно молча не применить, — а именно так
-    шесть кодов заключения не дошли ни до одного комплекта. Величина хранится
-    с комплектом, и кто пишет оценку, тот её и читает.
+    Сведения берутся **из базы**, а не доводом: довод с умолчанием означал бы,
+    что понижение можно молча не применить, — а именно так шесть кодов
+    заключения не дошли ни до одного комплекта.
+
+    Оснований четыре, и три из них появились по соразмерности: у Сегежи
+    уверенность выходила высшей при классе E, объявленной неопределённости
+    непрерывности деятельности, отчётности специального назначения, принятой
+    решением человека, и одном показателе в каждой группе.
     """
-    from finlib.normalize.ifrs_audit import load_audit_policy
     from finlib.sources.ifrs_audit import audit_from_meta
 
-    audit = audit_from_meta(_meta_of(inn, report_date, conn))
-    if audit is None or not audit.modified:
-        return Confidence.HIGH, []
-    policy = load_audit_policy()
-    if not policy.confidence.lowered_by_modified_opinion:
-        return Confidence.HIGH, []
-    return Confidence.MEDIUM, [" ".join(policy.confidence.reason.split())]
+    rule = policy.confidence
+    meta = _meta_of(inn, report_date, conn)
+    audit = audit_from_meta(meta)
+    grounds: list[str] = []
+    if audit is not None and audit.modified:
+        grounds.append(rule.text_of("modified_opinion"))
+    if audit is not None and "going_concern_uncertainty" in audit.sections:
+        grounds.append(rule.text_of("going_concern_uncertainty"))
+    accepted = ((meta or {}).get("accepted") or {}).get("grounds") or {}
+    if accepted:
+        grounds.append(rule.text_of("accepted_ground"))
+    # Группа, оценённая одним показателем, опирается на единственное
+    # наблюдение. Основание срабатывает, когда таковы все группы: отдельная
+    # группа из одного показателя — норма ветки, где показателей всего шесть.
+    counted = [len(item.metrics) for item in assessment.groups]
+    if counted and sum(1 for item in counted if item == 1) >= len(counted) * float(
+        rule.single_metric_share
+    ):
+        grounds.append(rule.text_of("single_metric_groups"))
+    return Confidence(rule.level_for(len(grounds))), grounds
 
 
 def save_ifrs_assessment(
@@ -397,7 +417,9 @@ def save_ifrs_assessment(
     """
     policy = policy or load_ifrs_metrics()
     stops = stops if stops is not None else StopFactors()
-    audit_confidence, audit_reasons = _audit_confidence(inn, report_date, conn)
+    audit_confidence, audit_reasons = _audit_confidence(
+        inn, report_date, conn, policy, assessment
+    )
     in_scoring = {item.code for group in assessment.groups for item in group.metrics}
     stored = StoredAssessment(
         inn=inn,
@@ -421,10 +443,10 @@ def save_ifrs_assessment(
         # во втором случае обязаны быть осторожнее, а нечитаемое заключение —
         # третий исход, а не второй.
         stop_factor_audit=stops.audit_note or None,
-        # Уверенность понижается модифицированным мнением аудитора и больше
-        # ничем: правило по числу периодов ряда к МСФО пока не применяется —
-        # ряда у эмитента ещё нет. Высокая здесь означает «понижать
-        # не по чему», а не «проверено».
+        # Основания понижения объявлены методикой ветки, и их четыре: два
+        # о заключении, одно о принятом человеком основании карантина, одно
+        # о ширине наблюдения. Правило по длине ряда к МСФО не применяется —
+        # ряда у эмитента ещё нет. Высокая означает «понижать не по чему».
         confidence=audit_confidence,
         confidence_reasons=[*assessment.divergence, *audit_reasons],
         groups=[

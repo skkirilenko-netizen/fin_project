@@ -249,6 +249,17 @@ class AuditReport:
                 if not self.modified:
                     continue
                 basis = f"Вид мнения: {self.opinion_name}"
+            elif signal.condition == "section_present":
+                # Наличие раздела и есть утверждение аудитора: искать в нём
+                # слова незачем, наименование предписано МСА.
+                if signal.section not in self.sections:
+                    continue
+                section = policy.section(signal.section)
+                basis = (
+                    f"Основание: раздел заключения «{section.name}»"
+                    if section is not None
+                    else "Основание: раздел заключения"
+                )
             else:
                 # Сигнал по разделу опознан при чтении: его код лежит
                 # в `signals`, а не выводится здесь заново.
