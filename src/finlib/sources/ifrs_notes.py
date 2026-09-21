@@ -131,6 +131,14 @@ class NoteValue:
     note: int | None = None
     rows: tuple[str, ...] = ()
     refusal: Refusal | None = None
+    # **Величины по графам примечания целиком, а не только отчётная.**
+    # Сравнительная графа примечания — та же величина за прошлый период,
+    # и без неё показатель, считающийся по примечанию, за сравнительный период
+    # не считался вовсе: у ФосАгро покрытие процентов за 2024 год отказывало
+    # «нет входных величин», тогда как проценты стоят в примечании 10 рядом
+    # с отчётными. Порядок граф — порядок колонок примечания, то есть тот же,
+    # что у формы, из строки которой пришла ссылка.
+    values: tuple[Decimal, ...] = ()
     # Наименование примечания, как оно стоит в документе: оговорка обязана
     # назвать и номер, и наименование — по номеру одному читатель примечания
     # не найдёт, у разных эмитентов под одним номером стоит разное.
@@ -438,13 +446,22 @@ def value_from_notes(
         return NoteValue(line.code, refusal=Refusal.NOTE_NOT_FOUND)
     for number in seen:
         note = index.get(number)
-        total = Decimal(0)
+        # Суммируется каждая графа отдельно: строка примечания несёт величину
+        # за каждый период, и сравнительная нужна ряду. Число граф берётся
+        # по самой короткой строке — сложить величину с отсутствующей нельзя,
+        # а домысливать ноль здесь запрещено так же, как везде.
+        totals: list[Decimal] = []
         rows: list[str] = []
         for name, values in rows_of_note(note, text, grouping, periods):
             if normalize_name(name) not in line.match_names or not values:
                 continue
             rows.append(name)
-            total += abs(values[0])
+            if not totals:
+                totals = [abs(item) for item in values]
+                continue
+            width = min(len(totals), len(values))
+            totals = [totals[i] + abs(values[i]) for i in range(width)]
+        total = totals[0] if totals else Decimal(0)
         if rows:
             logger.info(
                 "%s взято из примечания %s по строкам: %s",
@@ -459,6 +476,7 @@ def value_from_notes(
                 tuple(rows),
                 note_title=note.title,
                 from_line=(from_lines or {}).get(number, ""),
+                values=tuple(totals),
             )
     return NoteValue(line.code, note=seen[0], refusal=Refusal.LINE_NOT_FOUND)
 

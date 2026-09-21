@@ -653,31 +653,43 @@ def _write_facts(
                 outcome.from_line,
             )
             continue
-        roles = _roles(profile.dates_of(form))
-        report_date = profile.report_dates[0]
-        role = roles.get(report_date)
-        if role is None:
-            continue
-        touched = execute(
-            _UPSERT_FACT,
-            {
-                "src_file_id": src_file_id,
-                "inn": inn,
-                "standard": Standard.IFRS.value,
-                "report_date": report_date,
-                "form_code": form,
-                "line_code": outcome.code,
-                "source_line_code": outcome.code,
-                "value": outcome.value,
-                "period_role": role,
-                "recognition": Recognition.NOTE.value,
-                "note_number": outcome.note,
-                "note_source_name": "; ".join(outcome.rows) or None,
-            },
-            conn=conn,
-        )
-        written += touched
-        by_note += touched
+        dates = profile.dates_of(form)
+        roles = _roles(dates)
+        # **Сравнительная графа примечания — та же величина за прошлый период.**
+        # Прежде писалась только отчётная, и показатель, считающийся
+        # по примечанию, за сравнительный период не считался вовсе: у ФосАгро
+        # покрытие процентов за 2024 год отказывало «нет входных величин»,
+        # тогда как проценты стоят в примечании 10 рядом с отчётными.
+        # Граф бывает меньше, чем дат у формы, и лишняя дата величины
+        # не получает — домысливать её нечем.
+        by_period = outcome.values or (outcome.value,)
+        for index, value in enumerate(by_period):
+            if index >= len(dates):
+                break
+            report_date = dates[index]
+            role = roles.get(report_date)
+            if role is None:
+                continue
+            touched = execute(
+                _UPSERT_FACT,
+                {
+                    "src_file_id": src_file_id,
+                    "inn": inn,
+                    "standard": Standard.IFRS.value,
+                    "report_date": report_date,
+                    "form_code": form,
+                    "line_code": outcome.code,
+                    "source_line_code": outcome.code,
+                    "value": value,
+                    "period_role": role,
+                    "recognition": Recognition.NOTE.value,
+                    "note_number": outcome.note,
+                    "note_source_name": "; ".join(outcome.rows) or None,
+                },
+                conn=conn,
+            )
+            written += touched
+            by_note += touched
         unchanged += not touched
 
     collisions.by_confirmation = by_confirmation
