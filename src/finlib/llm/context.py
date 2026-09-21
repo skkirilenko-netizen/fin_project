@@ -727,8 +727,12 @@ def _ifrs_notes(
     from finlib.normalize.ifrs_lines import load_ifrs_lines
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 
-    found: list[str] = []
-    metrics = {item.code: item for item in load_ifrs_metrics().metrics}
+    policy = load_ifrs_metrics()
+    # **Оговорка о стоп-факторах ветки.** В РСБУ класс ограничивают четыре
+    # стоп-фактора; заключение по МСФО не упоминало о них вовсе, и молчание
+    # читалось как «проверены и не сработали».
+    found: list[str] = [" ".join(policy.stop_factors.limitation.split())]
+    metrics = {item.code: item for item in policy.metrics}
     for code in sorted(used):
         metric = metrics.get(code)
         if metric is not None and metric.note:

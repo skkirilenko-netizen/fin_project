@@ -212,6 +212,22 @@ class ScoringRule(BaseModel):
         return False
 
 
+class StopFactorsRule(BaseModel):
+    """Стоп-факторы ветки МСФО: их нет, и это объявлено.
+
+    **Молчание читалось бы как «ни один не сработал».** В РСБУ четыре
+    стоп-фактора ограничивают класс, и заключение по МСФО без единого
+    упоминания о них выглядит так, будто они проверены и не сработали.
+    Оговорка обязательна и идёт в «Ограничения анализа».
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    applied: bool
+    limitation: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
 class IfrsMetricsPolicy(BaseModel):
     """Справочник показателей по МСФО целиком."""
 
@@ -230,6 +246,8 @@ class IfrsMetricsPolicy(BaseModel):
     # Балл равен уровню, динамика справочно: правило объявлено, а не выведено
     # из отсутствия ряда.
     scoring: ScoringRule
+    # Стоп-факторов у ветки нет, и оговорка об этом обязательна.
+    stop_factors: StopFactorsRule
 
     @model_validator(mode="after")
     def _integrity(self) -> Self:

@@ -214,6 +214,14 @@ def _worth_naming(
     # Только отчётный период: в metric_value лежат производные всех периодов,
     # и без отбора в перечень наибольших изменений попадало движение
     # трёхлетней давности, противоречащее тезису о том же показателе.
+    #
+    # **Наибольшее — по существенности, а не по проценту.** Процент измеряет
+    # изменение относительно собственной прошлой величины, и наверх выносит
+    # мелочь: у Левенгука первым стоял итог раздела I с 9 778,1 %, у ФосАгро —
+    # налог на прибыль к возмещению с 11 901 %. Существенность изменения —
+    # его доля в размере организации: валюта баланса для статей на дату,
+    # выручка для статей за период. База объявлена методикой по формам,
+    # и у строки потока её нет вовсе — такая статья в перечень не идёт.
     changes = [
         row
         for row in data.derived
@@ -222,8 +230,13 @@ def _worth_naming(
         and (parsed := parse_derived(row["metric_code"])) is not None
         and parsed.kind is DerivedKind.CHANGE_PCT
     ]
-    changes.sort(key=lambda row: abs(row["value"]), reverse=True)
-    for row in changes[: policy.fact_base_of(data.standard).top_changes]:
+    weights = {
+        row["metric_code"]: _materiality_of(row, data, lines, reporting_type)
+        for row in changes
+    }
+    measured = [row for row in changes if weights[row["metric_code"]] is not None]
+    measured.sort(key=lambda row: weights[row["metric_code"]], reverse=True)
+    for row in measured[: policy.fact_base_of(data.standard).top_changes]:
         parsed = parse_derived(row["metric_code"])
         if parsed is None or parsed.base in seen:
             continue
@@ -238,10 +251,81 @@ def _worth_naming(
             # технический идентификатор в тексте запрещён, и правило поймало бы
             # именно его («ifrs.other_current_assets — изменение за период»).
             continue
-        found.append(
-            f"{title} — изменение за период {percent(row['value'])} %"
-        )
+        # **Величина изменения печатается рядом с процентом.** Перечень
+        # упорядочен по существенности, то есть по абсолютному изменению
+        # к размеру организации, и без самой величины читателю не видно,
+        # почему статья стоит выше другой с большим процентом.
+        absolute = _absolute_change(parsed.base, data)
+        shown = f"{title} — изменение за период {percent(row['value'])} %"
+        if absolute is not None:
+            shown += f", на {money(absolute)} {data.unit_name}"
+        found.append(shown)
     return found
+
+
+def _absolute_change(base: str, data: ReportData) -> Decimal | None:
+    """Абсолютное изменение статьи за отчётный период; None — не посчитано."""
+    return next(
+        (
+            row["value"]
+            for row in data.derived
+            if row["status"] == "ok"
+            and row["report_date"] == data.report_date
+            and (parsed := parse_derived(row["metric_code"])) is not None
+            and parsed.kind is DerivedKind.CHANGE_ABS
+            and parsed.base == base
+        ),
+        None,
+    )
+
+
+def _materiality_of(
+    row: dict, data: ReportData, lines: LinesCatalog, reporting_type: ReportingType
+) -> Decimal | None:
+    """Доля абсолютного изменения статьи в базе её формы; None — не измеряется.
+
+    Базы объявлены методикой по формам, и у каждого стандарта своим
+    справочником: у РСБУ — `lines.yaml`, у МСФО — `ifrs_lines.yaml`. Считается
+    одно и то же, а вопрос базы у них разный по устройству: у РСБУ форма
+    известна из справочника строк, у МСФО — из позиции.
+
+    Не измеряется в трёх случаях, и все три означают одно — ранжировать нечем:
+    у формы нет базы (строка потока), база не раскрыта, изменения в абсолютной
+    величине нет. Показатель-отношение базы не имеет вовсе: его динамика
+    приведена в разделе интерпретации вместе с уровнями.
+    """
+    parsed = parse_derived(row["metric_code"])
+    if parsed is None:
+        return None
+    absolute = _absolute_change(parsed.base, data)
+    if absolute is None:
+        return None
+    base_code = _materiality_base(parsed.base, data, lines, reporting_type)
+    if base_code is None:
+        return None
+    base_value = data.line_values.get(base_code)
+    if not base_value:
+        return None
+    return abs(absolute) / abs(base_value)
+
+
+def _materiality_base(
+    code: str, data: ReportData, lines: LinesCatalog, reporting_type: ReportingType
+) -> str | None:
+    """Код строки-базы существенности для статьи; None — базы нет."""
+    if data.standard is Standard.IFRS:
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+
+        catalog = load_ifrs_lines()
+        position = catalog.get(code)
+        if position is None:
+            return None
+        declared = catalog.materiality.bases.get(position.form)
+        return declared.base if declared is not None else None
+    line = lines.get(code, reporting_type)
+    if line is None:
+        return None
+    return lines.materiality.base_of(line.form)
 
 
 def _title_of(

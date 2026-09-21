@@ -334,6 +334,44 @@ class MeasuresDef(BaseModel):
         return date(moment.year - 1, month, day)
 
 
+class MaterialityBase(BaseModel):
+    """Чем мерится существенность строки этой формы — или почему нечем.
+
+    Устройство то же, что у справочника МСФО: объявлено ровно одно из двух.
+    База, объявленная отсутствующей, — свойство формы; форма, о базе
+    умолчавшая, — наш пробел, и справочник такого не примет.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base: str | None = None
+    no_base_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_declared(self) -> Self:
+        """Объявлено ровно одно: база или причина её отсутствия."""
+        if (self.base is None) == (self.no_base_reason is None):
+            raise ValueError(
+                "у формы объявляется либо база существенности, либо причина, "
+                "по которой её нет, — ровно одно из двух"
+            )
+        return self
+
+
+class MaterialityDef(BaseModel):
+    """База измерения существенности изменения статьи, по формам."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    bases: dict[str, MaterialityBase] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    def base_of(self, form: str) -> str | None:
+        """Код строки-базы для формы; None — существенность не измеряется."""
+        found = self.bases.get(form)
+        return found.base if found is not None else None
+
+
 class LinesCatalog(BaseModel):
     """Справочник строк всех форм с индексами по коду и наименованию."""
 
@@ -342,6 +380,7 @@ class LinesCatalog(BaseModel):
     version: str = Field(min_length=1)
     units: UnitsDef
     measures: MeasuresDef
+    materiality: MaterialityDef
     forms: dict[str, FormDef]
     reporting_types: dict[ReportingType, ReportingTypeDef]
     lines: tuple[LineDef, ...]
@@ -378,6 +417,14 @@ class LinesCatalog(BaseModel):
         if missing:
             raise ValueError(
                 "вид величины не объявлен для форм: " + ", ".join(missing)
+            )
+        # База существенности объявляется по тому же правилу: форма, о ней
+        # умолчавшая, — наш пробел, а не форма без базы.
+        unmeasured = sorted(set(self.forms) - set(self.materiality.bases))
+        if unmeasured:
+            raise ValueError(
+                "база существенности не объявлена для форм: "
+                + ", ".join(unmeasured)
             )
 
     def _build_index(self) -> dict[tuple[ReportingType, str], LineDef]:
