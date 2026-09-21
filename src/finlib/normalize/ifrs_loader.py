@@ -383,7 +383,14 @@ def load_extraction(
     # и неполный вид отчётности. Теперь каждое основание экрана должно быть
     # названо человеком с причиной, а неразмеченная строка не принимается
     # ничем: извлечение без неё неполно.
-    accepted = {code: text for code, text in (accepted or {}).items() if text.strip()}
+    accepted, confirmed_by = _accepted_with_previous(
+        inn,
+        profile.report_dates[0].year,
+        correction_version,
+        conn,
+        accepted,
+        confirmed_by,
+    )
     grounds = {item.value for item in review.reasons}
     covered = bool(confirmed_by) and not unconfirmed and grounds <= set(accepted)
     quarantined = not review.automatic and not covered
@@ -486,6 +493,65 @@ SELECT meta -> 'audit' AS audit FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
   AND source = 'file' AND correction_version = %(version)s
 """
+
+_PREVIOUS_ACCEPTED = """
+SELECT meta -> 'accepted' AS accepted FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
+  AND source = 'file' AND correction_version = %(version)s
+"""
+
+
+def _accepted_with_previous(
+    inn: str,
+    report_year: int,
+    correction_version: int,
+    conn: PgConnection,
+    accepted: dict[str, str] | None,
+    confirmed_by: str | None,
+) -> tuple[dict[str, str], str | None]:
+    """Принятые человеком основания переживают повторный разбор.
+
+    **Решение человека о комплекте — то же, что вид оговорки аудитора.**
+    Оно устанавливается не документом, и повторная загрузка его читать
+    неоткуда: не названное в этой загрузке, оно берётся из прежней записи
+    комплекта. Иначе всякий прогон приёма возвращал бы в карантин комплекты,
+    принятые вручную, — у ЛСР вместе с основанием «страница 6 без слоя, все
+    14 итогов сошлись, статьи сверены с Cbonds» пропадал бы и автор решения.
+
+    Безопасность правила держится тем же, чем у разметки: перенос не снимает
+    **новых** оснований. Если разбор изменился и экран сверки назвал основание,
+    которого человек не принимал, `grounds <= set(accepted)` не выполняется
+    и комплект уходит в карантин — то есть решение переносится о том же
+    извлечении, а не о любом.
+
+    **Молчание о основаниях и основание с пустой причиной — разные вещи.**
+    Прогон приёма об основаниях не говорит вовсе (`None`), и прежнее решение
+    в силе; названное пустой причиной — решение не принимать, и переносить
+    поверх него прежнее значило бы отменить отказ человека.
+    """
+    if accepted is not None:
+        return {
+            code: text for code, text in accepted.items() if text.strip()
+        }, confirmed_by
+    row = fetch_one(
+        _PREVIOUS_ACCEPTED,
+        {
+            "inn": inn,
+            "standard": Standard.IFRS.value,
+            "year": report_year,
+            "version": correction_version,
+        },
+        conn=conn,
+    )
+    previous = (row or {}).get("accepted") or {}
+    grounds = {
+        code: text
+        for code, text in (previous.get("grounds") or {}).items()
+        if text and text.strip()
+    }
+    if not grounds:
+        return {}, confirmed_by
+    return grounds, confirmed_by or previous.get("by")
 
 
 def _audit_with_caveat(

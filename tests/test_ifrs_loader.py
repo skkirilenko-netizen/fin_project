@@ -569,6 +569,99 @@ def test_confirmation_lifts_the_quarantine_only_by_named_grounds(db_conn) -> Non
     assert empty.quarantined
 
 
+def test_accepted_grounds_survive_a_reload(db_conn) -> None:
+    """Принятое человеком основание повторная загрузка не стирает.
+
+    Решение «я посмотрел это извлечение и отвечаю за него» устанавливается
+    не документом, и читать его при повторном разборе неоткуда — то же, что
+    вид оговорки аудитора. Без переноса всякий прогон приёма возвращал бы
+    в карантин комплекты, принятые вручную: у ЛСР вместе с основанием
+    «страница 6 без слоя, все 14 итогов сошлись, статьи сверены с Cbonds»
+    пропадал бы и автор решения.
+    """
+    text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
+    extraction, profile, decision = prepared(text)
+    grounds = {item.value for item in decision.reasons}
+    named = load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        NOT_READ,
+        confirmed_by="аналитик",
+        confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
+        accepted={code: "основание принято с причиной" for code in grounds},
+    )
+    assert not named.quarantined
+
+    # Повторная загрузка — как её делает прогон приёма: разметка берётся
+    # из журнала подтверждений, а об основаниях экрана не говорится вовсе.
+    from finlib.sources.ifrs_confirmed import load_confirmed
+
+    known = load_confirmed(INN, extraction, profile, conn=db_conn)
+    second = review(extraction, profile, None, known)
+    again = load_extraction(
+        INN, extraction, profile, second, db_conn, NOT_READ, confirmed=known
+    )
+    assert not again.quarantined
+    row = fetch_one(
+        "SELECT meta -> 'accepted' AS accepted FROM src_file WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND report_year = %(y)s AND is_actual",
+        {"i": INN, "y": DATES[0].year},
+        conn=db_conn,
+    )
+    assert row["accepted"]["by"] == "аналитик"
+    assert set(row["accepted"]["grounds"]) == grounds
+
+
+def test_carried_acceptance_does_not_admit_an_unmarked_row(db_conn) -> None:
+    """Перенос решения не принимает того, чего человек не видел.
+
+    Обратная сторона переноса: решение относится к тому извлечению, которое
+    человек смотрел. Изменился разбор, в извлечении появилась неразмеченная
+    статья — комплект уходит в карантин, а не проходит по прежнему
+    подтверждению. Проверяется именно это: карантин здесь стоит по новой
+    строке, а основания прежнего решения при этом на месте — иначе тест
+    отвечал бы «в карантине» по той же причине, по какой отвечал до правки.
+    """
+    from finlib.sources.ifrs_confirmed import load_confirmed
+
+    text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
+    extraction, profile, decision = prepared(text)
+    grounds = {item.value for item in decision.reasons}
+    load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        NOT_READ,
+        confirmed_by="аналитик",
+        confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
+        accepted={code: "основание принято с причиной" for code in grounds},
+    )
+    # Второе извлечение приносит статью, которой человек не размечал.
+    wider = BALANCE + (
+        "\nЗадолженность Принципала                 400 000    380 000\n"
+        "Средства целевого финансирования          50 000     40 000\n"
+    )
+    extraction2, profile2, _ = prepared(wider)
+    known = load_confirmed(INN, extraction2, profile2, conn=db_conn)
+    second = review(extraction2, profile2, None, known)
+    again = load_extraction(
+        INN, extraction2, profile2, second, db_conn, NOT_READ, confirmed=known
+    )
+    assert again.quarantined
+    row = fetch_one(
+        "SELECT meta -> 'accepted' AS accepted FROM src_file WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND report_year = %(y)s AND is_actual",
+        {"i": INN, "y": DATES[0].year},
+        conn=db_conn,
+    )
+    assert set(row["accepted"]["grounds"]) == grounds, "решение человека потеряно"
+
+
 def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:
     """Подтверждённая статья попадает в факты с пометкой источника опознания.
 
