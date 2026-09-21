@@ -178,7 +178,13 @@ CREATE TABLE IF NOT EXISTS fact_report (
     -- подтверждённые статьи, у Автодора — 39 из 40, включая две,
     -- в которых лежат 85 % активов.
     recognition  text NOT NULL DEFAULT 'catalog'
-                 CHECK (recognition IN ('catalog', 'confirmation')),
+                 CHECK (recognition IN ('catalog', 'confirmation', 'note')),
+    -- Откуда величина взята, когда она из примечания: номер примечания
+    -- и наименования его строк. Читатель, сверяющий заключение с отчётностью,
+    -- обязан видеть источник: у Автодора в строке формы 414, а начислено
+    -- по примечанию 54 382, и без ссылки расхождение выглядит ошибкой расчёта.
+    note_number  integer,
+    note_source_name text,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fact_report_uniq UNIQUE (inn, standard, report_date, form_code, line_code),
@@ -215,12 +221,21 @@ ALTER TABLE fact_report
 ALTER TABLE fact_report DROP CONSTRAINT IF EXISTS fact_report_recognition_check;
 ALTER TABLE fact_report
     ADD CONSTRAINT fact_report_recognition_check
-    CHECK (recognition IN ('catalog', 'confirmation'));
+    CHECK (recognition IN ('catalog', 'confirmation', 'note'));
+-- Ссылка на примечание заведена 21.09.2026 вместе с третьей силой опознания.
+ALTER TABLE fact_report ADD COLUMN IF NOT EXISTS note_number integer;
+ALTER TABLE fact_report ADD COLUMN IF NOT EXISTS note_source_name text;
 
 COMMENT ON COLUMN fact_report.recognition IS
     'catalog — строка опознана справочником, confirmation — принята по коду, '
-    'присвоенному человеком у этого же эмитента. Доверие разное, участие '
+    'присвоенному человеком у этого же эмитента, note — величина взята '
+    'из примечания по ссылке из строки формы. Доверие разное, участие '
     'в расчёте одинаковое';
+COMMENT ON COLUMN fact_report.note_number IS
+    'Номер примечания, из которого взята величина; NULL — величина не '
+    'из примечания';
+COMMENT ON COLUMN fact_report.note_source_name IS
+    'Наименования строк примечания, давших величину, — дословно';
 
 -- Журнал контролей качества --------------------------------------------------
 

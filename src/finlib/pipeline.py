@@ -362,6 +362,28 @@ def accept_ifrs_document(
         ok=decision.automatic,
     )
 
+    # **Величины примечаний извлекаются здесь же и становятся фактами.**
+    # Прежде их брал только замер, и в базу они не попадали: показатель,
+    # которому нужна величина из примечания, в расчёте по фактам не считался
+    # вовсе — у ФосАгро так выпадало покрытие процентов, а вместе с ним
+    # и группа «Обслуживание долга», и класс не присваивался.
+    notes = _note_values(text, extraction, profile, headings)
+    report(
+        Stage.QUALITY,
+        "величины примечаний: взято "
+        f"{sum(1 for item in notes if item.found)} из {len(notes)} объявленных",
+        ok=any(item.found for item in notes),
+    )
+
+    # **Тип эмитента определяется по документу и хранится с комплектом.**
+    # Он свойство организации, но опознаётся статьями и текстом отчётности,
+    # и расчёт по фактам базы документа не видит: без записи тип пришлось бы
+    # принимать умолчанием, то есть молча терять поправку показателя.
+    from finlib.sources.ifrs_issuer_type import determine_type
+
+    issuer_type = determine_type(extraction.totals(profile.report_dates[0]), text)
+    report(Stage.QUALITY, f"тип эмитента: {issuer_type.describe()}")
+
     intake = IfrsIntake(True, profile=profile, extraction=extraction, review=decision)
     if inn is None:
         # Без организации комплект не записывается: привязать его не к чему.
@@ -384,11 +406,35 @@ def accept_ifrs_document(
             confirmed_by=confirmed_by,
             confirmations=confirmations,
             confirmed=confirmed,
+            notes=notes,
+            issuer_type=issuer_type.code,
             audit=audit,
         )
     report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
     intake.loaded = loaded
     return intake
+
+
+def _note_values(text: str, extraction, profile, headings: dict[str, int]):
+    """Величины примечаний по ссылкам из строк форм — вместе с отказами.
+
+    Ссылки берутся у величин **отчётного** периода: примечание расшифровывает
+    строку формы, и номер ссылки стоит в ней. Отказ возвращается наравне
+    с величиной: показатель, которому её не хватило, обязан назвать причину.
+    """
+    from finlib.sources.ifrs_notes import index_notes, note_values
+
+    index = index_notes(text, after=min(headings.values(), default=0))
+    rows = {
+        item.code: item.note_reference
+        for form in extraction.forms.values()
+        for item in form.values
+        if item.report_date == profile.report_dates[0]
+    }
+    _found, outcomes = note_values(
+        index, rows, text, profile.grouping, len(profile.report_dates)
+    )
+    return outcomes
 
 
 def _load_from_inbox(

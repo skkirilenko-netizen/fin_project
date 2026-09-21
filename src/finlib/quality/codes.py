@@ -127,6 +127,14 @@ class CheckCode(StrEnum):
     # Отчётность прошла обзорную проверку, а не аудит: объём процедур меньше,
     # мнения о достоверности аудитор не выражает.
     AUDIT_REVIEW_ENGAGEMENT = "audit_review_engagement"
+    # Величина, объявленная в примечании, не извлечена: ссылки из формы нет,
+    # примечание не найдено, строки в нём нет. **Это отказ, а не отсутствие
+    # факта**: у Норникеля капитализированные проценты раскрыты прозой,
+    # и показатель, которому величины не хватило, обязан назвать причину.
+    NOTE_VALUE_NOT_EXTRACTED = "note_value_not_extracted"
+    # Сводка величин примечаний: сколько взято, сколько отказов. Счётчик
+    # проверенного рядом со счётчиком сработавшего.
+    NOTE_VALUES = "note_values"
 
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
@@ -184,6 +192,11 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.AUDIT_REPORT_NOT_READABLE: Severity.WARNING,
     CheckCode.AUDIT_REPORT_ABSENT: Severity.WARNING,
     CheckCode.AUDIT_REVIEW_ENGAGEMENT: Severity.WARNING,
+    # Отказ извлечения из примечания карантина не вызывает: это наш пробел
+    # либо способ раскрытия эмитента, а не дефект отчётности. Но и молчать
+    # о нём нельзя — показатель без величины обязан назвать причину.
+    CheckCode.NOTE_VALUE_NOT_EXTRACTED: Severity.WARNING,
+    CheckCode.NOTE_VALUES: Severity.INFO,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -231,6 +244,8 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.AUDIT_REPORT_NOT_READABLE: "чтение аудиторского заключения",
     CheckCode.AUDIT_REPORT_ABSENT: "наличие аудиторского заключения",
     CheckCode.AUDIT_REVIEW_ENGAGEMENT: "тип аудиторского задания",
+    CheckCode.NOTE_VALUE_NOT_EXTRACTED: "извлечение величины из примечания",
+    CheckCode.NOTE_VALUES: "величины, взятые из примечаний",
 }
 
 

@@ -36,6 +36,7 @@ from finlib.quality.values import sign_only_difference
 from finlib.sources.ifrs_confirmed import Confirmed, ConfirmedFact, match_key
 from finlib.sources.ifrs_extract import Extraction, materiality_share
 from finlib.sources.ifrs_inbox import DocumentProfile
+from finlib.sources.ifrs_notes import NoteValue
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
 from finlib.standards import Standard
 
@@ -44,6 +45,16 @@ logger = logging.getLogger(__name__)
 # Роли периодов по порядку колонок документа. Четвёртой и далее колонке роли
 # нет: модель хранит три, как и для РСБУ.
 PERIOD_ROLES: tuple[str, ...] = ("current", "previous", "before_previous")
+
+
+def form_of(line_code: str) -> str | None:
+    """Форма, которой принадлежит позиция справочника; None — позиция чужая.
+
+    Нужна записи величин примечаний: примечание расшифровывает строку формы,
+    и факт принадлежит **её** форме.
+    """
+    position = load_ifrs_lines().get(line_code)
+    return position.form if position is not None else None
 
 
 class Recognition(StrEnum):
@@ -58,6 +69,10 @@ class Recognition(StrEnum):
 
     CATALOG = "catalog"
     CONFIRMATION = "confirmation"
+    # Величина взята из примечания по ссылке из строки формы. Третья сила,
+    # и слабее двух прочих она не потому, что менее достоверна, а потому,
+    # что добыта нами: строка формы её не содержит вовсе.
+    NOTE = "note"
 
 # Записи, описывающие **состояние** комплекта, а не событие: сводка
 # сопоставления строк, сводка столкновений периодов, основания экрана сверки
@@ -78,6 +93,11 @@ STATE_CODES: frozenset[CheckCode] = MAPPING_CODES | frozenset(
         CheckCode.AUDIT_REPORT_NOT_READABLE,
         CheckCode.AUDIT_REPORT_ABSENT,
         CheckCode.AUDIT_REVIEW_ENGAGEMENT,
+        # Величины примечаний и отказы их извлечения описывают комплект:
+        # исправленный справочник примечаний обязан менять эти записи,
+        # а не добавлять к прежним.
+        CheckCode.NOTE_VALUES,
+        CheckCode.NOTE_VALUE_NOT_EXTRACTED,
     }
 )
 
@@ -126,11 +146,12 @@ RETURNING id
 _UPSERT_FACT = """
 INSERT INTO fact_report (
     src_file_id, inn, standard, report_date, form_code, line_code,
-    source_line_code, value, value_status, period_role, recognition
+    source_line_code, value, value_status, period_role, recognition,
+    note_number, note_source_name
 ) VALUES (
     %(src_file_id)s, %(inn)s, %(standard)s, %(report_date)s, %(form_code)s,
     %(line_code)s, %(source_line_code)s, %(value)s, 'ok', %(period_role)s,
-    %(recognition)s
+    %(recognition)s, %(note_number)s, %(note_source_name)s
 )
 ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     src_file_id = EXCLUDED.src_file_id,
@@ -138,6 +159,8 @@ ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     value = EXCLUDED.value,
     period_role = EXCLUDED.period_role,
     recognition = EXCLUDED.recognition,
+    note_number = EXCLUDED.note_number,
+    note_source_name = EXCLUDED.note_source_name,
     updated_at = now()
 WHERE period_rank(EXCLUDED.period_role) <= period_rank(fact_report.period_role)
   AND fact_report.value IS DISTINCT FROM EXCLUDED.value
@@ -202,6 +225,8 @@ class Collisions:
     # Графа отдельная, потому что доверие к двум силам опознания разное,
     # а «фактов записано N» одним числом этого не показывает.
     by_confirmation: int = 0
+    # Сколько фактов пришло из примечаний — по ссылке из строки формы.
+    by_note: int = 0
     # Приоритет оставил загруженное значение: входящее хуже по роли периода.
     kept_by_priority: int = 0
     # Входящее значение победило: роль не хуже загруженной.
@@ -245,6 +270,7 @@ class LoadResult:
             f"ИНН {self.inn}, комплект {self.src_file_id}: фактов записано "
             f"{self.facts_written} из {self.facts_total}, из них "
             f"по подтверждению человека {self.collisions.by_confirmation}, "
+            f"из примечаний {self.collisions.by_note}, "
             f"без изменений {self.collisions.unchanged}, "
             f"{self.collisions.describe()}, расхождений "
             f"со сравнительными данными {len(self.revisions)}, "
@@ -266,6 +292,8 @@ def load_extraction(
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
     confirmed: Confirmed | None = None,
+    notes: tuple[NoteValue, ...] | None = None,
+    issuer_type: str | None = None,
     organization_name: str | None = None,
     audit=None,
 ) -> LoadResult:
@@ -301,6 +329,7 @@ def load_extraction(
         checksum=checksum,
         correction_version=correction_version,
         quarantined=quarantined,
+        issuer_type=issuer_type,
     )
 
     # Присвоения этого присеста — такое же подтверждение человека, как и
@@ -313,11 +342,12 @@ def load_extraction(
         profile,
         conn,
         confirmed=(*(confirmed.facts if confirmed else ()), *fresh),
+        notes=notes or (),
     )
     revisions = [item.describe() for item in collisions.revisions]
 
     records = _journal_records(
-        inn, src_file_id, extraction, review, collisions, quarantined
+        inn, src_file_id, extraction, review, collisions, quarantined, notes or ()
     )
     records.extend(_audit_records(inn, src_file_id, audit))
     execute(
@@ -364,6 +394,7 @@ def _write_src_file(
     checksum: str | None,
     correction_version: int,
     quarantined: bool,
+    issuer_type: str | None = None,
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
     report_year = profile.report_dates[0].year
@@ -382,6 +413,10 @@ def _write_src_file(
             "rows_total": review.rows_total,
             "confirmed_from": list(review.confirmed_from),
         },
+        # Тип эмитента опознаётся статьями и текстом документа, а расчёт
+        # по фактам базы документа не видит: без записи поправка показателя
+        # по типу молча не применялась бы.
+        "issuer_type": issuer_type,
     }
     row = fetch_one(
         _UPSERT_SRC_FILE,
@@ -440,6 +475,7 @@ def _write_facts(
     profile: DocumentProfile,
     conn: PgConnection,
     confirmed: tuple[ConfirmedFact, ...] = (),
+    notes: tuple[NoteValue, ...] = (),
 ) -> tuple[int, Collisions]:
     """Пишет факты комплекта; возвращает число записанных и разбор столкновений.
 
@@ -506,6 +542,8 @@ def _write_facts(
                     "value": item.value,
                     "period_role": role,
                     "recognition": Recognition.CATALOG.value,
+                    "note_number": None,
+                    "note_source_name": None,
                 },
                 conn=conn,
             )
@@ -545,13 +583,63 @@ def _write_facts(
                     "value": value,
                     "period_role": role,
                     "recognition": Recognition.CONFIRMATION.value,
+                    "note_number": None,
+                    "note_source_name": None,
                 },
                 conn=conn,
             )
             written += touched
             by_confirmation += touched
             unchanged += not touched
+
+    # **Величина примечания — факт той формы, строка которой на примечание
+    # ссылается.** Примечание расшифровывает конкретную строку конкретной
+    # формы, поэтому форма берётся у неё, а источником называется примечание:
+    # номер и наименования строк лежат рядом с величиной. Код при этом свой —
+    # `ifrs.interest_expense_accrued` и `ifrs.finance_costs` два разных факта
+    # одной формы: у Автодора 414 в строке формы и 54 382 по примечанию стоят
+    # рядом, и подменять одно другим нельзя.
+    by_note = 0
+    for outcome in notes:
+        if not outcome.found or not outcome.from_line:
+            continue
+        form = form_of(outcome.from_line)
+        if form is None:
+            logger.warning(
+                "величина примечания %s не записана: форма строки %s неизвестна",
+                outcome.code,
+                outcome.from_line,
+            )
+            continue
+        roles = _roles(profile.dates_of(form))
+        report_date = profile.report_dates[0]
+        role = roles.get(report_date)
+        if role is None:
+            continue
+        touched = execute(
+            _UPSERT_FACT,
+            {
+                "src_file_id": src_file_id,
+                "inn": inn,
+                "standard": Standard.IFRS.value,
+                "report_date": report_date,
+                "form_code": form,
+                "line_code": outcome.code,
+                "source_line_code": outcome.code,
+                "value": outcome.value,
+                "period_role": role,
+                "recognition": Recognition.NOTE.value,
+                "note_number": outcome.note,
+                "note_source_name": "; ".join(outcome.rows) or None,
+            },
+            conn=conn,
+        )
+        written += touched
+        by_note += touched
+        unchanged += not touched
+
     collisions.by_confirmation = by_confirmation
+    collisions.by_note = by_note
     collisions.unchanged = unchanged
     collisions.revisions = tuple(revisions)
     collisions.sign_only = tuple(sign_only)
@@ -745,6 +833,7 @@ def _journal_records(
     review: ReviewResult,
     collisions: Collisions,
     quarantined: bool,
+    notes: tuple[NoteValue, ...] = (),
 ) -> list[CheckRecord]:
     """Записи журнала качества по итогам приёма и сверки.
 
@@ -872,6 +961,69 @@ def _journal_records(
             },
         )
     )
+
+    # **Отказ извлечения из примечания — исход, а не отсутствие факта.**
+    # У Норникеля капитализированные проценты раскрыты прозой, и показатель,
+    # которому величины не хватило, обязан назвать причину, иначе она
+    # останется в памяти того, кто смотрел документ. Рядом стоит сводка:
+    # сколько величин взято и сколько отказов — ноль отказов при неизвестном
+    # числе объявленных величин не означает ничего.
+    if notes:
+        taken = [item for item in notes if item.found]
+        refused = [item for item in notes if not item.found]
+        records.append(
+            CheckRecord(
+                inn=inn,
+                check_code=CheckCode.NOTE_VALUES,
+                status=CheckStatus.INFO,
+                severity=Severity.INFO,
+                message=(
+                    f"Величины примечаний: взято {len(taken)} "
+                    f"из {len(notes)} объявленных, отказов {len(refused)}"
+                    + (
+                        "; "
+                        + "; ".join(
+                            f"{item.code} — примечание {item.note}" for item in taken
+                        )
+                        if taken
+                        else ""
+                    )
+                ),
+                src_file_id=src_file_id,
+                details={
+                    "taken": [
+                        {
+                            "code": item.code,
+                            "note": item.note,
+                            "from_line": item.from_line,
+                            "rows": list(item.rows),
+                            "value": str(item.value),
+                        }
+                        for item in taken
+                    ],
+                    "refused": [
+                        {"code": item.code, "reason": item.describe()}
+                        for item in refused
+                    ],
+                },
+            )
+        )
+        records.extend(
+            CheckRecord(
+                inn=inn,
+                check_code=CheckCode.NOTE_VALUE_NOT_EXTRACTED,
+                status=CheckStatus.WARNING,
+                severity=LOADER_SEVERITY[CheckCode.NOTE_VALUE_NOT_EXTRACTED],
+                message=f"Величина примечания не извлечена: {item.describe()}",
+                src_file_id=src_file_id,
+                line_code=item.code,
+                details={
+                    "refusal": item.refusal.value if item.refusal else None,
+                    "note": item.note,
+                },
+            )
+            for item in refused
+        )
 
     def clash_record(
         clash: Clash, code: CheckCode, status: CheckStatus, message: str

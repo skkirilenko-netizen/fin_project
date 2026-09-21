@@ -1235,6 +1235,88 @@ def _save_confirmation(
         )
 
 
+@app.command("ifrs-assess")
+def ifrs_assess_command(
+    inn: Annotated[str, typer.Option("--inn", help=INN_HELP)],
+    report_date: Annotated[
+        str,
+        typer.Option(
+            "--report-date",
+            help="Отчётная дата комплекта, ГГГГ-ММ-ДД; по умолчанию самая свежая",
+        ),
+    ] = "",
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Считает показатели и оценку по МСФО **по фактам базы** и пишет их.
+
+    Путь расчёта здесь тот же, что у заключения: вход собирается из
+    `fact_report`, а не из разобранного документа. Замер задачи 27 считает
+    по документу, и два пути обязаны давать одно число — у ФосАгро это класс B
+    и балл 66,0. Пока этой команды не было, расчёт по фактам МСФО не вызывался
+    ниоткуда: он был написан и недостижим.
+
+    Комплекты в карантине не читаются, и это не молчание: причина стоит
+    в журнале качества, а команда называет, что считать нечего.
+    """
+    _setup_logging(verbose)
+    _check_inn(inn)
+
+    from finlib.db import connection
+    from finlib.metrics.ifrs_store import (
+        IfrsPeriodMissingError,
+        compute_from_facts,
+        periods_of,
+    )
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+    from finlib.scoring.ifrs import assess
+    from finlib.scoring.ifrs_store import save_ifrs_assessment, save_metrics
+
+    policy = load_ifrs_metrics()
+    with connection() as conn:
+        periods = periods_of(inn, conn)
+        if not periods:
+            _fail(
+                f"по МСФО у {inn} нет комплектов вне карантина: считать нечего. "
+                "Причина отбраковки — в журнале качества (fin-analysis quality)"
+            )
+        if report_date.strip():
+            try:
+                target = date.fromisoformat(report_date.strip())
+            except ValueError:
+                _fail(f"--report-date принимает дату ГГГГ-ММ-ДД, получено «{report_date}»")
+            if target not in periods:
+                listed = ", ".join(str(item) for item in periods)
+                _fail(f"комплекта на {target} нет; есть: {listed}")
+        else:
+            target = periods[0]
+
+        try:
+            computed = compute_from_facts(inn, target, conn, policy)
+        except IfrsPeriodMissingError as failure:
+            _fail(str(failure))
+
+        typer.echo(f"Расчёт по МСФО, {inn}, период {target:%d.%m.%Y}\n")
+        for item in computed:
+            typer.echo(f"  {item.describe()}")
+
+        saved = save_metrics(inn, target, computed, conn, policy)
+        result = assess(computed, policy, ())
+        save_ifrs_assessment(inn, target, result, computed, conn, policy)
+
+    typer.echo("")
+    for group in result.groups:
+        typer.echo(f"  {group.describe()}")
+    typer.echo(
+        typer.style(f"\n{result.describe()}", fg=typer.colors.GREEN, bold=True)
+    )
+    typer.echo(f"значений записано: {saved}")
+    if result.divergence:
+        # Расхождение двух мер долговой нагрузки печатается всегда: ноль
+        # превышений при неизвестном разрыве неотличим от несделанного
+        # сравнения.
+        typer.echo("расхождение мер долговой нагрузки: " + "; ".join(result.divergence))
+
+
 @app.command("pdf-check")
 def pdf_check_command(
     paths: Annotated[

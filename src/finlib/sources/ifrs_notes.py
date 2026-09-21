@@ -135,6 +135,12 @@ class NoteValue:
     # назвать и номер, и наименование — по номеру одному читатель примечания
     # не найдёт, у разных эмитентов под одним номером стоит разное.
     note_title: str = ""
+    # Строка формы, из которой пришла ссылка на примечание. **Ею определяется
+    # форма факта**: примечание расшифровывает конкретную строку конкретной
+    # формы, и величина принадлежит этой форме, а источником указывается
+    # примечание. Без этого поля форму пришлось бы угадывать: у процентов
+    # капитализированных ссылки объявлены сразу из трёх строк двух форм.
+    from_line: str = ""
 
     @property
     def found(self) -> bool:
@@ -414,12 +420,16 @@ def value_from_notes(
     text: str,
     grouping: Grouping,
     periods: int,
+    from_lines: dict[int, str] | None = None,
 ) -> NoteValue:
     """Величина строки примечания по ссылке из формы — либо отказ с причиной.
 
     Отказ здесь не неудача, а исход: показатель, которому эта величина нужна,
     не считается вовсе. Подставить величину из формы нельзя — ровно для этого
     правило и объявлено.
+
+    `from_lines` — по номеру примечания строка формы, которая на него
+    ссылается: ею определяется форма факта, когда величина попадает в базу.
     """
     if not references:
         return NoteValue(line.code, refusal=Refusal.NO_REFERENCE)
@@ -443,7 +453,12 @@ def value_from_notes(
                 "; ".join(rows),
             )
             return NoteValue(
-                line.code, total, number, tuple(rows), note_title=note.title
+                line.code,
+                total,
+                number,
+                tuple(rows),
+                note_title=note.title,
+                from_line=(from_lines or {}).get(number, ""),
             )
     return NoteValue(line.code, note=seen[0], refusal=Refusal.LINE_NOT_FOUND)
 
@@ -470,10 +485,23 @@ def note_values(
     outcomes: list[NoteValue] = []
     for line in catalog.lines:
         references: list[int] = []
+        # Откуда пришла ссылка, помнится вместе с номером: примечание
+        # расшифровывает строку конкретной формы, и по ней определяется форма
+        # факта. Первая объявленная строка сильнее: порядок `found_in` —
+        # это порядок предпочтения справочника, а не случайность.
+        from_lines: dict[int, str] = {}
         for code in line.found_in:
-            references.extend(rows.get(code, ()))
+            for number in rows.get(code, ()):
+                references.append(number)
+                from_lines.setdefault(number, code)
         outcome = value_from_notes(
-            line, index, tuple(dict.fromkeys(references)), text, grouping, periods
+            line,
+            index,
+            tuple(dict.fromkeys(references)),
+            text,
+            grouping,
+            periods,
+            from_lines,
         )
         outcomes.append(outcome)
         if outcome.found:
@@ -482,7 +510,10 @@ def note_values(
 
 
 def accrued_interest(
-    found: dict[str, Decimal], outcomes: tuple[NoteValue, ...], catalog=None
+    found: dict[str, Decimal],
+    outcomes: tuple[NoteValue, ...] = (),
+    catalog=None,
+    rows_by_code: dict[str, tuple[str, ...]] | None = None,
 ) -> Decimal | None:
     """Начисленные проценты по заёмным средствам: расход плюс капитализированные.
 
@@ -491,6 +522,14 @@ def accrued_interest(
     от капитализированных процентов, а сами они раскрыты прозой примечания.
     Нет составляющей — нет показателя: правило то же, что в РСБУ для
     «Чистый долг / EBITDA» при отсутствии амортизации.
+
+    Наименования строк примечания нужны правилу «очищено от
+    капитализированных», и приходят они двумя путями: исходами разбора
+    (`outcomes`) — когда считает замер по документу — либо готовым словарём
+    (`rows_by_code`) — когда считает расчёт по фактам базы, где они лежат
+    в `fact_report.note_source_name`. **Правило при этом одно**: собирать
+    начисленные проценты вторым способом значило бы иметь два ответа на один
+    вопрос.
     """
     from finlib.normalize.ifrs_note_lines import load_note_lines
 
@@ -503,14 +542,17 @@ def accrued_interest(
         return expense + capitalised
     # Строка формы объявила себя очищенной от капитализированных процентов,
     # а их величины нет: знаменатель был бы занижен, а выглядел полным.
-    rows = next(
-        (
-            item.rows
-            for item in outcomes
-            if item.code == "ifrs.interest_expense_accrued" and item.found
-        ),
-        (),
-    )
+    if rows_by_code is not None:
+        rows = rows_by_code.get("ifrs.interest_expense_accrued", ())
+    else:
+        rows = next(
+            (
+                item.rows
+                for item in outcomes
+                if item.code == "ifrs.interest_expense_accrued" and item.found
+            ),
+            (),
+        )
     lowered = " ".join(rows).lower()
     if any(
         marker.lower() in lowered
