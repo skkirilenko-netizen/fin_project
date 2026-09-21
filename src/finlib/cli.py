@@ -404,6 +404,96 @@ def reprocess_command(
         )
 
 
+@app.command("ifrs-confirm")
+def ifrs_confirm_command(
+    inn: Annotated[str, typer.Option("--inn", help=INN_HELP)],
+    report_date: Annotated[
+        str,
+        typer.Option(
+            "--report-date",
+            help="Отчётная дата комплекта, ГГГГ-ММ-ДД: у эмитента их несколько, "
+            "и подтверждается один",
+        ),
+    ],
+    who: Annotated[
+        str, typer.Option("--who", help="Кто подтверждает: попадёт в журнал")
+    ],
+    path: Annotated[
+        Path, typer.Option("--path", help="Каталог с документами МСФО по ИНН")
+    ] = Path("data/raw/ifrs"),
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Подтверждает комплект МСФО человеком и записывает его заново.
+
+    **Разметка и подтверждение — разные действия.** Присест разметки пишет
+    присвоенные коды в журнал подтверждений, но комплект остаётся в карантине:
+    решение «я посмотрел это извлечение и отвечаю за него» принимается о
+    комплекте целиком, а не о строке. Здесь оно и принимается: комплект
+    перезагружается с названным автором, экран сверки видит подтверждённые
+    строки наравне с опознанными справочником, и карантин снимается, если
+    неопознанных строк не осталось.
+
+    Основания, которые подтверждением не снимаются, называются: неполный вид
+    отчётности, потерянная страница, несошедшийся итог — там не опознание,
+    а состав раскрытий и арифметика.
+    """
+    _setup_logging(verbose)
+    _check_inn(inn)
+    try:
+        wanted = date.fromisoformat(report_date.strip())
+    except ValueError:
+        _fail(f"--report-date принимает дату ГГГГ-ММ-ДД, получено «{report_date}»")
+    if not who.strip():
+        _fail("укажите --who: подтверждение без автора в журнале бесполезно")
+
+    from finlib.pipeline import accept_ifrs_document
+    from finlib.sources.ifrs_inbox import text_of
+
+    issuers, skipped = _load_issuers(path)
+    for name, reason in skipped:
+        typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
+    mine = [
+        item for item in issuers if item.inn == inn and item.report_date == wanted
+    ]
+    if not mine:
+        dates = sorted({str(item.report_date) for item in issuers if item.inn == inn})
+        _fail(
+            f"комплекта {inn} за {wanted} в каталоге нет"
+            + (f"; есть: {', '.join(dates)}" if dates else "")
+        )
+
+    issuer = mine[0]
+    document = text_of(issuer.path)
+    typer.echo(typer.style(f"\nПодтверждение комплекта {inn} за {wanted}", bold=True))
+    typer.echo(f"  документ: {issuer.path}")
+    intake = accept_ifrs_document(
+        document.text,
+        _echo_stage,
+        inn=inn,
+        raw_path=str(issuer.path),
+        confirmed_by=who.strip(),
+        document=document,
+    )
+    if not intake.accepted:
+        _fail(f"документ отклонён приёмом [{intake.check_code}]: {intake.reason}")
+    loaded = intake.loaded
+    if loaded is None:  # pragma: no cover — ИНН назван, запись обязана состояться
+        _fail("комплект не записан")
+    if loaded.quarantined:
+        typer.echo(
+            typer.style(
+                "\nКарантин не снят: "
+                + "; ".join(item.value for item in intake.review.reasons),
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        typer.style("\nКарантин снят, комплект идёт в расчёт", fg=typer.colors.GREEN)
+    )
+
+
 @app.command("ifrs-markup")
 def ifrs_markup_command(
     path: Annotated[
