@@ -178,8 +178,24 @@ ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     note_number = EXCLUDED.note_number,
     note_source_name = EXCLUDED.note_source_name,
     updated_at = now()
+-- **Совпавшее значение не переписывается, но владелец факта уточняется.**
+-- Условие сравнивало только величину, и факт оставался за комплектом, который
+-- загрузился первым: у ПАО «Сегежа Групп» промежуточный комплект записал
+-- 37 балансовых величин на 31.12.2025 сравнительной колонкой, а пришедший
+-- вслед годовой те же величины отчётной колонкой не переписал — они совпали.
+-- Факты годового комплекта остались с ролью `previous` и с чужим
+-- `src_file_id`, и при карантине промежуточного комплекта баланс годового
+-- исчезал из расчёта целиком.
+--
+-- Перечень сравниваемых граф тот же, что у РСБУ (`normalize/loader.py`):
+-- правило одно, и расходиться ему нельзя.
 WHERE period_rank(EXCLUDED.period_role) <= period_rank(fact_report.period_role)
-  AND fact_report.value IS DISTINCT FROM EXCLUDED.value
+  AND (fact_report.value IS DISTINCT FROM EXCLUDED.value
+       OR fact_report.period_role IS DISTINCT FROM EXCLUDED.period_role
+       OR fact_report.src_file_id IS DISTINCT FROM EXCLUDED.src_file_id
+       OR fact_report.source_line_code IS DISTINCT FROM EXCLUDED.source_line_code
+       OR fact_report.recognition IS DISTINCT FROM EXCLUDED.recognition
+       OR fact_report.note_number IS DISTINCT FROM EXCLUDED.note_number)
 """
 
 _EXISTING = """
