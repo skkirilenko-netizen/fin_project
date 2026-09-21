@@ -148,6 +148,26 @@ class CheckCode(StrEnum):
     IFRS_REPORTING_KIND = "ifrs_reporting_kind"
     IFRS_LOST_PAGE = "ifrs_lost_page"
 
+    # --- Нормализованные данные агрегатора (Cbonds) --------------------------
+    #
+    # **Ноль у агрегатора не означает нуля**: источник пишет ноль и там, где
+    # величина не раскрыта. Различать это нам, и правило — три признака,
+    # у каждого свой код: ноль, ломающий тождество отчётности; ноль итога
+    # при ненулевом составе; расхождение долга с суммой срочностей.
+    # Четвёртый код — сводка сопоставления: без неё ноль неизвестных полей
+    # ничем не подтверждён.
+    CBONDS_IDENTITY_MISMATCH = "cbonds_identity_mismatch"
+    CBONDS_SECTIONS_MISMATCH = "cbonds_sections_mismatch"
+    CBONDS_ZERO_TOTAL = "cbonds_zero_total"
+    CBONDS_DEBT_SPLIT_MISMATCH = "cbonds_debt_split_mismatch"
+    CBONDS_FIELD_MAPPING = "cbonds_field_mapping"
+    # Комплект агрегатора не принят: валюта, единица, стандарт либо период.
+    CBONDS_SET_REJECTED = "cbonds_set_rejected"
+    # Величина агрегатора расходится с величиной первоисточника за тот же
+    # период. Первоисточник старше, и величина не перезаписывается, но
+    # расхождение содержательно: у Автодора так виден пересмотр 2024 года.
+    CBONDS_VALUE_MISMATCH = "cbonds_value_mismatch"
+
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
 # по наименованию, в fact_report не попадает, поэтому запись обязана быть видна
@@ -217,6 +237,19 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.IFRS_MATERIAL_ITEM: Severity.BLOCKING,
     CheckCode.IFRS_REPORTING_KIND: Severity.BLOCKING,
     CheckCode.IFRS_LOST_PAGE: Severity.BLOCKING,
+    # Проверки нуля блокирующие: комплект, у которого тождество отчётности
+    # не сходится, в расчёт не идёт — стоп-фактор по такому капиталу был бы
+    # утверждением о эмитенте, сделанным по нераскрытой величине.
+    CheckCode.CBONDS_IDENTITY_MISMATCH: Severity.BLOCKING,
+    CheckCode.CBONDS_SECTIONS_MISMATCH: Severity.BLOCKING,
+    CheckCode.CBONDS_ZERO_TOTAL: Severity.BLOCKING,
+    # Расхождение долга с суммой срочностей карантина не вызывает: величины
+    # пишутся по срочностям, а общий долг служит сверкой. Тождество сходится
+    # у 3 281 строки из 3 283, и два случая нужно увидеть, а не отбросить.
+    CheckCode.CBONDS_DEBT_SPLIT_MISMATCH: Severity.WARNING,
+    CheckCode.CBONDS_FIELD_MAPPING: Severity.INFO,
+    CheckCode.CBONDS_SET_REJECTED: Severity.BLOCKING,
+    CheckCode.CBONDS_VALUE_MISMATCH: Severity.INFO,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -271,6 +304,13 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.IFRS_MATERIAL_ITEM: "статья сверх порога существенности",
     CheckCode.IFRS_REPORTING_KIND: "полнота вида отчётности",
     CheckCode.IFRS_LOST_PAGE: "страница внутри форм без текстового слоя",
+    CheckCode.CBONDS_IDENTITY_MISMATCH: "равенство актива и пассива в данных агрегатора",
+    CheckCode.CBONDS_SECTIONS_MISMATCH: "сходимость разделов в данных агрегатора",
+    CheckCode.CBONDS_ZERO_TOTAL: "нулевой итог при ненулевой деятельности",
+    CheckCode.CBONDS_DEBT_SPLIT_MISMATCH: "сходимость долга со срочностями",
+    CheckCode.CBONDS_FIELD_MAPPING: "сопоставление полей агрегатора",
+    CheckCode.CBONDS_SET_REJECTED: "приём комплекта агрегатора",
+    CheckCode.CBONDS_VALUE_MISMATCH: "расхождение агрегатора с первоисточником",
 }
 
 

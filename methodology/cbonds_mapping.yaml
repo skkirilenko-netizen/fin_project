@@ -1,0 +1,188 @@
+# Сопоставление полей нормализованных данных Cbonds с позициями модели.
+#
+# **Справочник, а не код.** Сопоставление «поле источника → позиция нашей
+# модели» правится диффом и объявляет род каждого поля: точное соответствие,
+# агрегат, сверка. Иначе решение о том, чем считать «Краткосрочный долг»
+# агрегатора, лежало бы в загрузчике, а проверить его было бы нечем.
+#
+# **Три рода поля, и путать их нельзя.**
+#
+#   exact      поле означает ровно нашу позицию. Проверено сверкой
+#              с разобранными документами: у восьми эмитентов 139 величин
+#              совпали, расхождений четыре, и все четыре — не эти поля.
+#   aggregate  поле шире нашей позиции: оно покрывает её и что-то ещё.
+#              Такое поле фактом становится только тогда, когда без него
+#              не считается величина маршрута, и тогда расхождение объявлено
+#              здесь же. Иначе поле не грузится вовсе — агрегат, разложить
+#              который нечем, есть то же, что величина неизвестного состава.
+#   control    поле фактом не становится: оно сверяется с суммой наших
+#              и служит проверкой, а не величиной.
+#
+# **Устройство рассчитано на РСБУ следующим шагом.** Виды отчёта объявлены
+# блоками, у каждого свой стандарт, свои поля и свои проверки; загрузчик
+# читает справочник, а не знает поля наизусть.
+
+version: "0.1.0"
+
+origin: >-
+  Сопоставление выверено 21.09.2026 сверкой с разобранными документами МСФО
+  восьми эмитентов разных отраслей: 229 величин сверено, 139 совпало,
+  4 разошлись. Два расхождения объяснены составом поля (гудвил в нематериальных
+  активах, текущая часть долгосрочного долга в краткосрочном), два остались
+  развилкой и записаны в NIGHT_QUESTIONS.md.
+
+reports:
+
+  report_msfo_real:
+    standard: ifrs
+    name: Показатели МСФО (реальный сектор)
+    # Отбор по ИНН источник поддерживает именно у этого вида отчёта.
+    filter_field: emitent_inn
+    # Годовые строки: ключ уникальности комплекта содержит год, и квартальная
+    # строка того же года заняла бы место годовой. Промежуточные периоды
+    # агрегатора — отдельная работа, объявлена в NIGHT_QUESTIONS.md.
+    annual_only: true
+    currency_field: ln104
+    unit_field: ln105
+    standard_field: ln102
+    # Единица объявляется источником построчно и умолчания не имеет: ошибка
+    # здесь тихая — баланс сойдётся, коэффициенты будут верны, а все
+    # абсолютные величины окажутся неверными.
+    units:
+      "1000": "384"
+      "1000000": "385"
+      "1000000000": "386"
+    # Стандарт и консолидация — два признака, а не один: неконсолидированная
+    # отчётность по МСФО относится к отдельному юридическому лицу, и смешивать
+    # её с консолидированной нельзя. Сравнение приведённой строки целиком:
+    # «МСФО» входит в «МСФО(к)» как подстрока.
+    consolidated_marks: ["МСФО(к)", "МСФО (к)"]
+    standalone_marks: ["МСФО"]
+
+    fields:
+      # --- Отчёт о финансовом положении ------------------------------------
+      ln1: {code: ifrs.trade_receivables, form: position, kind: exact}
+      ln2: {code: ifrs.long_term_trade_receivables, form: position, kind: exact}
+      ln3: {code: ifrs.cash, form: position, kind: exact}
+      ln4: {code: ifrs.inventories, form: position, kind: exact}
+      ln6: {code: ifrs.total_current_assets, form: position, kind: exact}
+      ln8: {code: ifrs.ppe, form: position, kind: exact}
+      ln10: {code: ifrs.total_non_current_assets, form: position, kind: exact}
+      ln11: {code: ifrs.total_assets, form: position, kind: exact}
+      ln12: {code: ifrs.long_term_trade_payables, form: position, kind: exact}
+      ln13: {code: ifrs.trade_payables, form: position, kind: exact}
+      ln16: {code: ifrs.short_term_lease_liabilities, form: position, kind: exact}
+      ln17: {code: ifrs.long_term_borrowings, form: position, kind: exact}
+      ln19: {code: ifrs.total_non_current_liabilities, form: position, kind: exact}
+      ln20: {code: ifrs.total_equity, form: position, kind: exact}
+      ln21: {code: ifrs.total_equity_and_liabilities, form: position, kind: exact}
+      ln22: {code: ifrs.long_term_lease_liabilities, form: position, kind: exact}
+      ln38: {code: ifrs.total_current_liabilities, form: position, kind: exact}
+      ln41: {code: ifrs.retained_earnings, form: position, kind: exact}
+      ln42:
+        code: ifrs.equity_attributable_to_owners_of_parent
+        form: position
+        kind: exact
+
+      # **Нематериальные активы агрегатора включают гудвил** — у Черкизово
+      # 7 451 + 2 723 = 10 174 ровно. Ни один показатель, флаг и стоп-фактор
+      # на эту позицию не опирается, поэтому поле не грузится вовсе: величина
+      # неизвестного состава хуже отсутствующей.
+      ln7:
+        code: ifrs.intangible_assets
+        form: position
+        kind: aggregate
+        loaded: false
+        covers: [ifrs.intangible_assets, ifrs.goodwill]
+        seen_at: "Черкизово: 7 451 + гудвил 2 723 = 10 174"
+
+      # **Краткосрочный долг агрегатора шире нашей позиции**: у ФосАгро 220 850
+      # против 209 715 по документу, у О'КЕЙ 13 597 629 против 13 320 252.
+      # Поле грузится, потому что без него не считается долг — величина
+      # маршрута, — и расхождение объявлено здесь. Развилка о его составе
+      # записана в NIGHT_QUESTIONS.md.
+      ln14:
+        code: ifrs.short_term_borrowings
+        form: position
+        kind: aggregate
+        loaded: true
+        covers: [ifrs.short_term_borrowings]
+        seen_at: "ФосАгро: 220 850 против 209 715 по документу (разница 11 135)"
+
+      # --- Отчёт о прибыли или убытке --------------------------------------
+      ln23: {code: ifrs.revenue, form: profit_or_loss, kind: exact}
+      ln24: {code: ifrs.gross_profit, form: profit_or_loss, kind: exact}
+      ln25: {code: ifrs.profit_before_tax, form: profit_or_loss, kind: exact}
+      ln26: {code: ifrs.profit_for_period, form: profit_or_loss, kind: exact}
+      ln37: {code: ifrs.operating_profit, form: profit_or_loss, kind: exact}
+
+      # --- Отчёт о движении денежных средств -------------------------------
+      ln28: {code: ifrs.cash_from_operations, form: cash_flow, kind: exact}
+      ln29: {code: ifrs.cash_from_investing, form: cash_flow, kind: exact}
+      ln39: {code: ifrs.cash_from_financing, form: cash_flow, kind: exact}
+      ln40: {code: ifrs.capital_expenditure, form: cash_flow, kind: exact}
+      ln79: {code: ifrs.depreciation, form: cash_flow, kind: exact}
+
+    # --- Сверки: поля, которые фактами не становятся -----------------------
+    #
+    # Общий долг и чистый долг агрегатора считаются им самим, и в фактах им
+    # места нет: долг у нас собирается из срочностей, а чистый долг — разностью
+    # с денежными средствами. Но сверка содержательна: у ЛСР чистый долг
+    # агрегатора занижен ровно на величину счетов эскроу (217 501 на 31.12.2025
+    # и 137 899 на 31.12.2024), то есть источник применяет собственную поправку.
+    controls:
+      debt_split:
+        total: ln34
+        parts: [ln14, ln17]
+        check: cbonds_debt_split_mismatch
+        origin: >-
+          Тождество сходится у 3 281 строки из 3 283 на всём массиве рублёвых
+          записей. Два расхождения нужно увидеть, а не отбросить, поэтому
+          уровень предупреждающий.
+      identity:
+        left: ln11
+        right: ln21
+        check: cbonds_identity_mismatch
+      sections:
+        total: ln11
+        parts: [ln6, ln10]
+        check: cbonds_sections_mismatch
+
+    # Ноль у агрегатора не означает нуля: источник пишет ноль и там, где
+    # величина не раскрыта. Итог, равный нулю при ненулевой деятельности, —
+    # признак нераскрытия, а не пустого баланса.
+    zero_total:
+      totals: [ln11, ln20]
+      activity: [ln23]
+      check: cbonds_zero_total
+
+    # Величины, которые агрегатор посчитал сам. Фактами они не становятся —
+    # состав у них его, а не наш, — но хранятся с комплектом: по ним делается
+    # сверка, а EBITDA источника служит заменой там, где состав не собрать.
+    reported:
+      ebitda: ln36
+      debt_total: ln34
+      net_debt: ln35
+      revenue_yoy: ln71
+      ebitda_margin: ln73
+
+# **Замены объявлены методикой, а не подобраны загрузчиком.**
+substitutions:
+  debt_total:
+    primary: ln34
+    fallback: [ln14, ln17]
+    origin: >-
+      Общий долг берётся суммой срочностей: тождество ln34 = ln14 + ln17
+      сходится у 3 281 строки из 3 283, а поле общего долга пусто у 58
+      эмитентов из 455 — там, впрочем, пусты и срочности, так что замена
+      их не спасает. Правило объявлено ради обратного случая.
+  ebitda:
+    primary: [ln37, ln79]
+    fallback: ln36
+    shown_as: по данным источника, упрощённая
+    origin: >-
+      EBITDA собирается из операционной прибыли и амортизации. Амортизация
+      не раскрыта у 110 эмитентов из 455, и тогда берётся поле источника —
+      с пометкой: состав его нам неизвестен, и у ЛСР оно даёт 68 369 против
+      61 159 по составу. Нулевое значение поля заменой не считается: ноль
+      здесь означает «не раскрыто».

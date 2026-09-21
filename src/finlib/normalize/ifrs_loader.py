@@ -23,6 +23,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from finlib.db import PgConnection, execute, fetch_all, fetch_one
+from finlib.normalize.facts import PRIORITY_WHERE
 from finlib.normalize.ifrs_lines import load_ifrs_lines
 from finlib.normalize.loader import PERIOD_RANK
 from finlib.quality.codes import (
@@ -192,15 +193,10 @@ ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
 -- исчезал из расчёта целиком.
 --
 -- Перечень сравниваемых граф тот же, что у РСБУ (`normalize/loader.py`):
--- правило одно, и расходиться ему нельзя.
-WHERE period_rank(EXCLUDED.period_role) <= period_rank(fact_report.period_role)
-  AND (fact_report.value IS DISTINCT FROM EXCLUDED.value
-       OR fact_report.period_role IS DISTINCT FROM EXCLUDED.period_role
-       OR fact_report.src_file_id IS DISTINCT FROM EXCLUDED.src_file_id
-       OR fact_report.source_line_code IS DISTINCT FROM EXCLUDED.source_line_code
-       OR fact_report.recognition IS DISTINCT FROM EXCLUDED.recognition
-       OR fact_report.note_number IS DISTINCT FROM EXCLUDED.note_number)
-"""
+-- правило одно, и расходиться ему нельзя. Само условие приоритета живёт
+-- в `normalize/facts.py`: его вставляют оба загрузчика, и второго определения
+-- правила быть не должно.
+""" + PRIORITY_WHERE
 
 _EXISTING = """
 SELECT report_date, form_code, line_code, value, period_role, src_file_id

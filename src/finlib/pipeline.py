@@ -12,6 +12,7 @@
 
 import logging
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import StrEnum
@@ -428,6 +429,72 @@ def accept_ifrs_document(
     report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
     intake.loaded = loaded
     return intake
+
+
+def accept_cbonds_report(
+    inn: str,
+    on_stage: Callable[[StageResult], None] | None = None,
+    *,
+    report: str = "report_msfo_real",
+    refresh: bool = False,
+    write: bool = True,
+    conn: PgConnection | None = None,
+) -> list[object]:
+    """Проводит нормализованные данные агрегатора через приём и загрузку.
+
+    Отдельная точка входа, как у документа МСФО: у доставки от агрегатора
+    своя последовательность — отбор годовых строк, проверки пригодности,
+    три проверки нуля, — и её итог нужен прежде, чем комплект попадёт
+    в расчёт.
+
+    **Здесь контроли доставки становятся достижимыми от цикла.** Пока строка
+    источника не проходила через эту функцию, все они числились бы
+    неподключёнными: код написан, покрыт тестами и никем не вызывается —
+    случай, из-за которого и появился реестр контролей.
+
+    `write=False` не предусмотрен намеренно: смысл доставки — запись, а
+    разобрать строку без записи значило бы завести второй путь к тому же
+    ответу. Пробный прогон откатывает транзакцию, а не обходит загрузку.
+    """
+    from finlib.normalize.cbonds_loader import load_row
+    from finlib.sources import cbonds
+
+    def say(stage: Stage, message: str, ok: bool = True) -> None:
+        if on_stage is not None:
+            on_stage(StageResult(stage, message, ok))
+
+    rows = cbonds.msfo_real(inn, refresh=refresh)
+    annual = [item for item in rows if str(item.get("date") or "").endswith("12-31")]
+    say(
+        Stage.FETCH,
+        f"строк источника {len(rows)}, из них годовых {len(annual)}",
+        ok=bool(annual),
+    )
+    if not annual:
+        return []
+    if not write:
+        raise ValueError(
+            "доставка агрегатора без записи не предусмотрена: пробный прогон "
+            "откатывает транзакцию, а не обходит загрузку"
+        )
+    outcomes: list[object] = []
+    with connection() if conn is None else _kept(conn) as active:
+        for item in annual:
+            outcomes.append(load_row(item, active, report_name=report))
+    accepted = [item for item in outcomes if item.accepted]
+    say(
+        Stage.LOAD,
+        f"комплектов принято {len(accepted)} из {len(annual)}, "
+        f"в карантине {sum(1 for item in accepted if item.quarantined)}",
+        ok=bool(accepted),
+    )
+    return outcomes
+
+
+@contextmanager
+def _kept(conn: PgConnection) -> Iterator[PgConnection]:
+    """Отдаёт переданное соединение, не закрывая его: транзакция чужая."""
+    yield conn
 
 
 def _load_from_inbox(

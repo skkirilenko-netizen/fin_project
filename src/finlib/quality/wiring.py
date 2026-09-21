@@ -263,6 +263,26 @@ REGISTRY: dict[CheckCode, Wiring] = {
             CheckCode.NOTE_VALUE_NOT_EXTRACTED,
         )
     },
+    # --- нормализованные данные агрегатора ----------------------------------
+    # Три проверки нуля стоят в боевом пути загрузки, а не в замере: ноль
+    # у агрегатора не означает нуля, и комплект, у которого не сходится
+    # тождество отчётности, в расчёт не идёт. Рядом с ними сводка сопоставления
+    # полей и запись об отказе приёма: строка, не ставшая комплектом,
+    # не молчит.
+    **{
+        code: Wiring(
+            WiringStatus.WIRED, date(2026, 9, 21), ("normalize/cbonds_loader.py",)
+        )
+        for code in (
+            CheckCode.CBONDS_IDENTITY_MISMATCH,
+            CheckCode.CBONDS_SECTIONS_MISMATCH,
+            CheckCode.CBONDS_ZERO_TOTAL,
+            CheckCode.CBONDS_DEBT_SPLIT_MISMATCH,
+            CheckCode.CBONDS_FIELD_MAPPING,
+            CheckCode.CBONDS_SET_REJECTED,
+            CheckCode.CBONDS_VALUE_MISMATCH,
+        )
+    },
 }
 
 
