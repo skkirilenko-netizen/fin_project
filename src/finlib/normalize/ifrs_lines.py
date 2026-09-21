@@ -68,6 +68,18 @@ class IfrsPosition(BaseModel):
     code: str = Field(pattern=CODE_PATTERN)
     name: str = Field(min_length=1)
     form: str = Field(pattern=CODE_PATTERN)
+    # Формы, в которых та же позиция встречается ещё. **Один код в двух формах
+    # правомерен, а величина принадлежит форме.** Неденежные корректировки
+    # косвенного метода по определению повторяют статьи отчёта о прибыли —
+    # налог, курсовые разницы, обесценение, — и двойники справочника для них
+    # хуже, чем одна позиция, объявившая обе формы: по паре зеркал расходятся
+    # и наименования, и состав синонимов.
+    #
+    # Форма при этом не перестаёт различать: перечень объявлен у позиции,
+    # а не отменён вовсе. «Прибыль до налогообложения» стоит и в ОПУ,
+    # и первой строкой косвенного метода, означая разное, — и обе остаются
+    # разными позициями, потому что вторая форма у них не объявлена.
+    also_in_forms: tuple[str, ...] = ()
     section: str = Field(min_length=1)
     sign: Sign = Sign.POSITIVE
     in_brackets: bool = False
@@ -119,6 +131,16 @@ class IfrsPosition(BaseModel):
         """
         names = (self.name, *(item.name for item in self.aliases))
         return tuple(dict.fromkeys(normalize_name(name) for name in names))
+
+    def occurs_in(self, form: str) -> bool:
+        """Встречается ли позиция в этой форме — своей или объявленной второй.
+
+        Правило одно на все места, где спрашивают про форму: прежде проверка
+        стояла и в справочнике, и в разборе (`found.form == form_code`),
+        и свёрнутое зеркало опознавалось справочником, но отбрасывалось
+        разбором — величина терялась молча.
+        """
+        return form == self.form or form in self.also_in_forms
 
     @property
     def compositions(self) -> tuple[tuple[IfrsComponent, ...], ...]:
@@ -316,7 +338,11 @@ class IfrsCatalog(BaseModel):
 
     def _check_forms_exist(self) -> None:
         """Позиция объявлена в разделе, который есть в справочнике."""
-        unknown = {item.form for item in self.positions} - set(self.forms)
+        unknown = {
+            form
+            for item in self.positions
+            for form in (item.form, *item.also_in_forms)
+        } - set(self.forms)
         if unknown:
             raise ValueError(
                 f"позиции ссылаются на неизвестные разделы: {', '.join(sorted(unknown))}"
@@ -373,8 +399,12 @@ class IfrsCatalog(BaseModel):
         owners: dict[tuple[str, str, str], list[str]] = {}
         for position in self.positions:
             for name in position.match_names:
-                key = (position.form, position.section, name)
-                owners.setdefault(key, []).append(position.code)
+                # Объявившая вторую форму позиция занимает наименование
+                # и в ней: иначе тёзка из второй формы опознавался бы
+                # произвольно — именно тем, что встретилось раньше.
+                for form in (position.form, *position.also_in_forms):
+                    key = (form, position.section, name)
+                    owners.setdefault(key, []).append(position.code)
         overlapping = {
             key: codes for key, codes in owners.items() if len(codes) > 1
         }
@@ -433,7 +463,10 @@ class IfrsCatalog(BaseModel):
         normalized = normalize_name(name)
         found = [item for item in self.positions if normalized in item.match_names]
         if form is not None:
-            found = [item for item in found if item.form == form]
+            # Позиция, объявившая вторую форму, опознаётся и в ней: код один,
+            # а величина принадлежит форме строки и в итоги другой формы
+            # не входит. Правило одно и живёт у самой позиции.
+            found = [item for item in found if item.occurs_in(form)]
         if not found:
             return None
         if len(found) == 1:

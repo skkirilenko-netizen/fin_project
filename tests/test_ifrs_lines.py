@@ -466,3 +466,56 @@ def test_ifrs_catalog_does_not_import_rsbu_notion_of_forms() -> None:
     assert CATALOG.match_form("Консолидированный отчёт о движении денежных средств") == (
         "ifrs.statement_of_cash_flows"
     )
+
+
+def test_position_may_occur_in_two_forms() -> None:
+    """Один код в двух формах правомерен, и вторая форма объявлена у позиции.
+
+    Неденежные корректировки косвенного метода повторяют статьи отчёта
+    о прибыли — налог, курсовые разницы, обесценение, — и шесть зеркал
+    свёрнуты в позиции ядра. Величина при этом принадлежит форме строки:
+    в ОПУ и в ОДДС это два разных факта.
+    """
+    flows = "ifrs.statement_of_cash_flows"
+    for code in (
+        "ifrs.income_tax",
+        "ifrs.fx_gain_loss",
+        "ifrs.impairment_losses",
+        "ifrs.investment_income",
+        "ifrs.other_finance_result",
+        "ifrs.share_of_associates_result",
+    ):
+        position = CATALOG.require(code)
+        assert position.occurs_in(position.form)
+        assert position.occurs_in(flows), code
+        # Опознание в обеих формах идёт по одному правилу — по самой позиции.
+        assert CATALOG.match_by_name(position.name, form=flows) is position
+
+    # Зеркала, у которых смысл различается, остались отдельными кодами:
+    # нетто-результат — сальдо, а не расход; проценты у́же финансовых расходов.
+    for code in (
+        "ifrs.cf_adj_finance_result_net",
+        "ifrs.cf_adj_interest_expense",
+        "ifrs.cf_adj_interest_income",
+    ):
+        position = CATALOG.require(code)
+        assert position.form == flows
+        assert position.also_in_forms == ()
+
+
+def test_second_form_does_not_cancel_the_form_rule() -> None:
+    """Форма продолжает различать тёзок, у которых вторая форма не объявлена.
+
+    «Прибыль до налогообложения» стоит и в отчёте о прибыли, и первой строкой
+    косвенного метода, означая разное: опознание по наименованию без формы
+    отдало бы произвольную из двух.
+    """
+    profit = CATALOG.match_by_name(
+        "Прибыль до налогообложения", form="ifrs.statement_of_profit_or_loss"
+    )
+    flows = CATALOG.match_by_name(
+        "Прибыль до налогообложения", form="ifrs.statement_of_cash_flows"
+    )
+    assert profit is not None and flows is not None
+    assert profit.code != flows.code
+    assert not profit.occurs_in("ifrs.statement_of_cash_flows")

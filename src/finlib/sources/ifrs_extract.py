@@ -138,6 +138,8 @@ def _total_places_of(
     return {
         position.code: index
         for index, position in recognised.items()
+        # Итог остаётся итогом своей формы: позиция, объявившая вторую форму,
+        # итогом там не становится — иерархию разделов задаёт своя форма.
         if position.is_total and position.form == form_code
     }
 
@@ -519,7 +521,7 @@ def _extract_form(
     recognised: dict[int, IfrsPosition] = {}
     for position_index, (name, _, _) in enumerate(rows):
         found = catalog.match_by_name(name, form=form_code) if name else None
-        if found is not None and found.form == form_code:
+        if found is not None and found.occurs_in(form_code):
             recognised[position_index] = found
 
     _resolve_by_section(rows, recognised, catalog, form_code)
@@ -1759,7 +1761,7 @@ def _resolve_by_section(
         found = catalog.match_by_name(
             name, section=recognised[below].section, form=form_code
         )
-        if found is not None and found.form == form_code:
+        if found is not None and found.occurs_in(form_code):
             recognised[index] = found
             logger.info(
                 "строка «%s» опознана по разделу %s как %s",
