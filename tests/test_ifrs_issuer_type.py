@@ -72,11 +72,15 @@ def test_stop_factor_is_not_applied_by_type() -> None:
 def test_stop_factor_is_not_applied_by_context() -> None:
     """Отрицательный оборотный капитал при высоком покрытии не применяется."""
     policy = load_issuer_types()
+    # Ключ словаря — код показателя ветки. Прежде норма ссылалась
+    # на `interest_cover`, которого в справочнике МСФО нет: замер подставлял
+    # величину отдельным словарём, а в расчёте по фактам норма не сработала бы
+    # никогда.
     high = applicability(
-        "negative_nwc", "corporate", {"interest_cover": Decimal("5.71")}, policy
+        "negative_nwc", "corporate", {"interest_cover_accrued": Decimal("5.71")}, policy
     )
     low = applicability(
-        "negative_nwc", "corporate", {"interest_cover": Decimal("-1.99")}, policy
+        "negative_nwc", "corporate", {"interest_cover_accrued": Decimal("-1.99")}, policy
     )
     assert not high.applicable and high.kind == "by_context"
     assert low.applicable
@@ -89,7 +93,9 @@ def test_context_condition_needs_the_metric() -> None:
     а не на его отсутствие.
     """
     policy = load_issuer_types()
-    found = applicability("negative_nwc", "corporate", {"interest_cover": None}, policy)
+    found = applicability(
+        "negative_nwc", "corporate", {"interest_cover_accrued": None}, policy
+    )
     assert found.applicable
 
 

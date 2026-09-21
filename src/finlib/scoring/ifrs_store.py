@@ -24,7 +24,7 @@ from finlib.scoring.definitions import Confidence, StopEffect
 from finlib.scoring.engine import Assessment as StoredAssessment
 from finlib.scoring.engine import GroupScore as StoredGroup
 from finlib.scoring.ifrs import Assessment as IfrsAssessment
-from finlib.scoring.ifrs import assess
+from finlib.scoring.ifrs import StopFactors, assess, evaluate_stop_factors
 from finlib.scoring.metric_score import MetricScore as StoredMetric
 from finlib.scoring.store import save_assessment
 from finlib.standards import Standard
@@ -169,10 +169,42 @@ def assess_ifrs(
         if report_date == periods[0]:
             latest = computed
 
-    result = assess(latest, policy, ())
-    save_ifrs_assessment(inn, periods[0], result, latest, conn, policy)
+    # **Стоп-факторы проверяются здесь же, по величинам комплекта.** Прежде
+    # оценка звалась с пустым перечнем исключённых и писала
+    # `stop_factor_code = NULL`: механизм задачи 26 существовал только
+    # в замере, и в документе стоп-фактора не было вовсе.
+    stops = stop_factors_of(inn, periods[0], latest, conn, policy)
+    logger.info("%s за %s: %s", inn, periods[0], stops.describe())
+    result = assess(latest, policy, stops)
+    save_ifrs_assessment(inn, periods[0], result, latest, conn, policy, stops)
     save_changes(inn, periods, conn, policy)
     return result, saved
+
+
+def stop_factors_of(
+    inn: str,
+    report_date: date,
+    computed: tuple[MetricValue, ...],
+    conn: PgConnection,
+    policy: IfrsMetricsPolicy | None = None,
+) -> StopFactors:
+    """Стоп-факторы комплекта: тип эмитента и заключение берутся из базы.
+
+    Обстановка хранится с комплектом (`src_file.meta`), поэтому доводом
+    её передавать не нужно: величина, которую можно передать снаружи, однажды
+    передаётся неверной и об этом не сообщает.
+    """
+    from finlib.sources.ifrs_audit import Determination, audit_from_meta
+
+    meta = _meta_of(inn, report_date, conn)
+    audit = audit_from_meta(meta)
+    return evaluate_stop_factors(
+        computed,
+        meta.get("issuer_type") or "corporate",
+        audit.sections if audit is not None else (),
+        audit is not None and audit.determination is Determination.DETERMINED,
+        policy,
+    )
 
 
 def save_changes(
@@ -313,6 +345,16 @@ LIMIT 1
 """
 
 
+def _meta_of(inn: str, report_date: date, conn: PgConnection) -> dict:
+    """`src_file.meta` актуального комплекта года; пусто — комплекта нет."""
+    row = fetch_one(
+        _AUDIT_META,
+        {"inn": inn, "standard": Standard.IFRS.value, "year": report_date.year},
+        conn=conn,
+    )
+    return (row["meta"] if row else None) or {}
+
+
 def _audit_confidence(
     inn: str, report_date: date, conn: PgConnection
 ) -> tuple[Confidence, list[str]]:
@@ -326,12 +368,7 @@ def _audit_confidence(
     from finlib.normalize.ifrs_audit import load_audit_policy
     from finlib.sources.ifrs_audit import audit_from_meta
 
-    row = fetch_one(
-        _AUDIT_META,
-        {"inn": inn, "standard": Standard.IFRS.value, "year": report_date.year},
-        conn=conn,
-    )
-    audit = audit_from_meta(row["meta"] if row else None)
+    audit = audit_from_meta(_meta_of(inn, report_date, conn))
     if audit is None or not audit.modified:
         return Confidence.HIGH, []
     policy = load_audit_policy()
@@ -347,9 +384,16 @@ def save_ifrs_assessment(
     computed: tuple[MetricValue, ...],
     conn: PgConnection,
     policy: IfrsMetricsPolicy | None = None,
+    stops: StopFactors | None = None,
 ) -> int:
-    """Пишет оценку МСФО и её разложение по группам и показателям."""
+    """Пишет оценку МСФО и её разложение по группам и показателям.
+
+    `stops` — стоп-факторы, по которым считалась оценка: из них берутся
+    последствие для класса и оговорки неприменимости. Без них запись
+    утверждала бы, что стоп-факторов нет, тогда как их не проверяли.
+    """
     policy = policy or load_ifrs_metrics()
+    stops = stops if stops is not None else StopFactors()
     audit_confidence, audit_reasons = _audit_confidence(inn, report_date, conn)
     in_scoring = {item.code for group in assessment.groups for item in group.metrics}
     stored = StoredAssessment(
@@ -364,9 +408,11 @@ def save_ifrs_assessment(
         # отдельного случая «класс есть, а балла нет» здесь не возникает —
         # стоп-факторы ветки применяются к показателям, а не к классу.
         breadth_reason=None,
-        class_before_stop=assessment.class_code,
-        stop_factor_code=None,
-        stop_factor_effect=StopEffect.NONE,
+        # Класс до применения стоп-фактора и после — разные сведения: класс E
+        # у набравшего по баллу B и класс E у набравшего E выглядят одинаково.
+        class_before_stop=assessment.class_before_stop or assessment.class_code,
+        stop_factor_code=assessment.stop_factor_code,
+        stop_factor_effect=_effect_of(assessment, policy),
         # Уверенность понижается модифицированным мнением аудитора и больше
         # ничем: правило по числу периодов ряда к МСФО пока не применяется —
         # ряда у эмитента ещё нет. Высокая здесь означает «понижать
@@ -401,7 +447,7 @@ def save_ifrs_assessment(
                 dynamics=None,
                 periods_used=1 if item.calculable else 0,
                 included=item.code in in_scoring,
-                exclusion_reason=_exclusion_of(item, in_scoring),
+                exclusion_reason=_exclusion_of(item, in_scoring, stops, policy),
                 exclusion_kind=None,
                 excluded_by_methodology=not item.in_scoring,
             )
@@ -414,6 +460,22 @@ def save_ifrs_assessment(
     return save_assessment(stored, conn)
 
 
+def _effect_of(assessment: IfrsAssessment, policy: IfrsMetricsPolicy) -> StopEffect:
+    """Что стоп-фактор сделал с классом: опустил до низшего или ограничил.
+
+    Градация читается из самого исхода, а не объявляется вторым полем: два
+    поля одной величины умеют разойтись — это уже случалось с весами групп.
+    """
+    if assessment.stop_factor_code is None:
+        return StopEffect.NONE
+    lowest = policy.classes[-1].code
+    return (
+        StopEffect.LOWEST_CLASS
+        if assessment.class_code == lowest
+        else StopEffect.CAP_AT_CLASS
+    )
+
+
 def _score_of(code: str, assessment: IfrsAssessment) -> Decimal | None:
     """Балл показателя из разложения оценки; None — в балл не входил."""
     for group in assessment.groups:
@@ -423,15 +485,39 @@ def _score_of(code: str, assessment: IfrsAssessment) -> Decimal | None:
     return None
 
 
-def _exclusion_of(item: MetricValue, in_scoring: set[str]) -> str | None:
+def _exclusion_of(
+    item: MetricValue,
+    in_scoring: set[str],
+    stops: StopFactors,
+    policy: IfrsMetricsPolicy,
+) -> str | None:
     """Почему показатель не вошёл в балл; None — вошёл.
 
     Причина обязана быть безусловной и различать наше решение от неполноты
     данных: «в балл не идёт по методике» и «не рассчитан» — разные сведения.
+    Неприменимость стоп-фактора называется оговоркой методики дословно: она
+    объясняет не только исключение, но и то, что оценка не понижена.
     """
     if item.code in in_scoring:
         return None
+    limitation = stops.limitation_of(item.code)
+    if limitation is not None:
+        return limitation
     if not item.in_scoring:
+        # **Причина объявлена у показателя, а не подставлена общей фразой.**
+        # «Показатель описывает деятельность» верно для рентабельности
+        # и неверно для собственного капитала: у него исключение — это
+        # стоп-фактор, а не измерение, и методика так и говорит.
+        declared = next(
+            (
+                metric.exclusion_reason
+                for metric in policy.metrics
+                if metric.code == item.code and metric.exclusion_reason
+            ),
+            None,
+        )
+        if declared:
+            return " ".join(declared.split())
         return "в балл не входит по методике: показатель описывает деятельность"
     if not item.calculable:
         return item.describe()

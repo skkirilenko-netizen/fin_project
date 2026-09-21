@@ -34,11 +34,11 @@ from finlib.report.refusals import (
     from_ifrs_notes,
     totals,
 )
-from finlib.scoring.ifrs import assess
+from finlib.scoring.ifrs import assess, evaluate_stop_factors
 from finlib.sources.ifrs_audit import Determination as AuditState
 from finlib.sources.ifrs_audit import read_audit_report
 from finlib.sources.ifrs_inbox import form_headings, text_of
-from finlib.sources.ifrs_issuer_type import applicability, consistency, determine_type
+from finlib.sources.ifrs_issuer_type import determine_type
 from finlib.sources.ifrs_markup import restore
 from finlib.sources.ifrs_notes import accrued_interest, index_notes, note_values
 from finlib.sources.ifrs_numbers import load_parsing_policy
@@ -49,14 +49,10 @@ logger = logging.getLogger(__name__)
 # Перечень один на весь проект (`metrics/ifrs.py`): замер и документ обязаны
 # называть величину одинаково, иначе читатель сверяет одно с другим и не находит
 # соответствия.
-# Стоп-факторы считаются по тем же величинам, что и показатели: правило одно,
-# меняется только применимость (задача 26).
-STOP_FACTORS = {
-    "negative_equity": "ifrs.total_equity",
-    "negative_autonomy": "equity_ratio",
-    "negative_nwc": "nwc",
-    "interest_cover_below_one": "interest_cover_accrued",
-}
+# Перечень стоп-факторов и величины, по которым они проверяются, объявлены
+# методикой (`methodology/ifrs_issuer_type.yaml`), а применяет их одна
+# реализация (`scoring/ifrs.py::evaluate_stop_factors`). Прежде перечень стоял
+# здесь, в замере: он их применял, а расчёт по фактам не знал о них вовсе.
 
 
 def _known(issuer, catalog) -> dict[str, Decimal]:
@@ -170,27 +166,24 @@ def main(argv: list[str] | None = None) -> int:
             policy,
         )
 
-        # Неприменимость стоп-фактора по типу и по обстановке действует
-        # в расчёте: показатель считается и печатается, а в балл не идёт.
-        by_code = {item.code: item for item in computed}
-        cover = by_code["interest_cover_accrued"].value
-        excluded: list[str] = []
-        for factor, metric in STOP_FACTORS.items():
-            outcome = applicability(factor, verdict.code, {"interest_cover": cover})
-            if not outcome.applicable and metric in by_code:
-                excluded.append(metric)
-        excluded_total += len(excluded)
-
-        result = assess(computed, policy, tuple(excluded))
-        if result.class_code is not None:
-            classed += 1
-        if result.divergence:
-            divergences += 1
-
         report = read_audit_report(
             document.text, document, before=min(headings.values(), default=0)
         )
         readable = report.determination is AuditState.DETERMINED
+
+        # **Стоп-факторы считает одна реализация на замер и на расчёт
+        # по фактам.** Прежде перечень величин, по которым они проверяются,
+        # лежал здесь, в замере, — и расчёт по фактам о них не знал вовсе.
+        stops = evaluate_stop_factors(
+            computed, verdict.code, report.sections, readable, policy
+        )
+        excluded_total += len(stops.excluded)
+
+        result = assess(computed, policy, stops)
+        if result.class_code is not None:
+            classed += 1
+        if result.divergence:
+            divergences += 1
 
         print(f"\n{issuer.inn} {issuer.report_date} {kind} [{verdict.code}]")
         for item in computed:
@@ -212,10 +205,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         for note in result.divergence:
             print(f"      сверх порога: {note}")
-        for metric in excluded:
-            print(f"      исключён из балла неприменимостью: {metric}")
-        state, note = consistency("negative_nwc", report.sections, readable)
-        print(f"      заключение: {state.value} — {note.split('.')[0]}.")
+        print(f"      {stops.describe()}")
+        if stops.audit_state:
+            print(
+                f"      заключение: {stops.audit_state} — "
+                f"{stops.audit_note.split('.')[0]}."
+            )
 
         # Отказы собираются тем же механизмом, что и в РСБУ: раздел
         # «Ограничения анализа» — перечень того, что нужно запросить.
@@ -238,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
             + from_ifrs_audit(report)
             + from_assessment(result, _class_where(result, policy, computed, issuer.profile))
             + from_excluded(
-                {code: by_code[code].name for code in excluded},
+                {
+                    item.code: item.name
+                    for item in computed
+                    if item.code in stops.excluded
+                },
                 "неприменимость объявлена методикой по типу эмитента",
             )
         )

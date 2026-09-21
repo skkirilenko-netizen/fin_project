@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
 NOT_CALCULATED_MARK = "не рассчитан"
 
 _ORGANIZATION = """
+-- `org_meta` названа иначе, чем `meta` комплекта: два поля одного имени
+-- в одной строке сливаются, и адрес организации подменялся бы сведениями
+-- комплекта.
 SELECT o.inn, o.name, o.short_name, o.ogrn, o.okved, o.region,
+       o.meta AS org_meta,
        s.reporting_type, s.standard, s.unit_code, s.unit_source, s.knd,
        s.correction_version, s.source, s.digit_grouping, s.meta
 FROM organization o

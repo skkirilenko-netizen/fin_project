@@ -109,6 +109,8 @@ DERIVED_NAMES: dict[str, str] = {
     "net_debt": "чистый долг: заёмные средства за вычетом денежных",
     "debt_total": "совокупный долг: долгосрочные и краткосрочные заёмные средства",
     "ebitda": "EBITDA: операционная прибыль и амортизация",
+    "nwc": "чистый оборотный капитал: итог оборотных активов за вычетом итога "
+    "краткосрочных обязательств",
     "ffo": "FFO: поток от операционной деятельности до изменений оборотного капитала",
 }
 
@@ -176,8 +178,21 @@ def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | N
     scale = Decimal(12) / Decimal(inputs.months)
     if inputs.interim and ebitda is not None and "ebitda" in policy.annualisation.scaled:
         ebitda *= scale
+    # **Чистый оборотный капитал считается по итогам разделов баланса.**
+    # Отговорка «состав оборотных активов различается от эмитента к эмитенту»
+    # не держится: итоги раздела опознаются справочником — их и вычитаем,
+    # а состав внутри итога на разность не влияет. Один недостающий итог
+    # отменяет величину целиком, как и везде здесь.
+    current_assets = get("ifrs.total_current_assets")
+    current_liabilities = get("ifrs.total_current_liabilities")
+    nwc = (
+        current_assets - current_liabilities
+        if current_assets is not None and current_liabilities is not None
+        else None
+    )
     return {
         "debt_total": debt,
+        "nwc": nwc,
         "net_debt": debt - cash if debt is not None and cash is not None else None,
         "ebitda": ebitda,
         "ffo": ffo,

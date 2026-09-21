@@ -534,7 +534,10 @@ def _organization(details: _Details, inn: str) -> Organization:
         okpo=details.get(OKPO_LABEL),
         okved=details.get(OKVED_LABEL),
         okopf=okopf,
-        region=details.get(ADDRESS_LABEL),
+        # Выгрузка называет это «Местонахождение (адрес)» — адресом и пишем:
+        # прежде адрес ложился в графу региона, и документ печатал под словом
+        # «Регион» дом с помещением.
+        address=details.get(ADDRESS_LABEL),
     )
 
 
@@ -884,5 +887,6 @@ def _merged_organization(files: list[ParsedFile]) -> Organization:
             okved=merged.okved or item.organization.okved,
             okopf=merged.okopf or item.organization.okopf,
             region=merged.region or item.organization.region,
+            address=merged.address or item.organization.address,
         )
     return merged

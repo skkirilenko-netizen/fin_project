@@ -51,7 +51,12 @@ class Organization:
     okpo: str | None = None
     okved: str | None = None
     okopf: str | None = None
+    # Регион и адрес — разные сведения, и одно поле на оба врало в документе:
+    # выгрузка XLSX называет «Местонахождение (адрес)», ресурс отдаёт регион,
+    # и в шапке заключения по ООО «Левенгук» под словом «Регион» стоял адрес
+    # с домом и помещением. Графа считает то, как называется.
     region: str | None = None
+    address: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

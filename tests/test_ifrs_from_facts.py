@@ -27,7 +27,11 @@ from finlib.normalize.ifrs_loader import load_extraction
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.quality.periods import PeriodConfidence
 from finlib.scoring.ifrs import assess
-from finlib.scoring.ifrs_store import save_ifrs_assessment, save_metrics
+from finlib.scoring.ifrs_store import (
+    save_ifrs_assessment,
+    save_metrics,
+    stop_factors_of,
+)
 from finlib.sources.ifrs_document import DocumentReading
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import identify
@@ -236,7 +240,7 @@ def test_metrics_and_assessment_come_from_the_facts(db_conn) -> None:
     assert by_code["equity_ratio"].value == Decimal(600_000) / Decimal(1_500_000)
 
     assert save_metrics(INN, DATES[0], computed, db_conn, policy) == len(computed)
-    result = assess(computed, policy, ())
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
     assert save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
 
     stored = fetch_one(
@@ -283,7 +287,7 @@ def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     policy = load_ifrs_metrics()
     computed = compute_from_facts(INN, DATES[0], db_conn, policy)
     save_metrics(INN, DATES[0], computed, db_conn, policy)
-    result = assess(computed, policy, ())
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
     save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
 
     made = build_report(
@@ -368,7 +372,7 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     policy = load_ifrs_metrics()
     computed = compute_from_facts(INN, DATES[0], db_conn, policy)
     save_metrics(INN, DATES[0], computed, db_conn, policy)
-    result = assess(computed, policy, ())
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
     save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
 
     # Уверенность понижена ступенью, и причина названа словами.

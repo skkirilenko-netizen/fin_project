@@ -8,6 +8,7 @@
 """
 
 import logging
+from decimal import Decimal
 from pathlib import Path
 from typing import Self
 
@@ -50,12 +51,49 @@ class IssuerType(BaseModel):
 
 
 class StopFactor(BaseModel):
-    """Стоп-фактор, применимость которого зависит от типа."""
+    """Стоп-фактор ветки МСФО: величина, условие и последствие для класса.
+
+    **Всё объявлено здесь, а не в замере.** Прежде перечень стоял в методике,
+    а величина, по которой стоп-фактор проверяется, — в `eval/`: замер их
+    применял, расчёт по фактам не знал о них вовсе.
+
+    `statement` печатается читателю, `rationale` — нет: первое говорит,
+    что стоп-фактор означает для этой организации, второе — почему методика
+    устроена так, и рядом с оценкой читалось бы как оправдание.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     code: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    # Показатель, по которому проверяется условие. Именно показатель, а не
+    # статья: у эмитента, не раскрывшего капитал отдельной строкой, статьи
+    # нет, а показатель считается.
+    metric: str = Field(min_length=1)
+    condition: str = Field(pattern="^(lt|lte|gt|gte)$")
+    value: str = Field(min_length=1)
+    # Класс, которым ограничивается оценка при срабатывании.
+    cap: str = Field(min_length=1)
+    statement: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+    @property
+    def threshold(self) -> Decimal:
+        """Отсечка условия величиной."""
+        return Decimal(self.value)
+
+    def holds(self, value: Decimal | None) -> bool:
+        """Сработал ли стоп-фактор на этой величине; None — проверять нечем."""
+        if value is None:
+            return False
+        threshold = self.threshold
+        if self.condition == "lt":
+            return value < threshold
+        if self.condition == "lte":
+            return value <= threshold
+        if self.condition == "gt":
+            return value > threshold
+        return value >= threshold
 
 
 class Condition(BaseModel):

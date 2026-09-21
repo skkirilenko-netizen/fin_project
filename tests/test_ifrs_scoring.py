@@ -12,7 +12,12 @@ from decimal import Decimal
 
 from finlib.metrics.ifrs import Inputs, Reason, compute_all, months_of
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
-from finlib.scoring.ifrs import assess
+from finlib.scoring.ifrs import StopFactors, assess
+
+# Стоп-факторы, проверенные на величинах комплекта. Довод обязательный:
+# посчитать оценку, не проверив ни одного стоп-фактора, значит не отличить
+# «ни один не сработал» от «не проверяли».
+NONE_TRIGGERED = StopFactors(checked=4)
 
 HEALTHY = {
     "ifrs.long_term_borrowings": Decimal(119062),
@@ -100,14 +105,14 @@ def test_class_is_not_assigned_when_one_group_dominates() -> None:
     """
     policy = load_ifrs_metrics()
     without_cover = compute_all(Inputs(HEALTHY, {}), policy)
-    result = assess(without_cover, policy)
+    result = assess(without_cover, policy, NONE_TRIGGERED)
     assert result.class_code is None
     assert "одной группой" in result.no_class_reason
 
     with_cover = compute_all(
         Inputs(HEALTHY, {"interest_accrued": Decimal(30974)}), policy
     )
-    assigned = assess(with_cover, policy)
+    assigned = assess(with_cover, policy, NONE_TRIGGERED)
     assert assigned.class_code == "B"
     assert assigned.score.quantize(Decimal("0.1")) == Decimal("66.0")
 
@@ -120,7 +125,14 @@ def test_excluded_metric_does_not_enter_the_score() -> None:
     """
     policy = load_ifrs_metrics()
     computed = compute_all(Inputs(HEALTHY, {"interest_accrued": Decimal(30974)}), policy)
-    without = assess(computed, policy, excluded=("interest_cover_accrued",))
+    without = assess(
+        computed,
+        policy,
+        StopFactors(
+            checked=4,
+            excluded_reasons=(("interest_cover_accrued", "стоп-фактор неприменим"),),
+        ),
+    )
     assert all(
         item.code != "debt_service" for group in without.groups for item in group.metrics
     )
@@ -161,6 +173,6 @@ def test_divergence_gap_is_reported_even_below_the_threshold() -> None:
     """Разрыв двух мер печатается всегда: ноль превышений — не ноль разрыва."""
     policy = load_ifrs_metrics()
     computed = compute_all(Inputs(HEALTHY, {"interest_accrued": Decimal(30974)}), policy)
-    result = assess(computed, policy)
+    result = assess(computed, policy, NONE_TRIGGERED)
     assert result.divergence_gap is not None
     assert result.divergence == ()

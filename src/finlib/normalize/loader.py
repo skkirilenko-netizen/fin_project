@@ -468,6 +468,10 @@ def _upsert_organization(organization: Organization, conn: PgConnection) -> None
                     for key, value in (
                         ("kpp", organization.kpp),
                         ("okopf", organization.okopf),
+                        # Адрес хранится рядом с прочими реквизитами, а не
+                        # в графе региона: это разные сведения, и графа обязана
+                        # содержать то, как называется.
+                        ("address", organization.address),
                     )
                     if value is not None
                 },

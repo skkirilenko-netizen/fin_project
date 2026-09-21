@@ -357,6 +357,11 @@ def _write_header(
         details.append(f"Основной вид деятельности (ОКВЭД): {organization['okved']}")
     if organization["region"]:
         details.append(f"Регион: {organization['region']}")
+    # Адрес — не регион, и печатается своим именем. Прежде он лежал в графе
+    # региона, и в шапке под словом «Регион» стоял дом с помещением.
+    address = (organization.get("org_meta") or {}).get("address")
+    if address:
+        details.append(f"Адрес: {address}")
     details.append(f"Отчётная дата: {data.report_date:%d.%m.%Y}")
     # Дата формирования и разрыв стоят рядом с отчётной датой: документ,
     # собранный через двадцать месяцев после отчётной даты, описывает

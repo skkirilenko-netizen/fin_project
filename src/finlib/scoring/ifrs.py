@@ -81,6 +81,11 @@ class Assessment:
     # превышении порога: ноль превышений при неизвестном разрыве неотличим
     # от несделанного сравнения.
     divergence_gap: Decimal | None = None
+    # Сработавший стоп-фактор и класс до его применения. Класс E у набравшего
+    # по баллу B и класс E у набравшего E — разные сведения, а выглядят
+    # одинаково; правило то же, что в РСБУ.
+    stop_factor_code: str | None = None
+    class_before_stop: str | None = None
 
     def describe(self) -> str:
         """Однострочная сводка."""
@@ -92,18 +97,126 @@ class Assessment:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class StopFactors:
+    """Стоп-факторы комплекта: проверенное, сработавшее и неприменимое.
+
+    **Число проверенных стоит рядом с числом сработавших.** Ноль сработавших
+    при неизвестном числе проверок не означает ни того, что стоп-факторов нет,
+    ни того, что они проверялись: ровно так они и не работали — перечень был
+    в методике, применение в замере, а расчёт по фактам звал оценку с пустым
+    перечнем исключённых.
+    """
+
+    checked: int = 0
+    triggered: tuple[str, ...] = ()
+    # Показатели, вышедшие из балла неприменимостью стоп-фактора, вместе
+    # с оговоркой методики: она печатается там, где читатель ищет причину
+    # исключения, а не отдельным перечнем.
+    excluded_reasons: tuple[tuple[str, str], ...] = ()
+    # Класс, которым ограничена оценка, и стоп-фактор, его назначивший.
+    cap: str | None = None
+    code: str | None = None
+    # Сверка сработавшего стоп-фактора с аудиторским заключением.
+    audit_state: str = ""
+    audit_note: str = ""
+
+    @property
+    def excluded(self) -> tuple[str, ...]:
+        """Показатели, не идущие в балл из-за неприменимости стоп-фактора."""
+        return tuple(code for code, _ in self.excluded_reasons)
+
+    def limitation_of(self, metric: str) -> str | None:
+        """Оговорка неприменимости по показателю; None — он в балле."""
+        return next((text for code, text in self.excluded_reasons if code == metric), None)
+
+    def describe(self) -> str:
+        """Однострочная сводка для журнала и отчёта прогона."""
+        head = (
+            "сработали: " + ", ".join(self.triggered)
+            if self.triggered
+            else "ни один не сработал"
+        )
+        listed = ", ".join(self.excluded)
+        return (
+            f"стоп-факторы: проверено {self.checked}, {head}"
+            + (f"; класс ограничен {self.cap}" if self.cap else "")
+            + (f"; неприменимостью исключены: {listed}" if listed else "")
+        )
+
+
+def evaluate_stop_factors(
+    metrics: tuple[MetricValue, ...],
+    issuer_type: str,
+    audit_sections: tuple[str, ...] = (),
+    audit_readable: bool = False,
+    policy: IfrsMetricsPolicy | None = None,
+    types=None,
+) -> StopFactors:
+    """Проверяет стоп-факторы ветки по величинам комплекта.
+
+    **Одна реализация на замер и на расчёт по фактам.** Прежде применимость
+    считал только замер, а перечень величин, по которым стоп-факторы
+    проверяются, лежал в `eval/`: в замере стоп-фактор менял исход, а
+    в документе его не было вовсе.
+
+    Порядок такой: сперва применимость по типу эмитента и по обстановке —
+    неприменимый стоп-фактор в оценку не идёт, а его показатель выходит
+    из балла с оговоркой из методики; затем условие по величине; затем
+    градация — при нескольких сработавших берётся младший класс.
+    """
+    from finlib.normalize.ifrs_issuer_type import load_issuer_types
+    from finlib.sources.ifrs_issuer_type import applicability, consistency
+
+    policy = policy or load_ifrs_metrics()
+    types = types or load_issuer_types()
+    values = {item.code: item.value for item in metrics if item.calculable}
+    ranks = {item.code: index for index, item in enumerate(policy.classes)}
+
+    triggered: list[str] = []
+    excluded: list[tuple[str, str]] = []
+    cap: str | None = None
+    code: str | None = None
+    for factor in types.stop_factors:
+        outcome = applicability(factor.code, issuer_type, values, types)
+        if not outcome.applicable:
+            excluded.append((factor.metric, " ".join(outcome.limitation.split())))
+            continue
+        if not factor.holds(values.get(factor.metric)):
+            continue
+        triggered.append(factor.code)
+        if cap is None or ranks[factor.cap] > ranks[cap]:
+            cap, code = factor.cap, factor.code
+
+    state, note = ("", "")
+    if code is not None:
+        found, text = consistency(code, audit_sections, audit_readable, types)
+        state, note = found.value, " ".join(text.split())
+    return StopFactors(
+        checked=len(types.stop_factors),
+        triggered=tuple(triggered),
+        excluded_reasons=tuple(dict.fromkeys(excluded)),
+        cap=cap,
+        code=code,
+        audit_state=state,
+        audit_note=note,
+    )
+
+
 def assess(
     metrics: tuple[MetricValue, ...],
-    policy: IfrsMetricsPolicy | None = None,
-    excluded: tuple[str, ...] = (),
+    policy: IfrsMetricsPolicy | None,
+    stops: StopFactors,
 ) -> Assessment:
-    """Считает балл и присваивает класс — либо отказывает с причиной.
+    """Считает балл, присваивает класс и применяет стоп-фактор.
 
-    `excluded` — показатели, исключённые из балла неприменимостью
-    стоп-фактора или решением по типу эмитента. Они уже рассчитаны
-    и в приложение идут; в балл — нет.
+    `stops` — **обязательный довод**: стоп-факторы, проверенные по величинам
+    комплекта. Довод с умолчанием здесь означал бы, что оценку можно посчитать,
+    не проверив ни одного стоп-фактора, и отличить это от «ни один не сработал»
+    было бы нечем — ровно так ветка и работала.
     """
     policy = policy or load_ifrs_metrics()
+    excluded = stops.excluded
     scores: list[MetricScore] = []
     for item in metrics:
         if not item.in_scoring or not item.calculable or item.code in excluded:
@@ -142,7 +255,25 @@ def assess(
     # Порог класса сверяется с напечатанным баллом, и правило одно на два
     # стандарта: у РСБУ балл 79,997 печатался как «80,00» при классе B.
     chosen = class_by_printed_score(total, policy.classes)
-    return Assessment(total, chosen.code, chosen.name, "", groups, divergence, gap)
+    # **Стоп-фактор класс только понижает.** Если балл и без него хуже
+    # ограничения, ограничение ничего не меняет — но стоп-фактор остаётся
+    # названным: он обстоятельство, а не следствие балла.
+    final = chosen
+    if stops.cap is not None:
+        ranks = {item.code: index for index, item in enumerate(policy.classes)}
+        if ranks[stops.cap] > ranks[chosen.code]:
+            final = next(item for item in policy.classes if item.code == stops.cap)
+    return Assessment(
+        total,
+        final.code,
+        final.name,
+        "",
+        groups,
+        divergence,
+        gap,
+        stop_factor_code=stops.code,
+        class_before_stop=chosen.code,
+    )
 
 
 def _groups(
