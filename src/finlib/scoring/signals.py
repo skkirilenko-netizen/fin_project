@@ -100,6 +100,13 @@ class SignalRule(BaseModel):
     # здесь, а не подразумевается кодом: иначе по справочнику нельзя сказать,
     # когда печатается формулировка.
     compare_absolute: bool = False
+    # **Печатать величину процентными пунктами.** Доля, посчитанная формулой,
+    # выходит долей единицы: числовых литералов в формулах нет, и умножить
+    # на сто выражение не может. Перевод объявляется здесь, относится
+    # к представлению и применяется к величине и к отсечке сразу — разойтись
+    # они поэтому не могут. Доли структурного сдвига приходят уже в процентах,
+    # и у него признак не нужен.
+    as_percentage_points: bool = False
     origin: str = Field(min_length=1)
     # Происхождение и зрелость порога — разные сведения: origin отвечает,
     # откуда взялась величина, статус — можно ли на неё опираться.
@@ -164,6 +171,12 @@ class SignalDef(SignalRule):
     threshold_of: str | None = Field(
         default=None, pattern=r"^(\d{4}|ifrs\.[a-z][a-z0-9_]*)$"
     )
+    # **Признак, проверяемый только при сработавшем стоп-факторе.** Выплата
+    # акционерам сама по себе правомерна, а выплата при состоянии, из-за
+    # которого класс ограничен, — обстоятельство: условие это не о величинах,
+    # а об исходе оценки, и формулой его не выразить. Объявляется здесь,
+    # потому что по справочнику надо видеть, когда печатается формулировка.
+    requires_stop_factor: bool = False
 
     @model_validator(mode="after")
     def _active_names_its_threshold(self) -> Self:
@@ -222,6 +235,11 @@ class SignalsCatalog(BaseModel):
     signals: tuple[SignalDef, ...] = Field(min_length=1)
     structure_shift: StructureShift
     revision_intensity: RevisionIntensity
+    # **Величины, подставляемые в формулировку помимо самой величины сигнала.**
+    # Имя слота → код строки: справочники у стандартов разные, и прежде код
+    # прибыли был зашит в `_format` числом «2400» — то есть формулировка ветки
+    # МСФО подставляла бы величину, которой в её данных нет.
+    slots: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_codes(self) -> Self:
@@ -231,6 +249,27 @@ class SignalsCatalog(BaseModel):
             if item.code in seen:
                 raise ValueError(f"код сигнала {item.code} встречается дважды")
             seen.add(item.code)
+        return self
+
+    @model_validator(mode="after")
+    def _check_slots(self) -> Self:
+        """Каждый слот формулировки объявлен: иначе подстановка упадёт при сборке.
+
+        Слот, которого нет ни среди встроенных, ни среди объявленных, обрушил
+        бы подстановку в тот момент, когда сигнал впервые сработает, — то есть
+        у первого же эмитента, а не при загрузке справочника.
+        """
+        import re
+
+        builtin = {"value", "unit"}
+        declared = builtin | set(self.slots)
+        for signal in self.signals:
+            unknown = set(re.findall(r"\{(\w+)\}", signal.text)) - declared
+            if unknown:
+                raise ValueError(
+                    f"сигнал {signal.code}: неизвестные слоты формулировки "
+                    f"{sorted(unknown)}"
+                )
         return self
 
     def rule_for(self, code: str) -> SignalRule | None:
@@ -296,6 +335,7 @@ def evaluate_signals(
     previous: dict[str, Decimal | None],
     catalog: SignalsCatalog | None = None,
     unit: str = "",
+    stop_factors: tuple[str, ...] = (),
 ) -> list[SignalHit]:
     """Проверяет выражения сигналов по значениям двух периодов.
 
@@ -303,6 +343,10 @@ def evaluate_signals(
     отчётность составляется в миллионах, и число без единицы рядом с отсечкой
     читатель прочтёт в тех единицах, которые сам предположит. Формулировка,
     единицу не называющая, слот не содержит, и подстановка её не меняет.
+
+    `stop_factors` — коды сработавших стоп-факторов: признак, объявивший
+    `requires_stop_factor`, проверяется только при них. Условие это не о
+    величинах, а об исходе оценки, и формулой его не выразить.
     """
     catalog = catalog if catalog is not None else load_signals()
     found: list[SignalHit] = []
@@ -310,6 +354,8 @@ def evaluate_signals(
         # Недействующий признак не проверяется вовсе: его отсечка объявлена
         # ненадёжной, и срабатывание по ней мерило бы наш набор, а не эмитента.
         if not signal.active:
+            continue
+        if signal.requires_stop_factor and not stop_factors:
             continue
         value = _evaluate(signal.expression, current, previous)
         if value is None:
@@ -329,7 +375,7 @@ def evaluate_signals(
                 name=signal.name,
                 level=signal.level,
                 value=value,
-                message=_format(signal, value, current, unit),
+                message=_format(signal, value, current, unit, catalog.slots),
                 details={
                     "expression": signal.expression,
                     "value": str(value),
@@ -441,7 +487,10 @@ def shown(rule: SignalRule, value: Decimal) -> str:
     в разделе дважды: «изменение — 181,2 п. п.» и рядом «Расчётная величина:
     -181,18».
     """
-    return _money(abs(value) if rule.as_absolute else value, rule.display_scale)
+    shown_value = abs(value) if rule.as_absolute else value
+    if rule.as_percentage_points:
+        shown_value *= Decimal(100)
+    return _money(shown_value, rule.display_scale)
 
 
 def _format(
@@ -449,14 +498,19 @@ def _format(
     value: Decimal,
     values: dict[str, Decimal | None],
     unit: str = "",
+    slots: dict[str, str] | None = None,
 ) -> str:
-    """Подставляет величины в предписанную формулировку."""
-    profit = values.get("2400")
-    return signal.text.format(
-        value=shown(signal, value),
-        profit=_money(profit, 0) if profit is not None else "—",
-        unit=unit,
-    )
+    """Подставляет величины в предписанную формулировку.
+
+    Слоты помимо `value` и `unit` объявлены справочником: имя слота → код
+    строки. Прежде код прибыли стоял здесь числом, и формулировка ветки МСФО
+    подставляла бы величину, которой в её данных нет.
+    """
+    extra = {
+        name: _money(values[code], 0) if values.get(code) is not None else "—"
+        for name, code in (slots or {}).items()
+    }
+    return signal.text.format(value=shown(signal, value), unit=unit, **extra)
 
 
 def _money(value: Decimal, scale: int) -> str:

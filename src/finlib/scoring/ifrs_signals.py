@@ -27,6 +27,7 @@ def ifrs_signals(
     conn: PgConnection,
     report_date: date,
     catalog=None,
+    stop_factors: tuple[str, ...] = (),
 ) -> list[SignalHit]:
     """Признаки ветки по величинам отчётного и предыдущего периодов.
 
@@ -34,6 +35,10 @@ def ifrs_signals(
     это сравнительная колонка того же комплекта, и другого источника прошлых
     величин эмитента у нас нет. Признак, которому не с чем сравнивать,
     не срабатывает — величины нет, а не «нет сдвига».
+
+    `stop_factors` — коды сработавших стоп-факторов: выплата акционерам при
+    состоянии, ограничившем класс, есть обстоятельство независимо от размера
+    выплаты, и условие это об исходе оценки, а не о величинах.
     """
     from finlib.metrics.engine import load_period_values
     from finlib.normalize.ifrs_signals import load_ifrs_signals
@@ -51,7 +56,15 @@ def ifrs_signals(
     # Единица — комплекта, а не стандарта: консолидированная отчётность
     # составляется в миллионах, и «46 620» без единицы читатель прочтёт
     # в тех единицах, которые предположит сам.
-    found = list(evaluate_signals(current, previous, catalog, _unit(inn, report_date, conn)))
+    found = list(
+        evaluate_signals(
+            current,
+            previous,
+            catalog,
+            _unit(inn, report_date, conn),
+            stop_factors,
+        )
+    )
     rule = catalog.structure_shift
     found += structure_shifts(
         shares_of(current, rule),

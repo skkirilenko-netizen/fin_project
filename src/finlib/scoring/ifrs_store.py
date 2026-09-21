@@ -505,7 +505,12 @@ def save_ifrs_assessment(
         # аудитора: движение капитала, структурный сдвиг и выплаты акционерам
         # расчёт не выявлял вовсе, потому что признаков у ветки не было —
         # и отличить это от «ничего не нашлось» было нечем.
-        signals=list(ifrs_signals(inn, conn, report_date)),
+        # Сработавшие стоп-факторы доходят до признаков: выплата акционерам
+        # при состоянии, ограничившем класс, есть обстоятельство независимо
+        # от её размера.
+        signals=list(
+            ifrs_signals(inn, conn, report_date, stop_factors=stops.triggered)
+        ),
         metrics_version=policy.version,
         scoring_version=policy.version,
         flags_version="",

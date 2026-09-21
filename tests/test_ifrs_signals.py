@@ -21,6 +21,7 @@ PHOSAGRO = {
     "ifrs.total_equity": Decimal(239793),
     "ifrs.share_capital": Decimal(372),
     "ifrs.share_premium": Decimal(7494),
+    "ifrs.profit_for_period": Decimal(114243),
     "ifrs.total_comprehensive_income": Decimal(113841),
     "ifrs.dividends_paid": Decimal(-46620),
 }
@@ -29,8 +30,9 @@ PHOSAGRO_BEFORE = {
     "ifrs.total_equity": Decimal(164722),
     "ifrs.share_capital": Decimal(372),
     "ifrs.share_premium": Decimal(7494),
+    "ifrs.profit_for_period": Decimal(84469),
     "ifrs.total_comprehensive_income": Decimal(69128),
-    "ifrs.dividends_paid": Decimal(-38000),
+    "ifrs.dividends_paid": Decimal(-109169),
 }
 
 
@@ -55,24 +57,43 @@ def test_every_signal_declares_its_origin_and_maturity() -> None:
         assert signal.preliminary, signal.code
 
 
-def test_inactive_signal_names_its_reason_and_never_fires() -> None:
-    """Недействующий признак объявляет причину и не срабатывает.
+def test_inactive_rule_names_its_reason_and_never_fires() -> None:
+    """Недействующее правило объявляет причину и не срабатывает.
 
     Отсечка, подогнанная под два наблюдения, выглядит работающим правилом,
     а меряет размер набора. Объявленное недействие — не молчание: удалённый
     признак нельзя отличить от забытого.
     """
-    inactive = [item for item in CATALOG.signals if not item.active]
-    assert inactive, "недействующие признаки объявлены — иначе проверять нечего"
-    for signal in inactive:
-        assert signal.inactive_reason.strip(), signal.code
-    # Условие смещения долга выполняется, а признак не срабатывает.
+    rules = [*CATALOG.signals, CATALOG.structure_shift, CATALOG.revision_intensity]
+    inactive = [item for item in rules if not item.active]
+    assert inactive, "недействующие правила объявлены — иначе проверять нечего"
+    for rule in inactive:
+        assert rule.inactive_reason.strip(), rule.name
+
+    # Условие выполняется, а объявленный недействующим признак не срабатывает.
     values = {
         "ifrs.total_assets": Decimal(1000),
-        "ifrs.short_term_borrowings": Decimal(900),
-        "ifrs.long_term_borrowings": Decimal(100),
+        "ifrs.share_capital": Decimal(500),
+        "ifrs.share_premium": Decimal(0),
     }
-    assert "debt_shift_to_short_term" not in fired(values, values)
+    before = {**values, "ifrs.share_capital": Decimal(10)}
+    assert "equity_contribution" in fired(values, before)
+    silenced = CATALOG.model_copy(
+        update={
+            "signals": tuple(
+                item.model_copy(
+                    update={"active": False, "inactive_reason": "проверка правила"}
+                )
+                if item.code == "equity_contribution"
+                else item
+                for item in CATALOG.signals
+            )
+        }
+    )
+    quiet = {
+        item.code for item in evaluate_signals(values, before, silenced, "млн руб.")
+    }
+    assert "equity_contribution" not in quiet
 
 
 def test_signals_not_transferred_name_their_reason() -> None:
@@ -108,31 +129,103 @@ def test_revision_intensity_is_declared_inactive_without_a_threshold() -> None:
 # --- перенесённые признаки ----------------------------------------------------
 
 
-def test_dividends_paid_are_observed_directly() -> None:
-    """Выплаты акционерам сверх порога существенности — надзорный признак.
+def test_ordinary_dividend_policy_is_not_a_signal() -> None:
+    """Выплата, умещающаяся в результат периода, признака не даёт.
 
-    В РСБУ изъятие выводилось остатком «прирост капитала минус прибыль»,
-    потому что другого следа у выплаты не было. В консолидированной отчётности
-    выплата стоит отдельной строкой отчёта о движении денежных средств,
-    и косвенный признак ей не нужен.
+    Предмет признака — изъятие сверх заработанного, а не выплата. У ФосАгро
+    дивиденды 46 620 при прибыли 114 243 — обычная дивидендная политика,
+    и надзорным обстоятельством она не является. Прежде отсечка была привязана
+    к валюте баланса, и признак давал надзорный уровень с эскалацией.
     """
-    found = fired(PHOSAGRO, PHOSAGRO_BEFORE)
-    assert found["equity_withdrawal"] == Decimal(-46620)
+    assert "equity_withdrawal" not in fired(PHOSAGRO, PHOSAGRO_BEFORE)
+
+
+def test_payout_above_the_result_of_the_period_is_a_signal() -> None:
+    """Выплата сверх заработанного — надзорный признак, и величина её превышение."""
+    current = {**PHOSAGRO, "ifrs.dividends_paid": Decimal(-150000)}
     by_code = {
         item.code: item
-        for item in evaluate_signals(PHOSAGRO, PHOSAGRO_BEFORE, CATALOG, "млн руб.")
+        for item in evaluate_signals(current, PHOSAGRO_BEFORE, CATALOG, "млн руб.")
     }
     signal = by_code["equity_withdrawal"]
     assert signal.level.value == "supervisory"
-    # Величина печатается по модулю и вместе с единицей комплекта: «46 620»
-    # без единицы читатель прочтёт в тех единицах, которые предположит сам.
-    assert "46 620 млн руб." in signal.message.replace(" ", " ")
+    assert signal.value == Decimal(150000) - Decimal(114243)
+    # В формулировке стоят и превышение, и сам результат периода: слот прибыли
+    # объявлен справочником ветки, а не зашит кодом строки РСБУ.
+    message = signal.message.replace(" ", " ")
+    assert "35 757 млн руб." in message
+    assert "114 243 млн руб." in message
     # Отсечка идёт рядом с величиной: тезис без неё проверить нечем.
     assert signal.details["threshold_shown"]
 
-    # Выплата ниже порога существенности признака не даёт.
-    modest = {**PHOSAGRO, "ifrs.dividends_paid": Decimal(-1000)}
-    assert "equity_withdrawal" not in fired(modest, PHOSAGRO_BEFORE)
+
+def test_any_payout_at_a_loss_is_a_signal() -> None:
+    """При убытке признак даёт любая выплата: заработанного не было вовсе."""
+    current = {
+        **PHOSAGRO,
+        "ifrs.profit_for_period": Decimal(-50000),
+        "ifrs.dividends_paid": Decimal(-1000),
+    }
+    found = fired(current, PHOSAGRO_BEFORE)
+    assert found["equity_withdrawal"] == Decimal(51000)
+
+
+def test_payout_under_a_stop_factor_needs_the_stop_factor() -> None:
+    """Выплата при сработавшем стоп-факторе — обстоятельство независимо от размера.
+
+    Условие здесь об исходе оценки, а не о величинах: без сработавшего
+    стоп-фактора признак не проверяется вовсе, и это объявлено справочником.
+    """
+    current = {**PHOSAGRO, "ifrs.dividends_paid": Decimal(-100)}
+    without = {
+        item.code
+        for item in evaluate_signals(current, PHOSAGRO_BEFORE, CATALOG, "млн руб.")
+    }
+    assert "equity_withdrawal_under_stop_factor" not in without
+    with_stop = {
+        item.code: item
+        for item in evaluate_signals(
+            current, PHOSAGRO_BEFORE, CATALOG, "млн руб.", ("negative_nwc",)
+        )
+    }
+    signal = with_stop["equity_withdrawal_under_stop_factor"]
+    assert signal.level.value == "supervisory"
+    assert signal.value == Decimal(100)
+
+
+def test_debt_shift_measures_the_shift_and_not_the_level() -> None:
+    """Признак мерит изменение срочности долга, а не её уровень.
+
+    Доля краткосрочного долга сама по себе — свойство долговой политики:
+    у ФосАгро она 63,8 % при классе B. Отсечка та же, что у структурного
+    сдвига, — 20 п. п.: она уже откалибрована и мерит то же самое.
+    """
+    debt = {
+        "ifrs.short_term_borrowings": Decimal(209715),
+        "ifrs.long_term_borrowings": Decimal(119062),
+    }
+    before = {
+        "ifrs.short_term_borrowings": Decimal(161661),
+        "ifrs.long_term_borrowings": Decimal(169962),
+    }
+    # У ФосАгро смещение около 15 п. п. — признака нет, хотя уровень высок.
+    assert "debt_shift_to_short_term" not in fired({**PHOSAGRO, **debt}, before)
+
+    shifted = {
+        "ifrs.short_term_borrowings": Decimal(300000),
+        "ifrs.long_term_borrowings": Decimal(28777),
+    }
+    by_code = {
+        item.code: item
+        for item in evaluate_signals(
+            {**PHOSAGRO, **shifted}, before, CATALOG, "млн руб."
+        )
+    }
+    signal = by_code["debt_shift_to_short_term"]
+    # Величина печатается процентными пунктами — той же мерой, что сдвиг
+    # структуры: доля из формулы приходит долей единицы.
+    assert "п. п." in signal.message
+    assert signal.details["threshold_shown"].replace(" ", " ") == "20,0"
 
 
 def test_capital_contribution_is_measured_by_the_balance_sheet() -> None:
