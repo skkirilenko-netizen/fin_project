@@ -439,6 +439,7 @@ def accept_cbonds_report(
     refresh: bool = False,
     write: bool = True,
     conn: PgConnection | None = None,
+    rows: list[dict] | None = None,
 ) -> list[object]:
     """Проводит нормализованные данные агрегатора через приём и загрузку.
 
@@ -463,7 +464,12 @@ def accept_cbonds_report(
         if on_stage is not None:
             on_stage(StageResult(stage, message, ok))
 
-    rows = cbonds.msfo_real(inn, refresh=refresh)
+    # **Строки можно передать готовыми, и это не обход цикла.** Справочник
+    # эмитентов отдаёт весь массив одним ответом, и спрашивать источник ещё
+    # раз по каждому ИНН значило бы тратить суточную норму запросов на то,
+    # что уже лежит на диске. Решение о том, что делать со строками, остаётся
+    # здесь — у цикла.
+    rows = rows if rows is not None else cbonds.msfo_real(inn, refresh=refresh)
     annual = [item for item in rows if str(item.get("date") or "").endswith("12-31")]
     say(
         Stage.FETCH,

@@ -35,6 +35,7 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.definitions import MetricDef, MetricsCatalog, Unit, load_metrics
 from finlib.metrics.display import format_metric, round_to
 from finlib.metrics.formula import average_codes, line_codes
+from finlib.normalize.facts import SOURCE_PREFERENCE
 from finlib.normalize.lines import ReportingType
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
 from finlib.standards import Standard
@@ -64,10 +65,13 @@ FROM metric_value
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = ANY(%(dates)s)
 """
 
-_REPORTING_TYPE = """
+# Комплект года выбирается с предпочтением первоисточника: за год их два —
+# документ и доставка агрегатора, — и порядок здесь часть правила.
+_REPORTING_TYPE = f"""
 SELECT reporting_type FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
   AND is_actual
+{SOURCE_PREFERENCE}
 LIMIT 1
 """
 

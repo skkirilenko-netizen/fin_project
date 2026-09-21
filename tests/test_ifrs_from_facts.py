@@ -16,7 +16,9 @@
 from datetime import date
 from decimal import Decimal
 
-from finlib.db import fetch_all, fetch_one
+import pytest
+
+from finlib.db import execute, fetch_all, fetch_one
 from finlib.metrics.ifrs_store import (
     compute_from_facts,
     confidence_of,
@@ -89,6 +91,23 @@ HEADER = (
     "по состоянию на 31 декабря 2025 года и 31 декабря 2024 года\n"
     + "\nПримечания к консолидированной финансовой отчётности.\n" * 40
 )
+
+
+@pytest.fixture(autouse=True)
+def clean(db_conn):
+    """Убирает комплекты МСФО этого ИНН внутри транзакции теста.
+
+    ИНН здесь настоящий, и с загрузкой универсума из нормализованных данных
+    у него появились комплекты за 2021–2023 годы: тест, считающий периоды,
+    стал зависеть от содержимого базы. Транзакция теста откатывается,
+    поэтому удаление здесь ничего не уносит.
+    """
+    execute(
+        "DELETE FROM src_file WHERE inn = %(i)s AND standard = 'ifrs'",
+        {"i": INN},
+        conn=db_conn,
+    )
+    return db_conn
 
 
 def loaded(

@@ -18,6 +18,7 @@ from decimal import Decimal
 from finlib.db import PgConnection, fetch_all, fetch_one
 from finlib.metrics.ifrs import MetricValue
 from finlib.metrics.store import save_results
+from finlib.normalize.facts import SOURCE_PREFERENCE
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.quality.periods import PeriodConfidence
 from finlib.scoring.definitions import Confidence, StopEffect
@@ -346,10 +347,15 @@ def _bases(
 _SCALE_THOUSANDS = 0
 
 
-_AUDIT_META = """
+# **Комплект года выбирается с предпочтением первоисточника.** За год их
+# теперь два — документ и доставка агрегатора, — и без порядка сведения
+# аудиторского заключения и тип эмитента исчезали: у комплекта агрегатора
+# их нет вовсе. Правило одно на проект (`normalize/facts.py`).
+_AUDIT_META = f"""
 SELECT meta FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
   AND is_actual
+{SOURCE_PREFERENCE}
 LIMIT 1
 """
 

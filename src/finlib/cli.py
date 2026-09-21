@@ -86,8 +86,12 @@ def _echo_caveat(inn: str, report_date: date) -> None:
 
     with connection() as conn:
         row = fetch_one(
+            # Предпочтение первоисточника: за год комплектов два — документ
+            # и доставка агрегатора, — а сведения заключения есть только
+            # у документа.
             "SELECT meta FROM src_file WHERE inn = %(inn)s AND standard = 'ifrs' "
-            "AND report_year = %(year)s AND is_actual ORDER BY id DESC LIMIT 1",
+            "AND report_year = %(year)s AND is_actual "
+            "ORDER BY source_rank(source), id DESC LIMIT 1",
             {"inn": inn, "year": report_date.year},
             conn=conn,
         )

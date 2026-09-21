@@ -16,6 +16,7 @@ from datetime import date
 from decimal import Decimal
 
 from finlib.db import PgConnection
+from finlib.normalize.facts import source_preference
 from finlib.scoring.signals import SignalHit, structure_shifts
 from finlib.standards import Standard
 
@@ -90,11 +91,16 @@ def ifrs_signals(
     return found
 
 
-_UNIT = """
+# **Единица берётся у комплекта первоисточника.** У агрегатора она своя
+# построчно — у одних эмитентов тысячи, у других миллионы, — и взятая
+# произвольно, она даёт ошибку в тысячу раз, которой не ловит ни один
+# контроль сходимости.
+_UNIT = f"""
 SELECT s.unit_code FROM src_file s
 JOIN fact_report f ON f.src_file_id = s.id
 WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
   AND s.status <> 'quarantine' AND s.is_actual
+{source_preference("s")}
 LIMIT 1
 """
 

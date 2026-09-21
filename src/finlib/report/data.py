@@ -34,6 +34,11 @@ FROM organization o
 JOIN src_file s ON s.inn = o.inn AND s.report_year = %(year)s
                 AND s.standard = %(standard)s AND s.is_actual
 WHERE o.inn = %(inn)s
+-- **Комплект документа прежде доставки агрегатора.** За год их два, и взятый
+-- произвольно комплект агрегатора лишал бы документ единицы измерения,
+-- вида отчётности, сведений аудиторского заключения и типа эмитента:
+-- у него этого нет вовсе.
+ORDER BY source_rank(s.source)
 LIMIT 1
 """
 

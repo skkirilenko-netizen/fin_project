@@ -132,10 +132,15 @@ def _from_document(check: dict) -> Outcome:
     return Outcome(inn, issuer, kind, subject, expected, f"вид проверки {kind} неизвестен", False)
 
 
+# Комплект года выбирается с предпочтением первоисточника — тем же правилом,
+# что в боевом пути: за год их два, документ и доставка агрегатора, и сведения
+# заключения с типом эмитента есть только у документа.
 _TYPE = """
 SELECT meta ->> 'issuer_type' AS issuer_type FROM src_file
 WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
   AND report_year = %(year)s AND status <> 'quarantine'
+ORDER BY source_rank(source)
+LIMIT 1
 """
 
 _METRIC = """
@@ -165,6 +170,19 @@ _AUDIT = """
 SELECT meta -> 'audit' AS audit FROM src_file
 WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
   AND report_year = %(year)s AND status <> 'quarantine'
+ORDER BY source_rank(source)
+LIMIT 1
+"""
+
+# Чья величина осталась в базе и какая. Приоритет источника проверяется именно
+# так: у эмитента, у которого есть и документ, и данные агрегатора, величина
+# обязана остаться документа — иначе пересмотренная сравнительная графа
+# затиралась бы прочтением отчёта того года.
+_FACT_OWNER = """
+SELECT f.value, f.recognition, s.source
+FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
+WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
+  AND f.line_code = %(code)s
 """
 
 
@@ -239,6 +257,21 @@ def _from_database(check: dict) -> Outcome:
             return Outcome(
                 inn, issuer, kind, subject, str(expected),
                 ", ".join(fired) or "признаков нет", code not in fired,
+            )
+        if kind == "fact_owner":
+            row = fetch_one(
+                _FACT_OWNER,
+                {"inn": inn, "d": moment, "code": check["code"]},
+                conn=conn,
+            )
+            if row is None:
+                return Outcome(inn, issuer, kind, subject, expected, "величины нет", False)
+            got = f"{row['recognition']}:{row['value']}"
+            wanted = f"{expected}:{Decimal(check['value'])}"
+            return Outcome(
+                inn, issuer, kind, subject, wanted, got,
+                row["recognition"] == expected
+                and row["value"] == Decimal(check["value"]),
             )
         if kind == "group_out_of_score":
             rows = fetch_all(_GROUPS, {"inn": inn, "date": moment}, conn=conn)

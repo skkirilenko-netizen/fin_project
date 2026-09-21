@@ -40,6 +40,11 @@ SELECT f.line_code, f.form_code, f.value, f.recognition, f.note_source_name,
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
   AND s.status <> 'quarantine' AND s.is_actual
+-- **Порядок нужен не величинам, а сведениям комплекта.** Тип эмитента и вид
+-- отчётности берутся из `meta` первой строки, и при двух доставках периода
+-- первой оказывалась то одна, то другая: у комплекта агрегатора типа
+-- эмитента нет вовсе, и поправка ликвидности девелопера молча не применялась.
+ORDER BY source_rank(s.source)
 """
 
 # Периоды, за которые есть величины: и отчётные, и сравнительные. **Роль
