@@ -640,6 +640,7 @@ def _markup_loop(
     разметки.
     """
     from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.sources.ifrs_confirmed import refresh_match_keys
     from finlib.sources.ifrs_markup import (
         NOT_A_LINE_CODE,
         Decision,
@@ -667,6 +668,17 @@ def _markup_loop(
     # повторно, а присвоенные коды участвуют в суммах — без них итоги
     # считались бы незакрытыми, и очередь выстроилась бы по недостаче,
     # которой уже нет.
+    # Ключ сопоставления — величина производная, и он обязан соответствовать
+    # нынешнему разбору, а не тому, который действовал в день подтверждения:
+    # наименование в журнале остаётся записью о том, что было, вместе с мусором,
+    # который разбор тогда прочитал. Пересчёт идёт перед восстановлением —
+    # иначе оно искало бы прежним ключом.
+    refreshed = sum(
+        refresh_match_keys(inn) for inn in sorted({item.inn for item in issuers})
+    )
+    if refreshed:
+        typer.echo(f"  ключей сопоставления пересчитано: {refreshed}")
+
     already = restore(issuers)
     _show_lost_markup(issuers)
     whole = candidates(issuers, catalog)
@@ -1174,6 +1186,7 @@ def _save_confirmation(
     не то же, что «не сошлось».
     """
     from finlib.db import connection, execute
+    from finlib.sources.ifrs_confirmed import match_key
 
     with connection() as conn:
         execute(
@@ -1183,10 +1196,10 @@ def _save_confirmation(
         )
         execute(
             "INSERT INTO ifrs_line_confirmation (code, inn, report_date, source_name, "
-            "form_code, value, materiality_share, confirmed_by, relation, related_codes, "
-            "arithmetic_confirmed, row_index) VALUES (%(code)s, %(inn)s, %(date)s, "
-            "%(name)s, %(form)s, %(value)s, %(share)s, %(who)s, %(relation)s, "
-            "%(related)s, %(confirmed)s, %(index)s) "
+            "match_key, form_code, value, materiality_share, confirmed_by, relation, "
+            "related_codes, arithmetic_confirmed, row_index) VALUES (%(code)s, "
+            "%(inn)s, %(date)s, %(name)s, %(key)s, %(form)s, %(value)s, %(share)s, "
+            "%(who)s, %(relation)s, %(related)s, %(confirmed)s, %(index)s) "
             # Ключ конфликта — строка комплекта, а не пара «строка, код»:
             # исправление обязано **заменить** прежнее решение. Прежде оно
             # ложилось рядом, восстановление применяло оба, и отклонённое
@@ -1194,6 +1207,7 @@ def _save_confirmation(
             # её присест за присестом.
             "ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET "
             "code = EXCLUDED.code, source_name = EXCLUDED.source_name, "
+            "match_key = EXCLUDED.match_key, "
             "value = EXCLUDED.value, materiality_share = EXCLUDED.materiality_share, "
             "confirmed_by = EXCLUDED.confirmed_by, relation = EXCLUDED.relation, "
             "related_codes = EXCLUDED.related_codes, "
@@ -1203,6 +1217,9 @@ def _save_confirmation(
                 "inn": issuer.inn,
                 "date": issuer.report_date,
                 "name": candidate.source_name,
+                # Дословная запись и ключ поиска — разные графы: наименование
+                # не правится никогда, ключ пересчитывается текущим разбором.
+                "key": match_key(candidate.source_name),
                 "form": candidate.form,
                 "value": candidate.amount,
                 # Мера, которой нет, пишется как NULL, а не как ноль: ноль

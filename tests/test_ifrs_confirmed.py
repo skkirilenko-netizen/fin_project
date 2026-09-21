@@ -16,8 +16,12 @@ from decimal import Decimal
 
 import pytest
 
-from finlib.db import execute
-from finlib.sources.ifrs_confirmed import Confirmed, load_confirmed
+from finlib.db import execute, fetch_one
+from finlib.sources.ifrs_confirmed import (
+    Confirmed,
+    load_confirmed,
+    refresh_match_keys,
+)
 from finlib.sources.ifrs_extract import extract
 from finlib.sources.ifrs_inbox import ReportingKind, identify
 from finlib.sources.ifrs_numbers import Grouping
@@ -184,6 +188,36 @@ def test_detail_row_does_not_become_a_fact(clean) -> None:
 
     assert known.rows, "подтверждение не применилось — проверять нечего"
     assert known.facts == ()
+
+
+def test_match_key_is_recomputed_and_the_wording_is_kept(clean) -> None:
+    """Ключ сопоставления пересчитывается разбором, наименование — нет.
+
+    В журнале есть подтверждения, у которых в наименовании стоит мусор разбора
+    того дня — «Поступление от выпуска акций 19 51 012 -». Это запись о том,
+    что было, и правке она не подлежит: доказательная база. Искать же
+    подтверждение надо тем ключом, который даёт нынешний разбор, поэтому ключ
+    лежит отдельной графой и пересчитывается.
+    """
+    confirm(clean, INN, "Задолженность Принципала", "ifrs.principal_receivable")
+    # Ключ от прежнего правила: строка по нему не найдётся.
+    execute(
+        "UPDATE ifrs_line_confirmation SET match_key = %(k)s WHERE inn = %(i)s",
+        {"k": "задолженность принципала 19 160 000", "i": INN},
+        conn=clean,
+    )
+    extraction, profile = prepared()
+    assert load_confirmed(INN, extraction, profile, conn=clean).rows == frozenset()
+
+    assert refresh_match_keys(INN, conn=clean) == 1
+    row = fetch_one(
+        "SELECT source_name, match_key FROM ifrs_line_confirmation WHERE inn = %(i)s",
+        {"i": INN},
+        conn=clean,
+    )
+    assert row["source_name"] == "Задолженность Принципала"
+    assert row["match_key"] == "задолженность принципала"
+    assert len(load_confirmed(INN, extraction, profile, conn=clean).rows) == 1
 
 
 def test_confirmation_of_another_issuer_is_not_knowledge(clean) -> None:

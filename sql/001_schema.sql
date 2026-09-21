@@ -509,8 +509,17 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     inn            text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
     src_file_id    bigint REFERENCES src_file (id) ON DELETE SET NULL,
     report_date    date NOT NULL,
-    -- Наименование статьи в отчётности эмитента, без нормализации.
+    -- Наименование статьи в отчётности эмитента, без нормализации. Запись
+    -- о том, что было: не правится никогда, даже если разбор прочитал
+    -- наименование с мусором — «Поступление от выпуска акций 19 51 012 -».
     source_name    text NOT NULL,
+    -- Ключ сопоставления, вычисленный **текущим разбором** из наименования.
+    -- Величина производная, поэтому пересчитывается при каждом присесте
+    -- разметки: когда разбор научится отрезать номер примечания, прежние
+    -- подтверждения начнут находиться, а `source_name` останется как был.
+    -- NULL — ключ ещё не вычислялся, и тогда сопоставление идёт по
+    -- наименованию, как прежде.
+    match_key      text,
     -- Раздел отчётности и величина, ради которой статья вынесена отдельно.
     form_code      text NOT NULL,
     value          numeric(20, 3),
@@ -598,6 +607,13 @@ ALTER TABLE ifrs_line_confirmation
 -- проставляет прежним записям прежнее правило и лишь потом объявляет
 -- умолчание: `ADD COLUMN ... DEFAULT` присвоил бы им нынешнее, то есть
 -- сказал бы о них неправду.
+-- Ключ сопоставления заведён 21.09.2026. Значение вычисляет Python (правило
+-- приведения наименования одно на весь проект), поэтому догонка добавляет
+-- только графу: заполняет её присест разметки.
+ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS match_key text;
+CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_match_idx
+    ON ifrs_line_confirmation (inn, form_code, match_key);
+
 ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS materiality_rule text;
 UPDATE ifrs_line_confirmation SET materiality_rule = 'total_assets'
     WHERE materiality_rule IS NULL;

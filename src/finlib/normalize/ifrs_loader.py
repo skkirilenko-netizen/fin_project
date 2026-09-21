@@ -33,7 +33,7 @@ from finlib.quality.codes import (
 )
 from finlib.quality.journal import CheckRecord, log_records
 from finlib.quality.values import sign_only_difference
-from finlib.sources.ifrs_confirmed import Confirmed, ConfirmedFact
+from finlib.sources.ifrs_confirmed import Confirmed, ConfirmedFact, match_key
 from finlib.sources.ifrs_extract import Extraction, materiality_share
 from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
@@ -158,15 +158,17 @@ DELETE FROM dq_log WHERE src_file_id = %(id)s AND check_code = ANY(%(codes)s)
 # с прежним вместо того, чтобы его заменить.
 _INSERT_CONFIRMATION = """
 INSERT INTO ifrs_line_confirmation (
-    code, inn, src_file_id, report_date, source_name, form_code, value,
+    code, inn, src_file_id, report_date, source_name, match_key, form_code, value,
     materiality_share, confirmed_by, note, row_index
 ) VALUES (
     %(code)s, %(inn)s, %(src_file_id)s, %(report_date)s, %(source_name)s,
-    %(form_code)s, %(value)s, %(share)s, %(confirmed_by)s, %(note)s, %(index)s
+    %(match_key)s, %(form_code)s, %(value)s, %(share)s, %(confirmed_by)s,
+    %(note)s, %(index)s
 )
 ON CONFLICT (inn, report_date, form_code, row_index) DO UPDATE SET
     code = EXCLUDED.code,
     source_name = EXCLUDED.source_name,
+    match_key = EXCLUDED.match_key,
     src_file_id = EXCLUDED.src_file_id,
     value = EXCLUDED.value,
     materiality_share = EXCLUDED.materiality_share,
@@ -968,6 +970,9 @@ def _save_confirmations(
                 "src_file_id": src_file_id,
                 "report_date": report_date,
                 "source_name": row.source_name,
+                # Ключ сопоставления вычисляется текущим разбором и лежит
+                # рядом с дословной записью, а не вместо неё.
+                "match_key": match_key(row.source_name),
                 "form_code": row.form,
                 "value": row.values[0] if row.values else None,
                 "share": share,

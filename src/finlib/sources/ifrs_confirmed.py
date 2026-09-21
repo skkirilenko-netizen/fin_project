@@ -43,11 +43,63 @@ logger = logging.getLogger(__name__)
 
 _CONFIRMED = """
 SELECT DISTINCT ON (form_code, source_name)
-       form_code, source_name, code, relation, related_codes, report_date
+       form_code, source_name, match_key, code, relation, related_codes, report_date
 FROM ifrs_line_confirmation
 WHERE inn = %(inn)s
 ORDER BY form_code, source_name, confirmed_at DESC, id DESC
 """
+
+_REFRESH_MATCH_KEYS = """
+UPDATE ifrs_line_confirmation SET match_key = %(key)s WHERE id = %(id)s
+"""
+
+_MATCH_KEYS = """
+SELECT id, source_name, match_key FROM ifrs_line_confirmation WHERE inn = %(inn)s
+"""
+
+
+def match_key(source_name: str) -> str:
+    """Ключ сопоставления подтверждения со строкой отчётности.
+
+    **Запись о том, что было, и ключ поиска — разные вещи.** `source_name`
+    хранится дословно и не правится никогда: у части подтверждений в нём стоит
+    мусор разбора — «Поступление от выпуска акций 19 51 012 -», — и это запись
+    того, что разбор тогда прочитал. Ключ же вычисляется **текущим разбором**
+    и потому пересчитывается: когда разбор научится отрезать номер примечания
+    и величины, прежние подтверждения начнут находиться, а доказательная база
+    останется нетронутой.
+
+    Пока правило приведения одно — то же `normalize_name`, которым опознаётся
+    любой синоним справочника. Функция названа отдельно, чтобы правка правила
+    была в одном месте, а не в трёх.
+    """
+    return normalize_name(source_name)
+
+
+def refresh_match_keys(inn: str, conn=None) -> int:
+    """Пересчитывает ключи сопоставления этого эмитента; возвращает число правок.
+
+    Вызывается перед присестом разметки: ключ — величина производная, и она
+    обязана соответствовать нынешнему разбору, а не тому, который действовал
+    в день подтверждения.
+    """
+    from finlib.db import execute, fetch_all
+
+    try:
+        rows = fetch_all(_MATCH_KEYS, {"inn": inn}, conn=conn)
+    except Exception as failure:  # noqa: BLE001 — разметка работает и без базы
+        logger.warning("ключи сопоставления не прочитаны: %s", failure)
+        return 0
+    changed = 0
+    for row in rows:
+        wanted = match_key(row["source_name"])
+        if row["match_key"] == wanted:
+            continue
+        execute(_REFRESH_MATCH_KEYS, {"key": wanted, "id": row["id"]}, conn=conn)
+        changed += 1
+    if changed:
+        logger.info("%s: ключей сопоставления пересчитано %d", inn, changed)
+    return changed
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,8 +179,12 @@ def load_confirmed(
         logger.warning("ранее подтверждённое опознание не прочитано: %s", failure)
         return Confirmed()
 
+    # Сопоставление идёт по ключу, вычисленному разбором, а наименование
+    # остаётся записью о том, что было. Ключа ещё нет — считается на месте
+    # тем же правилом: графа заведена позже подтверждений.
     by_name = {
-        (item["form_code"], normalize_name(item["source_name"])): item for item in rows
+        (item["form_code"], item["match_key"] or match_key(item["source_name"])): item
+        for item in rows
     }
     if not by_name:
         return Confirmed()
@@ -140,7 +196,7 @@ def load_confirmed(
     reports: set[str] = set()
     facts: dict[tuple[str, int], ConfirmedFact] = {}
     for row in extraction.unrecognised:
-        found = by_name.get((row.form, normalize_name(row.source_name)))
+        found = by_name.get((row.form, match_key(row.source_name)))
         if found is None:
             continue
         relation = found["relation"] or Relation.EXACT.value
