@@ -95,6 +95,36 @@ class IfrsMetricsView:
             raise KeyError(f"показателя {code} нет в справочнике показателей МСФО")
         return found
 
+    def negative_word(self, code: str) -> str | None:
+        """Слово вместо отрицательной величины; None — печатается числом.
+
+        Объявляется методикой у того показателя, у которого число бесполезно:
+        покрытие процентов при операционном убытке даёт отношение, верное
+        арифметически и не говорящее ничего — величина его зависит от размера
+        убытка, а не от способности обслуживать долг.
+        """
+        found = next(
+            (item for item in self._policy.metrics if item.code == code), None
+        )
+        return found.negative_shown_as if found is not None else None
+
+    def shown(self, code: str, value: Decimal, money: str | None = None) -> str:
+        """Величина показателя так, как она печатается читателю.
+
+        Единственная точка: округление берётся из единой точки округления,
+        а словесная замена — из методики. Прежде число набиралось в трёх
+        местах порознь, и словесная замена разошлась бы с ними на первом же
+        отрицательном покрытии.
+        """
+        from finlib.metrics.display import format_metric
+
+        word = self.negative_word(code)
+        if word and value < 0:
+            return word
+        metric = self.get(code)
+        unit = metric.unit if metric is not None else Unit.RATIO
+        return format_metric(value, unit, self.scale_for(code), money=money)
+
     def scale_for(self, code: str) -> int:
         """Разрядность отображения показателя — из единой точки округления."""
         from finlib.metrics.definitions import load_metrics

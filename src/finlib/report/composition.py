@@ -157,23 +157,22 @@ def _render_ifrs_line(
 
 
 def _render_ifrs_metric(code: str, data: ReportData) -> str | None:
-    """Показатель МСФО: наименование и величина в единице методики МСФО."""
-    from finlib.metrics.definitions import Unit
-    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+    """Показатель МСФО: наименование и величина так, как она печатается.
+
+    Округление и словесная замена отрицательной величины берутся из одного
+    места (`IfrsMetricsView.shown`): набирать число здесь значило бы завести
+    второй способ его напечатать.
+    """
+    from finlib.metrics.ifrs_view import IfrsMetricsView
 
     value = _value_of(data, code)
     if value is None:
         return None
-    metric = next(
-        (item for item in load_ifrs_metrics().metrics if item.code == code), None
-    )
+    view = IfrsMetricsView()
+    metric = view.get(code)
     if metric is None:
         return None
-    # Единица методики МСФО названа своими словами: «currency» означает
-    # величину отчётности, то есть те же тысячи рублей, «ratio» — отношение.
-    unit = Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
-    scale = 0 if unit is Unit.THOUSAND_RUB else 3
-    return f"{metric.name} — {format_metric(value, unit, scale, money=data.unit_name)}"
+    return f"{metric.name} — {view.shown(code, value, money=data.unit_name)}"
 
 
 def _worth_naming(

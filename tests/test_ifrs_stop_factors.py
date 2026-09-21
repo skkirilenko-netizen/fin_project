@@ -97,6 +97,60 @@ def test_interest_cover_below_one_caps_the_class_at_the_middle() -> None:
     assert stops.cap == "C"
 
 
+def test_cover_below_one_is_proven_by_the_sign() -> None:
+    """Неположительный числитель при положительных процентах доказывает вывод.
+
+    У ПАО «Сегежа Групп» операционный убыток 50 628 при начисленных процентах
+    19 059: отношение считается и равно −2,66, но вывод от него не зависит —
+    он следует из знака. Правило работает и там, где отношение не посчитано:
+    доказательство не в величине.
+    """
+    policy = load_ifrs_metrics()
+    metric = {item.code: item for item in policy.metrics}["interest_cover_accrued"]
+    refused = MetricValue(
+        metric.code,
+        metric.name,
+        metric.group,
+        metric.in_scoring,
+        value=None,
+        numerator=Decimal(-50628),
+        denominator=Decimal(19059),
+    )
+    stops = evaluate_stop_factors((refused,), "corporate", (), False, policy)
+    assert "interest_cover_below_one" in stops.triggered
+    assert stops.cap == "C"
+
+    # Положительный числитель ничего не доказывает: там считается отношение.
+    positive = MetricValue(
+        metric.code,
+        metric.name,
+        metric.group,
+        metric.in_scoring,
+        value=None,
+        numerator=Decimal(135605),
+        denominator=Decimal(30974),
+    )
+    assert not evaluate_stop_factors(
+        (positive,), "corporate", (), False, policy
+    ).triggered
+
+
+def test_negative_cover_is_printed_as_a_word() -> None:
+    """Отрицательное покрытие печатается словом, а не числом.
+
+    «−2,66» выглядит кратностью и читается как «покрыто наоборот», тогда
+    как смысл один: операционной прибыли нет вовсе. Слово объявлено методикой
+    вместе с основанием, и печатает его одна функция — та же, что приложение.
+    """
+    from finlib.metrics.ifrs_view import IfrsMetricsView
+
+    view = IfrsMetricsView(load_ifrs_metrics())
+    assert view.shown("interest_cover_accrued", Decimal("-2.656")) == "отрицательно"
+    assert view.shown("interest_cover_accrued", Decimal("4.378")) == "4,38"
+    # У показателя, которому замена не объявлена, печатается число.
+    assert view.shown("cur_liq", Decimal("-0.5")) == "-0,50"
+
+
 def test_inapplicable_stop_factor_does_not_lower_the_class() -> None:
     """Неприменимый стоп-фактор оценку не понижает, а оговорку называет.
 

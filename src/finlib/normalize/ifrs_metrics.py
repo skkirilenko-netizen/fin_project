@@ -73,8 +73,23 @@ class MetricDef(BaseModel):
     # в заключении об этой организации.
     note: str | None = None
     methodology_note: str | None = None
+    # Как печатается отрицательная величина, если числом её печатать нельзя:
+    # у покрытия процентов при убытке отношение верно и бесполезно — смысл
+    # один, «операционной прибыли нет вовсе», и он выражается словом.
+    negative_shown_as: str | None = None
+    negative_shown_origin: str | None = None
     exclusion_kind: str | None = None
     exclusion_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _negative_wording_is_grounded(self) -> Self:
+        """Слово вместо числа объявляется вместе с основанием."""
+        if self.negative_shown_as and not (self.negative_shown_origin or "").strip():
+            raise ValueError(
+                f"{self.code}: словесная замена отрицательной величины объявлена "
+                "без основания"
+            )
+        return self
 
     @model_validator(mode="after")
     def _exclusion_is_explained(self) -> Self:

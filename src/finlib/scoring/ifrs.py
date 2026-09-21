@@ -174,6 +174,7 @@ def evaluate_stop_factors(
     policy = policy or load_ifrs_metrics()
     types = types or load_issuer_types()
     values = {item.code: item.value for item in metrics if item.calculable}
+    by_code = {item.code: item for item in metrics}
     ranks = {item.code: index for index, item in enumerate(policy.classes)}
 
     triggered: list[str] = []
@@ -185,7 +186,16 @@ def evaluate_stop_factors(
         if not outcome.applicable:
             excluded.append((factor.metric, " ".join(outcome.limitation.split())))
             continue
-        if not factor.holds(values.get(factor.metric)):
+        # **Вывод по знаку.** Неположительный числитель при положительном
+        # знаменателе доказывает, что отношение ниже единицы, без деления —
+        # и доказывает это даже тогда, когда само отношение не посчитано.
+        # Правило объявлено методикой у того стоп-фактора, у которого оно
+        # верно арифметически.
+        found = by_code.get(factor.metric)
+        by_sign = (
+            factor.proven_by_sign and found is not None and found.below_one_by_sign
+        )
+        if not by_sign and not factor.holds(values.get(factor.metric)):
             continue
         triggered.append(factor.code)
         if cap is None or ranks[factor.cap] > ranks[cap]:

@@ -748,7 +748,10 @@ def build_ifrs_theses(
             selectors,
             {
                 "code": item.code,
-                "value": format_metric(item.value, _ifrs_unit(item.code, policy), 3),
+                # Величина печатается той же функцией, что в документе:
+                # у покрытия процентов при убытке она словесная, и тезис,
+                # набравший число сам, разошёлся бы с приложением.
+                "value": _ifrs_shown(item.code, item.value, policy),
                 "name": item.name,
             },
         )
@@ -786,6 +789,18 @@ def _ifrs_unit(code: str, policy) -> Unit:
     if metric is None:
         return Unit.RATIO
     return Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
+
+
+def _ifrs_shown(code: str, value, policy) -> str:
+    """Величина показателя МСФО так, как её печатает документ.
+
+    Одна функция на тезис и на приложение: словесная замена отрицательной
+    величины объявлена методикой, и набрать число здесь значило бы завести
+    второй способ его напечатать.
+    """
+    from finlib.metrics.ifrs_view import IfrsMetricsView
+
+    return IfrsMetricsView(policy).shown(code, value)
 
 
 def build_theses(

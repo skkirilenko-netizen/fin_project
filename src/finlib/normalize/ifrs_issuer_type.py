@@ -76,6 +76,20 @@ class StopFactor(BaseModel):
     cap: str = Field(min_length=1)
     statement: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
+    # Вывод по знаку: неположительный числитель при положительном знаменателе
+    # доказывает условие без деления. Объявляется только там, где это верно
+    # арифметически, и требует основания — как всякая отсечка методики.
+    proven_by_sign: bool = False
+    sign_origin: str | None = None
+
+    @model_validator(mode="after")
+    def _sign_proof_is_grounded(self) -> Self:
+        """Вывод по знаку объявляется вместе с основанием."""
+        if self.proven_by_sign and not (self.sign_origin or "").strip():
+            raise ValueError(
+                f"стоп-фактор {self.code}: вывод по знаку объявлен без основания"
+            )
+        return self
 
     @property
     def threshold(self) -> Decimal:

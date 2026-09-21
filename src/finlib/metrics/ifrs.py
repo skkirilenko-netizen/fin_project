@@ -18,7 +18,7 @@
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
 
@@ -60,6 +60,23 @@ class MetricValue:
     reason: Reason | None = None
     missing: tuple[str, ...] = ()
     annualised: bool = False
+    # Части отношения хранятся рядом с ним: по ним делается **вывод по знаку**.
+    # Неположительный числитель при положительном знаменателе доказывает, что
+    # отношение ниже единицы, без деления — и доказывает это даже тогда, когда
+    # само отношение не посчитано. Того же рода, что вывод нуля раздела
+    # из тождества баланса.
+    numerator: Decimal | None = None
+    denominator: Decimal | None = None
+
+    @property
+    def below_one_by_sign(self) -> bool:
+        """Доказано ли знаком, что отношение ниже единицы."""
+        return (
+            self.numerator is not None
+            and self.denominator is not None
+            and self.numerator <= 0
+            and self.denominator > 0
+        )
 
     @property
     def calculable(self) -> bool:
@@ -256,6 +273,9 @@ def _compute(
     denominator = _value_of(metric.denominator, inputs, derived, metric)
     if denominator is None:
         return _refused(empty, Reason.MISSING_INPUT, (metric.denominator,))
+    # Части отношения остаются при отказе: по ним делается вывод по знаку,
+    # и отказ, у которого их нет, лишает вывода доказательства.
+    empty = replace(empty, numerator=numerator, denominator=denominator)
     if denominator == 0:
         return _refused(empty, Reason.ZERO_DENOMINATOR)
     if metric.denominator_must_be_positive and denominator < 0:
@@ -271,6 +291,8 @@ def _compute(
         metric.in_scoring,
         numerator / denominator,
         annualised=annualised,
+        numerator=numerator,
+        denominator=denominator,
     )
 
 
@@ -310,4 +332,8 @@ def _refused(
         empty.in_scoring,
         reason=reason,
         missing=missing,
+        # Части отношения переносятся в отказ: вывод по знаку опирается
+        # на них, а не на посчитанную величину.
+        numerator=empty.numerator,
+        denominator=empty.denominator,
     )

@@ -96,10 +96,16 @@ def metrics_table(data: ReportData) -> Table:
         "Участвует в балле",
     )
     rows: list[tuple[str, ...]] = []
+    shown = getattr(catalog, "shown", None)
     for metric in data.metrics:
         scale = catalog.scale_for(metric.code)
         cells = [
-            _value(metric.values.get(period), metric.unit, scale, data.unit_name)
+            # Словесная замена отрицательной величины — у справочника своего
+            # стандарта: «−2,66» у покрытия процентов при убытке выглядит
+            # кратностью, а означает отсутствие операционной прибыли.
+            shown(metric.code, metric.values[period], data.unit_name)
+            if shown is not None and metric.values.get(period) is not None
+            else _value(metric.values.get(period), metric.unit, scale, data.unit_name)
             for period in periods
         ]
         rows.append(
