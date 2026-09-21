@@ -84,14 +84,14 @@ ORDER BY metric_code, report_date DESC
 # а именно это от сводки и требуется. Объект — строки отчётности, которых
 # контроль касался; контроль, применённый к комплекту целиком, их не имеет.
 _CHECKS = """
-SELECT d.check_code, d.severity, d.status, d.report_date,
+SELECT d.check_code, d.severity, d.status, d.report_date, s.report_year,
        count(DISTINCT (d.form_code, d.line_code, d.previous_value,
                        d.new_value, d.message)) AS runs,
        array_remove(array_agg(DISTINCT d.line_code), NULL) AS line_codes
 FROM dq_log d
 JOIN src_file s ON s.id = d.src_file_id
 WHERE d.inn = %(inn)s AND s.standard = %(standard)s AND s.is_actual
-GROUP BY d.check_code, d.severity, d.status, d.report_date
+GROUP BY d.check_code, d.severity, d.status, d.report_date, s.report_year
 ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
 """
 
@@ -143,6 +143,10 @@ class MetricRow:
     group_name: str
     values: dict[date, Decimal | None]
     reasons: dict[date, str | None]
+    # Машинная причина отказа по периодам: по ней определяется семейство
+    # отказа, то есть что с ним делать. Текст причины для этого не годится —
+    # он написан читателю, а не разбору.
+    reason_codes: dict[date, str | None]
     included: bool
     score: Decimal | None
     level_score: Decimal | None
@@ -158,6 +162,24 @@ class MetricRow:
         return bool(
             self.exclusion_reason and NOT_CALCULATED_MARK in self.exclusion_reason
         )
+
+    def refusal_kind(self, report_date: date):
+        """Семейство отказа за период: из него следует, что делать.
+
+        `data_missing` — величины нет в отчётности, и из отказа следует запрос
+        к организации; `our_gap` и `not_applicable` — запрашивать нечего.
+        Семейство объявлено методикой (`refusals.yaml`), а не выведено здесь:
+        документ обязан говорить о показателе одним голосом в «Ограничениях»
+        и в «Вопросах».
+        """
+        from finlib.quality.refusals import Kind, load_refusals
+        from finlib.report.refusals import METRIC_REASONS
+
+        code = self.reason_codes.get(report_date)
+        if code is None:
+            return Kind.DATA_MISSING
+        found = load_refusals().reason(METRIC_REASONS.get(code, code))
+        return found.kind if found is not None else Kind.DATA_MISSING
 
     @property
     def exclusion_rank(self) -> int:
@@ -424,16 +446,25 @@ class ReportData:
 
     @property
     def blocking_failures(self) -> list[dict]:
-        """Провалившиеся блокирующие контроли.
+        """Провалившиеся блокирующие контроли **комплекта этого документа**.
 
         Провал блокирующего контроля означает, что комплект в расчёт не пошёл,
         и умолчать об этом в «Ключевом выводе» нельзя: читатель обязан знать,
         что часть отчётности отбракована, а не просто отсутствует.
+
+        **Но контроли чужого комплекта здесь не место.** У ФосАгро «Ключевой
+        вывод» по годовой отчётности перечислял четыре отказа промежуточного
+        комплекта — опознание позиции, полноту вида отчётности, статью сверх
+        порога, сходимость итога, — то есть отказы, к комплекту этого документа
+        не относящиеся вовсе. Отбракованный комплект другого периода при этом
+        не замалчивается: он назван в «Ограничениях анализа» и в приложении.
         """
         return [
             item
             for item in self.checks
-            if item["severity"] == "blocking" and item["status"] == "fail"
+            if item["severity"] == "blocking"
+            and item["status"] == "fail"
+            and item["report_year"] == self.report_date.year
         ]
 
     def months_since_report(self, generated_at: datetime) -> int:
@@ -647,6 +678,10 @@ def _metric_row(
         },
         reasons={
             item["report_date"]: item["reason"] if item["status"] != "ok" else None
+            for item in points
+        },
+        reason_codes={
+            item["report_date"]: item["reason_code"] if item["status"] != "ok" else None
             for item in points
         },
         included=bool(scored and scored["included"]),

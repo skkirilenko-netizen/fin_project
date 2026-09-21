@@ -21,6 +21,7 @@ from finlib.metrics.derived import DerivedKind
 from finlib.metrics.derived import parse as parse_derived
 from finlib.metrics.display import format_metric, money, percent
 from finlib.normalize.lines import LinesCatalog, ReportingType
+from finlib.quality.refusals import Kind as RefusalKind
 from finlib.report.data import ReportData
 from finlib.report.policy import QuestionSubject, ReportPolicy
 from finlib.scoring.definitions import ScoringCatalog
@@ -341,6 +342,14 @@ def questions(
         # Нехватка данных и исключение решением методики — разные вещи:
         # о втором спрашивать нечего, это наш выбор, а не пробел отчётности.
         if row.included or not row.missing_data:
+            continue
+        # **Наш пробел вопросом не становится.** Семейство отказа объявлено
+        # методикой (`refusals.yaml`): из `data_missing` следует запрос,
+        # из `our_gap` и `not_applicable` — прямое «запрашивать нечего».
+        # Прежде документ говорил об одном показателе двумя голосами:
+        # «Ограничения» — «величина есть в отчётности, извлечение за нами»,
+        # а «Вопросы» просили у организации расшифровки того же показателя.
+        if row.refusal_kind(data.report_date) is not RefusalKind.DATA_MISSING:
             continue
         by_subject.setdefault(QuestionSubject.MISSING_METRIC, []).append(
             policy.questions.question(QuestionSubject.MISSING_METRIC, name=row.name)

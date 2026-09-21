@@ -608,11 +608,18 @@ def _question_texts(data: ReportData) -> list[str]:
     from finlib.metrics.definitions import load_metrics
     from finlib.report.composition import questions
 
+    # **Спрашивают о комплекте этого документа, а не о чужом.** У ФосАгро
+    # первым вопросом стояло «чем объясняются расхождения в комплекте за 2026
+    # год» — комплект промежуточный, к заключению по годовой отчётности
+    # отношения не имеет, а расхождения в нём наши: это условия экрана сверки,
+    # а не свойства отчётности. Отбракованный комплект другого периода назван
+    # в «Ограничениях анализа» и в приложении, и вопросом не становится.
     years = sorted(
         {
             int(row["report_year"])
             for row in data.sources
             if row["status"] == "quarantine"
+            and int(row["report_year"]) == data.report_date.year
         }
     )
     return questions(data, load_policy(), load_metrics(), load_scoring(), years)
