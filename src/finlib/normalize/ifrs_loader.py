@@ -333,8 +333,6 @@ def load_extraction(
     извлечение, о котором машина не знает, что перед ней, в расчёт не идёт.
     """
     notes = reading.notes
-    issuer_type = reading.issuer_type
-    audit = reading.audit
     execute(
         _ENSURE_ORGANIZATION, {"inn": inn, "name": organization_name}, conn=conn
     )
@@ -353,7 +351,7 @@ def load_extraction(
         checksum=checksum,
         correction_version=correction_version,
         quarantined=quarantined,
-        issuer_type=issuer_type,
+        reading=reading,
     )
 
     # Присвоения этого присеста — такое же подтверждение человека, как и
@@ -380,7 +378,7 @@ def load_extraction(
         quarantined,
         notes,
     )
-    records.extend(_audit_records(inn, src_file_id, audit))
+    records.extend(_audit_records(inn, src_file_id, reading.audit))
     execute(
         _CLEAR_STATE_RECORDS,
         {
@@ -426,7 +424,7 @@ def _write_src_file(
     checksum: str | None,
     correction_version: int,
     quarantined: bool,
-    issuer_type: str | None = None,
+    reading: DocumentReading,
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
     report_year = profile.report_dates[0].year
@@ -448,7 +446,13 @@ def _write_src_file(
         # Тип эмитента опознаётся статьями и текстом документа, а расчёт
         # по фактам базы документа не видит: без записи поправка показателя
         # по типу молча не применялась бы.
-        "issuer_type": issuer_type,
+        "issuer_type": reading.issuer_type,
+        # **Сведения заключения хранятся с комплектом.** Документ собирается
+        # из базы, самого файла при этом нет, и оговорку аудитора взять больше
+        # неоткуда: у ФосАгро мнение с оговоркой не дошло до документа вовсе.
+        # Хранятся факты и дословный текст разделов, формулировки — из методики
+        # в момент сборки.
+        "audit": reading.audit.as_meta() if reading.audit is not None else None,
     }
     row = fetch_one(
         _UPSERT_SRC_FILE,

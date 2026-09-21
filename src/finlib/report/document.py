@@ -636,9 +636,28 @@ def _write_risks(document: Document, data: ReportData) -> None:
     policy = load_policy()
     if data.signals:
         _write_signals(document, data)
+    _write_audit_signals(document, data)
     _write_stop_factor_risk(document, data, policy)
-    if not data.signals and not data.stop_factor_code:
+    if not data.signals and not data.stop_factor_code and not data.audit_signals:
         document.add_paragraph(policy.risks.none_found_text)
+
+
+def _write_audit_signals(document: Document, data: ReportData) -> None:
+    """Сигналы аудиторского заключения: формулировка методики и основание.
+
+    Основание здесь структурное — вид мнения и раздел, — а не величина
+    с отсечкой: вид мнения объявлен заголовком раздела заключения, и числа
+    у этого признака нет вовсе. Требовать величину значило бы её выдумать.
+    """
+    for signal in data.audit_signals:
+        level = SIGNAL_LEVELS.get(signal.level, signal.level)
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"{signal.name} ({level}). ").bold = True
+        paragraph.add_run(signal.message)
+        note = document.add_paragraph()
+        run = note.add_run(signal.basis)
+        run.italic = True
+        run.font.size = Pt(9)
 
 
 def _write_stop_factor_risk(
@@ -754,7 +773,12 @@ def _triggers(
 ) -> set[Trigger]:
     """Машинные признаки организации, по которым выводятся предложения."""
     found: set[Trigger] = set()
-    levels = {item["level"] for item in data.signals}
+    # Сигнал заключения — такой же признак расчёта, как сигнал по показателю:
+    # уровень объявлен методикой, и эскалация от него зависит так же. Прежде
+    # предложения о нём не знали, и раздел 7 ссылался на пустой раздел 4.
+    levels = {item["level"] for item in data.signals} | {
+        item.level for item in data.audit_signals
+    }
     if "supervisory" in levels:
         found.add(Trigger.SUPERVISORY_SIGNAL)
     if "attention" in levels:

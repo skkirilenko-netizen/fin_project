@@ -197,6 +197,22 @@ class ReportData:
     line_notes: dict[str, tuple[int, str]] = field(default_factory=dict)
 
     @property
+    def audit_signals(self) -> tuple:
+        """Сигналы аудиторского заключения — предписанными формулировками.
+
+        Сведения лежат в `src_file.meta` комплекта, формулировки берутся
+        из методики сейчас. Раздел 4 без них у ФосАгро был пуст, хотя мнение
+        аудитора модифицировано, а раздел 7 на этот пустой раздел ссылался.
+        """
+        from finlib.normalize.ifrs_audit import load_audit_policy
+        from finlib.sources.ifrs_audit import audit_from_meta
+
+        audit = audit_from_meta(self.organization.get("meta"))
+        if audit is None:
+            return ()
+        return audit.signal_hits(load_audit_policy())
+
+    @property
     def disclosed_lines(self) -> frozenset[str]:
         """Коды строк, раскрытых за отчётный период."""
         return frozenset(self.line_values)

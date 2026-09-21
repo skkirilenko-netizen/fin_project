@@ -39,7 +39,14 @@ class ReportSection(BaseModel):
 
 
 class AuditSignal(BaseModel):
-    """Сигнал, выводимый из заключения."""
+    """Сигнал, выводимый из заключения.
+
+    **Условие объявлено у каждого сигнала, а способ задать его не один.**
+    Сигнал по разделу называет раздел и слова, которыми раздел объявляет
+    предмет; сигнал по виду мнения не называет ни того ни другого — вид
+    объявлен заголовком самого раздела мнения. Требовать раздел у обоих
+    значило бы придумать его тому, у кого его нет.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -47,11 +54,38 @@ class AuditSignal(BaseModel):
     name: str = Field(min_length=1)
     level: str = Field(min_length=1)
     condition: str = Field(min_length=1)
-    section: str = Field(min_length=1)
-    markers: tuple[str, ...] = Field(min_length=1)
+    section: str | None = None
+    markers: tuple[str, ...] = ()
     formulation: str = Field(min_length=1)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _condition_names_what_it_needs(self) -> Self:
+        """Условие по разделу обязано назвать раздел и слова, прочие — нет."""
+        if self.condition == "section_found":
+            if not self.section or not self.markers:
+                raise ValueError(
+                    f"сигнал {self.code}: условие по разделу требует раздел и слова"
+                )
+            return self
+        if self.condition == "opinion_modified":
+            if self.section or self.markers:
+                raise ValueError(
+                    f"сигнал {self.code}: условие по виду мнения раздела не имеет"
+                )
+            return self
+        raise ValueError(f"сигнал {self.code}: условие {self.condition} неизвестно")
+
+
+class ConfidenceRule(BaseModel):
+    """Понижение уверенности в оценке по сведениям заключения."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lowered_by_modified_opinion: bool
+    reason: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
 
 
 class Attribution(BaseModel):
@@ -87,6 +121,9 @@ class AuditPolicy(BaseModel):
     opinions: tuple[OpinionKind, ...] = Field(min_length=1)
     sections: tuple[ReportSection, ...] = Field(min_length=1)
     signals: tuple[AuditSignal, ...] = Field(min_length=1)
+    # Разделы, печатаемые в документе дословно.
+    quoted_sections: tuple[str, ...] = Field(min_length=1)
+    confidence: ConfidenceRule
     limitations: dict[str, str]
 
     @model_validator(mode="after")
@@ -97,11 +134,16 @@ class AuditPolicy(BaseModel):
                 raise ValueError(f"не объявлены заголовки для типа задания {kind}")
         sections = {item.code for item in self.sections}
         for signal in self.signals:
-            if signal.section not in sections:
+            if signal.section is not None and signal.section not in sections:
                 raise ValueError(
                     f"сигнал {signal.code} ссылается на незаведённый раздел "
                     f"{signal.section}"
                 )
+        # Цитируемый раздел обязан быть заведённым: иначе документ обещает
+        # дословный текст раздела, которого чтение не ищет вовсе.
+        for code in self.quoted_sections:
+            if code not in sections:
+                raise ValueError(f"цитируемый раздел {code} не заведён в справочнике")
         # Немодифицированный вид обязан стоять последним: его заголовок
         # «Мнение» — начало всех прочих, и опознайся он первым, мнение
         # с оговоркой стало бы немодифицированным.

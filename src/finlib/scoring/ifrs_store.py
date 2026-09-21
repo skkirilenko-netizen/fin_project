@@ -15,7 +15,7 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from finlib.db import PgConnection, fetch_all
+from finlib.db import PgConnection, fetch_all, fetch_one
 from finlib.metrics.ifrs import MetricValue
 from finlib.metrics.store import save_results
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
@@ -305,6 +305,41 @@ def _bases(
 _SCALE_THOUSANDS = 0
 
 
+_AUDIT_META = """
+SELECT meta FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
+  AND is_actual
+LIMIT 1
+"""
+
+
+def _audit_confidence(
+    inn: str, report_date: date, conn: PgConnection
+) -> tuple[Confidence, list[str]]:
+    """Уверенность в оценке с учётом мнения аудитора и причины понижения.
+
+    Сведения заключения берутся **из базы**, а не доводом: довод с умолчанием
+    здесь означал бы, что понижение можно молча не применить, — а именно так
+    шесть кодов заключения не дошли ни до одного комплекта. Величина хранится
+    с комплектом, и кто пишет оценку, тот её и читает.
+    """
+    from finlib.normalize.ifrs_audit import load_audit_policy
+    from finlib.sources.ifrs_audit import audit_from_meta
+
+    row = fetch_one(
+        _AUDIT_META,
+        {"inn": inn, "standard": Standard.IFRS.value, "year": report_date.year},
+        conn=conn,
+    )
+    audit = audit_from_meta(row["meta"] if row else None)
+    if audit is None or not audit.modified:
+        return Confidence.HIGH, []
+    policy = load_audit_policy()
+    if not policy.confidence.lowered_by_modified_opinion:
+        return Confidence.HIGH, []
+    return Confidence.MEDIUM, [" ".join(policy.confidence.reason.split())]
+
+
 def save_ifrs_assessment(
     inn: str,
     report_date: date,
@@ -315,6 +350,7 @@ def save_ifrs_assessment(
 ) -> int:
     """Пишет оценку МСФО и её разложение по группам и показателям."""
     policy = policy or load_ifrs_metrics()
+    audit_confidence, audit_reasons = _audit_confidence(inn, report_date, conn)
     in_scoring = {item.code for group in assessment.groups for item in group.metrics}
     stored = StoredAssessment(
         inn=inn,
@@ -331,12 +367,12 @@ def save_ifrs_assessment(
         class_before_stop=assessment.class_code,
         stop_factor_code=None,
         stop_factor_effect=StopEffect.NONE,
-        # Уверенность в оценке у МСФО пока не ступенчатая: правило понижения
-        # опирается на число периодов ряда, а ряда по МСФО ещё нет. Высокая
-        # здесь означает «понижать не по чему», и расхождение мер долговой
-        # нагрузки идёт рядом словами.
-        confidence=Confidence.HIGH,
-        confidence_reasons=list(assessment.divergence),
+        # Уверенность понижается модифицированным мнением аудитора и больше
+        # ничем: правило по числу периодов ряда к МСФО пока не применяется —
+        # ряда у эмитента ещё нет. Высокая здесь означает «понижать
+        # не по чему», а не «проверено».
+        confidence=audit_confidence,
+        confidence_reasons=[*assessment.divergence, *audit_reasons],
         groups=[
             StoredGroup(
                 code=group.code,

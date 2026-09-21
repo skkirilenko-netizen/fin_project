@@ -26,11 +26,17 @@ from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
+# Комплект называет стандарт: у организации, сдающей и РСБУ, и МСФО, за один
+# год лежат два комплекта, и `LIMIT 1` без стандарта брал любой из них.
+# Тип отчётности, единица и сведения заключения шли бы тогда от чужого
+# комплекта — то же смешение стандартов, что уже ловилось в отборе карантина
+# и в выборке расхождений.
 _ORGANIZATION = """
 SELECT o.inn, o.name, o.short_name, o.ogrn, o.okved, o.region,
-       s.reporting_type, s.standard, s.unit_code, s.unit_source, s.knd
+       s.reporting_type, s.standard, s.unit_code, s.unit_source, s.knd, s.meta
 FROM organization o
-JOIN src_file s ON s.inn = o.inn AND s.report_year = %(year)s AND s.is_actual
+JOIN src_file s ON s.inn = o.inn AND s.report_year = %(year)s
+                AND s.standard = %(standard)s AND s.is_actual
 WHERE o.inn = %(inn)s
 LIMIT 1
 """
@@ -128,10 +134,18 @@ def _periods(inn: str, conn: PgConnection | None, standard: Standard) -> list[da
 
 
 def _organization_block(
-    inn: str, report_date: date, conn: PgConnection | None, catalog: LinesCatalog
+    inn: str,
+    report_date: date,
+    conn: PgConnection | None,
+    catalog: LinesCatalog,
+    standard: Standard,
 ) -> str:
     """Реквизиты организации и происхождение отчётности."""
-    row = fetch_one(_ORGANIZATION, {"inn": inn, "year": report_date.year}, conn=conn)
+    row = fetch_one(
+        _ORGANIZATION,
+        {"inn": inn, "year": report_date.year, "standard": standard.value},
+        conn=conn,
+    )
     if row is None:
         raise ValueError(f"для ИНН {inn} нет отчётности за {report_date.year} год")
     kind = ReportingType(row["reporting_type"])
@@ -148,7 +162,10 @@ def _organization_block(
         # Оговорки о предположении здесь нет: единица определена формой
         # отчётности, а комплект с неопределённой единицей до расчёта
         # не доходит — его останавливает контроль unit_not_determined.
-        f"Единица измерения: {catalog.units.name}",
+        # Единица — **комплекта**: консолидированная отчётность составляется
+        # в миллионах, и «тыс. руб.» рядом с её величинами есть ошибка
+        # в тысячу раз.
+        f"Единица измерения: {catalog.units.name_of(row['unit_code'])}",
     ]
     return "\n".join(lines)
 
@@ -733,6 +750,27 @@ def _ifrs_notes(
     return found
 
 
+def _audit_notes(meta: dict | None) -> list[str]:
+    """Оговорки заключения и дословные цитаты его разделов.
+
+    Сведения берутся из `src_file.meta` комплекта: документ собирается
+    из базы, и самого файла отчётности при сборке нет. Формулировки —
+    из методики в момент сборки, а не из записи: методика правится,
+    и результат обязан меняться вместе с ней.
+    """
+    from finlib.normalize.ifrs_audit import load_audit_policy
+    from finlib.sources.ifrs_audit import audit_from_meta
+
+    audit = audit_from_meta(meta)
+    if audit is None:
+        return []
+    policy = load_audit_policy()
+    return [
+        *(" ".join(item.split()) for item in audit.limitations(policy)),
+        *audit.quotes(policy),
+    ]
+
+
 def _limitations_block(
     inn: str,
     periods: list[date],
@@ -743,11 +781,18 @@ def _limitations_block(
     reporting_type: ReportingType,
     assessment: dict | None,
     standard: Standard,
+    meta: dict | None = None,
 ) -> str:
     """Ограничения анализа: готовые формулировки, которые нельзя сокращать."""
     lines = ["=== ОГРАНИЧЕНИЯ АНАЛИЗА ==="]
     notes: list[str] = [" ".join(scoring.calibration_points.limitation_note.split())]
     notes.extend(period_limitations(inn, conn, standard))
+    # **Оговорка аудитора и его слова дословно.** Сведения хранятся
+    # с комплектом, формулировки берутся из методики сейчас: у ФосАгро мнение
+    # с оговоркой, и в первом заключении по МСФО о нём не было ни слова —
+    # читатель видел оценку по отчётности, которую аудитор подтвердил
+    # не полностью.
+    notes.extend(_audit_notes(meta))
 
     if assessment is not None and assessment["confidence_reasons"]:
         notes.extend(assessment["confidence_reasons"])
@@ -822,13 +867,17 @@ def build_context(
         assessment["metrics"] = fetch_all(_ASSESSMENT_METRICS, params, conn=conn)
         assessment["flags"] = fetch_all(_FLAGS, params, conn=conn)
 
-    row = fetch_one(_ORGANIZATION, {"inn": inn, "year": target.year}, conn=conn)
+    row = fetch_one(
+        _ORGANIZATION,
+        {"inn": inn, "year": target.year, "standard": standard.value},
+        conn=conn,
+    )
     reporting_type = ReportingType(row["reporting_type"]) if row else ReportingType.FULL
 
     return ConclusionContext(
         inn=inn,
         report_date=target,
-        organization=_organization_block(inn, target, conn, lines_catalog),
+        organization=_organization_block(inn, target, conn, lines_catalog, standard),
         data=_data_block(inn, periods, conn, lines_catalog, standard, reporting_type),
         metrics=_metrics_block(
             inn, periods, conn, metrics_catalog, standard, lines_catalog, reporting_type
@@ -849,6 +898,7 @@ def build_context(
             reporting_type,
             assessment,
             standard,
+            row["meta"] if row else None,
         ),
         theses=_theses_block(inn, target, conn, standard) if with_theses else "",
     )

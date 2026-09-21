@@ -87,7 +87,7 @@ HEADER = (
 )
 
 
-def loaded(db_conn, notes: tuple[NoteValue, ...] = ()) -> None:
+def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
     """Проводит комплект через приём, разбор, сверку и запись.
 
     Единственная неопознанная строка подтверждается человеком: иначе комплект
@@ -105,7 +105,7 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = ()) -> None:
         profile,
         decision,
         db_conn,
-        DocumentReading(audit=None, notes=notes, issuer_type="corporate"),
+        DocumentReading(audit=audit, notes=notes, issuer_type="corporate"),
         confirmed_by="аналитик",
         confirmations={"Амортизация основных средств": "ifrs.depreciation"},
     )
@@ -314,6 +314,81 @@ def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     assert "1410" not in plain and "1510" not in plain
     # Технических идентификаторов в тексте нет: показатель назван наименованием.
     assert "net_debt" not in plain and "debt_maturity_cover" not in plain
+
+
+def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
+    """Оговорка аудитора доходит до документа: сигнал, цитата, уверенность.
+
+    У годового комплекта ФосАгро мнение с оговоркой — не раскрыта информация
+    о сегментах, требуемая МСФО (IFRS) 8, — и в первом заключении по МСФО
+    об этом не было ни слова: раздел 4 был пуст, раздел 7 на него ссылался,
+    а уверенность в оценке стояла высшей.
+    """
+    from docx import Document
+
+    from finlib.report.document import build_report
+    from finlib.sources.ifrs_audit import (
+        AuditReport,
+        Determination,
+        Engagement,
+        SectionText,
+    )
+    from finlib.standards import Standard
+
+    basis = (
+        "Руководство Группы не раскрыло информацию о сегментах, требуемую "
+        "стандартом МСФО (IFRS) 8 «Операционные сегменты»."
+    )
+    audit = AuditReport(
+        Determination.DETERMINED,
+        engagement=Engagement.AUDIT,
+        opinion="qualified",
+        opinion_name="Мнение с оговоркой",
+        modified=True,
+        sections=("basis_for_opinion",),
+        texts=(
+            SectionText(
+                code="basis_for_opinion",
+                name="Основание для выражения мнения",
+                text=basis,
+            ),
+        ),
+        auditor="АО «Аудитор»",
+        signed_on="10 марта 2026 года",
+    )
+    loaded(db_conn, audit=audit)
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+    result = assess(computed, policy, ())
+    save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
+
+    # Уверенность понижена ступенью, и причина названа словами.
+    stored = fetch_one(
+        "SELECT confidence, confidence_reasons FROM assessment WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND report_date = %(d)s",
+        {"i": INN, "d": DATES[0]},
+        conn=db_conn,
+    )
+    assert stored["confidence"] == "medium"
+    assert any("аудитор" in item.lower() for item in stored["confidence_reasons"])
+
+    made = build_report(
+        INN,
+        db_conn,
+        standard=Standard.IFRS,
+        with_text=False,
+        directory=tmp_path,
+        is_test=True,
+    )
+    text = "\n".join(item.text for item in Document(made.path).paragraphs)
+
+    # Сигнал в разделе 4 — с предписанной формулировкой и основанием.
+    assert "Мнение аудитора модифицировано (надзорный сигнал)." in text
+    assert "Вид мнения: Мнение с оговоркой" in text
+    # Слова аудитора приведены дословно и с указанием источника.
+    assert basis in text
+    assert "Из аудиторского заключения, раздел «Основание для выражения мнения»" in text
 
 
 def test_foreign_standard_marks_are_blocking(db_conn, tmp_path) -> None:

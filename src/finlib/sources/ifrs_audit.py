@@ -103,6 +103,23 @@ class SectionText:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditSignalHit:
+    """Сработавший сигнал заключения: формулировка методики и основание.
+
+    Основание здесь структурное, а не числовое: у сигналов по показателям
+    им служит величина с отсечкой, а вид мнения объявлен заголовком раздела,
+    и проверить тезис читатель может только по самому заключению. Поэтому
+    в основании стоит вид мнения либо раздел, а рядом — подпись и дата.
+    """
+
+    code: str
+    name: str
+    level: str
+    message: str
+    basis: str
+
+
+@dataclass(frozen=True, slots=True)
 class AuditReport:
     """Итог чтения заключения."""
 
@@ -153,6 +170,37 @@ class AuditReport:
         sections = ", ".join(self.sections) if self.sections else "нет"
         return f"{kind}, {self.opinion_name}; разделы-признаки: {sections}"
 
+    def as_meta(self) -> dict:
+        """Сведения заключения для `src_file.meta` — сырыми, без формулировок.
+
+        **Хранятся факты, а не текст методики.** Оговорки и формулировка
+        сигнала берутся из справочника в момент сборки документа: методика
+        правится, и результат обязан меняться вместе с ней. Дословный текст
+        разделов — единственное, что хранится как есть: это слова аудитора,
+        и взять их заново неоткуда, документа при сборке заключения уже нет.
+        """
+        return {
+            "determination": self.determination.value,
+            "engagement": self.engagement.value if self.engagement else None,
+            "opinion": self.opinion,
+            "opinion_name": self.opinion_name,
+            "modified": self.modified,
+            "sections": list(self.sections),
+            "signals": list(self.signals),
+            "unreadable_pages": list(self.unreadable_pages),
+            "auditor": self.auditor,
+            "signed_on": self.signed_on,
+            "texts": [
+                {
+                    "code": item.code,
+                    "name": item.name,
+                    "text": item.text,
+                    "refusal": item.refusal.value if item.refusal else None,
+                }
+                for item in self.texts
+            ],
+        }
+
     def limitations(self, policy: AuditPolicy) -> tuple[str, ...]:
         """Оговорки для раздела «Ограничения анализа» — дословно из методики."""
         found: list[str] = []
@@ -165,6 +213,103 @@ class AuditReport:
         if self.modified:
             found.append(policy.limitations["modified"])
         return tuple(found)
+
+    def quotes(self, policy: AuditPolicy) -> tuple[str, ...]:
+        """Дословные цитаты разделов, объявленных цитируемыми, — и отказы.
+
+        **Отказ называется наравне с цитатой.** Раздел, объявленный
+        цитируемым и не извлечённый, иначе неотличим от раздела, которого
+        в заключении нет: читатель решит, что оговорки не было.
+        """
+        found: list[str] = []
+        for code in policy.quoted_sections:
+            section = self.text_of(code)
+            if section is None:
+                continue
+            quote = self.quote(code, policy)
+            if quote:
+                found.append(" ".join(quote.split()))
+                continue
+            found.append(
+                f"Раздел заключения «{section.name}»: "
+                f"{TEXT_REFUSAL_TEXT.get(section.refusal, 'причина не названа')}. "
+                "Текст раздела приводится по самому заключению."
+            )
+        return tuple(found)
+
+    def signal_hits(self, policy: AuditPolicy) -> tuple["AuditSignalHit", ...]:
+        """Сработавшие сигналы заключения с предписанной формулировкой.
+
+        Условие каждого объявлено в справочнике, а не здесь: прочитав
+        справочник, надо видеть, когда печатается формулировка.
+        """
+        found: list[AuditSignalHit] = []
+        for signal in policy.signals:
+            if signal.condition == "opinion_modified":
+                if not self.modified:
+                    continue
+                basis = f"Вид мнения: {self.opinion_name}"
+            else:
+                # Сигнал по разделу опознан при чтении: его код лежит
+                # в `signals`, а не выводится здесь заново.
+                if signal.code not in self.signals:
+                    continue
+                section = policy.section(signal.section) if signal.section else None
+                basis = (
+                    f"Основание: раздел заключения «{section.name}»"
+                    if section is not None
+                    else "Основание: раздел заключения"
+                )
+            if self.auditor:
+                basis += f"; заключение подписано {self.auditor}"
+                if self.signed_on:
+                    basis += f", {self.signed_on}"
+            found.append(
+                AuditSignalHit(
+                    code=signal.code,
+                    name=signal.name,
+                    level=signal.level,
+                    message=" ".join(signal.formulation.split()),
+                    basis=basis,
+                )
+            )
+        return tuple(found)
+
+
+def audit_from_meta(meta: dict | None) -> AuditReport | None:
+    """Восстанавливает сведения заключения из `src_file.meta`.
+
+    Документ собирается из базы, самого файла отчётности при этом нет,
+    и оговорки с цитатой берутся отсюда. Восстанавливается тот же объект,
+    которым пользуется загрузка: формулировки считает одна реализация,
+    а не две — расхождение двух путей к одному ответу не видно, пока
+    их не сравнить.
+    """
+    if not meta or not meta.get("audit"):
+        return None
+    found = meta["audit"]
+    engagement = found.get("engagement")
+    return AuditReport(
+        determination=Determination(found["determination"]),
+        engagement=Engagement(engagement) if engagement else None,
+        opinion=found.get("opinion"),
+        opinion_name=found.get("opinion_name", ""),
+        modified=found.get("modified"),
+        sections=tuple(found.get("sections", ())),
+        signals=tuple(found.get("signals", ())),
+        unreadable_pages=tuple(found.get("unreadable_pages", ())),
+        auditor=found.get("auditor", ""),
+        signed_on=found.get("signed_on", ""),
+        texts=tuple(
+            SectionText(
+                code=item["code"],
+                name=item["name"],
+                text=item.get("text", ""),
+                refusal=TextRefusal(item["refusal"]) if item.get("refusal") else None,
+            )
+            for item in found.get("texts", ())
+        ),
+    )
 
 
 def read_audit_report(
