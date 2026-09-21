@@ -41,6 +41,7 @@ from finlib.sources.ifrs_inbox import DocumentProfile
 from finlib.sources.ifrs_notes import NoteValue
 from finlib.sources.ifrs_review import REASON_CODES, ReviewResult
 from finlib.standards import Standard
+from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
 
@@ -140,11 +141,12 @@ _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
     inn, standard, report_year, source, raw_path, checksum, form_codes,
     correction_version, is_actual, reporting_type, reporting_kind, unit_code,
-    unit_source, digit_grouping, status, meta
+    unit_source, digit_grouping, status, meta, code_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_year)s, 'file', %(raw_path)s, %(checksum)s,
     %(form_codes)s, %(correction_version)s, true, 'full', %(reporting_kind)s,
-    %(unit_code)s, 'explicit', %(digit_grouping)s, %(status)s, %(meta)s
+    %(unit_code)s, 'explicit', %(digit_grouping)s, %(status)s, %(meta)s,
+    %(code_version)s
 )
 ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
     raw_path = EXCLUDED.raw_path,
@@ -156,6 +158,7 @@ ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE S
     digit_grouping = EXCLUDED.digit_grouping,
     status = EXCLUDED.status,
     meta = EXCLUDED.meta,
+    code_version = EXCLUDED.code_version,
     loaded_at = now()
 RETURNING id
 """
@@ -745,6 +748,9 @@ def _write_src_file(
             "digit_grouping": profile.grouping.value,
             "status": "quarantine" if quarantined else "loaded",
             "meta": json.dumps(meta, ensure_ascii=False),
+            # Версия кода загрузки: по ней сводка контролей отличает записи
+            # журнала, описывающие это извлечение, от записей прежних разборов.
+            "code_version": code_version(),
         },
         conn=conn,
     )

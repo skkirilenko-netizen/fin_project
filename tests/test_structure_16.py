@@ -608,6 +608,32 @@ def test_checks_table_names_period_and_object(db_conn) -> None:
     assert table.rows
 
 
+def test_superseded_records_are_named_but_not_counted(db_conn) -> None:
+    """Записи прежних разборов в сводку не идут, но называются числом.
+
+    Журнал — доказательная база, и удалять из него нельзя; но запись,
+    порождённая разбором, которого больше нет, о нынешнем извлечении
+    не говорит. У ЛСР так остались 18 записей «расхождение сравнительных
+    данных», из которых 12 знаковые, а 6 — следы наших же исправлений
+    справочника. Молчание о них читалось бы как «журнал чист».
+    """
+    from dataclasses import replace
+
+    data = load_report_data(FULL_INN, db_conn)
+    counted = len(checks_table(data).rows)
+
+    aged = replace(data, checks_superseded={"records": 18, "codes": 3})
+    table = checks_table(aged)
+    assert len(table.rows) == counted, "записи прежних версий попали в сводку"
+    assert "Записей прежних версий разбора в журнале: 18" in table.note
+    assert "кодов контроля 3" in table.note
+
+    # Нет прежних записей — нет и оговорки: фраза о нуле записей ничего
+    # не сообщает, а место занимает.
+    clean = replace(data, checks_superseded={"records": 0, "codes": 0})
+    assert "прежних версий" not in checks_table(clean).note
+
+
 def test_blocking_failure_is_stated_in_the_summary(db_conn) -> None:
     """Провал блокирующего контроля попадает в «Ключевой вывод» наименованием."""
     data = load_report_data(NO_CLASS_INN, db_conn)

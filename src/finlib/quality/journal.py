@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 _INSERT = """
 INSERT INTO dq_log (
     src_file_id, inn, report_date, form_code, line_code, check_code,
-    status, severity, message, previous_value, new_value, details
+    status, severity, message, previous_value, new_value, details, code_version
 ) VALUES (
     %(src_file_id)s, %(inn)s, %(report_date)s, %(form_code)s, %(line_code)s, %(check_code)s,
-    %(status)s, %(severity)s, %(message)s, %(previous_value)s, %(new_value)s, %(details)s
+    %(status)s, %(severity)s, %(message)s, %(previous_value)s, %(new_value)s, %(details)s,
+    %(code_version)s
 )
 """
 
@@ -53,8 +54,19 @@ def _resolve_severity(record: CheckRecord) -> Severity:
 
 
 def _as_params(record: CheckRecord) -> dict[str, Any]:
-    """Превращает запись в параметры запроса."""
+    """Превращает запись в параметры запроса.
+
+    **Версия кода пишется у каждой записи.** Журнал — доказательная база,
+    и удалять из него нельзя; но запись, порождённая разбором, которого больше
+    нет, о комплекте уже не говорит: у ЛСР так остались 18 записей
+    «расхождение сравнительных данных», из которых 12 знаковые, а 6 — следы
+    наших же исправлений справочника. Сводка считает записи версии, которой
+    комплект загружен, прочие называет отдельно.
+    """
+    from finlib.version import code_version
+
     return {
+        "code_version": code_version(),
         "src_file_id": record.src_file_id,
         "inn": record.inn,
         "report_date": record.report_date,

@@ -33,6 +33,7 @@ from finlib.sources.model import (
 )
 from finlib.standards import Standard
 from finlib.utils import ValueStatus
+from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,12 @@ _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
     inn, standard, report_year, source, source_url, raw_path, checksum, form_codes, knd,
     girbo_bfo_id, correction_version, is_actual, reporting_type, unit_code, unit_multiplier,
-    unit_source, status, meta
+    unit_source, status, meta, code_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_year)s, %(source)s, %(source_url)s, %(raw_path)s,
     %(checksum)s, %(form_codes)s, %(knd)s, %(girbo_bfo_id)s, %(correction_version)s,
     %(is_actual)s, %(reporting_type)s, %(unit_code)s, %(unit_multiplier)s, %(unit_source)s,
-    'loaded', %(meta)s
+    'loaded', %(meta)s, %(code_version)s
 )
 ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
     source_url = EXCLUDED.source_url,
@@ -112,6 +113,7 @@ ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE S
     unit_multiplier = EXCLUDED.unit_multiplier,
     unit_source = EXCLUDED.unit_source,
     meta = EXCLUDED.meta,
+    code_version = EXCLUDED.code_version,
     loaded_at = now()
 RETURNING id
 """
@@ -530,6 +532,9 @@ def _upsert_src_file(
             },
             ensure_ascii=False,
         ),
+        # Версия кода загрузки: сводка контролей считает записи журнала этой
+        # версии, а записи прежних разборов называет отдельно.
+        "code_version": code_version(),
     }
     with cursor(conn, dict_rows=False) as cur:
         cur.execute(_UPSERT_SRC_FILE, params)

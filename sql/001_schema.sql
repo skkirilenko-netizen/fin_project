@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS src_file (
                       CHECK (status IN ('loaded', 'processed', 'quarantine')),
     quarantine_reason text,
     meta              jsonb,
+    -- Версия кода, которой комплект загружен. По ней сводка контролей
+    -- отличает записи журнала, описывающие нынешнее извлечение, от записей
+    -- прежних разборов: удалять их нельзя, а считать за нынешние — тем более.
+    code_version      text,
     loaded_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT src_file_uniq UNIQUE (inn, standard, report_year, source, correction_version)
 );
@@ -82,6 +86,8 @@ CREATE TABLE IF NOT EXISTS src_file (
 -- отдающих числа машиночитаемо, это верно — разделителей разрядов там нет.
 ALTER TABLE src_file ADD COLUMN IF NOT EXISTS digit_grouping text;
 ALTER TABLE src_file ADD COLUMN IF NOT EXISTS reporting_kind text;
+-- Догонка 21.09.2026: версия кода загрузки комплекта.
+ALTER TABLE src_file ADD COLUMN IF NOT EXISTS code_version text;
 
 DO $$
 BEGIN
@@ -253,6 +259,14 @@ CREATE TABLE IF NOT EXISTS dq_log (
     previous_value numeric(20, 3),
     new_value      numeric(20, 3),
     details        jsonb,
+    -- **Версия кода, которой сделана запись.** Журнал — доказательная база,
+    -- и удалять из него нельзя; но запись, порождённая разбором, которого
+    -- больше нет, о комплекте уже не говорит. У ЛСР так остались 18 записей
+    -- «расхождение сравнительных данных», из которых 12 знаковые, а 6 — следы
+    -- наших же исправлений справочника: сегодняшняя загрузка того же комплекта
+    -- даёт их иными кодами. Сводка считает записи версии, которой комплект
+    -- загружен, а прочие называет отдельно — молча пропасть они не вправе.
+    code_version   text,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
 
@@ -260,8 +274,13 @@ CREATE INDEX IF NOT EXISTS dq_log_src_idx ON dq_log (src_file_id);
 CREATE INDEX IF NOT EXISTS dq_log_inn_idx ON dq_log (inn, report_date);
 CREATE INDEX IF NOT EXISTS dq_log_check_idx ON dq_log (check_code);
 
+-- Догонка: колонка добавлена 21.09.2026 после решения о записях прежних
+-- версий. `CREATE TABLE IF NOT EXISTS` в готовую таблицу её не принесёт.
+ALTER TABLE dq_log ADD COLUMN IF NOT EXISTS code_version text;
+
 COMMENT ON TABLE dq_log IS 'Результаты контролей качества; провал блокирующего контроля отправляет src_file в карантин';
 COMMENT ON COLUMN dq_log.details IS 'Фактические значения, участвовавшие в контроле, с кодами строк';
+COMMENT ON COLUMN dq_log.code_version IS 'Версия кода записи (git-хеш); сводка считает записи версии загрузки комплекта';
 COMMENT ON COLUMN dq_log.check_code IS
     'Код контроля; служебный код fact_overwrite фиксирует перезаписи строки fact_report при повторной загрузке';
 COMMENT ON COLUMN dq_log.previous_value IS 'Прежнее значение строки fact_report до перезаписи, в тысячах рублей';

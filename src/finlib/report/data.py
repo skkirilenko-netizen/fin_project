@@ -94,6 +94,18 @@ ORDER BY metric_code, report_date DESC
 # нельзя установить, какой период отбракован и какая строка не сошлась,
 # а именно это от сводки и требуется. Объект — строки отчётности, которых
 # контроль касался; контроль, применённый к комплекту целиком, их не имеет.
+#
+# **Считаются записи той версии кода, которой комплект загружен.** Журнал —
+# доказательная база, и удалять из него нельзя; но запись, порождённая
+# разбором, которого больше нет, о комплекте уже не говорит. У ЛСР так
+# остались 18 записей «расхождение сравнительных данных» от 18.09.2026:
+# 12 из них знаковые, 6 — следы наших же исправлений справочника, а роли
+# периодов во всех 18 совпадают, то есть столкновения не было ни одного.
+# Сегодняшняя загрузка того же комплекта даёт их иными кодами.
+#
+# Сверяется версия комплекта, а не текущая версия процесса: иначе любой
+# коммит обнулял бы сводку по комплекту, загруженному до него, — молчаливый
+# ноль вместо сведений.
 _CHECKS = """
 SELECT d.check_code, d.severity, d.status, d.report_date, s.report_year,
        count(DISTINCT (d.form_code, d.line_code, d.previous_value,
@@ -102,8 +114,19 @@ SELECT d.check_code, d.severity, d.status, d.report_date, s.report_year,
 FROM dq_log d
 JOIN src_file s ON s.id = d.src_file_id
 WHERE d.inn = %(inn)s AND s.standard = %(standard)s AND s.is_actual
+  AND d.code_version IS NOT DISTINCT FROM s.code_version
 GROUP BY d.check_code, d.severity, d.status, d.report_date, s.report_year
 ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
+"""
+
+# Записи прежних разборов: в сводку не идут, но называются числом — молча
+# пропасть они не вправе, иначе сводка выдаёт неполноту за чистоту.
+_CHECKS_OLD = """
+SELECT count(*) AS records, count(DISTINCT d.check_code) AS codes
+FROM dq_log d
+JOIN src_file s ON s.id = d.src_file_id
+WHERE d.inn = %(inn)s AND s.standard = %(standard)s AND s.is_actual
+  AND d.code_version IS DISTINCT FROM s.code_version
 """
 
 # Строки, раскрытые за отчётный период: по ним видно, какие из обязательных
@@ -309,6 +332,10 @@ class ReportData:
     derived: list[dict] = field(default_factory=list)
     metric_rows: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
+    # Записи журнала прежних разборов: в сводку не идут, но называются числом.
+    # Удалённое от забытого не отличить, и молчание о них читалось бы как
+    # «журнал чист».
+    checks_superseded: dict = field(default_factory=dict)
     sources: list[dict] = field(default_factory=list)
     # Раскрытые строки отчётного периода вместе с величинами: раздел
     # «Фактическая база» собирается расчётом и печатает не только состав,
@@ -826,6 +853,7 @@ def load_report_data(
             if row["status"] == "ok" and catalog.get(row["metric_code"]) is None
         ],
         checks=fetch_all(_CHECKS, params, conn=conn),
+        checks_superseded=fetch_one(_CHECKS_OLD, params, conn=conn) or {},
         sources=fetch_all(_SOURCES, params, conn=conn),
         line_values={row["line_code"]: row["value"] for row in disclosed},
         line_notes={
