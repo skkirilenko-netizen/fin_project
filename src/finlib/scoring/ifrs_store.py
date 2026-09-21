@@ -59,7 +59,10 @@ class _Result:
         # и в расчёт не идёт вовсе. Сравнительных периодов без своего комплекта
         # здесь пока не бывает.
         self.confidence = PeriodConfidence.VERIFIED
-        self.reason = None if item.calculable else item.describe()
+        # Причина без наименования: наименование подставляет тот, кто печатает
+        # отказ, и в разделе «Ограничения анализа» выходило «Показатель
+        # „Покрытие погашений“ не рассчитан: Покрытие погашений: не рассчитан…».
+        self.reason = None if item.calculable else _reason_text(item)
         # Машинная причина — само значение перечисления: свободных строк
         # для неё в коде быть не должно.
         self.reason_code = item.reason.value if item.reason else None
@@ -72,6 +75,14 @@ class _Status:
 
     def __init__(self, value: str) -> None:
         self.value = value
+
+
+def _reason_text(item: MetricValue) -> str:
+    """Причина отказа словами, без наименования показателя."""
+    from finlib.metrics.ifrs import REASON_TEXT
+
+    text = REASON_TEXT.get(item.reason, "причина не названа")
+    return f"{text} — {', '.join(item.missing)}" if item.missing else text
 
 
 def save_metrics(

@@ -245,3 +245,59 @@ def test_metrics_and_assessment_come_from_the_facts(db_conn) -> None:
     # Отказ хранится отказом, а не отсутствующей строкой: причина нужна
     # «Ограничениям анализа».
     assert any(row["status"] == "not_calculable" for row in values)
+
+
+def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
+    """Заключение по МСФО собирается и говорит о своём стандарте.
+
+    Проверяется не вёрстка, а то, чем документ наполнен: состав фактической
+    базы взят у своего стандарта, статья названа наименованием позиции,
+    величина из примечания — вместе с номером примечания, а оговорки пришли
+    из справочников ветки МСФО. Прежде состав брался у РСБУ: перечень
+    не находил ни одной величины и проходил как выполненный, а в оговорки
+    попадало «в расчёт входят только строки 1410 и 1510» — утверждение
+    о другой отчётности.
+    """
+    from finlib.report.document import build_report
+    from finlib.standards import Standard
+
+    note = NoteValue(
+        code="ifrs.interest_expense_accrued",
+        value=Decimal(70_000),
+        note=9,
+        rows=("Процентный расход",),
+        from_line="ifrs.finance_costs",
+    )
+    loaded(db_conn, notes=(note,))
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+    result = assess(computed, policy, ())
+    save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
+
+    made = build_report(
+        INN,
+        db_conn,
+        standard=Standard.IFRS,
+        with_text=False,
+        directory=tmp_path,
+        is_test=True,
+    )
+    from docx import Document
+
+    text = "\n".join(item.text for item in Document(made.path).paragraphs)
+
+    # Неразрывные пробелы разрядов приводятся к обычным: проверяется
+    # содержание, а не вёрстка числа.
+    plain = text.replace("\u00a0", " ")
+
+    assert "Итого активы — 1 500 000 тыс. руб." in plain
+    assert "Процентные расходы, начисленные по заёмным средствам" in plain
+    # Ссылка на примечание стоит рядом с величиной: без неё покрытие процентов
+    # не совпадает ни с одной строкой отчёта о прибыли или убытке.
+    assert "примечание 9" in plain
+    # Оговорка о строках РСБУ в заключении по МСФО — утверждение о другой
+    # отчётности, и её здесь быть не должно.
+    assert "1410" not in plain and "1510" not in plain
+    # Технических идентификаторов в тексте нет: показатель назван наименованием.
+    assert "net_debt" not in plain and "debt_maturity_cover" not in plain

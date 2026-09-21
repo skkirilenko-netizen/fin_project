@@ -72,7 +72,7 @@ class Freshness(BaseModel):
 
 
 class FactBase(BaseModel):
-    """Обязательный состав раздела «Фактическая база»."""
+    """Обязательный состав раздела «Фактическая база» одного стандарта."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -81,13 +81,38 @@ class FactBase(BaseModel):
     top_changes: int = Field(ge=0)
     origin: str = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def _check_lines(self) -> Self:
-        """Строки задаются кодами РСБУ: перечень машинный, а не описательный."""
-        for code in self.lines:
-            if not (code.isdigit() and len(code) == 4):
-                raise ValueError(f"«{code}» не похож на код строки отчётности")
-        return self
+    def check_lines(self, standard: Standard) -> None:
+        """Проверяет, что строки названы кодами **своего** стандарта.
+
+        Проверка разведена по стандартам, а не снята: у РСБУ код утверждён
+        приказом и состоит из четырёх цифр, у МСФО таких кодов нет вовсе,
+        и статья называется позицией унифицированной модели. Снятая проверка
+        без замены — это ровно ноль срабатываний: перечень с опечаткой
+        не нашёл бы ни одной величины и прошёл бы как выполненный.
+
+        Позиция МСФО ищется в обоих справочниках ветки: статьи форм живут
+        в `ifrs_lines.yaml`, а величины примечаний — в `ifrs_note_lines.yaml`,
+        и `ifrs.interest_expense_accrued` стоит именно там. Искать только
+        в первом значило бы запретить обязательную величину, которая у ветки
+        главная: без неё покрытие процентов не совпадает ни с одной строкой
+        отчёта о прибыли или убытке.
+        """
+        if standard is Standard.RSBU:
+            for code in self.lines:
+                if not (code.isdigit() and len(code) == 4):
+                    raise ValueError(f"«{code}» не похож на код строки отчётности")
+            return
+
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+        from finlib.normalize.ifrs_note_lines import load_note_lines
+
+        known = {item.code for item in load_ifrs_lines().positions}
+        known |= {item.code for item in load_note_lines().lines}
+        unknown = [code for code in self.lines if code not in known]
+        if unknown:
+            raise ValueError(
+                "в справочниках МСФО нет позиций: " + ", ".join(unknown)
+            )
 
     def required(
         self, lines: frozenset[str] | set[str], metrics: frozenset[str] | set[str]
@@ -251,18 +276,33 @@ class ReportPolicy(BaseModel):
     version: str = Field(min_length=1)
     freshness: Freshness
     risks: Risks
-    fact_base: FactBase
+    # Состав фактической базы объявлен по стандартам: перечень одного,
+    # применённый к фактам другого, нашёл бы ноль величин и отбросил их все
+    # как отсутствующие — проверка состава прошла бы, не проверив ничего.
+    fact_base: dict[Standard, FactBase]
     fact_base_section: FactBaseSection
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _check_codes(self) -> Self:
-        """Коды предложений уникальны."""
+        """Коды предложений уникальны, состав объявлен у каждого стандарта."""
         codes = [item.code for item in self.actions]
         if len(set(codes)) != len(codes):
             raise ValueError("коды предложений по действиям повторяются")
+        missing = [item.value for item in Standard if item not in self.fact_base]
+        if missing:
+            raise ValueError(
+                "состав фактической базы не объявлен у стандартов: "
+                + ", ".join(missing)
+            )
+        for standard, composition in self.fact_base.items():
+            composition.check_lines(standard)
         return self
+
+    def fact_base_of(self, standard: Standard) -> FactBase:
+        """Обязательный состав для этого стандарта."""
+        return self.fact_base[standard]
 
     def actions_for(self, triggers: set[Trigger]) -> list[Action]:
         """Предложения, условия которых выполнены, в порядке справочника."""

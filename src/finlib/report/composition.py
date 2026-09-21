@@ -24,6 +24,7 @@ from finlib.normalize.lines import LinesCatalog, ReportingType
 from finlib.report.data import ReportData
 from finlib.report.policy import QuestionSubject, ReportPolicy
 from finlib.scoring.definitions import ScoringCatalog
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +101,73 @@ def _render(
         if value is None:
             return None
         return f"{_line_name(code, lines, reporting_type)} ({code}) — {money(value)} тыс. руб."
+    if code.startswith("ifrs."):
+        return _render_ifrs_line(code, data, facts)
+    if data.standard is Standard.IFRS:
+        return _render_ifrs_metric(code, data)
     metric = catalog.get(code)
     value = _value_of(data, code)
     if metric is None or value is None:
         return None
     shown = format_metric(value, metric.unit, catalog.scale_for(code))
     return f"{metric.name} — {shown}"
+
+
+def _render_ifrs_line(
+    code: str, data: ReportData, facts: dict[str, Decimal]
+) -> str | None:
+    """Статья консолидированной отчётности: наименованием, а не кодом.
+
+    Кодов строк, утверждённых нормативным актом, консолидированная отчётность
+    не содержит, и статья опознаётся позицией унифицированной модели — код
+    её внутренний, тексту документа чужой.
+
+    **Величина из примечания называет примечание и его строку.** Без этого
+    покрытие процентов не совпадает ни с одной строкой отчёта о прибыли или
+    убытке, и читатель не понимает почему: у Автодора в форме 414, а начислено
+    54 382; у Норникеля строка формы объявлена очищенной от капитализированных
+    процентов.
+    """
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.normalize.ifrs_note_lines import load_note_lines
+
+    value = facts.get(code)
+    if value is None:
+        return None
+    position = load_ifrs_lines().get(code)
+    name = position.name if position is not None else None
+    if name is None:
+        note_line = next(
+            (item for item in load_note_lines().lines if item.code == code), None
+        )
+        name = note_line.name if note_line is not None else code
+    shown = f"{name} — {money(value)} тыс. руб."
+    reference = data.line_notes.get(code)
+    if reference is None:
+        return shown
+    number, rows = reference
+    where = f"примечание {number}" + (f", «{rows}»" if rows else "")
+    return f"{shown} ({where})"
+
+
+def _render_ifrs_metric(code: str, data: ReportData) -> str | None:
+    """Показатель МСФО: наименование и величина в единице методики МСФО."""
+    from finlib.metrics.definitions import Unit
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+    value = _value_of(data, code)
+    if value is None:
+        return None
+    metric = next(
+        (item for item in load_ifrs_metrics().metrics if item.code == code), None
+    )
+    if metric is None:
+        return None
+    # Единица методики МСФО названа своими словами: «currency» означает
+    # величину отчётности, то есть те же тысячи рублей, «ratio» — отношение.
+    unit = Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
+    scale = 0 if unit is Unit.THOUSAND_RUB else 3
+    return f"{metric.name} — {format_metric(value, unit, scale)}"
 
 
 def _worth_naming(
@@ -155,7 +217,7 @@ def _worth_naming(
         and parsed.kind is DerivedKind.CHANGE_PCT
     ]
     changes.sort(key=lambda row: abs(row["value"]), reverse=True)
-    for row in changes[: policy.fact_base.top_changes]:
+    for row in changes[: policy.fact_base_of(data.standard).top_changes]:
         parsed = parse_derived(row["metric_code"])
         if parsed is None or parsed.base in seen:
             continue

@@ -34,6 +34,7 @@ from finlib.report.policy import (
 )
 from finlib.report.summary import build_summary
 from finlib.scoring.definitions import load_scoring
+from finlib.standards import Standard
 
 POLICY = load_policy()
 SCORING = load_scoring()
@@ -146,10 +147,25 @@ def test_header_names_both_dates_and_the_gap(db_conn, tmp_path) -> None:
 
 
 def test_fact_base_is_prescribed_by_methodology() -> None:
-    """Состав обязательных величин задан методикой, а не кодом."""
-    assert POLICY.fact_base.lines == ("1600", "1300", "2110", "2400")
-    assert POLICY.fact_base.metrics == ("debt_total", "net_debt", "nwc")
-    assert POLICY.fact_base.origin.strip()
+    """Состав обязательных величин задан методикой, а не кодом.
+
+    Объявлен он **по стандартам**: строка РСБУ называется кодом, утверждённым
+    приказом, а в консолидированной отчётности таких кодов нет вовсе. Перечень
+    одного стандарта, применённый к фактам другого, нашёл бы ноль величин
+    и прошёл бы как выполненный.
+    """
+    rsbu = POLICY.fact_base_of(Standard.RSBU)
+    assert rsbu.lines == ("1600", "1300", "2110", "2400")
+    assert rsbu.metrics == ("debt_total", "net_debt", "nwc")
+    assert rsbu.origin.strip()
+
+    ifrs = POLICY.fact_base_of(Standard.IFRS)
+    assert ifrs.lines[:2] == ("ifrs.total_assets", "ifrs.total_equity")
+    # Начисленные проценты из примечания обязательны: без них покрытие
+    # процентов не совпадает ни с одной строкой отчёта о прибыли или убытке.
+    assert "ifrs.interest_expense_accrued" in ifrs.lines
+    assert ifrs.metrics == ("debt_total", "ebitda", "net_debt")
+    assert ifrs.origin.strip()
 
 
 def test_fact_base_covers_the_values_the_expert_missed(db_conn) -> None:
@@ -231,7 +247,8 @@ def test_extra_values_are_limited_to_the_declared_number(db_conn) -> None:
     """Наибольших изменений столько, сколько объявила методика."""
     text = "\n".join(_fact_base_of(FULL_INN, db_conn))
     extra = text[text.index(POLICY.fact_base_section.extra_intro_text) :]
-    assert extra.count("изменение за период") <= POLICY.fact_base.top_changes
+    limit = POLICY.fact_base_of(Standard.RSBU).top_changes
+    assert extra.count("изменение за период") <= limit
 
 
 def test_missing_fact_base_value_blocks_the_answer() -> None:
@@ -723,7 +740,7 @@ def raw() -> dict:
 def test_every_threshold_declares_its_origin() -> None:
     """Порог без происхождения неотличим от выдуманного."""
     assert POLICY.freshness.origin.strip()
-    assert POLICY.fact_base.origin.strip()
+    assert all(item.origin.strip() for item in POLICY.fact_base.values())
     assert POLICY.questions.origin.strip()
 
 
@@ -752,8 +769,30 @@ def test_unknown_trigger_does_not_load() -> None:
 def test_fact_base_lines_must_be_line_codes() -> None:
     """Строка фактической базы задаётся кодом РСБУ, а не наименованием."""
     payload = raw()
-    payload["fact_base"]["lines"] = ["валюта баланса"]
+    payload["fact_base"]["rsbu"]["lines"] = ["валюта баланса"]
     with pytest.raises(ValidationError, match="код строки"):
+        ReportPolicy.model_validate(payload)
+
+
+def test_fact_base_ifrs_lines_must_exist_in_the_catalogue() -> None:
+    """Статья МСФО задаётся кодом, существующим в справочниках ветки.
+
+    Проверка разведена по стандартам, а не снята: четыре цифры у МСФО
+    бессмысленны, но снятая проверка без замены — это ноль срабатываний,
+    и перечень с опечаткой не нашёл бы ни одной величины, пройдя как
+    выполненный.
+    """
+    payload = raw()
+    payload["fact_base"]["ifrs"]["lines"] = ["ifrs.nothing_like_this"]
+    with pytest.raises(ValidationError, match="нет позиций"):
+        ReportPolicy.model_validate(payload)
+
+
+def test_fact_base_must_be_declared_for_every_standard() -> None:
+    """Стандарт без объявленного состава методику не проходит."""
+    payload = raw()
+    payload["fact_base"].pop("ifrs")
+    with pytest.raises(ValidationError, match="не объявлен у стандартов"):
         ReportPolicy.model_validate(payload)
 
 
@@ -775,4 +814,6 @@ def test_freshness_message_substitutes_the_gap() -> None:
 def test_decimal_values_are_not_floats() -> None:
     """Пороги методики читаются точными величинами."""
     assert isinstance(POLICY.freshness.max_months, int)
-    assert not isinstance(POLICY.fact_base.top_changes, Decimal | float)
+    assert not isinstance(
+        POLICY.fact_base_of(Standard.RSBU).top_changes, Decimal | float
+    )

@@ -401,7 +401,10 @@ def _composition_block(
         row["metric_code"]: row["value"] for row in values if row["status"] == "ok"
     }
 
-    required = policy.fact_base.required(frozenset(disclosed), frozenset(calculated))
+    # Состав объявлен по стандартам: перечень РСБУ, применённый к фактам МСФО,
+    # нашёл бы ноль величин и прошёл бы как выполненный.
+    composition = policy.fact_base_of(standard)
+    required = composition.required(frozenset(disclosed), frozenset(calculated))
     lines = ["=== СОСТАВ РАЗДЕЛОВ ==="]
     lines.append("Раздел 2 «Фактическая база» обязан назвать эти величины,")
     lines.append("каждую с её кодом в скобках:")
@@ -424,7 +427,7 @@ def _composition_block(
         scoring,
         assessment,
         reporting_type,
-        policy,
+        composition,
         required,
     )
     if worth:
@@ -457,7 +460,9 @@ def _worth_naming(
     scoring: ScoringCatalog,
     assessment: dict | None,
     reporting_type: ReportingType,
-    policy,
+    # Состав своего стандарта, а не справочник целиком: число наибольших
+    # изменений объявлено у каждого стандарта своё.
+    composition,
     required: tuple[str, ...],
 ) -> list[str]:
     """Величины сверх обязательных, отобранные машинно, а не на глаз.
@@ -513,7 +518,7 @@ def _worth_naming(
         and parsed.kind is DerivedKind.CHANGE_PCT
     ]
     changes.sort(key=lambda row: abs(row["value"]), reverse=True)
-    for row in changes[: policy.fact_base.top_changes]:
+    for row in changes[: composition.top_changes]:
         parsed = parse_derived(row["metric_code"])
         if parsed is None or parsed.base in found:  # pragma: no cover — разобрано выше
             continue
@@ -621,6 +626,23 @@ ORDER BY metric_code
 """
 
 
+def _metric_names(catalog: MetricsCatalog, standard: Standard) -> dict[str, str]:
+    """Наименования показателей **своего** стандарта: код → наименование.
+
+    Справочники не пересекаются ни одним кодом осмысленно: `debt_total`
+    и `net_debt` есть у обоих, и наименование РСБУ, подставленное в документ
+    по МСФО, приводило туда оговорку о строках 1410 и 1510 — утверждение
+    о бухгалтерской отчётности в заключении по консолидированной. Остальные
+    коды МСФО оставались в тексте кодами, то есть техническими
+    идентификаторами, которых в документе быть не должно.
+    """
+    if standard is Standard.IFRS:
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+        return {item.code: item.name for item in load_ifrs_metrics().metrics}
+    return {item.code: item.name for item in catalog.metrics}
+
+
 def _refusal_notes(
     inn: str,
     periods: list[date],
@@ -642,7 +664,7 @@ def _refusal_notes(
 
     if conn is None or not periods:
         return []
-    names = {item.code: item.name for item in catalog.metrics}
+    names = _metric_names(catalog, standard)
     rows = [
         row
         for row in fetch_all(
@@ -672,6 +694,43 @@ def _refusal_notes(
     # документ выглядит полным, и обнаружить пропажу нечем.
     check_complete(refusals, lines)
     return list(lines)
+
+
+def _ifrs_notes(
+    used: set[str], inn: str, periods: list[date], conn: PgConnection | None
+) -> list[str]:
+    """Оговорки справочников МСФО: о показателе и о статье отчётности.
+
+    Оговорка, оставшаяся только в справочнике, считается потерянной — правило
+    то же, что у РСБУ. Берутся оговорки посчитанных показателей и тех статей,
+    величины которых у этой организации раскрыты: оговорка о статье, которой
+    в отчётности нет, описывала бы чужой комплект.
+    """
+    from finlib.db import fetch_all
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+    found: list[str] = []
+    metrics = {item.code: item for item in load_ifrs_metrics().metrics}
+    for code in sorted(used):
+        metric = metrics.get(code)
+        if metric is not None and metric.note:
+            found.append(f"{metric.name}: {' '.join(metric.note.split())}")
+
+    if conn is None or not periods:
+        return found
+    disclosed = {
+        row["line_code"]
+        for row in fetch_all(
+            _FACTS,
+            {"inn": inn, "standard": Standard.IFRS.value, "dates": periods},
+            conn=conn,
+        )
+    }
+    for position in load_ifrs_lines().positions:
+        if position.code in disclosed and position.note:
+            found.append(f"{position.name}: {' '.join(position.note.split())}")
+    return found
 
 
 def _limitations_block(
@@ -704,14 +763,23 @@ def _limitations_block(
     # организации. Условные формулировки живут в methodology_note и в промпт
     # не идут: рядом с посчитанным значением модель выдаёт их за факт.
     used = {item["metric_code"] for item in (assessment["metrics"] if assessment else [])}
-    for code in sorted(used):
-        metric = catalog.get(code)
-        if metric is not None and metric.note:
-            notes.append(f"{metric.name}: {' '.join(metric.note.split())}")
-    notes.extend(
-        _line_notes(inn, periods, conn, lines_catalog, standard, reporting_type)
-    )
-    notes.append(" ".join(catalog.derived.share.note.split()))
+    if standard is Standard.IFRS:
+        # Оговорки берутся из справочников **своей** ветки. Прежде брались
+        # из РСБУ, и в заключение по консолидированной отчётности приходило
+        # «в расчёт входят только строки 1410 и 1510» — утверждение о другой
+        # отчётности. Оговорки о доле строки в валюте баланса здесь нет вовсе:
+        # производных величин расчёт по МСФО не считает, и говорить о них
+        # значило бы описывать несделанное.
+        notes.extend(_ifrs_notes(used, inn, periods, conn))
+    else:
+        for code in sorted(used):
+            metric = catalog.get(code)
+            if metric is not None and metric.note:
+                notes.append(f"{metric.name}: {' '.join(metric.note.split())}")
+        notes.extend(
+            _line_notes(inn, periods, conn, lines_catalog, standard, reporting_type)
+        )
+        notes.append(" ".join(catalog.derived.share.note.split()))
 
     lines.extend(f"- {note}" for note in notes)
     return "\n".join(lines)

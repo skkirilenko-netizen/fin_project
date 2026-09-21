@@ -97,8 +97,14 @@ ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
 
 # Строки, раскрытые за отчётный период: по ним видно, какие из обязательных
 # величин раздела «Фактическая база» вообще существуют у этой организации.
+# Величины отчётного периода вместе с силой опознания и ссылкой на примечание:
+# величина, взятая из примечания, называется в документе вместе с номером
+# примечания и наименованием его строки. Без ссылки покрытие процентов
+# не совпадает ни с одной строкой отчёта о прибыли или убытке, и читатель
+# не понимает почему: у Автодора в форме 414, а начислено 54 382.
 _DISCLOSED = """
-SELECT DISTINCT line_code, value FROM fact_report
+SELECT DISTINCT line_code, value, recognition, note_number, note_source_name
+FROM fact_report
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = %(d)s
   AND value IS NOT NULL
 """
@@ -184,6 +190,11 @@ class ReportData:
     # «Фактическая база» собирается расчётом и печатает не только состав,
     # но и значения.
     line_values: dict[str, Decimal] = field(default_factory=dict)
+    # Ссылка на примечание у тех величин, что взяты из примечания: номер
+    # и наименования строк. Читатель, сверяющий заключение с отчётностью,
+    # обязан видеть источник — иначе величина не совпадает ни с одной строкой
+    # формы и выглядит ошибкой расчёта.
+    line_notes: dict[str, tuple[int, str]] = field(default_factory=dict)
 
     @property
     def disclosed_lines(self) -> frozenset[str]:
@@ -206,11 +217,20 @@ class ReportData:
         from finlib.metrics.definitions import Unit
         from finlib.report.policy import load_policy
 
-        known = frozenset(
-            code
-            for code in {item.code for item in lines_catalog.lines}
-            if lines_catalog.has(code, reporting_type)
-        )
+        # Набор известных строк и наименования величин берутся **по стандарту**:
+        # у МСФО кодов строк, утверждённых приказом, нет вовсе, статья названа
+        # позицией унифицированной модели, а показатели живут в своём
+        # справочнике. Перечень РСБУ, применённый к тексту по МСФО, объявил бы
+        # каждую статью неизвестной строкой и не нашёл бы ни одного показателя.
+        if self.standard is Standard.IFRS:
+            known, names = self._ifrs_text_names()
+        else:
+            known = frozenset(
+                code
+                for code in {item.code for item in lines_catalog.lines}
+                if lines_catalog.has(code, reporting_type)
+            )
+            names = {item.code: item.name for item in catalog.metrics}
         refused = {
             row["metric_code"]: catalog.require(row["metric_code"]).name
             for row in self.metric_rows
@@ -232,9 +252,32 @@ class ReportData:
             fact_base=self.fact_base_codes(),
             # В тексте документа показатель назван наименованием, а не кодом,
             # и правило состава ищет его так же.
-            metric_names={item.code: item.name for item in catalog.metrics},
+            metric_names=names,
             questions=load_policy().questions,
         )
+
+    def _ifrs_text_names(self) -> tuple[frozenset[str], dict[str, str]]:
+        """Известные статьи МСФО и наименования величин для контроля текста.
+
+        Статьи берутся из обоих справочников ветки: позиции форм живут
+        в `ifrs_lines.yaml`, величины примечаний — в `ifrs_note_lines.yaml`.
+        Наименования показателей — из справочника показателей МСФО: у РСБУ
+        своих кодов нет ни одного общего, и перечень одного стандарта,
+        применённый к другому, не нашёл бы ни одной величины.
+        """
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+        from finlib.normalize.ifrs_note_lines import load_note_lines
+
+        positions = load_ifrs_lines().positions
+        note_lines = load_note_lines().lines
+        known = frozenset(
+            {item.code for item in positions} | {item.code for item in note_lines}
+        )
+        names = {item.code: item.name for item in positions}
+        names |= {item.code: item.name for item in note_lines}
+        names |= {item.code: item.name for item in load_ifrs_metrics().metrics}
+        return known, names
 
     def forbidden_templates(self, catalog) -> dict[str, str]:
         """Шаблонные блоки, условие применения которых не выполнено.
@@ -348,7 +391,9 @@ class ReportData:
         calculated = {
             row["metric_code"] for row in self.metric_rows if row["status"] == "ok"
         }
-        return policy.fact_base.required(self.disclosed_lines, calculated)
+        return policy.fact_base_of(self.standard).required(
+            self.disclosed_lines, calculated
+        )
 
     def flag_conflict(self, flags_catalog=None, scoring=None) -> "FlagConflict | None":
         """Столкновение флага и стоп-фактора, построенного на его показателях.
@@ -475,6 +520,7 @@ def load_report_data(
         if catalog.get(code) is not None
     ]
 
+    disclosed = fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn)
     return ReportData(
         inn=inn,
         report_date=target,
@@ -495,9 +541,11 @@ def load_report_data(
         ],
         checks=fetch_all(_CHECKS, params, conn=conn),
         sources=fetch_all(_SOURCES, params, conn=conn),
-        line_values={
-            row["line_code"]: row["value"]
-            for row in fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn)
+        line_values={row["line_code"]: row["value"] for row in disclosed},
+        line_notes={
+            row["line_code"]: (row["note_number"], row["note_source_name"] or "")
+            for row in disclosed
+            if row["recognition"] == "note" and row["note_number"] is not None
         },
     )
 
