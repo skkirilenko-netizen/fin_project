@@ -407,12 +407,17 @@ def save_ifrs_assessment(
         # Узость основания у МСФО объявляется причиной отказа целиком:
         # отдельного случая «класс есть, а балла нет» здесь не возникает —
         # стоп-факторы ветки применяются к показателям, а не к классу.
-        breadth_reason=None,
+        breadth_reason=assessment.breadth_reason,
         # Класс до применения стоп-фактора и после — разные сведения: класс E
         # у набравшего по баллу B и класс E у набравшего E выглядят одинаково.
         class_before_stop=assessment.class_before_stop or assessment.class_code,
         stop_factor_code=assessment.stop_factor_code,
-        stop_factor_effect=_effect_of(assessment, policy),
+        stop_factor_effect=_effect_of(assessment, stops, policy),
+        # Сверка с заключением хранится вместе со стоп-фактором: подтверждённый
+        # аудитором и неподтверждённый равно остаются в силе, но формулировки
+        # во втором случае обязаны быть осторожнее, а нечитаемое заключение —
+        # третий исход, а не второй.
+        stop_factor_audit=stops.audit_note or None,
         # Уверенность понижается модифицированным мнением аудитора и больше
         # ничем: правило по числу периодов ряда к МСФО пока не применяется —
         # ряда у эмитента ещё нет. Высокая здесь означает «понижать
@@ -448,7 +453,11 @@ def save_ifrs_assessment(
                 periods_used=1 if item.calculable else 0,
                 included=item.code in in_scoring,
                 exclusion_reason=_exclusion_of(item, in_scoring, stops, policy),
-                exclusion_kind=None,
+                # **Вид причины объявлен у показателя**, и без него все
+                # исключённые сводились в одну строку «шкалы уровня у них
+                # нет» — включая те, что исключены стоп-фактором: графа
+                # говорила о них неправду.
+                exclusion_kind=_kind_of(item, in_scoring, stops, policy),
                 excluded_by_methodology=not item.in_scoring,
             )
             for item in computed
@@ -460,18 +469,20 @@ def save_ifrs_assessment(
     return save_assessment(stored, conn)
 
 
-def _effect_of(assessment: IfrsAssessment, policy: IfrsMetricsPolicy) -> StopEffect:
+def _effect_of(
+    assessment: IfrsAssessment, stops: StopFactors, policy: IfrsMetricsPolicy
+) -> StopEffect:
     """Что стоп-фактор сделал с классом: опустил до низшего или ограничил.
 
-    Градация читается из самого исхода, а не объявляется вторым полем: два
-    поля одной величины умеют разойтись — это уже случалось с весами групп.
+    Градация читается из объявленной отсечки, а не из полученного класса:
+    балл сам по себе бывает низшим, и тогда ограничение средним выглядело бы
+    опусканием до низшего — то есть графа сказала бы о стоп-факторе неправду.
     """
-    if assessment.stop_factor_code is None:
+    if assessment.stop_factor_code is None or stops.cap is None:
         return StopEffect.NONE
-    lowest = policy.classes[-1].code
     return (
         StopEffect.LOWEST_CLASS
-        if assessment.class_code == lowest
+        if stops.cap == policy.classes[-1].code
         else StopEffect.CAP_AT_CLASS
     )
 
@@ -483,6 +494,36 @@ def _score_of(code: str, assessment: IfrsAssessment) -> Decimal | None:
             if item.code == code:
                 return item.score
     return None
+
+
+def _kind_of(
+    item: MetricValue,
+    in_scoring: set[str],
+    stops: StopFactors,
+    policy: IfrsMetricsPolicy,
+):
+    """Вид причины исключения: решение методики, стоп-фактор или нехватка данных.
+
+    Вид машинный и общий с РСБУ (`ExclusionKind`): по нему причины сводятся
+    в одну строку раздела, и вид, названный неверно, сводит разное вместе.
+    """
+    from finlib.metrics.definitions import ExclusionKind
+
+    if item.code in in_scoring:
+        return None
+    if stops.limitation_of(item.code) is not None:
+        return ExclusionKind.STOP_FACTOR
+    declared = next(
+        (
+            metric.exclusion_kind
+            for metric in policy.metrics
+            if metric.code == item.code and metric.exclusion_kind
+        ),
+        None,
+    )
+    if declared:
+        return ExclusionKind(declared)
+    return None if item.calculable else ExclusionKind.NO_DATA
 
 
 def _exclusion_of(

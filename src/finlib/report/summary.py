@@ -180,9 +180,14 @@ def _stop_factors(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
     code = data.stop_factor_code
     if not code:
         return []
-    policy = next((item for item in scoring.stop_factors if item.code == code), None)
+    # Формулировка берётся из справочника **своего** стандарта: коды у РСБУ
+    # и МСФО одни, а тексты разные, и чужой текст приметы не имеет — правило
+    # чистоты стандарта его не поймает.
+    from finlib.report.data import stop_factor_of
+
+    policy = stop_factor_of(code, data.standard)
     name = policy.name if policy else code
-    statement = " ".join(policy.statement.split()) if policy else ""
+    statement = policy.statement if policy else ""
     return [Paragraph(f"Сработал стоп-фактор «{name}». {statement}", bold=True)]
 
 

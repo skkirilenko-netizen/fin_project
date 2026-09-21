@@ -133,6 +133,59 @@ ORDER BY report_year DESC
 
 
 @dataclass(frozen=True, slots=True)
+class StopFactorView:
+    """Стоп-фактор так, как его называет документ **своего** стандарта.
+
+    Коды у РСБУ и МСФО одни и те же — правило одно, — а формулировки свои:
+    у РСБУ они в `scoring.yaml`, у МСФО в `ifrs_issuer_type.yaml`. Взять
+    формулировку чужого справочника значило бы напечатать в заключении
+    по консолидированной отчётности утверждение, писанное для бухгалтерской:
+    приметы у такого текста нет, и правило чистоты стандарта его не поймает.
+    """
+
+    code: str
+    name: str
+    statement: str
+    metrics: tuple[str, ...]
+
+
+def stop_factor_of(code: str, standard: Standard) -> StopFactorView | None:
+    """Стоп-фактор по коду в справочнике своего стандарта; None — такого нет."""
+    if standard is Standard.IFRS:
+        from finlib.normalize.ifrs_issuer_type import load_issuer_types
+
+        found = next(
+            (item for item in load_issuer_types().stop_factors if item.code == code),
+            None,
+        )
+        return (
+            StopFactorView(
+                code=found.code,
+                name=found.name,
+                statement=" ".join(found.statement.split()),
+                metrics=(found.metric,),
+            )
+            if found is not None
+            else None
+        )
+    from finlib.scoring.definitions import load_scoring
+
+    factor = next(
+        (item for item in load_scoring().stop_factors if item.code == code), None
+    )
+    return (
+        StopFactorView(
+            code=factor.code,
+            name=factor.name,
+            statement=" ".join(factor.statement.split()),
+            metrics=tuple(factor.metrics),
+        )
+        if factor is not None
+        else None
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class FlagConflict:
     """Флаг и стоп-фактор, построенные на одних и тех же показателях."""
 

@@ -81,6 +81,10 @@ class Assessment:
     stop_factor_code: str | None
     stop_factor_effect: StopEffect
     confidence: Confidence
+    # Согласуется ли сработавший стоп-фактор с аудиторским заключением.
+    # Пусто — сверка не делалась: у РСБУ заключения нет вовсе, и приписывать
+    # ей исход нельзя.
+    stop_factor_audit: str | None = None
     confidence_reasons: list[str] = field(default_factory=list)
     groups: list[GroupScore] = field(default_factory=list)
     metrics: list[MetricScore] = field(default_factory=list)

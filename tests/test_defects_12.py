@@ -186,6 +186,10 @@ def test_defect_5_hierarchy_is_fixed() -> None:
         ExclusionKind.STOP_FACTOR,
         ExclusionKind.NO_LEVEL_SCALE,
         ExclusionKind.DUPLICATE,
+        # Показатель описывает деятельность, но решения не меняет: вид ветки
+        # МСФО, и в иерархии он рядом с дублированием — это наше решение,
+        # а не пробел отчётности.
+        ExclusionKind.NOT_ROUTING,
         ExclusionKind.NO_DATA,
     )
     assert ExclusionKind.STOP_FACTOR.rank < ExclusionKind.NO_DATA.rank

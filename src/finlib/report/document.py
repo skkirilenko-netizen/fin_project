@@ -700,15 +700,25 @@ def _write_stop_factor_risk(
     code = data.stop_factor_code
     if not code:
         return
-    scoring = load_scoring()
-    factor = next((item for item in scoring.stop_factors if item.code == code), None)
+    from finlib.report.data import stop_factor_of
+
+    factor = stop_factor_of(code, data.standard)
     if factor is None:  # pragma: no cover — код приходит из той же методики
         return
     heading = document.add_paragraph()
     heading.add_run(policy.risks.stop_factor_text).bold = True
     paragraph = document.add_paragraph()
     paragraph.add_run(f"{factor.name}. ").bold = True
-    paragraph.add_run(" ".join(factor.statement.split()))
+    paragraph.add_run(factor.statement)
+    # Сверка с аудиторским заключением идёт основанием под формулировкой:
+    # стоп-фактор с внешним подтверждением и без него равно остаются в силе,
+    # и читатель обязан видеть, какой из трёх это случай.
+    audit = (data.assessment or {}).get("stop_factor_audit")
+    if audit:
+        note = document.add_paragraph()
+        run = note.add_run(audit)
+        run.italic = True
+        run.font.size = Pt(9)
 
 
 def _write_signals(document: Document, data: ReportData) -> None:

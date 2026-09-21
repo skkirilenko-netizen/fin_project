@@ -51,6 +51,11 @@ class ExclusionKind(StrEnum):
     STOP_FACTOR = "stop_factor"
     NO_LEVEL_SCALE = "no_level_scale"
     DUPLICATE = "duplicate"
+    # Показатель описывает деятельность, но решения «нужен ли человек»
+    # не меняет. Вид объявлен методикой ветки МСФО (`in_scoring: false`
+    # у рентабельности и оборачиваемости) и стоит в иерархии рядом
+    # с дублированием: это тоже наше решение, а не пробел отчётности.
+    NOT_ROUTING = "not_routing"
     NO_DATA = "no_data"
 
     @property
@@ -63,6 +68,7 @@ EXCLUSION_ORDER: tuple[ExclusionKind, ...] = (
     ExclusionKind.STOP_FACTOR,
     ExclusionKind.NO_LEVEL_SCALE,
     ExclusionKind.DUPLICATE,
+    ExclusionKind.NOT_ROUTING,
     ExclusionKind.NO_DATA,
 )
 

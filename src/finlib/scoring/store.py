@@ -15,12 +15,13 @@ _UPSERT_ASSESSMENT = """
 INSERT INTO assessment (
     inn, standard, report_date, total_score, class_code, class_name, no_class_reason,
     breadth_reason,
-    class_before_stop, stop_factor_code, stop_factor_effect, confidence, confidence_reasons,
+    class_before_stop, stop_factor_code, stop_factor_effect, stop_factor_audit,
+    confidence, confidence_reasons,
     metrics_version, scoring_version, flags_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_date)s, %(total_score)s, %(class_code)s, %(class_name)s,
     %(no_class_reason)s, %(breadth_reason)s, %(class_before_stop)s,
-    %(stop_factor_code)s, %(stop_factor_effect)s,
+    %(stop_factor_code)s, %(stop_factor_effect)s, %(stop_factor_audit)s,
     %(confidence)s, %(confidence_reasons)s, %(metrics_version)s, %(scoring_version)s,
     %(flags_version)s
 )
@@ -33,6 +34,7 @@ ON CONFLICT (inn, standard, report_date) DO UPDATE SET
     class_before_stop = EXCLUDED.class_before_stop,
     stop_factor_code = EXCLUDED.stop_factor_code,
     stop_factor_effect = EXCLUDED.stop_factor_effect,
+    stop_factor_audit = EXCLUDED.stop_factor_audit,
     confidence = EXCLUDED.confidence,
     confidence_reasons = EXCLUDED.confidence_reasons,
     metrics_version = EXCLUDED.metrics_version,
@@ -108,6 +110,7 @@ def save_assessment(assessment: Assessment, conn: PgConnection) -> int:
         "class_before_stop": assessment.class_before_stop,
         "stop_factor_code": assessment.stop_factor_code,
         "stop_factor_effect": assessment.stop_factor_effect.value,
+        "stop_factor_audit": assessment.stop_factor_audit,
         "confidence": assessment.confidence.value,
         "confidence_reasons": json.dumps(assessment.confidence_reasons, ensure_ascii=False),
         "metrics_version": assessment.metrics_version,

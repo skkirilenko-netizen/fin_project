@@ -86,6 +86,9 @@ class Assessment:
     # одинаково; правило то же, что в РСБУ.
     stop_factor_code: str | None = None
     class_before_stop: str | None = None
+    # Узость основания при присвоенном стоп-фактором классе: класс есть,
+    # балльной оценки нет, и молчать об этом нельзя.
+    breadth_reason: str | None = None
 
     def describe(self) -> str:
         """Однострочная сводка."""
@@ -239,18 +242,21 @@ def assess(
     )
     divergence, gap = _divergence(scores, policy)
     rules = policy.sufficiency.no_class
+    narrow = ""
     if len(scores) < rules.min_metrics:
-        return Assessment(
-            total, None, "", rules.min_metrics_reason, groups, divergence, gap
-        )
-    if len(groups) < rules.min_groups:
-        return Assessment(
-            total, None, "", rules.min_groups_reason, groups, divergence, gap
-        )
-    if max(item.effective_weight for item in groups) > rules.max_group_weight:
-        return Assessment(
-            total, None, "", rules.max_group_weight_reason, groups, divergence, gap
-        )
+        narrow = rules.min_metrics_reason
+    elif len(groups) < rules.min_groups:
+        narrow = rules.min_groups_reason
+    elif max(item.effective_weight for item in groups) > rules.max_group_weight:
+        narrow = rules.max_group_weight_reason
+    # **Стоп-фактор старше правила достаточности** — правило объявлено
+    # методикой и перенесено из РСБУ вместе с основанием: состояние,
+    # установленное одной величиной, узостью основания не отменяется.
+    # У Сегежи без него класс не присваивался вовсе: сработавший стоп-фактор
+    # молчал, потому что групп показателей оказалось мало.
+    overrides = policy.sufficiency.stop_factor_overrides_breadth
+    if narrow and not (overrides and stops.cap is not None):
+        return Assessment(total, None, "", narrow, groups, divergence, gap)
 
     # Порог класса сверяется с напечатанным баллом, и правило одно на два
     # стандарта: у РСБУ балл 79,997 печатался как «80,00» при классе B.
@@ -273,6 +279,10 @@ def assess(
         gap,
         stop_factor_code=stops.code,
         class_before_stop=chosen.code,
+        # Узость основания при сработавшем стоп-факторе не замалчивается:
+        # класс присвоен состоянием, а балльной оценки не существует, и число
+        # рядом с классом читалось бы как её итог.
+        breadth_reason=narrow or None,
     )
 
 

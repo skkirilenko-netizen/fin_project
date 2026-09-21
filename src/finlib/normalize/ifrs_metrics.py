@@ -158,11 +158,20 @@ class NoClass(BaseModel):
 
 
 class Sufficiency(BaseModel):
-    """Достаточность основания для присвоения класса."""
+    """Достаточность основания для присвоения класса.
+
+    **Стоп-фактор старше правила достаточности**, и это объявлено, а не
+    подразумевается: состояние, установленное одной величиной, узостью
+    основания не отменяется. У ПАО «Сегежа Групп» без этого правила класс
+    не присваивался вовсе — сработавший стоп-фактор молчал, потому что групп
+    показателей оказалось мало.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     no_class: NoClass
+    stop_factor_overrides_breadth: bool
+    stop_factor_overrides_origin: str = Field(min_length=1)
 
 
 class Divergence(BaseModel):

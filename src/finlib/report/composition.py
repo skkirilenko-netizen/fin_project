@@ -194,14 +194,11 @@ def _worth_naming(
     found: list[str] = []
     seen = set(named)
     if data.stop_factor_code:
-        factor = next(
-            (
-                item
-                for item in scoring.stop_factors
-                if item.code == data.stop_factor_code
-            ),
-            None,
-        )
+        # Стоп-фактор ищется в справочнике своего стандарта: коды общие,
+        # а перечень величин у ветки МСФО свой.
+        from finlib.report.data import stop_factor_of
+
+        factor = stop_factor_of(data.stop_factor_code, data.standard)
         for code in factor.metrics if factor is not None else ():
             if code in seen:
                 continue
@@ -403,14 +400,9 @@ def questions(
         )
 
     if data.stop_factor_code:
-        factor = next(
-            (
-                item
-                for item in scoring.stop_factors
-                if item.code == data.stop_factor_code
-            ),
-            None,
-        )
+        from finlib.report.data import stop_factor_of
+
+        factor = stop_factor_of(data.stop_factor_code, data.standard)
         if factor is not None:
             by_subject.setdefault(QuestionSubject.STOP_FACTOR, []).append(
                 policy.questions.question(

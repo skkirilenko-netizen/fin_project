@@ -323,6 +323,12 @@ CREATE TABLE IF NOT EXISTS assessment (
     class_before_stop   text,
     stop_factor_code    text,
     stop_factor_effect  text CHECK (stop_factor_effect IN ('none', 'lowest_class', 'cap_at_class')),
+    -- Сверка сработавшего стоп-фактора с аудиторским заключением: согласуется
+    -- ли он с разделом о непрерывности деятельности. Стоп-фактор с внешним
+    -- подтверждением и без него равно остаются в силе, но формулировки во
+    -- втором случае обязаны быть осторожнее, и нечитаемое заключение — третий
+    -- исход, а не второй.
+    stop_factor_audit   text,
     confidence          text NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
     confidence_reasons  jsonb,
     metrics_version     text NOT NULL,
@@ -374,7 +380,8 @@ CREATE TABLE IF NOT EXISTS assessment_metric (
     -- Машинный вид причины исключения: по нему причины упорядочиваются
     -- по фиксированной иерархии, а текст остаётся пояснением.
     exclusion_kind   text CHECK (exclusion_kind IN
-                     ('stop_factor', 'no_level_scale', 'duplicate', 'no_data')),
+                     ('stop_factor', 'no_level_scale', 'duplicate',
+                      'not_routing', 'no_data')),
     CONSTRAINT assessment_metric_uniq UNIQUE (assessment_id, metric_code)
 );
 
@@ -685,6 +692,25 @@ ALTER TABLE ifrs_line_confirmation
 
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
     ON ifrs_line_confirmation (code);
+
+-- Сверка стоп-фактора с аудиторским заключением заведена 21.09.2026 вместе
+-- с проводкой стоп-факторов ветки МСФО в расчёт по фактам. Догонка обязательна:
+-- таблица в рабочей базе есть, и объявление колонки `CREATE TABLE IF NOT
+-- EXISTS` в неё не принесёт. Значения прежним оценкам не проставляются —
+-- по ним сверка не делалась, и приписывать им исход было бы неправдой.
+ALTER TABLE assessment ADD COLUMN IF NOT EXISTS stop_factor_audit text;
+
+-- Вид причины `not_routing` заведён 21.09.2026 вместе с проводкой стоп-факторов
+-- МСФО: показатель описывает деятельность, но решения не меняет — это наше
+-- решение, а не пробел отчётности, и сводить его с «шкалы уровня нет» нельзя.
+-- Ограничение заменяется целиком: `CREATE TABLE IF NOT EXISTS` в готовую
+-- таблицу нового перечня не принесёт.
+ALTER TABLE assessment_metric
+    DROP CONSTRAINT IF EXISTS assessment_metric_exclusion_kind_check;
+ALTER TABLE assessment_metric
+    ADD CONSTRAINT assessment_metric_exclusion_kind_check
+    CHECK (exclusion_kind IN
+           ('stop_factor', 'no_level_scale', 'duplicate', 'not_routing', 'no_data'));
 
 COMMENT ON TABLE ifrs_line_confirmation IS
     'Специфические статьи МСФО сверх порога существенности, подтверждённые '
