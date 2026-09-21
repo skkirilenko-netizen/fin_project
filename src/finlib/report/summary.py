@@ -56,7 +56,8 @@ def build_summary(
             )
         ]
 
-    paragraphs = [*_verdict(data, scoring), *_stop_factors(data, scoring)]
+    paragraphs = [*_verdict(data, scoring), *_issuer_type(data)]
+    paragraphs.extend(_stop_factors(data, scoring))
     paragraphs.extend(_flag_conflict(data))
     paragraphs.extend(_blocking_checks(data))
     paragraphs.extend(_freshness(data, generated_at))
@@ -111,6 +112,38 @@ def _verdict(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
         # Счёт групп уже назван строкой выше — во втором абзаце он не нужен.
         found.extend(_missing(data, scoring, counted=True))
     return found
+
+
+def _issuer_type(data: ReportData) -> list[Paragraph]:
+    """Тип эмитента: от него зависят состав показателей и стоп-факторы.
+
+    Без него отказ расчёта читателю непонятен: у ЛСР текущая ликвидность
+    не рассчитана потому, что эмитент — девелопер, работающий по счетам
+    эскроу, и показатель у него считается с поправкой. В документе при этом
+    не стояло ни слова о типе, и отказ выглядел пробелом данных.
+
+    Тип называется и тогда, когда он обычный: молчание о типе неотличимо
+    от того, что тип не определялся, а определяется он по каждому комплекту
+    отдельно и на промежуточной отчётности теряется.
+    """
+    if data.standard is not Standard.IFRS:
+        return []
+    from finlib.normalize.ifrs_issuer_type import load_issuer_types
+
+    code = data.issuer_type
+    if not code:
+        return []
+    found = next(
+        (item for item in load_issuer_types().types if item.code == code), None
+    )
+    if found is None:  # pragma: no cover — код из того же справочника
+        return []
+    return [
+        Paragraph(
+            f"Тип эмитента: {found.name.lower()}. От него зависят состав "
+            "показателей и применимость стоп-факторов."
+        )
+    ]
 
 
 def _breadth(data: ReportData, scoring: ScoringCatalog) -> str:
@@ -315,20 +348,23 @@ def _confidence_rule(scoring: ScoringCatalog, standard: Standard) -> str:
     и длина ряда, которых ветка МСФО не считает вовсе: перечень РСБУ
     в заключении по МСФО назвал бы читателю основания, ни одно из которых
     не проверялось.
+
+    **Перечисляются применённые основания, а не все объявленные.** Перечень
+    методики, стоящий рядом с оценкой конкретной организации, читается как
+    перечень её обстоятельств: в заключении по ЛСР стояли «оговорка
+    о величинах отчётности» и «существенная неопределённость непрерывности»,
+    которых у ЛСР нет. Применённые перечисляет `_confidence` следом.
     """
     if standard is Standard.IFRS:
         from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 
         return " ".join(load_ifrs_metrics().confidence.rule_text.split())
-    grounds = "; ".join(
-        " ".join(rule.description.split()).rstrip(".")
-        for rule in scoring.confidence.downgrade_on
-    )
     return (
         "Уверенность определяется числом оснований для понижения: без "
         "оснований — высокая, при одном — средняя, при двух и более — низкая. "
-        f"Основания заданы методикой: {grounds}. Узость основания оценки "
-        "понижает уверенность отдельно, по числу показателей и групп."
+        "Основания заданы методикой, и ниже приводятся только применённые "
+        "к этой организации. Узость основания оценки понижает уверенность "
+        "отдельно, по числу показателей и групп."
     )
 
 

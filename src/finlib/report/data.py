@@ -341,6 +341,17 @@ class ReportData:
         return audit.signal_hits(load_audit_policy())
 
     @property
+    def issuer_type(self) -> str | None:
+        """Тип эмитента, определённый по этому комплекту.
+
+        Лежит в `src_file.meta`: расчёт по фактам документа не видит, а от типа
+        зависят состав показателей и применимость стоп-факторов. Документ
+        обязан его называть — иначе отказ по ликвидности у девелопера читается
+        как пробел данных.
+        """
+        return ((self.organization or {}).get("meta") or {}).get("issuer_type")
+
+    @property
     def disclosed_lines(self) -> frozenset[str]:
         """Коды строк, раскрытых за отчётный период."""
         return frozenset(self.line_values)

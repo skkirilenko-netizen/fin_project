@@ -82,7 +82,13 @@ def test_lost_refusal_blocks_the_document() -> None:
 
 
 def test_place_is_named_for_the_developer_liquidity() -> None:
-    """Отказ называет, где величина лежит в отчётности, а не только чего нет."""
+    """Отказ называет место величины, и семейство его — наш пробел.
+
+    Величина раскрыта эмитентом сноской под балансом, и место отказа само
+    это говорит. Прежде отказ числился нехваткой данных и просил организацию
+    раскрыть то, что она раскрыла; запрашивать здесь нечего — не сделан
+    перевод сноски в состав входных величин показателя, и это за нами.
+    """
     from finlib.metrics.ifrs import Inputs, compute_all
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
     from finlib.report.refusals import from_ifrs_metrics
@@ -94,4 +100,5 @@ def test_place_is_named_for_the_developer_liquidity() -> None:
     found = from_ifrs_metrics(computed, {}, adjustments=policy.for_type("developer"))
     liquidity = next(item for item in found if item.subject == "Текущая ликвидность")
     assert "сноской" in liquidity.text
-    assert liquidity.kind is Kind.DATA_MISSING
+    assert liquidity.kind is Kind.OUR_GAP
+    assert "Запрашивать нечего" in liquidity.request

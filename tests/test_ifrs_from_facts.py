@@ -91,7 +91,13 @@ HEADER = (
 )
 
 
-def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
+def loaded(
+    db_conn,
+    notes: tuple[NoteValue, ...] = (),
+    audit=None,
+    body: str = BALANCE,
+    issuer_type: str = "corporate",
+) -> None:
     """Проводит комплект через приём, разбор, сверку и запись.
 
     Единственная неопознанная строка подтверждается человеком: иначе комплект
@@ -101,7 +107,7 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
     Основания экрана сверки принимаются **поимённо и с причиной**: карантин
     снимается только по названным, а не подтверждением вообще.
     """
-    text = CONTENTS + BALANCE
+    text = CONTENTS + body
     profile = identify(text + HEADER)
     assert profile.accepted, getattr(profile, "reason", "")
     extraction = extract(text, DATES, Grouping.RUSSIAN)
@@ -112,7 +118,7 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
         profile,
         decision,
         db_conn,
-        DocumentReading(audit=audit, notes=notes, issuer_type="corporate"),
+        DocumentReading(audit=audit, notes=notes, issuer_type=issuer_type),
         confirmed_by="аналитик",
         confirmations={"Амортизация основных средств": "ifrs.depreciation"},
         accepted={
@@ -335,6 +341,73 @@ def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     assert "Стоп-факторы, ограничивающие класс" not in plain
 
 
+FOOTNOTE = (
+    "* В состав статьи «Денежные средства и их эквиваленты» не включены "
+    "денежные средства на счетах эскроу в сумме 217 501 млн руб. "
+    "на 31 декабря 2025 г."
+)
+
+WITH_FOOTNOTE = BALANCE.replace(
+    "Итого капитал и обязательства         1 500 000      1 360 000",
+    "Итого капитал и обязательства         1 500 000      1 360 000\n" + FOOTNOTE,
+)
+
+
+def test_footnote_and_issuer_type_reach_the_document(db_conn, tmp_path) -> None:
+    """Сноска под формой и тип эмитента доходят до заключения.
+
+    Три обстоятельства одного случая — годового комплекта ЛСР:
+
+    - **сноска извлекалась и терялась**: в комплект писались только коды форм,
+      у которых она нашлась, и 217 501 млн руб. на счетах эскроу в документ
+      попасть не могли — ради этой величины сноски и извлекаются;
+    - **тип эмитента в документе не назывался вовсе**, и отказ по текущей
+      ликвидности читался как пробел отчётности, тогда как показатель
+      у девелопера считается с поправкой;
+    - **отказ просил у организации то, что она раскрыла**: величина стоит
+      сноской, и семейство отказа — наш пробел, а не нехватка данных.
+    """
+    from docx import Document
+
+    from finlib.report.document import build_report
+    from finlib.standards import Standard
+
+    loaded(db_conn, body=WITH_FOOTNOTE, issuer_type="developer")
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
+    save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
+
+    stored = fetch_one(
+        "SELECT meta FROM src_file WHERE inn = %(i)s AND standard = 'ifrs' "
+        "AND report_year = %(y)s AND is_actual",
+        {"i": INN, "y": DATES[0].year},
+        conn=db_conn,
+    )
+    assert any(
+        "217 501" in item["text"] for item in stored["meta"]["footnotes"]
+    ), "сноска не записана с комплектом"
+
+    made = build_report(
+        INN,
+        db_conn,
+        standard=Standard.IFRS,
+        with_text=False,
+        directory=tmp_path,
+        is_test=True,
+    )
+    plain = "\n".join(item.text for item in Document(made.path).paragraphs).replace(
+        " ", " "
+    )
+    assert "Тип эмитента: девелопер, работающий по счетам эскроу" in plain
+    assert "217 501" in plain
+    assert "Сноска под формой «Отчёт о финансовом положении»" in plain
+    # Величина раскрыта эмитентом, и запрашивать её нечего: не сделан перевод
+    # сноски в состав входных величин показателя.
+    assert "Запрашивать нечего: величина раскрыта сноской" in plain
+
+
 def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     """Оговорка аудитора доходит до документа: сигнал, цитата, уверенность.
 
@@ -428,6 +501,12 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     # которых ветка не считает, в основаниях стоять не вправе.
     assert "Основания заданы методикой" in text
     assert "Сработал флаг" not in text
+    # **Перечисляются применённые основания, а не все объявленные.** Здесь
+    # уверенность понижена двумя своими основаниями, а неприменённые —
+    # оговорка о величинах и неопределённость непрерывности — рядом с оценкой
+    # читались бы как обстоятельства этой организации.
+    assert "продолжение деятельности которой под вопросом" not in text
+    assert "подтверждённым аудитором не полностью" not in text
     # Эскалация от неустановленного вида не возникает: она следует
     # из надзорного уровня, а его здесь нет.
     assert "Эскалация." not in text

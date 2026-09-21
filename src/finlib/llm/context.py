@@ -781,6 +781,34 @@ def _audit_notes(meta: dict | None) -> list[str]:
     ]
 
 
+def _footnote_notes(meta: dict | None) -> list[str]:
+    """Сноски под формами — дословно, с указанием формы.
+
+    **Сноска несёт величину, которой в таблице нет.** У ЛСР под отчётом
+    о финансовом положении сказано, что в состав денежных средств не включены
+    217 501 млн руб. на счетах эскроу: показатель ликвидности без этого
+    читается иначе, а в таблице формы такой строки нет вовсе. Прежде сноска
+    извлекалась и терялась — в комплект писались только коды форм, у которых
+    она нашлась, — и документ сообщал, что величины нет, тогда как она была
+    напечатана эмитентом.
+
+    Текст приводится как прочитан, вместе с мусором разбора: это цитата
+    эмитента, а не наша формулировка, и править её нельзя.
+    """
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+
+    found = (meta or {}).get("footnotes") or []
+    if not found:
+        return []
+    forms = load_ifrs_lines().forms
+    notes: list[str] = []
+    for item in found:
+        form = forms.get(item.get("form", ""))
+        named = form.name if form is not None else item.get("form", "форма не названа")
+        notes.append(f"Сноска под формой «{named}»: {' '.join(item['text'].split())}")
+    return notes
+
+
 def _accepted_notes(meta: dict | None) -> list[str]:
     """Основания экрана сверки, принятые человеком, — с кем и почему.
 
@@ -836,6 +864,11 @@ def _limitations_block(
     # который не провалился: у комплекта Сегежи так принимались несошедшийся
     # итог и неполный вид отчётности.
     notes.extend(_accepted_notes(meta))
+    # **Сноска под формой — раскрытие эмитента, и она идёт в документ.**
+    # Величина, напечатанная сноской, в таблице формы не стоит, и отказ
+    # показателя без неё выглядит нехваткой данных: у ЛСР так пропадали
+    # 217 501 млн руб. на счетах эскроу.
+    notes.extend(_footnote_notes(meta))
 
     if assessment is not None and assessment["confidence_reasons"]:
         notes.extend(assessment["confidence_reasons"])

@@ -420,6 +420,11 @@ def load_extraction(
         accepted=accepted,
         confirmed_by=confirmed_by,
         audit=audit,
+        footnotes=tuple(
+            (code, note)
+            for code, form in extraction.forms.items()
+            for note in form.notes_under_form
+        ),
     )
 
     # Присвоения этого присеста — такое же подтверждение человека, как и
@@ -615,6 +620,7 @@ def _write_src_file(
     accepted: dict[str, str],
     confirmed_by: str | None,
     audit: object | None = None,
+    footnotes: tuple[tuple[str, str], ...] = (),
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
     report_year = profile.report_dates[0].year
@@ -623,6 +629,13 @@ def _write_src_file(
         "review_outcome": review.outcome.value,
         "review_reasons": [item.value for item in review.reasons],
         "notes_under_forms": list(profile.forms),
+        # **Сноска под формой — раскрытие эмитента, и хранится она дословно.**
+        # Прежде в комплект писались только коды форм, у которых сноска нашлась,
+        # а сам текст оставался в разборе: документ собирается из базы, файла
+        # при сборке нет, и величина сноски в заключение попасть не могла.
+        # У ЛСР так пропадали 217 501 млн руб. на счетах эскроу — величина,
+        # ради которой сноски и извлекаются.
+        "footnotes": [{"form": form, "text": text} for form, text in footnotes],
         "grouping_evidence": profile.grouping_detection.describe(),
         # Опознание двух сил, порознь: справочник утверждает о строке вообще,
         # ранее подтверждённое — о строке этого эмитента. В документ идут
