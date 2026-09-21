@@ -22,6 +22,7 @@ from decimal import Decimal
 
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import Inputs, MetricValue, compute_all, months_of
+from finlib.normalize.ifrs_forms import pick_by_form
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.normalize.ifrs_note_lines import load_note_lines
 from finlib.quality.periods import PeriodConfidence
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 # отчётный период. Сравнительные колонки в расчёт показателей МСФО пока
 # не идут — динамика по МСФО появится с вторым годом одного эмитента.
 _FACTS = """
-SELECT f.line_code, f.value, f.recognition, f.note_source_name,
+SELECT f.line_code, f.form_code, f.value, f.recognition, f.note_source_name,
        s.reporting_kind, s.meta
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
@@ -123,6 +124,7 @@ def inputs_of(
     values: dict[str, Decimal] = {}
     notes: dict[str, Decimal] = {}
     note_rows: dict[str, tuple[str, ...]] = {}
+    form_rows: list[dict] = []
     for row in rows:
         if row["recognition"] == "note" or row["line_code"] in note_codes:
             notes[row["line_code"]] = row["value"]
@@ -130,7 +132,22 @@ def inputs_of(
                 (row["note_source_name"] or "").split("; ")
             )
             continue
+        form_rows.append(row)
+    # **Величина позиции берётся из формы, объявленной у позиции.** Ключ
+    # по коду без формы оставлял то из двух, что пришло позже: у Сегежи налог
+    # на прибыль равен −4 784 в отчёте о прибыли и +4 784 в потоке.
+    chosen, foreign = pick_by_form(form_rows, Standard.IFRS)
+    for row in chosen:
         values[row["line_code"]] = row["value"]
+    # Счётчик стоит рядом с правилом: ноль величин чужой формы при неизвестном
+    # числе величин не означает, что правило работает.
+    logger.info(
+        "%s за %s: величин %d, из них взято из чужой формы %d",
+        inn,
+        report_date,
+        len(values),
+        len(foreign),
+    )
 
     # Знаменатель покрытия процентов собирается тем же правилом, что в замере:
     # расход плюс капитализированные, а при объявленной очистке от них

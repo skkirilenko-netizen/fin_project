@@ -114,7 +114,8 @@ ORDER BY d.check_code, d.severity, d.status, d.report_date DESC NULLS LAST
 # не совпадает ни с одной строкой отчёта о прибыли или убытке, и читатель
 # не понимает почему: у Автодора в форме 414, а начислено 54 382.
 _DISCLOSED = """
-SELECT DISTINCT line_code, value, recognition, note_number, note_source_name
+SELECT DISTINCT line_code, form_code, value, recognition, note_number,
+       note_source_name
 FROM fact_report
 WHERE inn = %(inn)s AND standard = %(standard)s AND report_date = %(d)s
   AND value IS NOT NULL
@@ -777,7 +778,17 @@ def load_report_data(
         if catalog.get(code) is not None
     ]
 
-    disclosed = fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn)
+    # **Величина позиции берётся из формы, объявленной у позиции.** Один код
+    # правомерно стоит в двух формах МСФО — неденежные корректировки потока
+    # повторяют статьи отчёта о прибыли, — и это два разных факта. Отображение
+    # по коду без формы оставляло то из двух, что пришло позже: у Сегежи налог
+    # на прибыль равен −4 784 в отчёте о прибыли и +4 784 в потоке, и документ
+    # печатал бы произвольное из них.
+    from finlib.normalize.ifrs_forms import pick_by_form
+
+    disclosed, _ = pick_by_form(
+        fetch_all(_DISCLOSED, {**params, "d": target}, conn=conn), standard
+    )
     return ReportData(
         inn=inn,
         report_date=target,

@@ -32,7 +32,7 @@ from finlib.standards import Standard, load_standards
 logger = logging.getLogger(__name__)
 
 _SELECT_FACTS = """
-SELECT f.report_date, f.line_code, f.value, f.standard
+SELECT f.report_date, f.line_code, f.form_code, f.value, f.standard
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND s.status <> 'quarantine'
@@ -140,14 +140,29 @@ class PeriodValues:
 def load_period_values(
     inn: str, conn: PgConnection | None = None, standard: Standard = Standard.RSBU
 ) -> dict[date, PeriodValues]:
-    """Читает значения строк организации по периодам, минуя карантин."""
-    periods: dict[date, PeriodValues] = {}
+    """Читает значения строк организации по периодам, минуя карантин.
+
+    **Величина позиции берётся из формы, объявленной у позиции.** В РСБУ
+    четырёхзначный код принадлежит одной форме по устройству нумерации,
+    а в МСФО один код правомерно стоит в двух — неденежные корректировки
+    потока повторяют статьи отчёта о прибыли, — и это два разных факта.
+    Ключ по коду без формы оставлял то из двух, что пришло позже: у Сегежи
+    налог на прибыль равен −4 784 в отчёте о прибыли и +4 784 в потоке.
+    """
+    from finlib.normalize.ifrs_forms import pick_by_form
+
+    by_period: dict[date, list[dict]] = {}
     for row in fetch_all(_SELECT_FACTS, {"inn": inn, "standard": standard.value}, conn=conn):
-        period = periods.setdefault(
-            row["report_date"], PeriodValues(row["report_date"], {})
-        )
-        period.values[row["line_code"]] = row["value"]
-        period.standards[row["line_code"]] = row["standard"]
+        by_period.setdefault(row["report_date"], []).append(row)
+    periods: dict[date, PeriodValues] = {}
+    for report_date, rows in by_period.items():
+        # Выбор формы делается внутри периода: один и тот же код в двух формах
+        # правомерен, и за разные периоды он мог прийти по-разному.
+        chosen, _ = pick_by_form(rows, standard)
+        period = periods.setdefault(report_date, PeriodValues(report_date, {}))
+        for row in chosen:
+            period.values[row["line_code"]] = row["value"]
+            period.standards[row["line_code"]] = row["standard"]
     return periods
 
 
