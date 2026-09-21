@@ -216,9 +216,8 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
     # Ранее подтверждённое опознание участвует в решении наравне
     # со справочником: замер обязан отвечать на тот же вопрос, что цикл,
     # иначе доля автопрохождения в отчёте меньше настоящей.
-    decision = review(
-        extraction, profile, confirmed=load_confirmed(inn, extraction, profile)
-    )
+    known = load_confirmed(inn, extraction, profile)
+    decision = review(extraction, profile, confirmed=known)
 
     found = DocumentRun(
         path=path,
@@ -242,7 +241,13 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
 
     if write and inn:
         with connection() as conn:
-            loaded = load_extraction(inn, extraction, profile, decision, conn)
+            # Подтверждённое опознание передаётся записи так же, как решению:
+            # иначе комплект принимался бы с его учётом, а факты писались
+            # без него — и в расчёт не попадали статьи, о которых человек
+            # уже сказал, чем они являются.
+            loaded = load_extraction(
+                inn, extraction, profile, decision, conn, confirmed=known
+            )
             found.src_file_id = loaded.src_file_id
     return found
 
