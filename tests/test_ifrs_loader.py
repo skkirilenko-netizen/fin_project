@@ -143,6 +143,24 @@ def prepared(text: str = BALANCE):
     return extraction, profile, review(extraction, profile)
 
 
+def test_the_counter_of_written_facts_adds_up(db_conn) -> None:
+    """Записанное и неизменённое вместе дают знаменатель — иначе он не тот.
+
+    В выводе стояло «фактов записано 0 из 166, без изменений 177»: знаменатель
+    считал только величины форм, а числители — ещё и величины по подтверждению
+    человека и величины примечаний. Сложение не сходилось, и читатель
+    правильно ему не верил.
+    """
+    extraction, profile, decision = prepared()
+    first = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
+    assert first.facts_written + first.collisions.unchanged == first.facts_total
+
+    # Повторная загрузка того же комплекта: записано ноль, знаменатель тот же.
+    again = load_extraction(INN, extraction, profile, decision, db_conn, NOT_READ)
+    assert again.facts_written == 0
+    assert again.collisions.unchanged == again.facts_total == first.facts_total
+
+
 def test_facts_are_written_with_the_ifrs_standard(db_conn) -> None:
     """Факты пишутся со стандартом ifrs и не смешиваются с РСБУ."""
     extraction, profile, decision = prepared()

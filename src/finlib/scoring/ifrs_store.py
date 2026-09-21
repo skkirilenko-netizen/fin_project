@@ -133,7 +133,7 @@ def assess_ifrs(
     inn: str,
     conn: PgConnection,
     policy: IfrsMetricsPolicy | None = None,
-) -> tuple[IfrsAssessment, int]:
+) -> tuple[IfrsAssessment, int, StopFactors]:
     """Считает и пишет показатели по всем периодам и оценку по свежему.
 
     **Периодов больше одного намеренно.** Балл считается по уровню отчётного
@@ -178,7 +178,10 @@ def assess_ifrs(
     result = assess(latest, policy, stops)
     save_ifrs_assessment(inn, periods[0], result, latest, conn, policy, stops)
     save_changes(inn, periods, conn, policy)
-    return result, saved
+    # Стоп-факторы возвращаются вызывающему: их исход — главное, что прогон
+    # обязан показать. Класс E у Сегежи получается и по баллу, и по стоп-фактору,
+    # и без перечня проверенного одно от другого не отличить.
+    return result, saved, stops
 
 
 def stop_factors_of(
@@ -561,5 +564,12 @@ def _exclusion_of(
             return " ".join(declared.split())
         return "в балл не входит по методике: показатель описывает деятельность"
     if not item.calculable:
-        return item.describe()
+        # Наименование показателя даёт формулировка отказа, и повторять его
+        # здесь значило бы напечатать «Покрытие погашений… в балл не вошёл:
+        # показатель не рассчитан (Покрытие погашений…: не рассчитан, …)».
+        from finlib.metrics.ifrs import REASON_TEXT, named
+
+        text = REASON_TEXT.get(item.reason, "причина не названа")
+        missing = ", ".join(named(code) for code in item.missing)
+        return f"{text} — {missing}" if missing else text
     return "шкала уровня для показателя не объявлена"

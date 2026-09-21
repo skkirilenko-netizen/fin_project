@@ -247,6 +247,12 @@ class Collisions:
 
     # Сколько входящих величин встретили уже загруженную за тот же период.
     checked: int = 0
+    # Сколько записей вообще предъявлено базе: величины форм, величины
+    # по подтверждению человека и величины примечаний вместе. Знаменатель
+    # обязан покрывать всё, что считается в числителе: «фактов записано 0
+    # из 166, без изменений 177» — сложение, которое не сходится, и читатель
+    # правильно ему не верит.
+    attempted: int = 0
     # Величины, база которых не тронула: значение то же, что уже лежало.
     # Без этой графы «фактов записано 0 из 50» читается как несостоявшаяся
     # загрузка, тогда как это повторный прогон того же комплекта.
@@ -300,7 +306,7 @@ class LoadResult:
         """Однострочная сводка со счётчиками проверенного."""
         return (
             f"ИНН {self.inn}, комплект {self.src_file_id}: фактов записано "
-            f"{self.facts_written} из {self.facts_total}, из них "
+            f"{self.facts_written} из {self.facts_total} предъявленных, из них "
             f"по подтверждению человека {self.collisions.by_confirmation}, "
             f"из примечаний {self.collisions.by_note}, "
             f"без изменений {self.collisions.unchanged}, "
@@ -446,7 +452,11 @@ def load_extraction(
         src_file_id=src_file_id,
         inn=inn,
         facts_written=written,
-        facts_total=len(extraction.values),
+        # Знаменатель — число предъявленных базе записей, а не число величин
+        # форм: к ним добавляются величины по подтверждению человека и величины
+        # примечаний, и «записано 0 из 166, без изменений 177» было сложением,
+        # которое не сходится.
+        facts_total=collisions.attempted,
         revisions=tuple(revisions),
         quarantined=quarantined,
         confirmations=saved,
@@ -588,6 +598,7 @@ def _write_facts(
     overwritten: list[Clash] = []
     written = 0
     unchanged = 0
+    attempted = 0
 
     for form_code, form in extraction.forms.items():
         roles = _roles(profile.dates_of(form_code))
@@ -640,6 +651,7 @@ def _write_facts(
             )
             written += touched
             unchanged += not touched
+            attempted += 1
 
     # **Подтверждённое человеком идёт в факты наравне с опознанным.** Прежде
     # факты писались только из строк, опознанных справочником, и статьи,
@@ -682,6 +694,7 @@ def _write_facts(
             written += touched
             by_confirmation += touched
             unchanged += not touched
+            attempted += 1
 
     # **Величина примечания — факт той формы, строка которой на примечание
     # ссылается.** Примечание расшифровывает конкретную строку конкретной
@@ -739,11 +752,13 @@ def _write_facts(
             )
             written += touched
             by_note += touched
-        unchanged += not touched
+            unchanged += not touched
+            attempted += 1
 
     collisions.by_confirmation = by_confirmation
     collisions.by_note = by_note
     collisions.unchanged = unchanged
+    collisions.attempted = attempted
     collisions.revisions = tuple(revisions)
     collisions.sign_only = tuple(sign_only)
     collisions.rewritten = tuple(overwritten)

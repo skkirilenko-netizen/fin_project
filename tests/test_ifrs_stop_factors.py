@@ -193,6 +193,41 @@ def test_confirmation_by_the_audit_report_is_recorded() -> None:
     assert unreadable.audit_state == "not_readable"
 
 
+def test_every_declared_factor_reports_its_outcome() -> None:
+    """Исход называется у каждого стоп-фактора, включая не сработавшие.
+
+    Класс у Сегежи выходит низшим и по баллу, и по стоп-фактору: балл 0,1 ниже
+    любой границы. Без перечня проверенного прогон не показывал, сработали ли
+    стоп-факторы вообще, — то есть не отвечал на вопрос, ради которого
+    снимался карантин.
+    """
+    policy = load_ifrs_metrics()
+    metrics = (
+        value("equity", Decimal(255)),
+        value("equity_ratio", Decimal("0.002")),
+        value("nwc", Decimal(-42662)),
+        value("interest_cover_accrued", Decimal("-2.656")),
+    )
+    stops = evaluate_stop_factors(
+        metrics, "corporate", ("going_concern_uncertainty",), True, policy
+    )
+    assert len(stops.checks) == stops.checked == 4
+    outcomes = {item.code: item.verdict for item in stops.checks}
+    assert outcomes == {
+        "negative_equity": "not_triggered",
+        "negative_autonomy": "not_triggered",
+        "negative_nwc": "triggered",
+        "interest_cover_below_one": "triggered",
+    }
+    # У каждого исхода стоит величина, по которой он получен, а у сработавшего
+    # ещё и ограничение класса.
+    by_code = {item.code: item for item in stops.checks}
+    assert by_code["negative_nwc"].value == Decimal(-42662)
+    assert by_code["negative_nwc"].cap == "C"
+    assert by_code["negative_equity"].value == Decimal(255)
+    assert "непрерывности" in stops.audit_note
+
+
 def test_checked_count_stands_next_to_the_triggered() -> None:
     """Число проверенных стоп-факторов идёт рядом с числом сработавших."""
     policy = load_ifrs_metrics()

@@ -479,7 +479,9 @@ def ifrs_confirm_command(
             )
         taken[code.strip()] = reason.strip()
 
-    issuers, skipped = _load_issuers(path)
+    # Читается только папка этого эмитента: подтверждается один комплект,
+    # и разбирать ради этого весь каталог незачем.
+    issuers, skipped = _load_issuers(path, only=frozenset({inn}))
     for name, reason in skipped:
         typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
     mine = [
@@ -662,7 +664,9 @@ def ifrs_markup_command(
 
 
 def _load_issuers(
-    path: Path, grouping: dict[str, str] | None = None
+    path: Path,
+    grouping: dict[str, str] | None = None,
+    only: frozenset[str] | None = None,
 ) -> tuple[list, list[tuple[str, str]]]:
     """Готовит эмитентов к разметке; всё непринятое называется поимённо.
 
@@ -701,6 +705,11 @@ def _load_issuers(
         )
 
     for folder in sorted(p for p in path.iterdir() if p.is_dir()):
+        # **Отбор до разбора, а не после.** Подтверждение одного комплекта
+        # перечитывало весь каталог — семнадцать документов вместо одного,
+        # и чужие отказы печатались в вывод команды об этом эмитенте.
+        if only is not None and folder.name not in only:
+            continue
         if not re.fullmatch(r"\d{10}|\d{12}", folder.name):
             # Имя папки — это ИНН и ничто иное: оно попадает в ключ комплекта
             # и в отчёт. Суффикс вида «_interim» стал бы частью ИНН, а вид
@@ -1438,7 +1447,25 @@ def ifrs_assess_command(
         # Показатели считаются по всем периодам вне карантина, а балл — по
         # уровню отчётного: правило объявлено методикой, изменения идут
         # читателю, а не шкале.
-        result, saved = assess_ifrs(inn, conn, policy)
+        result, saved, stops = assess_ifrs(inn, conn, policy)
+
+    # **Стоп-факторы печатаются поимённо, включая не сработавшие.** Класс
+    # у Сегежи выходит низшим и по баллу, и по стоп-фактору, и без перечня
+    # проверенного одно от другого не отличить: прогон, ради которого
+    # снимался карантин, не показывал главного.
+    typer.echo("")
+    typer.echo(f"  стоп-факторы: проверено {stops.checked}")
+    for check in stops.checks:
+        colour = typer.colors.YELLOW if check.verdict == "triggered" else None
+        typer.echo(typer.style(f"    {check.describe()}", fg=colour))
+    if stops.code:
+        typer.echo(
+            f"    записан в оценку: {stops.code}; класс до применения "
+            f"{result.class_before_stop}, после {result.class_code}"
+        )
+        typer.echo(f"    сверка с аудиторским заключением: {stops.audit_note}")
+    for metric, limitation in stops.excluded_reasons:
+        typer.echo(f"    из балла исключён {metric}: {limitation}")
 
     typer.echo("")
     for group in result.groups:

@@ -101,6 +101,39 @@ class Assessment:
 
 
 @dataclass(frozen=True, slots=True)
+class FactorCheck:
+    """Исход проверки одного стоп-фактора — вместе с величиной и причиной.
+
+    **Проверка обязана называть и то, что не сработало.** Ноль сработавших
+    при неизвестном перечне проверенного неотличим от непроверенных: у Сегежи
+    класс E получился бы и по баллу, и по стоп-фактору, и отличить одно
+    от другого без такого перечня было нечем.
+    """
+
+    code: str
+    name: str
+    metric: str
+    verdict: str
+    value: Decimal | None = None
+    cap: str | None = None
+    reason: str = ""
+
+    def describe(self) -> str:
+        """Строка для терминала: исход, величина, причина."""
+        shown = "величина не рассчитана" if self.value is None else f"{self.value:.3f}"
+        if self.verdict == "triggered":
+            head = f"сработал, класс ограничен {self.cap}"
+        elif self.verdict == "not_applicable":
+            head = "неприменим"
+        elif self.verdict == "no_value":
+            head = "не проверялся"
+        else:
+            head = "не сработал"
+        tail = f" — {self.reason}" if self.reason else ""
+        return f"{self.name}: {head} ({shown}){tail}"
+
+
+@dataclass(frozen=True, slots=True)
 class StopFactors:
     """Стоп-факторы комплекта: проверенное, сработавшее и неприменимое.
 
@@ -120,6 +153,9 @@ class StopFactors:
     # Класс, которым ограничена оценка, и стоп-фактор, его назначивший.
     cap: str | None = None
     code: str | None = None
+    # Исход по каждому объявленному стоп-фактору, включая не сработавшие:
+    # перечень проверенного стоит рядом с числом сработавших.
+    checks: tuple[FactorCheck, ...] = ()
     # Сверка сработавшего стоп-фактора с аудиторским заключением.
     audit_state: str = ""
     audit_note: str = ""
@@ -179,12 +215,25 @@ def evaluate_stop_factors(
 
     triggered: list[str] = []
     excluded: list[tuple[str, str]] = []
+    checks: list[FactorCheck] = []
     cap: str | None = None
     code: str | None = None
     for factor in types.stop_factors:
         outcome = applicability(factor.code, issuer_type, values, types)
         if not outcome.applicable:
             excluded.append((factor.metric, " ".join(outcome.limitation.split())))
+            checks.append(
+                FactorCheck(
+                    factor.code,
+                    factor.name,
+                    factor.metric,
+                    "not_applicable",
+                    values.get(factor.metric),
+                    reason=" ".join(outcome.rationale.split())
+                    if outcome.rationale
+                    else "",
+                )
+            )
             continue
         # **Вывод по знаку.** Неположительный числитель при положительном
         # знаменателе доказывает, что отношение ниже единицы, без деления —
@@ -196,8 +245,31 @@ def evaluate_stop_factors(
             factor.proven_by_sign and found is not None and found.below_one_by_sign
         )
         if not by_sign and not factor.holds(values.get(factor.metric)):
+            checks.append(
+                FactorCheck(
+                    factor.code,
+                    factor.name,
+                    factor.metric,
+                    "not_triggered" if factor.metric in values else "no_value",
+                    values.get(factor.metric),
+                    reason=""
+                    if factor.metric in values
+                    else "показатель не рассчитан, условие проверять нечем",
+                )
+            )
             continue
         triggered.append(factor.code)
+        checks.append(
+            FactorCheck(
+                factor.code,
+                factor.name,
+                factor.metric,
+                "triggered",
+                values.get(factor.metric),
+                cap=factor.cap,
+                reason="вывод по знаку: числитель неположителен" if by_sign else "",
+            )
+        )
         if cap is None or ranks[factor.cap] > ranks[cap]:
             cap, code = factor.cap, factor.code
 
@@ -211,6 +283,7 @@ def evaluate_stop_factors(
         excluded_reasons=tuple(dict.fromkeys(excluded)),
         cap=cap,
         code=code,
+        checks=tuple(checks),
         audit_state=state,
         audit_note=note,
     )
