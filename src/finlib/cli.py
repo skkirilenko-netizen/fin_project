@@ -647,6 +647,7 @@ def _markup_loop(
         candidates,
         check_part_of,
         code_is_taken,
+        declared_value,
         forget,
         known_codes,
         last_confirmation,
@@ -807,7 +808,7 @@ def _markup_loop(
                     )
                 )
             elif matched is False:
-                declared = issuer.extraction.value_of(code, issuer.report_date)
+                declared = declared_value(issuer, code)
                 typer.echo(
                     typer.style(
                         f"  сумма детализации {total} не равна раскрытой величине "

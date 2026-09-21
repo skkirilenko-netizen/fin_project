@@ -25,6 +25,8 @@ from finlib.sources.ifrs_markup import (
     Priority,
     apply_assignment,
     candidates,
+    check_part_of,
+    declared_value,
     markup_problem,
 )
 from finlib.sources.ifrs_numbers import Grouping, GroupingDetection
@@ -299,6 +301,77 @@ def test_markup_of_another_section_is_refused() -> None:
     assert "разделе" in problem
     with pytest.raises(ValueError):
         apply_assignment(issuer, candidate, "ifrs.inventories", catalog)
+
+
+# Расходы по характеру затрат: итог есть, а позиции под него в справочнике
+# нет — так отчитывается Почта России. Итог размечается специфической статьёй,
+# строки под ним — её детализацией.
+EXPENSES_BY_NATURE = """
+Консолидированный отчёт о прибыли или убытке
+(в миллионах российских рублей)
+Выручка                               1 200 000      1 100 000
+Затраты на персонал                    (136 388)      (143 132)
+Транспортные услуги сторонних организаций (17 675)     (19 507)
+Покупная стоимость товаров              (16 450)       (16 960)
+Содержание помещений                     (7 654)        (7 161)
+Ремонт и техобслуживание                 (7 196)        (7 156)
+Прочие операционные расходы             (41 208)       (32 903)
+Итого расходов                         (226 571)      (226 819)
+Операционная прибыль                    973 429        873 181
+Прибыль до налогообложения              973 429        873 181
+Прибыль за период                       973 429        873 181
+"""
+
+
+def test_incomplete_detail_is_named_even_without_a_catalog_position() -> None:
+    """Сумма детализации сверяется и тогда, когда позицию назвал человек.
+
+    У Почты России «Итого расходов» — специфическая статья: кода в справочнике
+    нет. Проверка искала величину позиции только среди опознанных справочником
+    и отвечала «проверять нечем», хотя итог в отчётности есть и разметка была
+    неполной — пять частей из семи.
+    """
+    issuer = issuer_of(EXPENSES_BY_NATURE, ("ifrs.statement_of_profit_or_loss",))
+    catalog = load_ifrs_lines()
+    rows = {
+        item.source_name: item.key
+        for item in issuer.extraction.unrecognised
+        if item.form == "ifrs.statement_of_profit_or_loss"
+    }
+    issuer.specific[rows["Итого расходов"]] = "ifrs.total_expenses"
+    for name in (
+        "Затраты на персонал",
+        "Транспортные услуги сторонних организаций",
+        "Покупная стоимость товаров",
+        "Прочие операционные расходы",
+    ):
+        issuer.parts[rows[name]] = "ifrs.total_expenses"
+
+    assert declared_value(issuer, "ifrs.total_expenses") == Decimal(-226_571)
+    matched, total = check_part_of(issuer, "ifrs.total_expenses", catalog)
+    assert matched is False, "неполная детализация названа сошедшейся"
+    # Недостача — ровно две неразмеченные строки: 7 654 + 7 196.
+    assert total == Decimal(-211_721)
+    assert Decimal(-226_571) - total == Decimal(-14_850)
+
+
+def test_detail_of_a_position_the_catalog_knows_is_checked_too() -> None:
+    """Величина позиции берётся своей строкой, а не суммой её частей.
+
+    Иначе сумма сравнивалась бы сама с собой и сходилась всегда.
+    """
+    issuer = issuer_of(EXPENSES_BY_NATURE, ("ifrs.statement_of_profit_or_loss",))
+    catalog = load_ifrs_lines()
+    rows = {
+        item.source_name: item.key
+        for item in issuer.extraction.unrecognised
+        if item.form == "ifrs.statement_of_profit_or_loss"
+    }
+    # Позиция, которой у эмитента нет ни своей строкой, ни присвоением:
+    # проверять нечем, и это не то же, что «не сошлось».
+    issuer.parts[rows["Ремонт и техобслуживание"]] = "ifrs.cost_of_sales"
+    matched, total = check_part_of(issuer, "ifrs.cost_of_sales", catalog)
+    assert matched is None and total is None
 
 
 def test_refused_markup_returns_the_row_to_the_queue() -> None:

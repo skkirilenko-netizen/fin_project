@@ -861,6 +861,32 @@ def normal_sign_of(catalog: IfrsCatalog) -> Callable[[str], int]:
     return sign
 
 
+def declared_value(issuer: IssuerMarkup, code: str) -> Decimal | None:
+    """Величина позиции у этого эмитента — своей строкой, а не частями.
+
+    Ищется в двух местах, и оба — «своя строка позиции»: опознанная
+    справочником величина либо строка, которую человек назвал этой позицией
+    (точное присвоение или специфическая статья). **Из частей величина
+    не берётся никогда**: сумма частей тогда сравнивалась бы сама с собой.
+
+    Определение одно на проверку и на сообщение о ней: прежде проверка искала
+    величину в одном месте, а сообщение печатало её из другого, и у Почты
+    России выходило «не равна раскрытой величине ifrs.total_expenses (None)».
+    """
+    found = issuer.extraction.value_of(code, issuer.report_date)
+    if found is not None:
+        return found
+    return next(
+        (
+            row.values[0]
+            for row in issuer.extraction.unrecognised
+            if row.values
+            and code in (issuer.assignments.get(row.key), issuer.specific.get(row.key))
+        ),
+        None,
+    )
+
+
 def check_part_of(
     issuer: IssuerMarkup, code: str, catalog: IfrsCatalog
 ) -> tuple[bool | None, Decimal | None]:
@@ -872,8 +898,16 @@ def check_part_of(
 
     `None` означает, что проверять нечем: сама позиция у эмитента
     не раскрыта, и сравнивать сумму не с чем. Это не то же, что «не сошлось».
+
+    **Величина позиции берётся откуда угодно, кроме самих частей.** Прежде она
+    искалась только среди опознанных справочником, и у Почты России проверка
+    молчала: «Итого расходов» — специфическая статья, присвоенная человеком,
+    и в справочнике её кода нет. Разметка была неполной — пять частей из семи,
+    недостача 14 850 = 7 654 + 7 196, — а проверка отвечала «проверять нечем».
+    Из частей величина не берётся никогда: тогда сумма сравнивалась бы сама
+    с собой и сходилась всегда.
     """
-    declared = issuer.extraction.value_of(code, issuer.report_date)
+    declared = declared_value(issuer, code)
     if declared is None:
         return None, None
     parts = [
