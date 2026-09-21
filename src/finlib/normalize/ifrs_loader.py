@@ -325,6 +325,7 @@ def load_extraction(
     confirmed_by: str | None = None,
     confirmations: dict[str, str] | None = None,
     confirmed: Confirmed | None = None,
+    accepted: dict[str, str] | None = None,
     organization_name: str | None = None,
 ) -> LoadResult:
     """Пишет принятый комплект МСФО одной транзакцией.
@@ -345,6 +346,13 @@ def load_extraction(
     не появились ни у одного комплекта, и журнал выглядел так, будто
     оговорок нет.
 
+    accepted — основания экрана сверки, принятые человеком: код основания →
+    причина словами. **Карантин снимается только по названным основаниям.**
+    Прежде разметка строк снимала его целиком: у комплекта Сегежи вместе
+    с неопознанными строками молча принимались несошедшийся итог и неполный
+    вид отчётности — то есть провал блокирующего контроля принимался побочно,
+    без решения и без причины.
+
     Комплект, не прошедший экран сверки без подтверждения, уходит в карантин:
     извлечение, о котором машина не знает, что перед ней, в расчёт не идёт.
     """
@@ -362,7 +370,16 @@ def load_extraction(
     unconfirmed = _unconfirmed(
         extraction, confirmations or {}, frozenset(review.rows_confirmed)
     )
-    quarantined = not review.automatic and bool(unconfirmed or not confirmed_by)
+    # **Карантин снимается по названным основаниям, а не подтверждением
+    # вообще.** Прежде довольно было автора подтверждения и размеченных строк:
+    # у комплекта Сегежи вместе с ними молча принимались несошедшийся итог
+    # и неполный вид отчётности. Теперь каждое основание экрана должно быть
+    # названо человеком с причиной, а неразмеченная строка не принимается
+    # ничем: извлечение без неё неполно.
+    accepted = {code: text for code, text in (accepted or {}).items() if text.strip()}
+    grounds = {item.value for item in review.reasons}
+    covered = bool(confirmed_by) and not unconfirmed and grounds <= set(accepted)
+    quarantined = not review.automatic and not covered
 
     src_file_id = _write_src_file(
         inn,
@@ -374,6 +391,8 @@ def load_extraction(
         correction_version=correction_version,
         quarantined=quarantined,
         reading=reading,
+        accepted=accepted,
+        confirmed_by=confirmed_by,
     )
 
     # Присвоения этого присеста — такое же подтверждение человека, как и
@@ -399,6 +418,8 @@ def load_extraction(
         collisions,
         quarantined,
         notes,
+        accepted,
+        confirmed_by,
     )
     records.extend(_audit_records(inn, src_file_id, reading.audit))
     execute(
@@ -447,6 +468,8 @@ def _write_src_file(
     correction_version: int,
     quarantined: bool,
     reading: DocumentReading,
+    accepted: dict[str, str],
+    confirmed_by: str | None,
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
     report_year = profile.report_dates[0].year
@@ -475,6 +498,16 @@ def _write_src_file(
         # Хранятся факты и дословный текст разделов, формулировки — из методики
         # в момент сборки.
         "audit": reading.audit.as_meta() if reading.audit is not None else None,
+        # **Принятое человеком основание хранится вместе с причиной.** Решение
+        # «я принимаю несошедшийся итог, потому что…» — сведение о комплекте,
+        # и документ обязан его напечатать: провал блокирующего контроля,
+        # принятый молча, неотличим от контроля, который не провалился.
+        "accepted": {
+            "by": confirmed_by,
+            "grounds": {code: " ".join(text.split()) for code, text in accepted.items()},
+        }
+        if accepted
+        else None,
     }
     row = fetch_one(
         _UPSERT_SRC_FILE,
@@ -985,6 +1018,8 @@ def _journal_records(
     collisions: Collisions,
     quarantined: bool,
     notes: tuple[NoteValue, ...] = (),
+    accepted: dict[str, str] | None = None,
+    confirmed_by: str | None = None,
 ) -> list[CheckRecord]:
     """Записи журнала качества по итогам приёма и сверки.
 
@@ -1071,6 +1106,11 @@ def _journal_records(
     records.extend(_review_passes(inn, src_file_id, profile, review))
 
     for code, reason in zip(review.check_codes, review.reasons, strict=False):
+        # **Принятое основание называет, кем и почему принято.** Запись
+        # остаётся записью о провале — основание никуда не делось, — но
+        # к ней приписано решение человека: провал, принятый молча,
+        # неотличим от контроля, который не провалился.
+        taken = (accepted or {}).get(reason.value)
         records.append(
             CheckRecord(
                 inn=inn,
@@ -1080,6 +1120,11 @@ def _journal_records(
                 message=(
                     f"Экран сверки: {reason.value}. "
                     + "; ".join(review.problems[:3])
+                    + (
+                        f" Принято человеком ({confirmed_by}): {' '.join(taken.split())}"
+                        if taken
+                        else ""
+                    )
                 ),
                 src_file_id=src_file_id,
                 # **Отчётная дата комплекта стоит в записи.** Без неё документ

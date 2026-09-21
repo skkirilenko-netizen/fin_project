@@ -418,6 +418,14 @@ def ifrs_confirm_command(
     who: Annotated[
         str, typer.Option("--who", help="Кто подтверждает: попадёт в журнал")
     ],
+    accept: Annotated[
+        list[str],
+        typer.Option(
+            "--accept",
+            help="Принять основание экрана сверки: КОД=причина. Можно повторять. "
+            "Карантин снимается только по названным основаниям",
+        ),
+    ] = [],  # noqa: B006 — typer требует list по умолчанию
     path: Annotated[
         Path, typer.Option("--path", help="Каталог с документами МСФО по ИНН")
     ] = Path("data/raw/ifrs"),
@@ -427,15 +435,20 @@ def ifrs_confirm_command(
 
     **Разметка и подтверждение — разные действия.** Присест разметки пишет
     присвоенные коды в журнал подтверждений, но комплект остаётся в карантине:
-    решение «я посмотрел это извлечение и отвечаю за него» принимается о
-    комплекте целиком, а не о строке. Здесь оно и принимается: комплект
-    перезагружается с названным автором, экран сверки видит подтверждённые
-    строки наравне с опознанными справочником, и карантин снимается, если
-    неопознанных строк не осталось.
+    решение «я посмотрел это извлечение и отвечаю за него» принимается
+    о комплекте целиком, а не о строке.
 
-    Основания, которые подтверждением не снимаются, называются: неполный вид
-    отчётности, потерянная страница, несошедшийся итог — там не опознание,
-    а состав раскрытий и арифметика.
+    **Основание принимается поимённо и с причиной.** Прежде подтверждение
+    снимало карантин целиком, и вместе с неопознанными строками молча
+    принимались несошедшийся итог и неполный вид отчётности: провал
+    блокирующего контроля проходил побочно, без решения и без причины.
+    Теперь каждое основание называется своим кодом — `--accept
+    check_failed="итог не сходится на нераскрытые слагаемые"`, — причина идёт
+    в журнал и в «Ограничения анализа» заключения, а основание, не названное
+    человеком, оставляет комплект в карантине.
+
+    Без `--accept` команда ничего не принимает: она перезагружает комплект
+    и печатает, какие основания остались и какими кодами они называются.
     """
     _setup_logging(verbose)
     _check_inn(inn)
@@ -448,6 +461,23 @@ def ifrs_confirm_command(
 
     from finlib.pipeline import accept_ifrs_document
     from finlib.sources.ifrs_inbox import text_of
+    from finlib.sources.ifrs_review import ReviewReason
+
+    known = {item.value for item in ReviewReason}
+    taken: dict[str, str] = {}
+    for item in accept:
+        code, _, reason = item.partition("=")
+        if code.strip() not in known:
+            _fail(
+                f"основание «{code.strip()}» неизвестно; допустимы: "
+                + ", ".join(sorted(known))
+            )
+        if not reason.strip():
+            _fail(
+                f"основание {code.strip()} принято без причины: причина идёт "
+                "в журнал и в документ, и без неё решение проверить нечем"
+            )
+        taken[code.strip()] = reason.strip()
 
     issuers, skipped = _load_issuers(path)
     for name, reason in skipped:
@@ -472,6 +502,7 @@ def ifrs_confirm_command(
         inn=inn,
         raw_path=str(issuer.path),
         confirmed_by=who.strip(),
+        accepted=taken,
         document=document,
     )
     if not intake.accepted:
@@ -479,30 +510,35 @@ def ifrs_confirm_command(
     loaded = intake.loaded
     if loaded is None:  # pragma: no cover — ИНН назван, запись обязана состояться
         _fail("комплект не записан")
+    grounds = [item.value for item in intake.review.reasons]
+    for code in grounds:
+        mark = "принято" if code in taken else "НЕ ПРИНЯТО"
+        colour = typer.colors.GREEN if code in taken else typer.colors.YELLOW
+        typer.echo(
+            typer.style(f"  {code}: {mark}", fg=colour)
+            + (f" — {taken[code]}" if code in taken else "")
+        )
     if loaded.quarantined:
+        left = sorted(set(grounds) - set(taken))
         typer.echo(
             typer.style(
-                "\nКарантин не снят: "
-                + "; ".join(item.value for item in intake.review.reasons),
+                "\nКарантин не снят. Не принятые основания: "
+                + (", ".join(left) if left else "строки без кода в разметке"),
                 fg=typer.colors.YELLOW,
                 bold=True,
             )
         )
+        typer.echo(
+            "  принять каждое поимённо: --accept КОД=«причина». Причина идёт "
+            "в журнал и в «Ограничения анализа» заключения."
+        )
         raise typer.Exit(code=1)
     typer.echo(
-        typer.style("\nКарантин снят, комплект идёт в расчёт", fg=typer.colors.GREEN)
-    )
-    # **Снятый карантин не означает, что экран сверки всё принял.** Основания,
-    # которые остались, названы: комплект идёт в расчёт под ответственность
-    # подтвердившего, и он обязан видеть, что именно берёт на себя.
-    if intake.review.reasons:
-        typer.echo(
-            typer.style(
-                "  экран сверки принял комплект не сам, основания остались: "
-                + "; ".join(item.value for item in intake.review.reasons),
-                fg=typer.colors.YELLOW,
-            )
+        typer.style(
+            "\nКарантин снят по названным основаниям, комплект идёт в расчёт",
+            fg=typer.colors.GREEN,
         )
+    )
 
 
 @app.command("ifrs-markup")

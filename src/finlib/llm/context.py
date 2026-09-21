@@ -772,6 +772,34 @@ def _audit_notes(meta: dict | None) -> list[str]:
     ]
 
 
+def _accepted_notes(meta: dict | None) -> list[str]:
+    """Основания экрана сверки, принятые человеком, — с кем и почему.
+
+    Комплект, принятый человеком, идёт в расчёт с провалившимся блокирующим
+    контролем, и читатель обязан видеть это вместе с причиной и с именем
+    того, кто принял решение.
+    """
+    from finlib.quality.codes import check_name
+    from finlib.sources.ifrs_review import REASON_CODES, ReviewReason
+
+    found = (meta or {}).get("accepted") or {}
+    grounds = found.get("grounds") or {}
+    if not grounds:
+        return []
+    by = found.get("by") or "не назван"
+    notes: list[str] = []
+    for code, reason in sorted(grounds.items()):
+        try:
+            named = check_name(REASON_CODES[ReviewReason(code)])
+        except (KeyError, ValueError):  # pragma: no cover — код из того же перечня
+            named = code
+        notes.append(
+            f"Контроль «{named}» не пройден, и комплект принят в расчёт решением "
+            f"человека ({by}): {reason}"
+        )
+    return notes
+
+
 def _limitations_block(
     inn: str,
     periods: list[date],
@@ -794,6 +822,11 @@ def _limitations_block(
     # читатель видел оценку по отчётности, которую аудитор подтвердил
     # не полностью.
     notes.extend(_audit_notes(meta))
+    # **Принятое человеком основание идёт в документ вместе с причиной.**
+    # Провал блокирующего контроля, принятый молча, неотличим от контроля,
+    # который не провалился: у комплекта Сегежи так принимались несошедшийся
+    # итог и неполный вид отчётности.
+    notes.extend(_accepted_notes(meta))
 
     if assessment is not None and assessment["confidence_reasons"]:
         notes.extend(assessment["confidence_reasons"])

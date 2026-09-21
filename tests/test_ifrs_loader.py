@@ -447,11 +447,17 @@ def test_confirmed_item_is_saved_with_its_wording(db_conn) -> None:
     assert row["confirmed_by"] == "аналитик"
 
 
-def test_confirmation_lifts_the_quarantine(db_conn) -> None:
-    """Подтверждённое человеком извлечение идёт в расчёт."""
+def test_confirmation_lifts_the_quarantine_only_by_named_grounds(db_conn) -> None:
+    """Карантин снимается по названным основаниям, а не подтверждением вообще.
+
+    Прежде довольно было автора и размеченных строк, и вместе с ними молча
+    принимались несошедшийся итог и неполный вид отчётности: провал
+    блокирующего контроля проходил побочно, без решения и без причины.
+    """
     text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
     extraction, profile, decision = prepared(text)
-    result = load_extraction(
+    grounds = {item.value for item in decision.reasons}
+    silent = load_extraction(
         INN,
         extraction,
         profile,
@@ -461,7 +467,34 @@ def test_confirmation_lifts_the_quarantine(db_conn) -> None:
         confirmed_by="аналитик",
         confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
     )
-    assert not result.quarantined
+    assert silent.quarantined, "основания не названы, а карантин снят"
+
+    named = load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        NOT_READ,
+        confirmed_by="аналитик",
+        confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
+        accepted={code: "статья опознана человеком" for code in grounds},
+    )
+    assert not named.quarantined
+
+    # Причина обязательна: основание, принятое пустой причиной, не принято.
+    empty = load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        NOT_READ,
+        confirmed_by="аналитик",
+        confirmations={"Задолженность Принципала": "ifrs.principal_receivable"},
+        accepted={code: "  " for code in grounds},
+    )
+    assert empty.quarantined
 
 
 def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:

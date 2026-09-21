@@ -97,6 +97,9 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
     Единственная неопознанная строка подтверждается человеком: иначе комплект
     уходит в карантин и в расчёт не идёт вовсе — инвариант 6 действует и здесь,
     и проверять на карантинном комплекте было бы нечего.
+
+    Основания экрана сверки принимаются **поимённо и с причиной**: карантин
+    снимается только по названным, а не подтверждением вообще.
     """
     text = CONTENTS + BALANCE
     profile = identify(text + HEADER)
@@ -112,6 +115,10 @@ def loaded(db_conn, notes: tuple[NoteValue, ...] = (), audit=None) -> None:
         DocumentReading(audit=audit, notes=notes, issuer_type="corporate"),
         confirmed_by="аналитик",
         confirmations={"Амортизация основных средств": "ifrs.depreciation"},
+        accepted={
+            item.value: "проверено человеком на синтетическом комплекте"
+            for item in decision.reasons
+        },
     )
 
 
