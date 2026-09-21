@@ -323,8 +323,13 @@ def test_foreign_standard_marks_are_blocking(db_conn, tmp_path) -> None:
     их по одному и впредь, поэтому правило ищет приметы, а не перечень
     известных случаев.
     """
-    from finlib.llm.textcheck import Severity, TextRule, check_foreign_standard
-    from finlib.llm.textcheck import SEVERITY, TextContext
+    from finlib.llm.textcheck import (
+        SEVERITY,
+        Severity,
+        TextContext,
+        TextRule,
+        check_foreign_standard,
+    )
     from finlib.standards import Standard
 
     assert SEVERITY[TextRule.FOREIGN_STANDARD_MARK] is Severity.BLOCKING
