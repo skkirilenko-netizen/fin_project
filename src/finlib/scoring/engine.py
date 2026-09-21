@@ -442,8 +442,10 @@ def assess(
 
     groups = _group_scores(metric_scores, scoring)
     total = _total_score(groups)
-    by_score = scoring.class_for(total) if total is not None else scoring.require_class(
-        scoring.lowest_class
+    by_score = (
+        scoring.class_for(total)
+        if total is not None
+        else scoring.require_class(scoring.lowest_class)
     )
 
     policy, triggered = _stop_factor(metric_scores, catalog, scoring)

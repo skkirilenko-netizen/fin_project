@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from finlib.config import settings
 from finlib.metrics.definitions import Condition
 from finlib.metrics.formula import Node, parse_formula
+from finlib.scoring.scale import class_by_printed_score
 
 
 class StopEffect(StrEnum):
@@ -361,11 +362,8 @@ class ScoringCatalog(BaseModel):
         return self
 
     def class_for(self, score: Decimal) -> ClassDef:
-        """Класс по общему баллу; границы нестрогие сверху."""
-        for item in self.classes:
-            if score >= item.min_score:
-                return item
-        return self.classes[-1]
+        """Класс по общему баллу: порог сверяется с напечатанным баллом."""
+        return class_by_printed_score(score, self.classes)
 
     def require_class(self, code: str) -> ClassDef:
         """Класс по коду."""

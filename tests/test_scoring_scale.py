@@ -8,10 +8,10 @@
 
 from decimal import Decimal
 
-from finlib.normalize.ifrs_metrics import Scale
-from finlib.scoring.definitions import MetricScale
+from finlib.normalize.ifrs_metrics import Scale, load_ifrs_metrics
+from finlib.scoring.definitions import MetricScale, load_scoring
 from finlib.scoring.ifrs import _level
-from finlib.scoring.scale import interpolate
+from finlib.scoring.scale import class_by_printed_score, interpolate
 
 # Шкала РСБУ хранится по возрастанию значения показателя, шкала МСФО —
 # по возрастанию балла. У показателя «меньше — лучше» это противоположные
@@ -60,3 +60,27 @@ def test_zero_width_step_takes_the_upper_score() -> None:
     """
     step = ((Decimal(1), Decimal(0)), (Decimal(1), Decimal(100)))
     assert interpolate(step, Decimal(1)) == Decimal(100)
+
+
+def test_class_is_assigned_by_the_printed_score() -> None:
+    """Порог класса сверяется с напечатанным баллом, а не с полной точностью.
+
+    У ПАО «Левенгук» балл 79,997 давал класс B при напечатанных «80,00
+    из 100» и правиле «A — от 80»: каждая величина верна, а документ
+    противоречит себе.
+    """
+    scoring = load_scoring()
+    assert scoring.class_for(Decimal("79.997")).code == "A"
+    assert scoring.class_for(Decimal("79.994")).code == "B"
+
+
+def test_both_standards_assign_the_class_by_one_rule() -> None:
+    """Класс по баллу считается одной реализацией на РСБУ и МСФО."""
+    rsbu = load_scoring().classes
+    ifrs = load_ifrs_metrics().classes
+    for value in ("79.997", "79.994", "65", "64.999", "0"):
+        total = Decimal(value)
+        assert (
+            class_by_printed_score(total, rsbu).code
+            == class_by_printed_score(total, ifrs).code
+        )

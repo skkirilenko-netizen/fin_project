@@ -20,8 +20,44 @@
 import logging
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import Protocol
+
+from finlib.metrics.display import round_to
 
 logger = logging.getLogger(__name__)
+
+# Разрядность балла — та, с какой он печатается в «Ключевом выводе»
+# и в приложении (`report/summary.py`, `report/appendix.py`): два знака,
+# и одна на оба стандарта.
+SCORE_SCALE = 2
+
+
+class ScoreClass(Protocol):
+    """Класс состояния со стороны, которой касается порог балла."""
+
+    @property
+    def min_score(self) -> Decimal:
+        """Наименьший балл, при котором присваивается этот класс."""
+
+
+def class_by_printed_score[T: ScoreClass](
+    total: Decimal, classes: Sequence[T], scale: int = SCORE_SCALE
+) -> T:
+    """Класс по баллу в том виде, в каком балл напечатан в документе.
+
+    Порог сверяется с округлённым числом, а не с полной точностью: у ПАО
+    «Левенгук» балл 79,997 давал класс B при напечатанных «80,00 из 100»
+    и правиле «A — от 80». Каждая величина была верна, а документ противоречил
+    себе — единая точка округления (задача 13) относится и к порогу класса.
+
+    Классы перечисляются от старшего к младшему, границы нестрогие сверху;
+    реализация одна на РСБУ и МСФО, потому что величина одна.
+    """
+    shown = round_to(total, scale)
+    for item in classes:
+        if shown >= item.min_score:
+            return item
+    return classes[-1]
 
 
 def interpolate(points: Sequence[tuple[Decimal, Decimal]], value: Decimal) -> Decimal:

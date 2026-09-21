@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, Scale, load_ifrs_metrics
-from finlib.scoring.scale import interpolate
+from finlib.scoring.scale import class_by_printed_score, interpolate
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,9 @@ def assess(
             total, None, "", rules.max_group_weight_reason, groups, divergence, gap
         )
 
-    chosen = next(item for item in policy.classes if total >= item.min_score)
+    # Порог класса сверяется с напечатанным баллом, и правило одно на два
+    # стандарта: у РСБУ балл 79,997 печатался как «80,00» при классе B.
+    chosen = class_by_printed_score(total, policy.classes)
     return Assessment(total, chosen.code, chosen.name, "", groups, divergence, gap)
 
 
