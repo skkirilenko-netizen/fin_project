@@ -148,6 +148,13 @@ class MetricTheses(BaseModel):
     position: tuple[ThesisRule, ...] = ()
     band: tuple[ThesisRule, ...] = ()
     sign: tuple[ThesisRule, ...] = ()
+    # **Тезис по знаку заменяет тезис по части шкалы, а не дополняет его.**
+    # Объявляется у того показателя, у которого знак и есть вывод: у покрытия
+    # процентов при операционном убытке отношение не измеряет ничего, и рядом
+    # с «покрытие отрицательно» стоял тезис «нижняя часть калибровочной шкалы:
+    # процентные платежи занимают значительную часть операционного результата» —
+    # утверждение о доле там, где доли нет вовсе.
+    sign_supersedes_band: bool = False
 
 
 class Bands(BaseModel):
@@ -755,11 +762,20 @@ def build_ifrs_theses(
                 "name": item.name,
             },
         )
-        for kind, family in (
-            (ThesisKind.BAND, rules.band),
-            (ThesisKind.SIGN, rules.sign),
-        ):
-            rule = _pick(family, state, {}, _ifrs_unit(item.code, policy))
+        unit = _ifrs_unit(item.code, policy)
+        picked = {
+            kind: _pick(family, state, {}, unit)
+            for kind, family in (
+                (ThesisKind.BAND, rules.band),
+                (ThesisKind.SIGN, rules.sign),
+            )
+        }
+        # **Вывод по знаку старше вывода по части шкалы**, когда методика
+        # это объявила: у покрытия процентов при убытке отношение не измеряет
+        # ничего, и тезис о части шкалы говорил бы о доле, которой нет.
+        if rules.sign_supersedes_band and picked[ThesisKind.SIGN] is not None:
+            picked[ThesisKind.BAND] = None
+        for kind, rule in picked.items():
             if rule is None:
                 continue
             text = _render(rule, state, item.name, theses_catalog)

@@ -423,6 +423,98 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     assert "«Мнение аудитора модифицировано»" in text
 
 
+def test_going_concern_section_reaches_the_document(db_conn, tmp_path) -> None:
+    """Неопределённость непрерывности: стоп-фактор, сигнал, вопрос о планах.
+
+    У Сегежи мнение немодифицированное, а раздел о непрерывности объявлен —
+    и соразмерность выходила перевёрнутой: уверенность высшая, эскалации нет.
+    Заодно проверяется, что при немодифицированном мнении «Основание
+    для выражения мнения» не цитируется вовсе: там предписанное МСА описание
+    процедур аудита, а не оговорка об отчётности.
+    """
+    from docx import Document
+
+    from finlib.report.document import build_report
+    from finlib.sources.ifrs_audit import (
+        AuditReport,
+        Determination,
+        Engagement,
+        SectionText,
+    )
+    from finlib.standards import Standard
+
+    procedures = (
+        "Мы провели аудит в соответствии с Международными стандартами аудита."
+    )
+    going = (
+        "В Примечании 2 указано на превышение краткосрочных обязательств над "
+        "краткосрочными активами Группы. Планы руководства Группы в отношении "
+        "этих обстоятельств представлены в Примечании 2."
+    )
+    audit = AuditReport(
+        Determination.DETERMINED,
+        engagement=Engagement.AUDIT,
+        opinion="unmodified",
+        opinion_name="Немодифицированное мнение",
+        modified=False,
+        sections=("basis_for_opinion", "going_concern_uncertainty"),
+        texts=(
+            SectionText(
+                code="basis_for_opinion",
+                name="Основание для выражения мнения",
+                text=procedures,
+            ),
+            SectionText(
+                code="going_concern_uncertainty",
+                name="Существенная неопределённость в отношении непрерывности "
+                "деятельности",
+                text=going,
+            ),
+        ),
+        auditor="АО «Аудитор»",
+        signed_on="10 марта 2026 года",
+    )
+    loaded(db_conn, audit=audit)
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+    stops = stop_factors_of(INN, DATES[0], computed, db_conn)
+    # Условие стоп-фактора — сам раздел заключения, и показателя у него нет.
+    assert "going_concern_uncertainty" in stops.triggered
+    result = assess(computed, policy, stops)
+    save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy, stops)
+
+    stored = fetch_one(
+        "SELECT stop_factor_code, stop_factor_codes, confidence FROM assessment "
+        "WHERE inn = %(i)s AND standard = 'ifrs' AND report_date = %(d)s",
+        {"i": INN, "d": DATES[0]},
+        conn=db_conn,
+    )
+    assert stored["stop_factor_code"] == "going_concern_uncertainty"
+    assert "going_concern_uncertainty" in stored["stop_factor_codes"]
+    assert stored["confidence"] != "high"
+
+    made = build_report(
+        INN,
+        db_conn,
+        standard=Standard.IFRS,
+        with_text=False,
+        directory=tmp_path,
+        is_test=True,
+    )
+    text = "\n".join(item.text for item in Document(made.path).paragraphs)
+
+    # Надзорный сигнал и стоп-фактор — оба, и оба из заключения.
+    assert "Существенная неопределённость в отношении непрерывности деятельности" in text
+    assert going in text
+    # Раздел о процедурах аудита не цитируется: мнение немодифицировано.
+    assert procedures not in text
+    # Вопрос о планах руководства называет примечание, указанное аудитором.
+    assert "Планы руководства раскрыты в примечании 2" in text
+    # Надзорный сигнал даёт эскалацию в предложениях по действиям.
+    assert "Эскалация." in text
+
+
 def test_foreign_standard_marks_are_blocking(db_conn, tmp_path) -> None:
     """Документ по МСФО не говорит словами РСБУ — правило структурное.
 

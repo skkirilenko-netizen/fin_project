@@ -169,15 +169,26 @@ def from_rsbu_metrics(
 
 
 def from_rsbu_exclusions(
-    rows: list[dict], catalog: RefusalCatalog | None = None
+    rows: list[dict],
+    catalog: RefusalCatalog | None = None,
+    refused: frozenset[str] = frozenset(),
 ) -> tuple[Refusal, ...]:
-    """Показатели, исключённые из балла решением методики."""
+    """Показатели, исключённые из балла решением методики.
+
+    `refused` — показатели, отказ по которым в разделе уже назван. Исключение
+    из балла по причине «не рассчитан» такому показателю не добавляет ничего:
+    нерассчитанный показатель в балл войти не может по устройству, — а семейство
+    отказа у двух строк выходило разным, и раздел просил у организации то,
+    о чём строкой выше сказано «запрашивать нечего, извлечение за нами».
+    """
     catalog = catalog or load_refusals()
     found: list[Refusal] = []
     for row in rows:
         if row.get("included"):
             continue
         kind = row.get("exclusion_kind") or "no_level_scale"
+        if kind == "no_data" and row["metric_code"] in refused:
+            continue
         reason = EXCLUSION_REASONS.get(kind, "excluded_no_level_scale")
         found.append(
             refusal(reason, row.get("name") or row["metric_code"],
@@ -200,9 +211,21 @@ def _where_of(reason: str) -> str:
 
 
 def _short(text: str, limit: int = 160) -> str:
-    """Причина одной строкой: в разделе она стоит рядом с запросом."""
+    """Причина одной строкой: в разделе она стоит рядом с запросом.
+
+    **Обрезается по концу предложения, а не по числу знаков.** У рентабельности
+    по EBITDA причина методики длиннее предела, и посреди фразы выходило
+    «…а высокая маржа ничего не отменяет. Показатель при…» — текст, который
+    читатель дочитать не может. Предложение целиком длиннее предела остаётся
+    как есть: полная фраза лучше обрубка.
+    """
     squeezed = " ".join(str(text).split())
-    return squeezed if len(squeezed) <= limit else squeezed[: limit - 1] + "…"
+    if len(squeezed) > limit:
+        cut = squeezed.rfind(". ", 0, limit + 1)
+        squeezed = squeezed[:cut] if cut > 0 else squeezed
+    # Точка на конце не нужна: формулировка отказа ставит свою, и рядом
+    # выходило «…ничего не отменяет.. Запрашивать нечего».
+    return squeezed.rstrip(".")
 
 
 def totals(refusals: tuple[Refusal, ...]) -> dict[str, int]:

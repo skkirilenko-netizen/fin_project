@@ -29,7 +29,7 @@ from finlib.report.appendix import (
     provenance,
 )
 from finlib.report.consistency import InconsistentReportError, check_document
-from finlib.report.data import ReportData, load_report_data
+from finlib.report.data import ReportData, cap_is_weaker, load_report_data
 from finlib.report.integrity import NumbersAlteredError, check_numbers
 from finlib.report.policy import ReportPolicy, Trigger, load_policy
 from finlib.report.sections import EXPECTED, TEXT_PART, Section, split_sections
@@ -696,20 +696,44 @@ def _write_audit_signals(document: Document, data: ReportData) -> None:
 def _write_stop_factor_risk(
     document: Document, data: ReportData, policy: ReportPolicy
 ) -> None:
-    """Стоп-фактор в картине рисков, формулировкой из методики."""
-    code = data.stop_factor_code
-    if not code:
-        return
+    """Стоп-факторы в картине рисков, формулировками из методики.
+
+    **Называются все сработавшие, а не только назначивший класс.** У Сегежи
+    сработали три — неопределённость непрерывности деятельности, отрицательный
+    оборотный капитал и покрытие процентов ниже единицы, — а раздел называл
+    один: два обстоятельства из трёх до читателя не доходили вовсе, хотя
+    каждое из них методика объявила основанием ограничить класс.
+    """
     from finlib.report.data import stop_factor_of
 
-    factor = stop_factor_of(code, data.standard)
-    if factor is None:  # pragma: no cover — код приходит из той же методики
+    codes = data.stop_factor_codes
+    factors = [
+        found
+        for found in (stop_factor_of(code, data.standard) for code in codes)
+        if found is not None
+    ]
+    if not factors:
         return
     heading = document.add_paragraph()
-    heading.add_run(policy.risks.stop_factor_text).bold = True
-    paragraph = document.add_paragraph()
-    paragraph.add_run(f"{factor.name}. ").bold = True
-    paragraph.add_run(factor.statement)
+    heading.add_run(policy.risks.stop_factors_text(len(factors))).bold = True
+    for factor in factors:
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"{factor.name}. ").bold = True
+        paragraph.add_run(factor.statement)
+    # **Ограничение слабее присвоенного класса действующим не называется.**
+    # У Сегежи класс E, а формулировки отрицательного оборотного капитала
+    # и покрытия процентов обещают ограничение средним: обстоятельства в силе,
+    # ограничения — нет, и без оговорки раздел противоречит своему же классу.
+    # Оговорка приводится один раз с перечнем: повторённая при каждом
+    # стоп-факторе, она занимала больше места, чем сами формулировки.
+    weaker = tuple(
+        factor.name for factor in factors if cap_is_weaker(factor.cap, data)
+    )
+    if weaker:
+        note = document.add_paragraph()
+        run = note.add_run(policy.risks.cap_not_binding_of(weaker))
+        run.italic = True
+        run.font.size = Pt(9)
     # Сверка с аудиторским заключением идёт основанием под формулировкой:
     # стоп-фактор с внешним подтверждением и без него равно остаются в силе,
     # и читатель обязан видеть, какой из трёх это случай.

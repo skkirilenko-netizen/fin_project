@@ -226,8 +226,18 @@ def _worth_naming(
         and (parsed := parse_derived(row["metric_code"])) is not None
         and parsed.kind is DerivedKind.CHANGE_PCT
     ]
+    # **База существенности и равная ей строка в перечень не идут.** Доля
+    # изменения базы в себе самой равна единице, и такая строка стоит наверху
+    # у каждого эмитента, не говоря о нём ничего: у Сегежи «Итого капитал
+    # и обязательства» заняло вторую строку — итог пассива, то есть та же
+    # валюта баланса, которую обязательный состав уже назвал. Перечень
+    # объявлен методикой своего стандарта, а не выведен здесь.
+    bases = _base_codes(data, lines)
     weights = {
-        row["metric_code"]: _materiality_of(row, data, lines, reporting_type)
+        row["metric_code"]: None
+        if (parsed := parse_derived(row["metric_code"])) is not None
+        and parsed.base in bases
+        else _materiality_of(row, data, lines, reporting_type)
         for row in changes
     }
     measured = [row for row in changes if weights[row["metric_code"]] is not None]
@@ -314,6 +324,15 @@ def _materiality_of(
     return abs(absolute) / abs(base_value)
 
 
+def _base_codes(data: ReportData, lines: LinesCatalog) -> frozenset[str]:
+    """Базы существенности и равные им строки — по справочнику стандарта."""
+    if data.standard is Standard.IFRS:
+        from finlib.normalize.ifrs_lines import load_ifrs_lines
+
+        return load_ifrs_lines().materiality.base_codes
+    return lines.materiality.base_codes
+
+
 def _materiality_base(
     code: str, data: ReportData, lines: LinesCatalog, reporting_type: ReportingType
 ) -> str | None:
@@ -367,6 +386,26 @@ def _title_of(
     return None
 
 
+def _plans_note(data: ReportData) -> tuple[bool, int | None]:
+    """Объявлена ли неопределённость непрерывности и где раскрыты планы.
+
+    Двое, а не одно: раздела в заключении может не быть вовсе — тогда вопроса
+    не возникает, — а быть он может без ссылки на примечание, и тогда вопрос
+    задаётся, но номера не называет. Свести их в одно значило бы либо
+    промолчать о планах, либо выдумать номер.
+    """
+    from finlib.normalize.ifrs_audit import load_audit_policy
+    from finlib.sources.ifrs_audit import audit_from_meta
+
+    audit = audit_from_meta(data.organization.get("meta"))
+    if audit is None:
+        return False, None
+    policy = load_audit_policy()
+    if policy.plans_reference.section not in audit.sections:
+        return False, None
+    return True, audit.plans_note(policy)
+
+
 def questions(
     data: ReportData,
     policy: ReportPolicy,
@@ -396,6 +435,19 @@ def questions(
         )
         by_subject.setdefault(subject, []).append(
             policy.questions.question(subject, name=name)
+        )
+
+    # **Планы руководства — единственный вопрос о будущем.** Аудитор объявил
+    # существенную неопределённость и указал, что планы раскрыты, а их
+    # исполнимости не оценивал: это вопрос к организации, и без него документ
+    # фиксирует сомнение аудитора, ничего у организации не спрашивая.
+    declared, note = _plans_note(data)
+    if declared:
+        by_subject.setdefault(QuestionSubject.GOING_CONCERN_PLANS, []).append(
+            policy.questions.question(
+                QuestionSubject.GOING_CONCERN_PLANS,
+                where=policy.questions.plans_where_text(note),
+            )
         )
 
     if data.stop_factor_code:

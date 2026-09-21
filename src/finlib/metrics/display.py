@@ -97,11 +97,35 @@ def format_metric(
     ошибка в тысячу раз, которую не ловит ни один контроль сходимости.
     Умолчание одно и остаётся тысячами рублей: у РСБУ единица задана формой.
     """
-    if scale is None:
-        from finlib.metrics.definitions import load_metrics
+    from finlib.metrics.definitions import load_metrics
 
-        scale = load_metrics().display.scale_for(unit)
+    display = load_metrics().display
+    if scale is None:
+        scale = display.scale_for(unit)
     suffix = UNIT_SUFFIX.get(unit, "")
     if unit is Unit.THOUSAND_RUB and money:
         suffix = f" {money}"
+    near = near_zero(value, scale, display)
+    if near is not None:
+        return f"{near}{suffix}"
     return f"{digits(value, scale)}{suffix}"
+
+
+def near_zero(value: Decimal, scale: int, display=None) -> str | None:
+    """Ненулевая величина, округляющаяся в ноль, словами; иначе None.
+
+    «0,00» у коэффициента автономии 0,002 читается как отсутствие собственных
+    источников, тогда как они есть: у Сегежи это 255 млн руб. Разрядность при
+    этом не увеличивается — различить ноль от почти нуля обязаны слова,
+    и формулировка объявлена методикой (`metrics.yaml`, блок `display`).
+    """
+    if value == 0 or round_to(value, scale) != 0:
+        return None
+    if display is None:
+        from finlib.metrics.definitions import load_metrics
+
+        display = load_metrics().display
+    step = Decimal(1).scaleb(-scale)
+    template = display.below_scale if value > 0 else display.above_scale
+    edge = step if value > 0 else -step
+    return template.format(value=digits(edge, scale))

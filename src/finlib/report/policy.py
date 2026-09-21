@@ -47,6 +47,10 @@ class QuestionSubject(StrEnum):
     """Основания вопросов к организации, в порядке тяжести последствий."""
 
     SUPERVISORY_SIGNAL = "supervisory_signal"
+    # Планы руководства при объявленной неопределённости непрерывности:
+    # аудитор указывает, что они раскрыты, но их исполнимости не оценивает —
+    # это и есть вопрос к организации, а не к отчётности.
+    GOING_CONCERN_PLANS = "going_concern_plans"
     STOP_FACTOR = "stop_factor"
     FLAG_CONFLICT = "flag_conflict"
     ATTENTION_SIGNAL = "attention_signal"
@@ -142,6 +146,13 @@ class Risks(BaseModel):
     intro: str = Field(min_length=1)
     none_found: str = Field(min_length=1)
     stop_factor_intro: str = Field(min_length=1)
+    # Вступление при нескольких сработавших: согласование со числом — часть
+    # формулировки, и подбирать форму слова в коде мы не будем.
+    stop_factors_intro: str = Field(min_length=1)
+    # Оговорка к стоп-фактору, ограничение которого слабее присвоенного класса.
+    cap_not_binding: str = Field(min_length=1)
+    cap_not_binding_named: str = Field(min_length=1)
+    caps_not_binding_named: str = Field(min_length=1)
 
     @staticmethod
     def _folded(text: str) -> str:
@@ -163,6 +174,27 @@ class Risks(BaseModel):
         """Вступление к стоп-фактору."""
         return self._folded(self.stop_factor_intro)
 
+    def stop_factors_text(self, count: int) -> str:
+        """Вступление к стоп-факторам по их числу."""
+        return self._folded(
+            self.stop_factor_intro if count == 1 else self.stop_factors_intro
+        )
+
+    @property
+    def cap_not_binding_text(self) -> str:
+        """Оговорка об ограничении, слабее присвоенного класса."""
+        return self._folded(self.cap_not_binding)
+
+    def cap_not_binding_of(self, names: tuple[str, ...]) -> str:
+        """Та же оговорка с перечнем стоп-факторов — для картины рисков."""
+        listed = ", ".join(f"«{name}»" for name in names)
+        text = (
+            self.cap_not_binding_named
+            if len(names) == 1
+            else self.caps_not_binding_named
+        )
+        return self._folded(text).format(names=listed)
+
 
 class Questions(BaseModel):
     """Сколько вопросов задавать и в каком порядке их основания."""
@@ -174,7 +206,16 @@ class Questions(BaseModel):
     subject_order: tuple[QuestionSubject, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
     texts: dict[QuestionSubject, str] = Field(min_length=1)
+    # Где раскрыты планы руководства: названное аудитором примечание либо,
+    # если он его не назвал, примечания вообще. Выдумывать номер нельзя.
+    plans_where: dict[str, str] = Field(min_length=2)
     none_found: str = Field(min_length=1)
+
+    def plans_where_text(self, note: int | None) -> str:
+        """Место раскрытия планов руководства словами методики."""
+        if note is None:
+            return " ".join(self.plans_where["unknown"].split())
+        return " ".join(self.plans_where["known"].split()).format(note=note)
 
     @model_validator(mode="after")
     def _check_counts(self) -> Self:

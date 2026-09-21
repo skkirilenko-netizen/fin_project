@@ -686,7 +686,13 @@ def _refusal_notes(
         row
         for row in fetch_all(
             _REFUSED_METRICS,
-            {"inn": inn, "date": periods[-1], "standard": standard.value},
+            # **Отказы берутся за отчётный период документа, а не за самый
+            # ранний.** Прежде здесь стоял последний элемент перечня, то есть
+            # старейший период: в заключении по 2025 году раздел сообщал
+            # «за 2024 год величина знаменателя пока не извлекается», а
+            # об отчётном периоде молчал. Периоды по каждому показателю
+            # перечисляет приложение, раздел говорит о своём комплекте.
+            {"inn": inn, "date": periods[0], "standard": standard.value},
             conn=conn,
         )
         if row["metric_code"] in names
@@ -703,7 +709,10 @@ def _refusal_notes(
                     "exclusion_reason": item.get("exclusion_reason"),
                 }
                 for item in assessment["metrics"]
-            ]
+            ],
+            # Отказ по показателю в разделе уже назван, и второй раз он
+            # не называется: исход тот же, а семейство отказа выходило другим.
+            refused=frozenset(row["metric_code"] for row in rows),
         )
     catalog_of_refusals = load_refusals()
     lines = section(refusals, catalog_of_refusals)

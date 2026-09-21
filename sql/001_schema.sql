@@ -321,7 +321,16 @@ CREATE TABLE IF NOT EXISTS assessment (
     -- присвоен, а балльной оценки всё равно нет.
     breadth_reason      text,
     class_before_stop   text,
+    -- Стоп-фактор, назначивший ограничение класса: при нескольких
+    -- сработавших это тот, чьё ограничение младше.
     stop_factor_code    text,
+    -- **Все сработавшие стоп-факторы, а не только назначивший класс.**
+    -- У Сегежи сработали три — неопределённость непрерывности, отрицательный
+    -- оборотный капитал и покрытие процентов ниже единицы, — а документ
+    -- называл один: два обстоятельства из трёх читателю не доходили вовсе.
+    -- Ограничение ниже не даёт полям разойтись: назначивший класс обязан
+    -- стоять среди сработавших.
+    stop_factor_codes   jsonb,
     stop_factor_effect  text CHECK (stop_factor_effect IN ('none', 'lowest_class', 'cap_at_class')),
     -- Сверка сработавшего стоп-фактора с аудиторским заключением: согласуется
     -- ли он с разделом о непрерывности деятельности. Стоп-фактор с внешним
@@ -339,7 +348,12 @@ CREATE TABLE IF NOT EXISTS assessment (
     -- Либо класс присвоен, либо названа причина, по которой он не присвоен.
     -- Молчаливого отсутствия класса быть не может.
     CONSTRAINT assessment_class_or_reason
-        CHECK ((class_code IS NOT NULL) <> (no_class_reason IS NOT NULL))
+        CHECK ((class_code IS NOT NULL) <> (no_class_reason IS NOT NULL)),
+    -- Стоп-фактор, назначивший класс, обязан стоять среди сработавших: два
+    -- поля одной величины умеют разойтись, и расхождение здесь означало бы
+    -- класс, ограниченный стоп-фактором, которого не было.
+    CONSTRAINT assessment_stop_factor_listed
+        CHECK (stop_factor_code IS NULL OR stop_factor_codes ? stop_factor_code)
 );
 
 COMMENT ON TABLE assessment IS 'Класс финансового состояния; арифметика фиксирована методикой, модель его не определяет';
@@ -699,6 +713,21 @@ CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_code_idx
 -- EXISTS` в неё не принесёт. Значения прежним оценкам не проставляются —
 -- по ним сверка не делалась, и приписывать им исход было бы неправдой.
 ALTER TABLE assessment ADD COLUMN IF NOT EXISTS stop_factor_audit text;
+
+-- Перечень всех сработавших стоп-факторов заведён 21.09.2026: документ называл
+-- один — тот, что назначил класс, — и у Сегежи два обстоятельства из трёх
+-- до читателя не доходили. Догонка обязательна, а прежним оценкам перечень
+-- заполняется кодом назначившего стоп-фактора: он сработал наверняка, тогда
+-- как об остальных прежняя запись не говорит ничего.
+ALTER TABLE assessment ADD COLUMN IF NOT EXISTS stop_factor_codes jsonb;
+UPDATE assessment
+   SET stop_factor_codes = to_jsonb(ARRAY[stop_factor_code])
+ WHERE stop_factor_code IS NOT NULL AND stop_factor_codes IS NULL;
+ALTER TABLE assessment
+    DROP CONSTRAINT IF EXISTS assessment_stop_factor_listed;
+ALTER TABLE assessment
+    ADD CONSTRAINT assessment_stop_factor_listed
+    CHECK (stop_factor_code IS NULL OR stop_factor_codes ? stop_factor_code);
 
 -- Вид причины `not_routing` заведён 21.09.2026 вместе с проводкой стоп-факторов
 -- МСФО: показатель описывает деятельность, но решения не меняет — это наше

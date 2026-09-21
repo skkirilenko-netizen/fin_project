@@ -68,6 +68,24 @@ def test_rendering_uses_the_declared_precision() -> None:
     assert format_metric(value, Unit.RATIO, CATALOG.scale_for("roa")) == "0,31"
 
 
+def test_nonzero_value_does_not_print_as_zero() -> None:
+    """Ненулевая величина, округляющаяся в ноль, печатается словами.
+
+    У Сегежи коэффициент автономии 0,002 при капитале 255 млн печатался как
+    «0,00» — то есть как отсутствие собственных источников, которым он
+    не является. Ноль здесь читается как утверждение, которого расчёт
+    не делал.
+    """
+    assert format_metric(Decimal("0.002"), Unit.RATIO) == "менее 0,01"
+    assert format_metric(Decimal("-0.002"), Unit.RATIO) == "более -0,01"
+    # Настоящий ноль остаётся нулём: он раскрыт и равен нулю, и слова здесь
+    # означали бы обратное.
+    assert format_metric(Decimal(0), Unit.RATIO) == "0,00"
+    # Правило общее для всех единиц: сумма, округляющаяся в ноль, читается
+    # как ноль так же ложно.
+    assert format_metric(Decimal("0.4"), Unit.THOUSAND_RUB).startswith("менее 1")
+
+
 def test_money_keeps_group_separators() -> None:
     """Денежные величины остаются читаемыми."""
     assert money(Decimal("25736328136")).replace(" ", " ") == "25 736 328 136"

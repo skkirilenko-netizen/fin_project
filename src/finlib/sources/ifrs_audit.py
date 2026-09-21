@@ -220,9 +220,17 @@ class AuditReport:
         **Отказ называется наравне с цитатой.** Раздел, объявленный
         цитируемым и не извлечённый, иначе неотличим от раздела, которого
         в заключении нет: читатель решит, что оговорки не было.
+
+        Условие печати объявлено у каждого раздела: «Основание для выражения
+        мнения» при немодифицированном мнении содержит предписанное МСА
+        описание процедур, а не оговорку, и в «Ограничениях анализа» ему
+        не место.
         """
         found: list[str] = []
-        for code in policy.quoted_sections:
+        for quoted in policy.quoted_sections:
+            if not quoted.holds(self.modified):
+                continue
+            code = quoted.code
             section = self.text_of(code)
             if section is None:
                 continue
@@ -236,6 +244,28 @@ class AuditReport:
                 "Текст раздела приводится по самому заключению."
             )
         return tuple(found)
+
+    def plans_note(self, policy: AuditPolicy) -> int | None:
+        """Номер примечания, в котором аудитор указал планы руководства.
+
+        Ссылка берётся из того предложения раздела, где аудитор о планах
+        говорит, а не из первого номера в разделе: в том же разделе стоят
+        ссылки на примечание об обязательствах и на само допущение
+        непрерывности. `None` — ссылки нет, и выдумывать номер нельзя.
+        """
+        import re
+
+        rule = policy.plans_reference
+        section = self.text_of(rule.section)
+        if section is None or not section.text:
+            return None
+        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(section.text.split())):
+            if not any(marker in sentence for marker in rule.markers):
+                continue
+            found = re.search(rule.note_pattern, sentence)
+            if found is not None:
+                return int(found.group(1))
+        return None
 
     def signal_hits(self, policy: AuditPolicy) -> tuple["AuditSignalHit", ...]:
         """Сработавшие сигналы заключения с предписанной формулировкой.

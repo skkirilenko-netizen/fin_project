@@ -147,6 +147,34 @@ class StopFactorView:
     name: str
     statement: str
     metrics: tuple[str, ...]
+    # Класс, которым стоп-фактор ограничивает оценку. Нужен документу затем,
+    # чтобы не утверждать ограничения, которого нет: у Сегежи класс E, а
+    # формулировка отрицательного оборотного капитала обещает «класс ограничен
+    # средним» — ограничение слабее присвоенного класса и его не меняет.
+    cap: str | None = None
+
+
+def cap_is_weaker(cap: str | None, data: "ReportData") -> bool:
+    """Слабее ли ограничение стоп-фактора присвоенного класса.
+
+    Порядок классов берётся у справочника **своего** стандарта: шкалы у РСБУ
+    и МСФО разные, и сравнивать коды вне своей шкалы нельзя. Пустое
+    ограничение и незнакомый код отвечают «нет»: оговорка о недействующем
+    ограничении при неизвестном порядке была бы утверждением без основания.
+    """
+    if not cap or not data.class_code or cap == data.class_code:
+        return False
+    if data.standard is Standard.IFRS:
+        from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+        order = [item.code for item in load_ifrs_metrics().classes]
+    else:
+        from finlib.scoring.definitions import load_scoring
+
+        order = [item.code for item in load_scoring().classes]
+    if cap not in order or data.class_code not in order:
+        return False
+    return order.index(cap) < order.index(data.class_code)
 
 
 def stop_factor_of(code: str, standard: Standard) -> StopFactorView | None:
@@ -167,21 +195,27 @@ def stop_factor_of(code: str, standard: Standard) -> StopFactorView | None:
                 # условие его — слова аудитора, и величины, которую следовало
                 # бы назвать в фактической базе, за ним не стоит.
                 metrics=(found.metric,) if found.metric else (),
+                cap=found.cap,
             )
             if found is not None
             else None
         )
-    from finlib.scoring.definitions import load_scoring
+    from finlib.scoring.definitions import StopEffect, load_scoring
 
-    factor = next(
-        (item for item in load_scoring().stop_factors if item.code == code), None
-    )
+    scoring = load_scoring()
+    factor = next((item for item in scoring.stop_factors if item.code == code), None)
     return (
         StopFactorView(
             code=factor.code,
             name=factor.name,
             statement=" ".join(factor.statement.split()),
             metrics=tuple(factor.metrics),
+            # У РСБУ ограничение задано последствием: «до низшего» — это низший
+            # класс методики, и назвать его надо тем же способом, каким его
+            # применяет расчёт.
+            cap=factor.cap
+            if factor.effect is StopEffect.CAP_AT_CLASS
+            else scoring.lowest_class,
         )
         if factor is not None
         else None
@@ -492,8 +526,25 @@ class ReportData:
 
     @property
     def stop_factor_code(self) -> str | None:
-        """Код сработавшего стоп-фактора."""
+        """Код стоп-фактора, назначившего ограничение класса."""
         return self.assessment["stop_factor_code"] if self.assessment else None
+
+    @property
+    def stop_factor_codes(self) -> tuple[str, ...]:
+        """Коды **всех** сработавших стоп-факторов, назначивший класс первым.
+
+        Документ называл один — тот, чьё ограничение младше, — и у Сегежи
+        два обстоятельства из трёх до читателя не доходили вовсе. Порядок
+        не произволен: назначивший класс стоит первым, остальные за ним
+        в порядке методики.
+        """
+        if not self.assessment:
+            return ()
+        listed = tuple(self.assessment.get("stop_factor_codes") or ())
+        first = self.stop_factor_code
+        if first is None:
+            return listed
+        return (first, *(code for code in listed if code != first))
 
     @property
     def score_in_appendix(self) -> bool:

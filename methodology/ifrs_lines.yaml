@@ -1768,6 +1768,14 @@ materiality:
   bases:
     ifrs.statement_of_financial_position:
       base: ifrs.total_assets
+      # **Итог пассива — та же величина, что итог актива.** Доля его изменения
+      # в валюте баланса равна доле изменения самой базы, то есть единице,
+      # и в перечне наибольших изменений он стоял бы у каждого эмитента,
+      # не говоря о нём ничего: у Сегежи «Итого капитал и обязательства»
+      # заняло вторую строку перечня. Обязательный состав валюту баланса
+      # называет, и второй раз с другой стороны формы она не нужна.
+      same_as_base:
+        - ifrs.total_equity_and_liabilities
     ifrs.statement_of_profit_or_loss:
       base: ifrs.revenue
     ifrs.statement_of_cash_flows:

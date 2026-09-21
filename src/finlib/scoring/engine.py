@@ -85,6 +85,11 @@ class Assessment:
     # Пусто — сверка не делалась: у РСБУ заключения нет вовсе, и приписывать
     # ей исход нельзя.
     stop_factor_audit: str | None = None
+    # **Все сработавшие стоп-факторы, а не только назначивший класс.** Документ
+    # называл один, и у Сегежи два обстоятельства из трёх до читателя
+    # не доходили. Назначивший класс обязан стоять среди них — это проверяет
+    # ограничение базы.
+    stop_factor_codes: list[str] = field(default_factory=list)
     confidence_reasons: list[str] = field(default_factory=list)
     groups: list[GroupScore] = field(default_factory=list)
     metrics: list[MetricScore] = field(default_factory=list)
@@ -210,8 +215,14 @@ def _stop_factor(
     metric_scores: list[MetricScore],
     catalog: MetricsCatalog,
     scoring: ScoringCatalog,
-) -> tuple[StopFactorPolicy | None, list[str]]:
-    """Находит сработавший стоп-фактор с самым тяжёлым последствием."""
+) -> tuple[StopFactorPolicy | None, list[str], list[str]]:
+    """Стоп-фактор с самым тяжёлым последствием — и все сработавшие.
+
+    Отдаётся трое: стоп-фактор, назначивший класс, показатели, по которым
+    сработало, и коды **всех** сработавших стоп-факторов. Последнее нужно
+    документу: он называл один, и остальные обстоятельства до читателя
+    не доходили вовсе.
+    """
     triggered: list[tuple[StopFactorPolicy, str]] = []
     values = {item.metric_code: item.value for item in metric_scores}
     for policy in scoring.stop_factors:
@@ -224,10 +235,14 @@ def _stop_factor(
                 triggered.append((policy, code))
                 break
     if not triggered:
-        return None, []
+        return None, [], []
     order = {StopEffect.LOWEST_CLASS: 0, StopEffect.CAP_AT_CLASS: 1}
     triggered.sort(key=lambda item: order[item[0].effect])
-    return triggered[0][0], [code for _, code in triggered]
+    return (
+        triggered[0][0],
+        [code for _, code in triggered],
+        list(dict.fromkeys(policy.code for policy, _ in triggered)),
+    )
 
 
 def _apply_stop_factor(
@@ -452,7 +467,7 @@ def assess(
         else scoring.require_class(scoring.lowest_class)
     )
 
-    policy, triggered = _stop_factor(metric_scores, catalog, scoring)
+    policy, triggered, all_codes = _stop_factor(metric_scores, catalog, scoring)
     final_code = _apply_stop_factor(by_score.code, policy, scoring)
 
     # Балл считается всегда, но класс присваивается только при достаточно
@@ -489,6 +504,7 @@ def assess(
         class_before_stop=None if (blocked or narrow) else by_score.code,
         breadth_reason=narrow,
         stop_factor_code=policy.code if policy is not None else None,
+        stop_factor_codes=all_codes,
         stop_factor_effect=policy.effect if policy is not None else StopEffect.NONE,
         confidence=confidence,
         confidence_reasons=reasons,

@@ -188,6 +188,15 @@ def _stop_factors(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
     policy = stop_factor_of(code, data.standard)
     name = policy.name if policy else code
     statement = policy.statement if policy else ""
+    # **Ограничение слабее присвоенного класса действующим не называется.**
+    # У Сегежи класс E, а формулировка обещает ограничение классом D:
+    # обстоятельство в силе, ограничение — нет, и «класс ограничен
+    # неустойчивым состоянием» рядом с «класс E» противоречит само себе.
+    from finlib.report.data import cap_is_weaker
+    from finlib.report.policy import load_policy
+
+    if policy is not None and cap_is_weaker(policy.cap, data):
+        statement = f"{statement} {load_policy().risks.cap_not_binding_text}"
     return [Paragraph(f"Сработал стоп-фактор «{name}». {statement}", bold=True)]
 
 

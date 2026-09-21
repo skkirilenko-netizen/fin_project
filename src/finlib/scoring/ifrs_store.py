@@ -437,6 +437,9 @@ def save_ifrs_assessment(
         # у набравшего по баллу B и класс E у набравшего E выглядят одинаково.
         class_before_stop=assessment.class_before_stop or assessment.class_code,
         stop_factor_code=assessment.stop_factor_code,
+        # Все сработавшие, а не только назначивший класс: у Сегежи их три,
+        # и документ называл один.
+        stop_factor_codes=list(stops.triggered),
         stop_factor_effect=_effect_of(assessment, stops, policy),
         # Сверка с заключением хранится вместе со стоп-фактором: подтверждённый
         # аудитором и неподтверждённый равно остаются в силе, но формулировки

@@ -249,6 +249,20 @@ class DisplayPrecision(BaseModel):
 
     by_unit: dict[Unit, int]
     origin: str = Field(min_length=1)
+    # Как печатается ненулевая величина, округляющаяся в ноль. Формулировка
+    # объявлена методикой, а не набрана в коде: она попадает в документ рядом
+    # с числами и живёт по тем же правилам, что остальные формулировки.
+    below_scale: str = Field(min_length=1)
+    above_scale: str = Field(min_length=1)
+    below_scale_origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_wording(self) -> Self:
+        """Формулировки границы называют слот величины."""
+        for text in (self.below_scale, self.above_scale):
+            if "{value}" not in text:
+                raise ValueError(f"формулировка границы не содержит {{value}}: {text}")
+        return self
 
     @model_validator(mode="after")
     def _check_units(self) -> Self:

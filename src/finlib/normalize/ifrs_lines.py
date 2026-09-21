@@ -217,6 +217,9 @@ class MaterialityBase(BaseModel):
 
     base: str | None = None
     no_base_reason: str | None = None
+    # Позиции, равные базе по величине: та же величина с другой стороны
+    # формы. Устройство то же, что в справочнике РСБУ.
+    same_as_base: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _check_declared(self) -> Self:
@@ -240,6 +243,22 @@ class Materiality(BaseModel):
     # не даёт — и это не то же самое, что база, объявленная отсутствующей:
     # первое — наш пробел, второе — свойство формы.
     bases: dict[str, MaterialityBase] = Field(min_length=1)
+
+    @property
+    def base_codes(self) -> frozenset[str]:
+        """Базы и равные им позиции: величины, которые не ранжируются.
+
+        У баланса таких две: итог актива и итог пассива — одна величина,
+        напечатанная дважды. Перечень нужен перечню наибольших изменений:
+        доля изменения базы в себе самой равна единице, и статья выходила
+        наверх у каждого эмитента, ничего о нём не говоря.
+        """
+        found: set[str] = set()
+        for item in self.bases.values():
+            if item.base is not None:
+                found.add(item.base)
+            found.update(item.same_as_base)
+        return frozenset(found)
 
 
 class CoreCandidate(BaseModel):

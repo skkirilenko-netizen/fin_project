@@ -50,7 +50,7 @@ def assess_from(scores: list[MetricScore]) -> tuple[Decimal | None, str, str, st
     by_score = SCORING.class_for(total) if total is not None else SCORING.require_class(
         SCORING.lowest_class
     )
-    policy, _ = _stop_factor(scores, CATALOG, SCORING)
+    policy, _, _ = _stop_factor(scores, CATALOG, SCORING)
     final = _apply_stop_factor(by_score.code, policy, SCORING)
     return total, by_score.code, final, policy.code if policy else None
 

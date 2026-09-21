@@ -346,6 +346,10 @@ class MaterialityBase(BaseModel):
 
     base: str | None = None
     no_base_reason: str | None = None
+    # Строки, равные базе по величине: они и есть база, только с другой
+    # стороны формы. Ранжировать их существенностью нечем — доля выходит
+    # единицей у всех сразу.
+    same_as_base: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _check_declared(self) -> Self:
@@ -370,6 +374,22 @@ class MaterialityDef(BaseModel):
         """Код строки-базы для формы; None — существенность не измеряется."""
         found = self.bases.get(form)
         return found.base if found is not None else None
+
+    @property
+    def base_codes(self) -> frozenset[str]:
+        """Базы и равные им строки: величины, которые не ранжируются.
+
+        Сама база и строка, равной ей по величине, существенны по устройству:
+        доля изменения в себе самой — единица. Перечень нужен там, где статьи
+        отбираются по существенности, чтобы наверх не выходило то, о чём
+        читателю и так сказано обязательным составом.
+        """
+        found: set[str] = set()
+        for item in self.bases.values():
+            if item.base is not None:
+                found.add(item.base)
+            found.update(item.same_as_base)
+        return frozenset(found)
 
 
 class LinesCatalog(BaseModel):

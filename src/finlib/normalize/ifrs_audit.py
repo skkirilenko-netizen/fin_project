@@ -87,6 +87,36 @@ class AuditSignal(BaseModel):
         raise ValueError(f"сигнал {self.code}: условие {self.condition} неизвестно")
 
 
+class QuotedSection(BaseModel):
+    """Раздел, печатаемый дословно, и условие, при котором он печатается.
+
+    **Условие объявлено у каждого раздела.** «Основание для выражения мнения»
+    стоит в заключении всегда, но при немодифицированном мнении оно содержит
+    предписанное МСА описание процедур аудита, а не оговорку об отчётности:
+    у Сегежи в «Ограничениях анализа» стояло «Мы провели аудит в соответствии
+    с Международными стандартами аудита» — слова аудитора, ничего
+    не ограничивающие. Печатать раздел безусловно значило бы выдавать
+    обязательную часть заключения за оговорку.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    when: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _condition_is_known(self) -> Self:
+        """Условие печати названо одним из объявленных."""
+        if self.when not in ("always", "opinion_modified"):
+            raise ValueError(f"раздел {self.code}: условие {self.when} неизвестно")
+        return self
+
+    def holds(self, modified: bool) -> bool:
+        """Печатается ли раздел при таком виде мнения."""
+        return self.when == "always" or modified
+
+
 class Attribution(BaseModel):
     """Чем подписано заключение и как цитата печатается в документе."""
 
@@ -107,6 +137,21 @@ class Attribution(BaseModel):
         return self
 
 
+class PlansReference(BaseModel):
+    """Где аудитор указывает раскрытие планов руководства.
+
+    Признак структурный: ссылка на примечание в тексте раздела, а не поиск
+    по словам о содержании планов. Номер нужен вопросу к организации —
+    он спрашивает об исполнимости планов, а не об их наличии.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    section: str = Field(min_length=1)
+    markers: tuple[str, ...] = Field(min_length=1)
+    note_pattern: str = Field(min_length=1)
+
+
 class AuditPolicy(BaseModel):
     """Правила чтения аудиторского заключения."""
 
@@ -120,8 +165,9 @@ class AuditPolicy(BaseModel):
     opinions: tuple[OpinionKind, ...] = Field(min_length=1)
     sections: tuple[ReportSection, ...] = Field(min_length=1)
     signals: tuple[AuditSignal, ...] = Field(min_length=1)
-    # Разделы, печатаемые в документе дословно.
-    quoted_sections: tuple[str, ...] = Field(min_length=1)
+    plans_reference: PlansReference
+    # Разделы, печатаемые в документе дословно, — каждый со своим условием.
+    quoted_sections: tuple[QuotedSection, ...] = Field(min_length=1)
     # Заголовки подразделов, на которых цитата кончается.
     quote_ends_before: tuple[str, ...] = Field(min_length=1)
     limitations: dict[str, str]
@@ -141,9 +187,16 @@ class AuditPolicy(BaseModel):
                 )
         # Цитируемый раздел обязан быть заведённым: иначе документ обещает
         # дословный текст раздела, которого чтение не ищет вовсе.
-        for code in self.quoted_sections:
-            if code not in sections:
-                raise ValueError(f"цитируемый раздел {code} не заведён в справочнике")
+        if self.plans_reference.section not in sections:
+            raise ValueError(
+                "ссылка на планы руководства указывает на незаведённый раздел "
+                f"{self.plans_reference.section}"
+            )
+        for quoted in self.quoted_sections:
+            if quoted.code not in sections:
+                raise ValueError(
+                    f"цитируемый раздел {quoted.code} не заведён в справочнике"
+                )
         # Немодифицированный вид обязан стоять последним: его заголовок
         # «Мнение» — начало всех прочих, и опознайся он первым, мнение
         # с оговоркой стало бы немодифицированным.

@@ -295,6 +295,32 @@ def test_every_form_declares_its_materiality_base() -> None:
     assert flows.no_base_reason and flows.no_base_reason.strip()
 
 
+def test_the_other_side_of_the_balance_is_not_ranked() -> None:
+    """Итог пассива — та же величина, что итог актива, и в перечень не идёт.
+
+    Доля изменения базы в себе самой равна единице, и «Итого капитал
+    и обязательства» стояло бы в перечне наибольших изменений у каждого
+    эмитента, не говоря о нём ничего: у Сегежи оно заняло вторую строку.
+    Обязательный состав валюту баланса называет.
+    """
+    codes = CATALOG.materiality.base_codes
+    assert "ifrs.total_assets" in codes
+    assert "ifrs.total_equity_and_liabilities" in codes
+    assert "ifrs.revenue" in codes
+    # Обычная статья в перечень не попадает: иначе правило отбрасывало бы
+    # величины, о которых документ обязан говорить.
+    assert "ifrs.cash_and_equivalents" not in codes
+
+
+def test_rsbu_balance_total_is_not_ranked_twice() -> None:
+    """У РСБУ то же правило и та же пара: 1600 и 1700."""
+    from finlib.normalize.lines import load_lines
+
+    codes = load_lines().materiality.base_codes
+    assert {"1600", "1700", "2110"} <= codes
+    assert "1230" not in codes
+
+
 def test_form_without_a_declared_base_is_refused() -> None:
     """Форма, о базе существенности умолчавшая, справочник не загружает."""
     broken = raw()
