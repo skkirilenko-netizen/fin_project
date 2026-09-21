@@ -2,6 +2,7 @@
 
 import json
 import math
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -166,3 +167,56 @@ def safe_div(a: object, b: object) -> Decimal | None:
     if numerator is None or denominator is None or denominator == 0:
         return None
     return numerator / denominator
+
+
+class EmptyMarkerError(ValueError):
+    """Маркер, обратившийся в пустую строку: проверка отвечала бы «да» всегда."""
+
+
+def markers_found(
+    text: str,
+    markers: Iterable[str],
+    prepare: Callable[[str], str] | None = None,
+) -> tuple[str, ...]:
+    """Маркеры перечня, встреченные в тексте, — **единственная точка вхождения**.
+
+    Дважды за две недели проверка, построенная на вхождении маркера, отвечала
+    «да» на любой текст, потому что маркер после приведения обращался в пустую
+    строку: сперва знак валюты «₽», потом знак сноски «*». Ноль срабатываний
+    заметен глазом; единица срабатываний на каждом документе не заметна ничем,
+    и по журналу это выглядит как исправно работающий контроль.
+
+    Поэтому: **пустой маркер — ошибка, а не совпадение**. Предмету, который
+    опознаётся знаком, вхождение не подходит вовсе — знак печатается в начале
+    строки, и опора там структурная (`startswith`).
+
+    `prepare` применяется **к тексту и к каждому маркеру одинаково**: сравнение
+    приведённого маркера с всего лишь опущенным в нижний регистр текстом —
+    тот же дефект, только тише. Без `prepare` сравниваются как есть.
+
+    Возвращаются найденные маркеры, а не «да/нет»: вызывающему обычно нужно
+    назвать, что именно сработало, — тезис без основания проверить нечем.
+    """
+    step = prepare or (lambda value: value)
+    haystack = step(text)
+    found: list[str] = []
+    for marker in markers:
+        prepared = step(marker)
+        if not prepared.strip():
+            raise EmptyMarkerError(
+                f"маркер {marker!r} после приведения пуст: проверка вхождения "
+                "отвечала бы «да» на любой текст. Предмет, опознаваемый знаком, "
+                "проверяется строением строки, а не вхождением"
+            )
+        if prepared in haystack:
+            found.append(marker)
+    return tuple(found)
+
+
+def marked_by(
+    text: str,
+    markers: Iterable[str],
+    prepare: Callable[[str], str] | None = None,
+) -> bool:
+    """Встречен ли хотя бы один маркер перечня; пустой маркер — ошибка."""
+    return bool(markers_found(text, markers, prepare))

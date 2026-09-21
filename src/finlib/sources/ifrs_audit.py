@@ -33,6 +33,7 @@ from enum import StrEnum
 from finlib.normalize.ifrs_audit import AuditPolicy, load_audit_policy
 from finlib.normalize.lines import normalize_name
 from finlib.sources.pdf_text import PdfDocument
+from finlib.utils import marked_by
 
 logger = logging.getLogger(__name__)
 
@@ -226,11 +227,10 @@ class AuditReport:
         section = self.text_of("basis_for_opinion")
         if section is None or not section.text:
             return None
-        text = section.text.lower()
         matched = [
             item.code
             for item in policy.caveat_kinds
-            if item.markers and any(marker.lower() in text for marker in item.markers)
+            if item.markers and marked_by(section.text, item.markers, str.lower)
         ]
         return matched[0] if len(matched) == 1 else None
 
@@ -809,7 +809,6 @@ def _signals_of(
             ),
             "",
         )
-        lowered = heading.lower()
-        if any(marker.lower() in lowered for marker in signal.markers):
+        if marked_by(heading, signal.markers, str.lower):
             found.append(signal.code)
     return tuple(found)

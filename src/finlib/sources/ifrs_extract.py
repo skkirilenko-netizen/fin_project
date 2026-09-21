@@ -32,6 +32,7 @@ from finlib.normalize.ifrs_lines import IfrsCatalog, IfrsPosition, load_ifrs_lin
 from finlib.normalize.lines import normalize_name
 from finlib.sources.ifrs_claims import Claim, Fold, Folded, fold
 from finlib.sources.ifrs_numbers import ColumnLayout, Grouping, parse_amount
+from finlib.utils import marked_by
 
 logger = logging.getLogger(__name__)
 
@@ -1978,12 +1979,11 @@ def _notes_in(
         index += 1
         while index < len(lines):
             following = " ".join(lines[index].split())
-            lowered = normalize_name(following)
             if (
                 not following
                 or index in with_values
                 or following.startswith(_FOOTNOTE_SYMBOLS)
-                or any(core in lowered for core in cores)
+                or (cores and marked_by(following, cores, normalize_name))
             ):
                 break
             parts.append(following)

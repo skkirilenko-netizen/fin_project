@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from finlib.llm.cleanup import has_identifiers
 from finlib.llm.direction import Direction, mentions_direction
 from finlib.metrics.display import round_to
+from finlib.utils import marked_by, markers_found
 
 if TYPE_CHECKING:
     from finlib.report.policy import Questions
@@ -406,11 +407,11 @@ def check_foreign_standard(
                 + ", ".join(references),
             )
         )
-    lowered = text.casefold()
+    # Перечень наименований чужих организаций приходит из базы и может нести
+    # пустое наименование: проверка вхождения на нём отвечала бы «да» всякому
+    # документу, и первое измерение правила так и блокировало каждый.
     foreign_names = sorted(
-        name
-        for name in context.foreign_names
-        if name and name.casefold() in lowered
+        markers_found(text, [name for name in context.foreign_names if name], str.casefold)
     )
     if foreign_names:
         found.append(
@@ -794,12 +795,11 @@ def _fact_base_is_complete(
     text = sections.get(FACT_BASE_SECTION, "")
     if not text:
         return []
-    lowered = text.casefold()
-    missing = [
-        _expected(code, context)
-        for code in context.fact_base
-        if _expected(code, context).casefold() not in lowered
-    ]
+    expected = {code: _expected(code, context) for code in context.fact_base}
+    found = markers_found(
+        text, [name for name in expected.values() if name.strip()], str.casefold
+    )
+    missing = [name for name in expected.values() if name not in found]
     if not missing:
         return []
     return [
@@ -958,7 +958,7 @@ def _flag_conflict_is_stated(text: str, context: TextContext) -> list[TextIssue]
     """Конфликт флага и стоп-фактора зафиксирован в тексте, если возник."""
     if context.flag_conflict is None:
         return []
-    if context.flag_conflict.casefold() in text.casefold():
+    if marked_by(text, (context.flag_conflict,), str.casefold):
         return []
     return [
         TextIssue(

@@ -32,6 +32,7 @@ from finlib.normalize.ifrs_issuer_type import (
     NotApplicable,
     load_issuer_types,
 )
+from finlib.utils import markers_found
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +112,7 @@ def determine_type(
         )
         if not structural:
             continue
-        markers = tuple(
-            marker for marker in item.markers if marker.lower() in lowered
-        )
+        markers = markers_found(lowered, item.markers, str.lower)
         if len(markers) < item.min_markers:
             logger.info(
                 "тип %s не присвоен: статьи есть, подтверждений в тексте %d из %d",

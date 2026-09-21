@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from finlib.config import settings
 from finlib.normalize.lines import normalize_name
+from finlib.utils import marked_by
 
 logger = logging.getLogger(__name__)
 
@@ -519,12 +520,10 @@ def drop_not_money_rows(
     но за конвенцию разрядов голосовать не вправе: они печатаются в рублях
     с копейками, тогда как суммы в той же форме идут миллионами с пробелами.
     """
-    markers = tuple(normalize_name(item) for item in policy.not_money_rows)
     kept: list[str] = []
     dropped = 0
     for line in lines:
-        lowered = normalize_name(line)
-        if any(marker in lowered for marker in markers):
+        if marked_by(line, policy.not_money_rows, normalize_name):
             dropped += 1
             continue
         kept.append(line)

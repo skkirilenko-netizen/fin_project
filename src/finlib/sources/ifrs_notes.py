@@ -42,6 +42,7 @@ from finlib.sources.ifrs_extract import join_name, split_row
 from finlib.sources.ifrs_inbox import is_table_row
 from finlib.sources.ifrs_numbers import Grouping, NotesPolicy, load_parsing_policy
 from finlib.sources.pdf_text import PdfDocument
+from finlib.utils import marked_by
 
 logger = logging.getLogger(__name__)
 
@@ -571,10 +572,10 @@ def accrued_interest(
             ),
             (),
         )
-    lowered = " ".join(rows).lower()
-    if any(
-        marker.lower() in lowered
-        for marker in catalog.interest_cover.requires_capitalised_when_net
+    if marked_by(
+        " ".join(rows),
+        catalog.interest_cover.requires_capitalised_when_net,
+        str.lower,
     ):
         logger.info(
             "начисленные проценты не собраны: расход очищен от капитализированных, "
@@ -832,8 +833,7 @@ def _headings_of(
 
 def _is_continuation(title: str, policy: NotesPolicy) -> bool:
     """Повторён ли заголовок на следующей странице."""
-    lowered = title.lower()
-    return any(marker.lower() in lowered for marker in policy.continuation_markers)
+    return marked_by(title, policy.continuation_markers, str.lower)
 
 
 def _clean_title(title: str) -> str:

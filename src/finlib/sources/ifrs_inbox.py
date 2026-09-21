@@ -39,6 +39,7 @@ from finlib.sources.ifrs_numbers import (
     load_parsing_policy,
 )
 from finlib.sources.pdf_text import PdfDocument, read_document
+from finlib.utils import marked_by, markers_found
 
 logger = logging.getLogger(__name__)
 
@@ -642,9 +643,7 @@ def form_headings(
             if not _is_contents_entry(item) and not _is_table_row(item)
         ]
         for code, cores in policy.document_kind.cores.items():
-            if any(
-                normalize_name(core) in variant for core in cores for variant in lowered
-            ):
+            if any(marked_by(variant, cores, normalize_name) for variant in lowered):
                 candidates.setdefault(code, []).append(index)
                 break
 
@@ -840,7 +839,7 @@ def expected_forms(
             code
             for code, cores in kind.cores.items()
             for variant in variants
-            if any(normalize_name(core) in normalize_name(variant) for core in cores)
+            if marked_by(variant, cores, normalize_name)
         }
         if not found:
             continue
@@ -979,8 +978,7 @@ def _continues_after_page_break(
     """
     if not cores:
         return False
-    lowered = normalize_name(lines[index])
-    if not any(core in lowered for core in cores):
+    if not marked_by(lines[index], cores, normalize_name):
         return False
     return _heads_a_table(lines, index, policy)
 
@@ -1289,10 +1287,8 @@ def _financial_institution(lowered: str, policy: ParsingPolicy) -> str | None:
     Отсутствие деления на оборотные и внеоборотные усиливает маркер,
     но не заменяет его.
     """
-    for marker in policy.financial_institution.markers:
-        if normalize_name(marker) in lowered:
-            return marker
-    return None
+    found = markers_found(lowered, policy.financial_institution.markers, normalize_name)
+    return found[0] if found else None
 
 
 def _rouble(
@@ -1310,38 +1306,39 @@ def _rouble(
     то есть не работала вовсе — при том что ни один тест не падал
     и ни один документ не был отклонён по этой причине.
 
-    Поэтому словесные маркеры ищутся в нормализованном тексте, а знаки
-    валюты — в сыром: нормализовать их нечего.
+    Поэтому маркеры **разделяются по роду**: словесные ищутся в нормализованном
+    тексте одной проверкой вхождения на весь проект (`utils.markers_found`,
+    которая на пустом маркере отказывает), знаки — в сыром тексте как есть.
+    Разделение объявлено здесь, а не подразумевается: перечень маркеров
+    правится, и знак, попавший к словам, вернул бы ровно эту ошибку.
     """
-    for marker in policy.currency.rouble_markers:
-        normalized = normalize_name(marker)
-        if normalized:
-            if normalized in headers:
-                return True
-            continue
-        # Знак валюты нормализации не переживает и ищется как есть.
-        raw = "".join(
-            header_of(text, start, policy) for start in headings.values()
-        )
-        if marker in raw:
-            return True
-    return False
+    words = [
+        marker
+        for marker in policy.currency.rouble_markers
+        if normalize_name(marker).strip()
+    ]
+    if markers_found(headers, words, normalize_name):
+        return True
+    signs = [marker for marker in policy.currency.rouble_markers if marker not in words]
+    if not signs:
+        return False
+    # Знак валюты нормализации не переживает и ищется как есть.
+    raw = "".join(header_of(text, start, policy) for start in headings.values())
+    return any(sign in raw for sign in signs)
 
 
 def _foreign_currency(lowered: str, policy: ParsingPolicy) -> str | None:
     """Валюта, отличная от рубля, если она объявлена в шапке."""
-    for marker, code in policy.currency.foreign_markers.items():
-        if normalize_name(marker) in lowered:
-            return code
-    return None
+    markers = policy.currency.foreign_markers
+    found = markers_found(lowered, markers, normalize_name)
+    return markers[found[0]] if found else None
 
 
 def _unit(lowered: str, policy: ParsingPolicy) -> str | None:
     """Код ОКЕИ единицы измерения по шапке формы."""
-    for marker, code in policy.units.markers.items():
-        if normalize_name(marker) in lowered:
-            return code
-    return None
+    markers = policy.units.markers
+    found = markers_found(lowered, markers, normalize_name)
+    return markers[found[0]] if found else None
 
 
 def _report_dates(text: str, policy: ParsingPolicy) -> tuple[date, ...]:
@@ -1411,9 +1408,10 @@ def _reporting_kind(lowered: str, policy: ParsingPolicy) -> ReportingKind:
     маркеров не несёт, а промежуточная, раскрываемая и специального
     назначения объявляют себя сами — на титульном листе и в заголовках форм.
     """
-    for marker, kind in policy.reporting_kind.markers.items():
-        if normalize_name(marker) in lowered:
-            return ReportingKind(kind)
+    markers = policy.reporting_kind.markers
+    found = markers_found(lowered, markers, normalize_name)
+    if found:
+        return ReportingKind(markers[found[0]])
     return ReportingKind(policy.reporting_kind.default)
 
 

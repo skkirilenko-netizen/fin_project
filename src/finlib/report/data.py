@@ -481,12 +481,16 @@ class ReportData:
         Отбрасывается и то, что входит частью в наименование МСФО: такое
         вхождение — совпадение слов, а не чужое наименование.
         """
+        from finlib.utils import marked_by
+
         foreign = {item.name for item in catalog.metrics} - own_names
         names = frozenset(
             item
             for item in foreign
             if len(item.strip()) >= 3
-            and not any(item.casefold() in own.casefold() for own in own_names)
+            and not any(
+                marked_by(own, (item,), str.casefold) for own in own_names if own.strip()
+            )
         )
 
         from finlib.normalize.ifrs_metrics import load_ifrs_metrics
