@@ -133,6 +133,50 @@ def test_quarantine_of_the_documents_period_is_a_question() -> None:
     assert any(str(NOW.year) in item for item in found)
 
 
+def test_quarantine_asks_to_return_to_the_set_not_to_section_four() -> None:
+    """Отбракованный комплект ведёт к своему предложению, а не к чужому разделу.
+
+    Обстоятельством был отбракованный комплект, и описан он в «Ограничениях
+    анализа»; «Запрос пояснений» отсылал к «Рискам и надзорным сигналам»,
+    где расчёт не выявил ничего.
+    """
+    from datetime import datetime
+
+    from finlib.report.document import _triggers
+
+    policy = load_policy()
+    data = data_with([], [])
+    data.sources = [{"report_year": NOW.year, "status": "quarantine"}]
+    fired = {item.code for item in policy.actions_for(_triggers(data, datetime.now(), policy))}
+    assert "request_set_clarification" in fired
+    assert "request_explanations" not in fired
+
+
+def test_reference_to_an_empty_section_is_a_contradiction() -> None:
+    """Предложение, ссылающееся на пустой раздел, блокирует документ.
+
+    Правило механическое, а не память: ссылка объявлена полем `refers_to`,
+    и наполнение раздела сверяется расчётом.
+    """
+    from finlib.report.consistency import _actions_refer_to_filled_sections
+
+    policy = load_policy()
+    broken = policy.model_copy(
+        update={
+            "actions": tuple(
+                item.model_copy(update={"when": ("quarantined_set",)})
+                if item.code == "request_explanations"
+                else item
+                for item in policy.actions
+            )
+        }
+    )
+    data = data_with([], [])
+    data.sources = [{"report_year": NOW.year, "status": "quarantine"}]
+    problems = _actions_refer_to_filled_sections(data, broken)
+    assert [item.code for item in problems] == ["action_refers_to_empty_section"]
+
+
 def test_metric_values_are_untouched_by_the_scope_rule() -> None:
     """Правило касается вопросов и «Ключевого вывода», а не самих величин."""
     kept = row("cur_liq", "missing_input")

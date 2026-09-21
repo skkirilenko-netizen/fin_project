@@ -53,10 +53,13 @@ TITLE = "Заключение о финансовом состоянии"
 # а не описывает систему вообще. Шаблонная фраза «текстовая часть подготовлена
 # с применением языковой модели» в документе, собранном без модели, — ложное
 # утверждение того же рода, что и шаблонная причина исключения из балла.
+# Наименование отчётности подставляется по стандарту: «по данным бухгалтерской
+# отчётности» в заключении по консолидированной — утверждение о другом
+# предмете, и словоформы объявлены методикой.
 _COMMON_HEAD = (
     "Документ сформирован автоматически. Расчётная часть — класс, балл, "
     "показатели и контроли качества — получена детерминированным расчётом "
-    "по данным бухгалтерской отчётности. "
+    "по данным {statements_genitive}. "
 )
 _COMMON_TAIL = (
     " Документ подлежит проверке ответственным сотрудником и самостоятельным "
@@ -367,7 +370,11 @@ def _write_header(
         document.add_paragraph(line)
 
     warning = document.add_paragraph()
-    run = warning.add_run(DISCLAIMER if with_text else DISCLAIMER_CALCULATED)
+    run = warning.add_run(
+        load_policy().fill(
+            DISCLAIMER if with_text else DISCLAIMER_CALCULATED, data.standard
+        )
+    )
     run.italic = True
     run.font.size = Pt(9)
 
@@ -656,7 +663,11 @@ def _write_risks(document: Document, data: ReportData) -> None:
     _write_audit_signals(document, data)
     _write_stop_factor_risk(document, data, policy)
     if not data.signals and not data.stop_factor_code and not data.audit_signals:
-        document.add_paragraph(policy.risks.none_found_text)
+        # Отчётность называется по стандарту: «построен на годовой
+        # бухгалтерской отчётности» в заключении по МСФО — о другом предмете.
+        document.add_paragraph(
+            policy.fill(policy.risks.none_found_text, data.standard)
+        )
 
 
 def _write_audit_signals(document: Document, data: ReportData) -> None:
@@ -782,7 +793,7 @@ def _write_actions(
     for action in actions:
         paragraph = document.add_paragraph()
         paragraph.add_run(f"{action.name}. ").bold = True
-        paragraph.add_run(action.message)
+        paragraph.add_run(policy.fill(action.message, data.standard))
 
 
 def _triggers(

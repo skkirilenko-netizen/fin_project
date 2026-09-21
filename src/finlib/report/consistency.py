@@ -52,6 +52,47 @@ def check_document(data: ReportData, limitations: str) -> list[Inconsistency]:
     found.extend(_sources_agree(data, limitations))
     found.extend(_verdict_is_single(data))
     found.extend(_deltas_match_levels(data))
+    found.extend(_actions_refer_to_filled_sections(data))
+    return found
+
+
+# Разделы, содержимое которых умеет оказаться пустым, и признак наполнения.
+# Перечислены здесь, а не в методике: это устройство документа, а не правило
+# оценки. Раздел 4 наполняют сигналы и стоп-фактор, раздел 5 — оговорки,
+# раздел 6 — вопросы; прочие разделы пусты не бывают.
+_SIGNALS_SECTION = 4
+
+
+def _actions_refer_to_filled_sections(data: ReportData, policy=None) -> list[Inconsistency]:
+    """Предложение по действиям не ссылается на пустой раздел.
+
+    У ФосАгро «Запрос пояснений» отсылал к разделу «Риски и надзорные
+    сигналы», в котором стояло «обстоятельств, отнесённых методикой
+    к надзорным сигналам, расчётом не выявлено»: обстоятельством был
+    отбракованный комплект, а он описан в «Ограничениях анализа».
+    """
+    from datetime import datetime
+
+    from finlib.report.document import _triggers
+    from finlib.report.policy import load_policy
+
+    policy = policy or load_policy()
+    triggers = _triggers(data, datetime.now(), policy)
+    empty_signals = not (
+        data.signals or data.audit_signals or data.stop_factor_code
+    )
+    found: list[Inconsistency] = []
+    for action in policy.actions:
+        if not action.fires(triggers) or _SIGNALS_SECTION not in action.refers_to:
+            continue
+        if empty_signals:
+            found.append(
+                Inconsistency(
+                    "action_refers_to_empty_section",
+                    f"предложение «{action.name}» ссылается на раздел "
+                    f"{_SIGNALS_SECTION}, в котором расчёт ничего не выявил",
+                )
+            )
     return found
 
 

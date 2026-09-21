@@ -457,8 +457,14 @@ def test_document_without_model_explains_itself(db_conn, tmp_path) -> None:
 
     # Дисклеймер контекстный: утверждать, что связки порождены моделью,
     # в документе, собранном расчётом, — ложь.
-    assert DISCLAIMER_CALCULATED in text
-    assert DISCLAIMER not in text
+    # Наименование отчётности подставлено по стандарту, поэтому сверяется
+    # заполненная формулировка, а не шаблон.
+    from finlib.report.policy import load_policy
+    from finlib.standards import Standard
+
+    policy = load_policy()
+    assert policy.fill(DISCLAIMER_CALCULATED, Standard.RSBU) in text
+    assert policy.fill(DISCLAIMER, Standard.RSBU) not in text
     assert "не привлекалась" in text
     assert "воспроизводим" in text
 

@@ -161,7 +161,14 @@ def test_document_is_written(rendered) -> None:
 def test_disclaimer_is_in_the_header(rendered) -> None:
     """Дисклеймер об автоматическом формировании стоит в шапке."""
     _, document = rendered
-    assert DISCLAIMER in document_text(document)
+    # Наименование отчётности в дисклеймере подставлено по стандарту: у РСБУ
+    # это бухгалтерская отчётность, у МСФО — консолидированная финансовая.
+    from finlib.report.policy import load_policy
+    from finlib.standards import Standard
+
+    assert (
+        load_policy().fill(DISCLAIMER, Standard.RSBU) in document_text(document)
+    )
 
 
 def test_all_sections_are_in_the_document(rendered) -> None:

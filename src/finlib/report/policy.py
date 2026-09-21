@@ -244,6 +244,21 @@ class FactBaseSection(BaseModel):
         return " ".join(self.extra_intro.split())
 
 
+class StatementsWording(BaseModel):
+    """Как называется отчётность стандарта — в падежах, нужных формулировкам.
+
+    «Бухгалтерская отчётность» в заключении по МСФО — утверждение о другом
+    предмете. Словоформы объявлены методикой, а не выводятся кодом: падеж —
+    свойство языка, и подбирать его программой значило бы завести в коде
+    правило русской морфологии.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    genitive: str = Field(min_length=1)
+    accusative: str = Field(min_length=1)
+
+
 class OtherIssuers(BaseModel):
     """Правило «заключение об одной организации не называет другую».
 
@@ -294,6 +309,11 @@ class Action(BaseModel):
     name: str = Field(min_length=1)
     when: tuple[Trigger, ...] = Field(min_length=1)
     text: str = Field(min_length=1)
+    # Разделы, на которые предложение ссылается словами. Объявлены, потому что
+    # ссылка на пустой раздел — противоречие: у ФосАгро «Запрос пояснений»
+    # отсылал к «Рискам и надзорным сигналам», где расчёт не выявил ничего.
+    # Сверяется при сборке документа.
+    refers_to: tuple[int, ...] = ()
 
     def fires(self, triggers: set[Trigger]) -> bool:
         """Выполнен ли хотя бы один признак."""
@@ -318,9 +338,22 @@ class ReportPolicy(BaseModel):
     # как отсутствующие — проверка состава прошла бы, не проверив ничего.
     fact_base: dict[Standard, FactBase]
     fact_base_section: FactBaseSection
+    statements_wording: dict[Standard, StatementsWording]
     other_issuers: OtherIssuers
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)
+
+    def fill(self, text: str, standard: Standard) -> str:
+        """Подставляет наименование отчётности стандарта в предписанный текст.
+
+        Подстановка явная, а не через `format`: предписанные тексты содержат
+        и другие фигурные скобки, и общий разбор шаблона однажды съел бы
+        подстановку вопроса.
+        """
+        words = self.statements_wording[standard]
+        return text.replace("{statements_genitive}", words.genitive).replace(
+            "{statements_accusative}", words.accusative
+        )
 
     @model_validator(mode="after")
     def _check_codes(self) -> Self:
@@ -333,6 +366,17 @@ class ReportPolicy(BaseModel):
             raise ValueError(
                 "состав фактической базы не объявлен у стандартов: "
                 + ", ".join(missing)
+            )
+        # Наименование отчётности обязано быть объявлено у каждого стандарта:
+        # молча напечатать чужое — то же, что обещать читателю коды строк там,
+        # где их нет.
+        unnamed = [
+            item.value for item in Standard if item not in self.statements_wording
+        ]
+        if unnamed:
+            raise ValueError(
+                "наименование отчётности не объявлено у стандартов: "
+                + ", ".join(unnamed)
             )
         for standard, composition in self.fact_base.items():
             composition.check_lines(standard)

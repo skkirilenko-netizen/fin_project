@@ -314,6 +314,10 @@ def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     assert "1410" not in plain and "1510" not in plain
     # Технических идентификаторов в тексте нет: показатель назван наименованием.
     assert "net_debt" not in plain and "debt_maturity_cover" not in plain
+    # Отчётность называется по стандарту: «бухгалтерская отчётность»
+    # в заключении по консолидированной — утверждение о другом предмете.
+    assert "консолидированной финансовой отчётности по МСФО" in plain
+    assert "бухгалтерской отчётности" not in plain
 
 
 def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
