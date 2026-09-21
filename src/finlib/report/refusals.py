@@ -26,6 +26,7 @@ METRIC_REASONS: dict[str, str] = {
     "not_extracted_yet": "not_extracted_yet",
     "adjustment_impossible": "adjustment_impossible",
     "interim_not_annualised": "interim_not_annualised",
+    "replaced_by_range": "replaced_by_range",
 }
 
 # Причины исключения показателя из балла: машинный вид из РСБУ и решение
@@ -58,7 +59,10 @@ def from_ifrs_metrics(
         if item.calculable or item.reason is None:
             continue
         adjustment = by_metric.get(item.code)
-        if item.reason.value == "adjustment_impossible" and adjustment is not None:
+        if (
+            item.reason.value in ("adjustment_impossible", "replaced_by_range")
+            and adjustment is not None
+        ):
             where = adjustment.where
         else:
             where = ", ".join(

@@ -760,6 +760,64 @@ def _ifrs_notes(
     return found
 
 
+_RANGE_VALUES = """
+SELECT metric_code, value FROM metric_value
+WHERE inn = %(inn)s AND standard = 'ifrs' AND report_date = %(d)s
+  AND metric_code = ANY(%(codes)s) AND status = 'ok'
+"""
+
+
+def _range_notes(
+    inn: str, periods: list[date], conn: PgConnection | None
+) -> list[str]:
+    """Показатель, заменённый диапазоном, печатается обеими границами.
+
+    **Диапазон собирается из тех же величин, что стоят в приложении.**
+    Набирать его заново нельзя: разрядность разойдётся — то же правило,
+    что у величины надзорного сигнала. Обе границы — самостоятельные
+    показатели со своим составом, и печатаются они округлением единой точки.
+
+    Границы приводятся только вместе: одна из них без другой читается как
+    само значение показателя, а показатель здесь именно тем и отличается,
+    что одним числом не приводится.
+    """
+    from finlib.db import fetch_all
+    from finlib.metrics.display import format_metric
+    from finlib.metrics.ifrs_view import IfrsMetricsView
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+
+    if conn is None or not periods:
+        return []
+    policy = load_ifrs_metrics()
+    view = IfrsMetricsView(policy)
+    notes: list[str] = []
+    for adjustment in policy.adjustments:
+        if not adjustment.replaced_by:
+            continue
+        rows = {
+            row["metric_code"]: row["value"]
+            for row in fetch_all(
+                _RANGE_VALUES,
+                {"inn": inn, "d": periods[0], "codes": list(adjustment.replaced_by)},
+                conn=conn,
+            )
+        }
+        if len(rows) != len(adjustment.replaced_by):
+            continue
+        ordered = sorted(adjustment.replaced_by, key=lambda code: rows[code])
+        low, high = (
+            format_metric(
+                rows[code], view.get(code).unit, view.scale_for(code)
+            )
+            for code in ordered
+        )
+        notes.append(
+            f"{adjustment.adjusted_name}: от {low} до {high}. "
+            f"{' '.join(adjustment.limitation.split())}"
+        )
+    return notes
+
+
 def _audit_notes(meta: dict | None) -> list[str]:
     """Оговорки заключения и дословные цитаты его разделов.
 
@@ -869,6 +927,11 @@ def _limitations_block(
     # показателя без неё выглядит нехваткой данных: у ЛСР так пропадали
     # 217 501 млн руб. на счетах эскроу.
     notes.extend(_footnote_notes(meta))
+    # **Показатель, заменённый диапазоном, печатается обеими границами.**
+    # Одна граница без другой читается как само значение показателя, а он
+    # здесь именно тем и отличается, что одним числом не приводится.
+    if standard is Standard.IFRS:
+        notes.extend(_range_notes(inn, periods, conn))
 
     if assessment is not None and assessment["confidence_reasons"]:
         notes.extend(assessment["confidence_reasons"])

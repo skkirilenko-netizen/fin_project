@@ -183,20 +183,31 @@ def test_confirmed_value_gives_the_type_as_the_catalogue_would() -> None:
     assert reading.issuer_type == "developer"
 
 
-def test_metric_adjustment_belongs_to_metrics_and_refuses_without_the_value() -> None:
-    """Поправка показателя живёт в составе показателей и отказывает без величины.
+def test_metric_adjustment_belongs_to_metrics_and_names_its_replacement() -> None:
+    """Поправка живёт в составе показателей и называет, чем показатель заменён.
 
-    У ЛСР текущая ликвидность 4,15, но средства на счетах эскроу раскрыты
-    сноской, а не строкой: исключить их нечем, и показатель не приводится
-    вовсе — завышенный вчетверо хуже отсутствующего.
+    У ЛСР текущая ликвидность 4,148, но часть оборотных активов обращается
+    в деньги не решением организации: запасы — незавершённое строительство,
+    а требования по договорам долевого участия погашаются раскрытием счетов
+    эскроу. Одним числом показатель не приводится, и обе границы объявлены
+    показателями со своим составом.
     """
     metrics = load_ifrs_metrics()
     found = metrics.for_type("developer")
     assert [item.metric for item in found] == ["cur_liq"]
     adjustment = found[0]
     assert adjustment.on_missing == "not_calculable"
-    assert "ifrs.escrow_balance" in adjustment.requires
-    assert "не рассчитана" in adjustment.limitation
+    assert adjustment.replaced_by == (
+        "cur_liq_ex_inventories",
+        "cur_liq_ex_escrow_claims",
+    )
+    # Показатели замены объявлены в справочнике и считаются только у этого типа.
+    by_code = {item.code: item for item in metrics.metrics}
+    for code in adjustment.replaced_by:
+        assert code in by_code, code
+        assert by_code[code].only_for_type == adjustment.type
+        assert not by_code[code].in_scoring
+    assert "в балльную оценку не входит" in adjustment.limitation
 
 
 def test_norm_without_its_condition_does_not_load(tmp_path) -> None:

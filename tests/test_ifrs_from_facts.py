@@ -403,9 +403,10 @@ def test_footnote_and_issuer_type_reach_the_document(db_conn, tmp_path) -> None:
     assert "Тип эмитента: девелопер, работающий по счетам эскроу" in plain
     assert "217 501" in plain
     assert "Сноска под формой «Отчёт о финансовом положении»" in plain
-    # Величина раскрыта эмитентом, и запрашивать её нечего: не сделан перевод
-    # сноски в состав входных величин показателя.
-    assert "Запрашивать нечего: величина раскрыта сноской" in plain
+    # Показатель заменён диапазоном: это решение методики, и запрашивать
+    # у организации нечего.
+    assert "одним числом не приводится" in plain
+    assert "Запрашивать нечего: это решение методики" in plain
 
 
 def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:

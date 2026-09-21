@@ -28,7 +28,11 @@ class MetricAdjustment(BaseModel):
     type: str = Field(min_length=1)
     adjusted_name: str = Field(min_length=1)
     exclude_from_numerator: tuple[dict, ...] = Field(min_length=1)
-    requires: tuple[str, ...] = Field(min_length=1)
+    requires: tuple[str, ...] = ()
+    # Показатели, которыми поправленный заменяется. Диапазон — две границы,
+    # и каждая из них величина со своим составом: одно число с допуском было
+    # бы видимостью точности, а состав границы не восстановить по допуску.
+    replaced_by: tuple[str, ...] = ()
     where: str = Field(min_length=1)
     on_missing: str = Field(pattern="^not_calculable$")
     reason_code: str = Field(min_length=1)
@@ -41,6 +45,22 @@ class MetricAdjustment(BaseModel):
         for item in self.exclude_from_numerator:
             if "code" not in item or "reason" not in item:
                 raise ValueError(f"поправка {self.metric}: исключение без кода или причины")
+        return self
+
+    @model_validator(mode="after")
+    def _replacement_or_requirement(self) -> Self:
+        """Поправка либо требует величин, либо заменяет показатель другими.
+
+        Без этого поправка, не объявившая ни того ни другого, молча ничего
+        не делала бы: показатель считался бы как у всех, а тип эмитента
+        на результат не влиял — ровно тот случай, когда правило написано
+        и не срабатывает.
+        """
+        if not self.requires and not self.replaced_by:
+            raise ValueError(
+                f"поправка {self.metric}: не названы ни требуемые величины, "
+                "ни показатели замены — она ничего не меняет"
+            )
         return self
 
 
@@ -80,6 +100,11 @@ class MetricDef(BaseModel):
     negative_shown_origin: str | None = None
     exclusion_kind: str | None = None
     exclusion_reason: str | None = None
+    # Тип эмитента, у которого показатель вообще считается. У прочих он
+    # не отказывает, а **не существует**: границы диапазона текущей
+    # ликвидности объявлены методикой только для девелопера, работающего
+    # по счетам эскроу, и у обычного эмитента означали бы другое.
+    only_for_type: str | None = None
 
     @model_validator(mode="after")
     def _negative_wording_is_grounded(self) -> Self:

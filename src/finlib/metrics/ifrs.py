@@ -36,6 +36,7 @@ class Reason(StrEnum):
     NOT_EXTRACTED_YET = "not_extracted_yet"
     ADJUSTMENT_IMPOSSIBLE = "adjustment_impossible"
     INTERIM_NOT_ANNUALISED = "interim_not_annualised"
+    REPLACED_BY_RANGE = "replaced_by_range"
 
 
 REASON_TEXT: dict[Reason, str] = {
@@ -48,6 +49,7 @@ REASON_TEXT: dict[Reason, str] = {
     # в состав входных величин показателя, и это наш пробел, а не нехватка
     # данных у эмитента.
     Reason.ADJUSTMENT_IMPOSSIBLE: "поправка по типу эмитента не применена",
+    Reason.REPLACED_BY_RANGE: "показатель заменён диапазоном двух границ",
     Reason.INTERIM_NOT_ANNUALISED: "на промежуточной отчётности не рассчитывается",
 }
 
@@ -131,6 +133,10 @@ DERIVED_NAMES: dict[str, str] = {
     "nwc": "чистый оборотный капитал: итог оборотных активов за вычетом итога "
     "краткосрочных обязательств",
     "ffo": "FFO: поток от операционной деятельности до изменений оборотного капитала",
+    "current_assets_ex_inventories": "оборотные активы за вычетом запасов",
+    "current_assets_ex_escrow_claims": "оборотные активы за вычетом запасов "
+    "и требований, погашаемых раскрытием счетов эскроу (примечание "
+    "о дебиторской задолженности)",
 }
 
 
@@ -192,10 +198,19 @@ def months_of(
 def compute_all(
     inputs: Inputs, policy: IfrsMetricsPolicy | None = None
 ) -> tuple[MetricValue, ...]:
-    """Считает все показатели справочника, включая отказы с причинами."""
+    """Считает все показатели справочника, включая отказы с причинами.
+
+    Показатель, объявленный только для своего типа эмитента, у прочих
+    не считается **и не отказывает**: его там не существует, и отказ
+    «нет входных величин» описывал бы пробел, которого нет.
+    """
     policy = policy or load_ifrs_metrics()
     derived = _derived(inputs, policy)
-    return tuple(_compute(item, inputs, derived, policy) for item in policy.metrics)
+    return tuple(
+        _compute(item, inputs, derived, policy)
+        for item in policy.metrics
+        if item.only_for_type in (None, inputs.issuer_type)
+    )
 
 
 def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | None]:
@@ -233,9 +248,28 @@ def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | N
         if current_assets is not None and current_liabilities is not None
         else None
     )
+    # **Границы диапазона текущей ликвидности девелопера.** Считаются здесь,
+    # а не в показателе, по общему правилу: числовых литералов и арифметики
+    # в справочнике показателей нет, состав величины объявляется методикой,
+    # а собирается один раз. Один недостающий компонент отменяет границу
+    # целиком — частичных сумм здесь нет, как и у прочих производных.
+    inventories = get("ifrs.inventories")
+    ex_inventories = (
+        current_assets - inventories
+        if current_assets is not None and inventories is not None
+        else None
+    )
+    escrow_claims = inputs.notes.get("ifrs.escrow_backed_claims")
+    ex_escrow = (
+        ex_inventories - escrow_claims
+        if ex_inventories is not None and escrow_claims is not None
+        else None
+    )
     return {
         "debt_total": debt,
         "nwc": nwc,
+        "current_assets_ex_inventories": ex_inventories,
+        "current_assets_ex_escrow_claims": ex_escrow,
         "net_debt": debt - cash if debt is not None and cash is not None else None,
         "ebitda": ebitda,
         "ffo": ffo,
@@ -269,6 +303,11 @@ def _compute(
         None,
     )
     if adjustment is not None:
+        if adjustment.replaced_by:
+            # **Показатель заменён диапазоном, а не не посчитан.** Исход тот же
+            # по форме — величины нет, — но причина другая: это решение
+            # методики, а не пробел данных, и запрашивать у организации нечего.
+            return _refused(empty, Reason.REPLACED_BY_RANGE)
         missing = tuple(
             code for code in adjustment.requires if inputs.values.get(code) is None
         )

@@ -73,14 +73,43 @@ def test_negative_denominator_cancels_the_metric() -> None:
     assert found.reason is Reason.NEGATIVE_DENOMINATOR
 
 
-def test_developer_liquidity_is_refused_without_the_escrow_value() -> None:
-    """Поправку нечем посчитать — исходный показатель не приводится."""
-    found = value_of(
-        compute_all(Inputs(HEALTHY, {}, issuer_type="developer")), "cur_liq"
-    )
+def test_developer_liquidity_is_replaced_by_a_range() -> None:
+    """У девелопера показатель заменён диапазоном, а не посчитан одним числом.
+
+    Исходная величина не приводится по-прежнему — завышенная вчетверо хуже
+    отсутствующей, — но причина другая: это решение методики, а не пробел
+    данных. Границы считаются своими показателями и только у этого типа.
+    """
+    developer = {**HEALTHY, "ifrs.inventories": Decimal(60000)}
+    computed = compute_all(Inputs(developer, {}, issuer_type="developer"))
+    found = value_of(computed, "cur_liq")
     assert not found.calculable
-    assert found.reason is Reason.ADJUSTMENT_IMPOSSIBLE
-    assert "ifrs.escrow_balance" in found.missing
+    assert found.reason is Reason.REPLACED_BY_RANGE
+
+    # Верхняя граница считается по величинам формы, нижняя требует величины
+    # примечания: без неё границы нет, и это отказ, а не подстановка.
+    codes = {item.code for item in computed}
+    assert {"cur_liq_ex_inventories", "cur_liq_ex_escrow_claims"} <= codes
+    upper = value_of(computed, "cur_liq_ex_inventories")
+    assert upper.calculable
+    assert upper.value == (Decimal(217976) - Decimal(60000)) / Decimal(268545)
+    assert not value_of(computed, "cur_liq_ex_escrow_claims").calculable
+
+    # С величиной примечания считается и нижняя граница, и она ниже верхней.
+    with_note = compute_all(
+        Inputs(
+            developer,
+            {"ifrs.escrow_backed_claims": Decimal(30000)},
+            issuer_type="developer",
+        )
+    )
+    lower = value_of(with_note, "cur_liq_ex_escrow_claims")
+    assert lower.calculable and lower.value < upper.value
+
+    # У обычного эмитента границ не существует вовсе: отказ по ним описывал бы
+    # пробел, которого нет.
+    ordinary = {item.code for item in compute_all(Inputs(HEALTHY, {}))}
+    assert not {"cur_liq_ex_inventories", "cur_liq_ex_escrow_claims"} & ordinary
 
 
 def test_ffo_is_not_computed_on_interim_reporting() -> None:
