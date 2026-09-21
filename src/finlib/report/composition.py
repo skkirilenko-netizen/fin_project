@@ -236,8 +236,16 @@ def _worth_naming(
     }
     measured = [row for row in changes if weights[row["metric_code"]] is not None]
     measured.sort(key=lambda row: weights[row["metric_code"]], reverse=True)
-    for row in measured[: policy.fact_base_of(data.standard).top_changes]:
+    top = policy.fact_base_of(data.standard).top_changes
+    listed = 0
+    for row in measured:
+        if listed >= top:
+            break
         parsed = parse_derived(row["metric_code"])
+        # **Отсечка считается после отбора, а не до него.** Самыми
+        # существенными оказываются сами базы — валюта баланса и выручка, —
+        # а они и так названы обязательным составом: выбирая первые пять
+        # до отбрасывания названных, перечень терял по три статьи из пяти.
         if parsed is None or parsed.base in seen:
             continue
         seen.add(parsed.base)
@@ -260,6 +268,7 @@ def _worth_naming(
         if absolute is not None:
             shown += f", на {money(absolute)} {data.unit_name}"
         found.append(shown)
+        listed += 1
     return found
 
 
@@ -377,14 +386,20 @@ def questions(
     """
     by_subject: dict[QuestionSubject, list[str]] = {}
 
-    for signal in data.signals:
+    # Сигнал заключения — такое же основание вопроса, как сигнал
+    # по показателю: уровень объявлен методикой, и место в очереди у него
+    # то же. Прежде о нём вопроса не возникало, и «Запрос пояснений» отсылал
+    # к разделу вопросов, в котором стояло «расчётом не выявлено».
+    levelled = [(item["level"], item["signal_name"]) for item in data.signals]
+    levelled += [(item.level, item.name) for item in data.audit_signals]
+    for level, name in levelled:
         subject = (
             QuestionSubject.SUPERVISORY_SIGNAL
-            if signal["level"] == "supervisory"
+            if level == "supervisory"
             else QuestionSubject.ATTENTION_SIGNAL
         )
         by_subject.setdefault(subject, []).append(
-            policy.questions.question(subject, name=signal["signal_name"])
+            policy.questions.question(subject, name=name)
         )
 
     if data.stop_factor_code:

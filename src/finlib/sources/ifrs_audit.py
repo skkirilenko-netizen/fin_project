@@ -469,13 +469,39 @@ def _texts_of(
                 SectionText(code, section.name, refusal=TextRefusal.PAGES_NOT_READABLE)
             )
             continue
-        body = " ".join(_without_signature(lines[position + 1 : stop], policy))
+        body = " ".join(
+            _without_signature(
+                _until_subsection(lines[position + 1 : stop], policy), policy
+            )
+        )
         found.append(
             SectionText(code, section.name, text=body)
             if body
             else SectionText(code, section.name, refusal=TextRefusal.EMPTY)
         )
     return tuple(found)
+
+
+def _until_subsection(lines: list[str], policy: AuditPolicy) -> list[str]:
+    """Строки раздела до заголовка следующего подраздела.
+
+    **Границу держит начало строки, а не вхождение слов.** Заголовки-признаки
+    границу образуют не все: у ФосАгро в «Основание для выражения мнения»
+    попали «Независимость» и колонтитул страницы, потому что подразделы,
+    предписанные МСА, в перечень признаков не входят. Но и по вхождению слов
+    резать нельзя: заключение ссылается на свой раздел внутри предложения
+    («далее описаны в разделе «Ответственность аудитора…»), и цитата
+    обрывалась на середине фразы. Поэтому сравнивается начало строки —
+    та же опора на строение, что и везде здесь.
+    """
+    wanted = [normalize_name(item) for item in policy.quote_ends_before]
+    body: list[str] = []
+    for line in lines:
+        normalized = normalize_name(line.strip())
+        if normalized and any(normalized.startswith(item) for item in wanted):
+            break
+        body.append(line)
+    return body
 
 
 def _without_signature(lines: list[str], policy: AuditPolicy) -> list[str]:

@@ -84,6 +84,7 @@ class ConfidenceRule(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     lowered_by_modified_opinion: bool
+    rule_text: str = Field(min_length=1)
     reason: str = Field(min_length=1)
     origin: str = Field(min_length=1)
 
@@ -123,6 +124,8 @@ class AuditPolicy(BaseModel):
     signals: tuple[AuditSignal, ...] = Field(min_length=1)
     # Разделы, печатаемые в документе дословно.
     quoted_sections: tuple[str, ...] = Field(min_length=1)
+    # Заголовки подразделов, на которых цитата кончается.
+    quote_ends_before: tuple[str, ...] = Field(min_length=1)
     confidence: ConfidenceRule
     limitations: dict[str, str]
 

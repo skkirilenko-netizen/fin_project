@@ -157,6 +157,50 @@ def test_report_ends_before_the_responsibility_section() -> None:
     assert "Руководство отвечает" not in text.text
 
 
+BASIS_WITH_SUBSECTIONS = """
+Аудиторское заключение независимого аудитора
+Мнение с оговоркой
+Отчетность отражает достоверно, за исключением указанного ниже.
+Основание для выражения мнения с оговоркой
+Руководство не раскрыло информацию о сегментах.
+Наши обязанности далее описаны в разделе «Ответственность аудитора за аудит
+консолидированной финансовой отчетности» нашего заключения.
+Независимость
+Мы независимы по отношению к Группе в соответствии с Кодексом СМСЭБ.
+www.example.ru 2
+Ключевые вопросы аудита
+Вопросы, наиболее значимые для нашего аудита.
+"""
+
+
+def test_quote_ends_at_the_next_subsection() -> None:
+    """Цитата раздела кончается заголовком подраздела, а не идёт дальше него.
+
+    У ФосАгро в «Основание для выражения мнения» попали «Независимость»
+    и колонтитул страницы: подразделы, предписанные МСА, в перечень
+    разделов-признаков не входят и границы не образовывали.
+    """
+    policy = load_audit_policy()
+    found = read_audit_report(BASIS_WITH_SUBSECTIONS, policy=policy)
+    text = found.text_of("basis_for_opinion")
+    assert text is not None and text.found
+    assert "Руководство не раскрыло информацию о сегментах." in text.text
+    assert "Мы независимы" not in text.text
+    assert "example.ru" not in text.text
+
+
+def test_reference_to_a_section_inside_a_sentence_does_not_cut_the_quote() -> None:
+    """Ссылка на раздел внутри предложения цитату не обрывает.
+
+    Граница держится началом строки, а не вхождением слов: заключение
+    ссылается на «Ответственность аудитора…» внутри фразы, и по вхождению
+    цитата обрывалась на середине — «далее описаны в разделе «»».
+    """
+    found = read_audit_report(BASIS_WITH_SUBSECTIONS, policy=load_audit_policy())
+    text = found.text_of("basis_for_opinion")
+    assert "Ответственность аудитора за аудит" in text.text
+
+
 def test_signing_date_is_not_taken_from_the_opinion_text() -> None:
     """Отчётная дата из текста мнения датой подписания не становится.
 

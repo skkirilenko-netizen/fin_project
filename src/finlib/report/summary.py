@@ -17,6 +17,7 @@ from finlib.quality.codes import check_name
 from finlib.report.data import ReportData
 from finlib.report.policy import load_policy
 from finlib.scoring.definitions import ScoringCatalog
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +283,7 @@ def _confidence(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
         return []
     level = CONFIDENCE_NAMES.get(assessment["confidence"], assessment["confidence"])
     paragraphs = [Paragraph(f"Уверенность в оценке: {level}.")]
-    paragraphs.append(Paragraph(_confidence_rule(scoring)))
+    paragraphs.append(Paragraph(_confidence_rule(scoring, data.standard)))
     reasons = assessment["confidence_reasons"] or []
     if reasons:
         paragraphs.append(Paragraph("Что ограничивает уверенность:"))
@@ -290,12 +291,21 @@ def _confidence(data: ReportData, scoring: ScoringCatalog) -> list[Paragraph]:
     return paragraphs
 
 
-def _confidence_rule(scoring: ScoringCatalog) -> str:
+def _confidence_rule(scoring: ScoringCatalog, standard: Standard) -> str:
     """Как получается уверенность: порядок, а не результат.
 
     Прежде в документе стояло одно слово — «средняя», — и откуда оно взялось,
     читателю было неоткуда узнать.
+
+    **Порядок свой у каждого стандарта.** В основаниях РСБУ стоят флаги
+    и длина ряда, которых ветка МСФО не считает вовсе: перечень РСБУ
+    в заключении по МСФО назвал бы читателю основания, ни одно из которых
+    не проверялось.
     """
+    if standard is Standard.IFRS:
+        from finlib.normalize.ifrs_audit import load_audit_policy
+
+        return " ".join(load_audit_policy().confidence.rule_text.split())
     grounds = "; ".join(
         " ".join(rule.description.split()).rstrip(".")
         for rule in scoring.confidence.downgrade_on
