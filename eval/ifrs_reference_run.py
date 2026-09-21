@@ -55,47 +55,42 @@ class Outcome:
         )
 
 
-def _parsed(path: Path):
-    """Разбор документа: профиль и извлечение; None — документ не принят."""
-    from finlib.sources.ifrs_extract import extract
-    from finlib.sources.ifrs_inbox import identify, text_of
+def _parsed(path: Path, inn: str):
+    """Разбор документа **боевым путём**; None — документ не принят.
+
+    Прогон не повторяет шаги цикла: приём, извлечение, подтверждённое
+    опознание и чтение документа делает `accept_ifrs_document`, а прогон
+    только сравнивает ответ с эталоном. Иначе эталон сверялся бы со второй
+    системой — ровно то, из-за чего он и понадобился.
+
+    `write=False`: эмитент назван, потому что ранее подтверждённое опознание
+    без него не находится, а база не трогается вовсе.
+    """
+    from finlib.pipeline import accept_ifrs_document
+    from finlib.sources.ifrs_inbox import text_of
 
     document = text_of(path)
     if not document.readable:
         return None, None, f"файл не прочитан: {document.error}"
-    profile = identify(document.text, document=document)
-    if not getattr(profile, "accepted", False):
-        return None, None, getattr(profile, "reason", "документ не принят")
-    extraction = extract(
-        document.text,
-        profile.dates_by_form,
-        profile.grouping,
-        columns=document.columns_of,
-        layouts=profile.columns_by_form,
+    intake = accept_ifrs_document(
+        document.text, inn=inn, raw_path=str(path), document=document, write=False
     )
-    return document, (profile, extraction), ""
+    if not intake.accepted:
+        return None, None, intake.reason or "документ не принят"
+    return document, intake, ""
 
 
-def _note_value(document, profile, extraction, code: str) -> Decimal | None:
-    """Величина из примечания по ссылке из строки формы."""
-    from finlib.normalize.ifrs_lines import load_ifrs_lines
-    from finlib.sources.ifrs_inbox import form_headings
-    from finlib.sources.ifrs_notes import index_notes, note_values
-    from finlib.sources.ifrs_numbers import load_parsing_policy
+def _note_value(intake, code: str) -> Decimal | None:
+    """Величина из примечания — из того же чтения, что записал цикл.
 
-    headings = form_headings(document.text, load_ifrs_lines(), load_parsing_policy())
-    index = index_notes(document.text, after=min(headings.values(), default=0))
-    target = profile.report_dates[0]
-    rows = {
-        item.code: item.note_reference
-        for form in extraction.forms.values()
-        for item in form.values
-        if item.report_date == target
-    }
-    found, _ = note_values(
-        index, rows, document.text, profile.grouping, len(profile.report_dates)
+    Прежде прогон читал примечания сам: указатель, ссылки, графы. Это второй
+    разбор того же документа, и он мог бы отвечать иначе, чем тот, который
+    наполняет базу, — тогда эталон подтверждал бы не то, что работает.
+    """
+    notes = getattr(intake.reading, "notes", ())
+    return next(
+        (item.value for item in notes if item.code == code and item.found), None
     )
-    return found.get(code)
 
 
 def _from_document(check: dict) -> Outcome:
@@ -105,10 +100,10 @@ def _from_document(check: dict) -> Outcome:
     path = DOCUMENTS / inn / check["document"]
     if not path.exists():
         return Outcome(inn, issuer, kind, subject, str(check.get("expect")), "документа нет", False)
-    document, parsed, reason = _parsed(path)
-    if parsed is None:
+    _document, intake, reason = _parsed(path, inn)
+    if intake is None:
         return Outcome(inn, issuer, kind, subject, str(check.get("expect")), reason, False)
-    profile, extraction = parsed
+    profile, extraction = intake.profile, intake.extraction
     target = profile.report_dates[0]
     expected = str(check.get("expect"))
 
@@ -123,7 +118,7 @@ def _from_document(check: dict) -> Outcome:
             value is not None and value == Decimal(expected),
         )
     if kind == "note_value":
-        value = _note_value(document, profile, extraction, check["code"])
+        value = _note_value(intake, check["code"])
         return Outcome(
             inn, issuer, kind, subject, expected, str(value),
             value is not None and value == Decimal(expected),
@@ -154,12 +149,47 @@ SELECT stop_factor_codes FROM assessment
 WHERE inn = %(inn)s AND standard = 'ifrs' AND report_date = %(date)s
 """
 
+_SIGNALS = """
+SELECT s.signal_code, s.level FROM assessment_signal s
+JOIN assessment a ON a.id = s.assessment_id
+WHERE a.inn = %(inn)s AND a.standard = 'ifrs' AND a.report_date = %(date)s
+"""
+
+_GROUPS = """
+SELECT g.group_name FROM assessment_group g
+JOIN assessment a ON a.id = g.assessment_id
+WHERE a.inn = %(inn)s AND a.standard = 'ifrs' AND a.report_date = %(date)s
+"""
+
+_AUDIT = """
+SELECT meta -> 'audit' AS audit FROM src_file
+WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
+  AND report_year = %(year)s AND status <> 'quarantine'
+"""
+
+
+def _proposed_caveat(audit: dict) -> str:
+    """Вид оговорки: подтверждённый человеком либо предложенный машиной.
+
+    Вид восстанавливается тем же чтением, что и в документе, а не сравнением
+    слов здесь: формулировки и приметы правятся в методике, и второй разбор
+    основания разошёлся бы с первым.
+    """
+    from finlib.normalize.ifrs_audit import load_audit_policy
+    from finlib.sources.ifrs_audit import audit_from_meta
+
+    found = audit_from_meta({"audit": audit})
+    if found is None:
+        return "заключения нет"
+    policy = load_audit_policy()
+    return found.caveat_kind or found.proposed_caveat_kind(policy) or "вид не назван"
+
 
 def _from_database(check: dict) -> Outcome:
     """Проверка, которой нужна загруженная и подтверждённая база."""
     from datetime import date as date_type
 
-    from finlib.db import connection, fetch_one
+    from finlib.db import connection, fetch_all, fetch_one
 
     inn, issuer = check["inn"], check.get("issuer", "")
     kind = check["kind"]
@@ -186,6 +216,36 @@ def _from_database(check: dict) -> Outcome:
             return Outcome(
                 inn, issuer, kind, subject, ", ".join(sorted(expected)),
                 ", ".join(got) or "оценки нет", got == sorted(expected),
+            )
+        if kind == "audit_signal":
+            # Сигнал заключения в разделе 4 — он идёт не через `assessment_signal`,
+            # а из сведений комплекта: формулировка берётся из методики в момент
+            # сборки, а признак объявлен разделом заключения.
+            row = fetch_one(_AUDIT, {"inn": inn, "year": moment.year}, conn=conn)
+            sections = ((row or {}).get("audit") or {}).get("sections") or []
+            return Outcome(
+                inn, issuer, kind, subject, expected,
+                ", ".join(sections) or "заключения нет", expected in sections,
+            )
+        if kind == "caveat_kind":
+            row = fetch_one(_AUDIT, {"inn": inn, "year": moment.year}, conn=conn)
+            audit = (row or {}).get("audit") or {}
+            got = _proposed_caveat(audit)
+            return Outcome(inn, issuer, kind, subject, expected, got, got == expected)
+        if kind == "signal_absent":
+            rows = fetch_all(_SIGNALS, {"inn": inn, "date": moment}, conn=conn)
+            fired = sorted(item["signal_code"] for item in rows)
+            code = check["code"]
+            return Outcome(
+                inn, issuer, kind, subject, str(expected),
+                ", ".join(fired) or "признаков нет", code not in fired,
+            )
+        if kind == "group_out_of_score":
+            rows = fetch_all(_GROUPS, {"inn": inn, "date": moment}, conn=conn)
+            groups = sorted(item["group_name"] for item in rows)
+            return Outcome(
+                inn, issuer, kind, subject, f"{expected} вне балла",
+                ", ".join(groups) or "оценки нет", expected not in groups,
             )
     return Outcome(inn, issuer, kind, subject, str(expected), f"вид {kind} неизвестен", False)
 

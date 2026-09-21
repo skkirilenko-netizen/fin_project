@@ -148,7 +148,10 @@ def test_every_caller_passes_the_column_layout() -> None:
     означает разрешение, выданное вызову, которого больше нет.
     """
     calls = extract_calls()
-    assert len(calls) >= 5, calls
+    # Число вызовов разбора упало намеренно: замеры, собиравшие свою
+    # последовательность шагов, удалены или переведены на цикл. Ноль вызовов
+    # при этом означал бы, что разбор не вызывается вовсе.
+    assert calls, "разбор форм не вызывается ниоткуда"
 
     silent = {path for path, _, passed in calls if not passed}
     assert silent == set(LAYOUTS_NOT_NEEDED), (

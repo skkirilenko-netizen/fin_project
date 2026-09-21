@@ -48,18 +48,14 @@ from ifrs_set import (  # noqa: E402
 )
 
 from finlib.config import settings  # noqa: E402
+from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_lines import load_ifrs_lines  # noqa: E402
 from finlib.sources import cbonds  # noqa: E402
-from finlib.sources.ifrs_audit import (  # noqa: E402
-    Determination,
-    Engagement,
-    read_audit_report,
-)
-from finlib.sources.ifrs_inbox import form_headings, text_of  # noqa: E402
-from finlib.sources.ifrs_issuer_type import (  # noqa: E402
-    Determination as TypeDetermination,
-)
-from finlib.sources.ifrs_issuer_type import determine_type
+
+# Из чтения заключения берутся только перечисления: сами сведения приходят
+# от цикла вместе с комплектом. Читать заключение здесь значило бы завести
+# второй разбор того же документа.
+from finlib.sources.ifrs_audit import Determination, Engagement  # noqa: E402
 from finlib.sources.ifrs_numbers import load_parsing_policy  # noqa: E402
 from finlib.version import code_version  # noqa: E402
 
@@ -333,14 +329,13 @@ def _document_features(path: Path, run: DocumentRun) -> set[str]:
     if "lost_page" in run.reasons:
         found.add("lost_page")
 
-    document = text_of(path)
-    if not document.readable:
+    # **Заключение берётся у цикла, а не читается заново.** Прежде здесь стоял
+    # свой вызов чтения — и признаки набора считались по другому разбору, чем
+    # тот, который наполняет базу: у замера был свой словарь величин и не было
+    # подтверждённого человеком опознания.
+    audit = getattr(run.reading, "audit", None)
+    if audit is None:
         return found
-    catalog = load_ifrs_lines()
-    headings = form_headings(document.text, catalog, load_parsing_policy())
-    audit = read_audit_report(
-        document.text, document, before=min(headings.values(), default=0)
-    )
     if audit.determination is Determination.NOT_READABLE:
         found.add("audit_not_readable")
     elif audit.determination is Determination.DETERMINED:
@@ -361,40 +356,24 @@ def _document_features(path: Path, run: DocumentRun) -> set[str]:
     return found
 
 
-def _issuer_type_feature(path: Path) -> str | None:
-    """Тип эмитента по статьям отчётности; None — структурного признака нет.
+def _issuer_type_feature(run: DocumentRun) -> str | None:
+    """Тип эмитента, как его определил цикл; None — структурного признака нет.
 
-    **Умолчание типом не считается.** `determine_type` при отсутствии
-    признаков возвращает обычного корпоративного эмитента — это не вывод,
-    а отсутствие вывода, и записывать его в покрытие значило бы объявить
-    измеренным то, чего не измеряли. Тип девелопера опознаётся статьями,
-    которые справочник без разметки человеком не знает, и до разметки
-    тип остаётся неопределённым.
+    **Умолчание типом не считается.** При отсутствии признаков тип выходит
+    обычным корпоративным — это не вывод, а отсутствие вывода, и записывать
+    его в покрытие значило бы объявить измеренным то, чего не измеряли.
+
+    **Вердикт берётся у цикла, а не считается здесь.** Прежде замер собирал
+    свой словарь величин и звал определение типа сам — без подтверждённого
+    человеком опознания и без чтения по координатам, — и у ЛСР выходил
+    «обычный корпоративный» там, где цикл даёт девелопера. Ровно так замер
+    задачи 26 показывал девелоперский тип, которого боевой путь не давал:
+    ответ второй системы принимался за доказательство.
     """
-    document = text_of(path)
-    if not document.readable:
+    code = getattr(run.reading, "issuer_type", None)
+    if not code or code == load_issuer_types().fallback.code:
         return None
-    from finlib.sources.ifrs_extract import extract
-    from finlib.sources.ifrs_inbox import Rejection, identify
-
-    profile = identify(document.text, document=document, any_currency=True)
-    if isinstance(profile, Rejection):
-        return None
-    found = extract(
-        document.text,
-        profile.dates_by_form,
-        profile.grouping,
-        layouts=profile.columns_by_form,
-    )
-    values = {
-        item.code: item.value
-        for item in found.values
-        if item.report_date == profile.report_dates[0]
-    }
-    verdict = determine_type(values, document.text)
-    if verdict.determination is TypeDetermination.DEFAULT:
-        return None
-    return ISSUER_TYPE_FEATURES.get(verdict.code)
+    return ISSUER_TYPE_FEATURES.get(code)
 
 
 def run_issuer(
@@ -418,7 +397,7 @@ def run_issuer(
             continue
         found.features |= _document_features(item.path, item)
         if item.accepted:
-            kind = _issuer_type_feature(item.path)
+            kind = _issuer_type_feature(item)
             if kind is not None:
                 found.features.add(kind)
 

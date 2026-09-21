@@ -41,7 +41,7 @@ from ifrs_regression_run import _share  # noqa: E402
 
 from finlib.cli import _load_issuers  # noqa: E402
 from finlib.db import fetch_all  # noqa: E402
-from finlib.normalize.lines import normalize_name  # noqa: E402
+from finlib.sources.ifrs_confirmed import match_key  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,10 @@ def measure(path: Path | None = None) -> Scale:
     for issuer in issuers:
         queue = Queue(inn=issuer.inn, report_date=str(issuer.report_date))
         for row in issuer.extraction.unrecognised:
-            name = normalize_name(row.source_name)
+            # Ключ строки — боевой, тот же, которым разметка ищет прежние
+            # подтверждения: свой ключ в замере расходится с ним молча,
+            # и перенос разметки выходил бы измеренным иначе, чем работает.
+            name = match_key(row.source_name)
             if name in _NOT_AN_ITEM:
                 continue
             queue.rows += 1
@@ -197,7 +200,7 @@ def measure(path: Path | None = None) -> Scale:
     try:
         for row in fetch_all(_CONFIRMED):
             found.confirmed.setdefault(row["inn"], set()).add(
-                normalize_name(row["source_name"])
+                match_key(row["source_name"])
             )
     except Exception as failure:  # noqa: BLE001 — замер не должен падать из-за базы
         logger.warning("присвоения прежних сессий не прочитаны: %s", failure)

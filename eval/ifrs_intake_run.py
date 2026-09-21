@@ -24,15 +24,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from finlib.db import connection
-from finlib.normalize.ifrs_loader import load_extraction
+from finlib.pipeline import accept_ifrs_document
 from finlib.quality.codes import CheckCode
-from finlib.sources.ifrs_confirmed import load_confirmed
-from finlib.sources.ifrs_document import read_document
-from finlib.sources.ifrs_extract import extract
-from finlib.sources.ifrs_inbox import Rejection, form_headings, identify, text_of
-from finlib.sources.ifrs_numbers import load_parsing_policy
-from finlib.sources.ifrs_review import ReviewOutcome, review
+from finlib.sources.ifrs_inbox import text_of
+from finlib.sources.ifrs_review import ReviewOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +70,12 @@ class DocumentRun:
     grouping: str = ""
     # Доставка того же комплекта, отложенная в пользу другой: причина.
     set_aside: str | None = None
+    # **Прочитанное помимо таблиц — от цикла, а не своим чтением.** Замеру
+    # нужны заключение и тип эмитента; прежде тот, кому они нужны, читал
+    # документ заново — по своему словарю величин и без подтверждённого
+    # человеком опознания, — и ответ выходил другим. Здесь лежит то самое
+    # чтение, которое цикл и записал в комплект.
+    reading: object | None = None
 
     @property
     def automatic(self) -> bool:
@@ -197,29 +198,33 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
             check_code=CheckCode.FILE_NOT_PARSED.value,
         )
 
-    # Страницы передаются приёму: без них проверка потерянной страницы внутри
-    # форм всегда отвечает «потерь нет», то есть не работает вовсе. У Автодора
-    # так не существовала вся сторона пассива, у Самолёта потеряны две страницы
+    # **Прогон не повторяет шаги цикла, а зовёт цикл.** Прежде здесь стояла
+    # своя последовательность — приём, извлечение, подтверждённое, сверка,
+    # чтение документа, запись, — и она расходилась с боевой: подтверждённое
+    # опознание доходило до решения, но не до чтения документа, и тип эмитента
+    # выходил другим. Второй путь к одному ответу неминуемо расходится
+    # с первым, и увидеть это можно только сравнив два прогона.
+    #
+    # Страницы передаются приёму внутри цикла: без них проверка потерянной
+    # страницы внутри форм всегда отвечает «потерь нет». У Автодора так
+    # не существовала вся сторона пассива, у Самолёта потеряны две страницы
     # внутри форм — а доля автоматического прохождения считалась так, будто
     # документы целы.
-    profile = identify(document.text, document=document)
-    if isinstance(profile, Rejection):
-        return DocumentRun(
-            path, False, rejection=profile.reason, check_code=profile.code.value
-        )
-
-    extraction = extract(
+    # Эмитент называется всегда: ранее подтверждённое опознание участвует
+    # в решении наравне со справочником, и без ИНН доля автопрохождения
+    # выходила бы меньше настоящей. Запись при этом включает `write`.
+    intake = accept_ifrs_document(
         document.text,
-        profile.dates_by_form,
-        profile.grouping,
-        columns=document.columns_of,
-        layouts=profile.columns_by_form,
+        inn=inn,
+        raw_path=str(path),
+        document=document,
+        write=write,
     )
-    # Ранее подтверждённое опознание участвует в решении наравне
-    # со справочником: замер обязан отвечать на тот же вопрос, что цикл,
-    # иначе доля автопрохождения в отчёте меньше настоящей.
-    known = load_confirmed(inn, extraction, profile)
-    decision = review(extraction, profile, confirmed=known)
+    if not intake.accepted:
+        return DocumentRun(
+            path, False, rejection=intake.reason, check_code=intake.check_code
+        )
+    profile, extraction, decision = intake.profile, intake.extraction, intake.review
 
     found = DocumentRun(
         path=path,
@@ -239,30 +244,14 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
         if hasattr(profile.reporting_kind, "value")
         else str(profile.reporting_kind),
         grouping=profile.grouping.value,
+        reading=intake.reading,
     )
 
-    if write and inn:
-        # **Прогон читает документ тем же чтением, что цикл.** Прежде он
-        # записи не давал ни заключения, ни величин примечаний, ни типа
-        # эмитента — а базу наполняет именно он: у ФосАгро мнение с оговоркой,
-        # и в журнале комплекта о ней не было ни строки.
-        from finlib.normalize.ifrs_lines import load_ifrs_lines
-
-        headings = form_headings(
-            document.text, load_ifrs_lines(), load_parsing_policy()
-        )
-        reading = read_document(
-            document.text, extraction, profile, headings, known, document=document
-        )
-        with connection() as conn:
-            # Подтверждённое опознание передаётся записи так же, как решению:
-            # иначе комплект принимался бы с его учётом, а факты писались
-            # без него — и в расчёт не попадали статьи, о которых человек
-            # уже сказал, чем они являются.
-            loaded = load_extraction(
-                inn, extraction, profile, decision, conn, reading, confirmed=known
-            )
-            found.src_file_id = loaded.src_file_id
+    # Запись делает тот же цикл, и здесь остаётся только назвать комплект:
+    # прежде запись собиралась отдельно, и чтение документа при ней отличалось
+    # от чтения при сверке.
+    if intake.loaded is not None:
+        found.src_file_id = intake.loaded.src_file_id
     return found
 
 

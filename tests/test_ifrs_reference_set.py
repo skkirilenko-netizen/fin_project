@@ -32,7 +32,18 @@ def module(name: str):
 runner = module("ifrs_reference_run")
 REFERENCE = settings.base_dir / "eval" / "ifrs_reference.yaml"
 KNOWN_DOCUMENT = {"note_contains", "value", "note_value", "grouping", "reporting_kind"}
-KNOWN_DATABASE = {"issuer_type", "metric_refused", "stop_factors"}
+KNOWN_DATABASE = {
+    "issuer_type",
+    "metric_refused",
+    "stop_factors",
+    "audit_signal",
+    "caveat_kind",
+    # **Несрабатывание проверяется наравне со срабатыванием.** Признак, дающий
+    # надзорный сигнал всякому плательщику дивидендов, хуже отсутствующего,
+    # и эталон обязан держать и такую величину.
+    "signal_absent",
+    "group_out_of_score",
+}
 
 
 @pytest.fixture(scope="module")

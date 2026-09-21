@@ -51,7 +51,7 @@ from pathlib import Path
 from finlib.cli import _load_issuers
 from finlib.db import fetch_all
 from finlib.normalize.ifrs_lines import load_ifrs_lines
-from finlib.normalize.lines import normalize_name
+from finlib.sources.ifrs_confirmed import match_key
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +99,16 @@ def main(argv: list[str] | None = None) -> int:
     catalog = load_ifrs_lines()
     confirmed: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
     for row in fetch_all(_EXACT, {}):
-        key = (normalize_name(row["source_name"]), row["form_code"])
+        # Ключ строки — боевой, тот же, которым разметка ищет прежние
+        # подтверждения: свой ключ в замере расходится с ним молча.
+        key = (match_key(row["source_name"]), row["form_code"])
         confirmed[key].add((row["code"], row["inn"]))
 
     # Наименование → где оно осталось неопознанным и каким кодом подтверждено.
     gap: dict[tuple[str, str], dict] = {}
     for issuer in issuers:
         for row in issuer.extraction.unrecognised:
-            key = (normalize_name(row.source_name), row.form)
+            key = (match_key(row.source_name), row.form)
             if key not in confirmed:
                 continue
             item = gap.setdefault(
@@ -133,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     # у нас два разных кода в двух формах одного эмитента.
     all_codes: dict[str, set[str]] = defaultdict(set)
     for row in fetch_all(_ASSIGNED, {}):
-        all_codes[normalize_name(row["source_name"])].add(row["code"])
+        all_codes[match_key(row["source_name"])].add(row["code"])
 
     spellings = _spellings(issuers, confirmed)
     ready: dict[tuple[str, str], dict] = {}
@@ -208,7 +210,7 @@ def _spellings(issuers: list, confirmed: dict) -> dict[tuple[str, str], set[str]
     found: dict[tuple[str, str], set[str]] = defaultdict(set)
     for issuer in issuers:
         for row in issuer.extraction.unrecognised:
-            found[(issuer.inn, row.form)].add(normalize_name(row.source_name))
+            found[(issuer.inn, row.form)].add(match_key(row.source_name))
         for value in issuer.extraction.values:
             form = next(
                 (
@@ -219,7 +221,7 @@ def _spellings(issuers: list, confirmed: dict) -> dict[tuple[str, str], set[str]
                 None,
             )
             if form is not None:
-                found[(issuer.inn, form)].add(normalize_name(value.source_name))
+                found[(issuer.inn, form)].add(match_key(value.source_name))
     for (name, form), owners in confirmed.items():
         for _code, inn in owners:
             found[(inn, form)].add(name)
@@ -246,10 +248,10 @@ def _whole_spelling(
     short = name[:1].islower() or len(name.split()) < _SHORT_NAME_WORDS
     if not short:
         return None
-    codes = all_codes.get(normalize_name(name), set())
+    codes = all_codes.get(match_key(name), set())
     if len(codes) > 1:
         return "родовое слово: у нас ему присвоены " + ", ".join(sorted(codes))
-    packed = normalize_name(name)
+    packed = match_key(name)
     for inn in item["by"] | item["own"]:
         for other in spellings.get((inn, form), ()):
             if other != packed and packed in other:

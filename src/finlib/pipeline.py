@@ -279,8 +279,14 @@ class IfrsIntake:
     profile: object | None = None
     extraction: object | None = None
     review: object | None = None
+    # **Прочитанное помимо таблиц отдаётся наружу**: заключение, величины
+    # примечаний, тип эмитента. Прежде их приходилось читать заново тому, кому
+    # они нужны, — и замер набора читал заключение своим вызовом, по своему
+    # словарю величин, а тип получал без подтверждённого человеком опознания.
+    # Одно чтение на цикл и на замер: расходиться должны входы, а не ответы.
+    reading: object | None = None
     # Итог записи комплекта в базу; None — запись не выполнялась, потому что
-    # организация не названа.
+    # организация не названа либо запись не запрашивалась.
     loaded: object | None = None
 
 
@@ -295,6 +301,7 @@ def accept_ifrs_document(
     accepted: dict[str, str] | None = None,
     document: object | None = None,
     caveat_kind: str | None = None,
+    write: bool = True,
 ) -> IfrsIntake:
     """Проводит документ МСФО через приём, разбор форм и экран сверки.
 
@@ -378,12 +385,22 @@ def accept_ifrs_document(
     )
     report(Stage.QUALITY, reading.describe(), ok=any(item.found for item in reading.notes))
 
-    intake = IfrsIntake(True, profile=profile, extraction=extraction, review=decision)
-    if inn is None:
+    intake = IfrsIntake(
+        True,
+        profile=profile,
+        extraction=extraction,
+        review=decision,
+        reading=reading,
+    )
+    if inn is None or not write:
         # Без организации комплект не записывается: привязать его не к чему.
-        # Это разбор ради разбора — им пользуется прогон приёма, который
-        # отвечает на вопрос о доле автоматического прохождения, а базу
-        # не трогает.
+        #
+        # **Знать эмитента и писать в базу — разные вещи.** `write=False`
+        # проводит разбор целиком, включая ранее подтверждённое опознание,
+        # и ничего не пишет: прогону приёма нужен тот же ответ, что цикл даёт
+        # при записи, а база ему не нужна. Прежде различить это было нечем,
+        # и прогон собирал свою последовательность шагов — которая и разошлась
+        # с боевой.
         return intake
 
     from finlib.normalize.ifrs_loader import load_extraction
