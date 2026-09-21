@@ -643,6 +643,101 @@ def test_rsbu_checks_are_not_run_against_an_ifrs_set(db_conn) -> None:
     assert any("Контроли РСБУ не выполнялись" in row["message"] for row in rows)
 
 
+def _facts_snapshot(db_conn) -> list[tuple]:
+    """Состояние фактов эмитента: всё, кроме служебных идентификаторов.
+
+    Идентификатор комплекта в снимок не входит: он выдаётся
+    последовательностью и при другом порядке загрузки будет другим у тех же
+    данных. Сверяются величина, роль периода и сила опознания — то, от чего
+    зависит расчёт.
+    """
+    return [
+        (
+            row["report_date"],
+            row["form_code"],
+            row["line_code"],
+            row["value"],
+            row["period_role"],
+            row["recognition"],
+        )
+        for row in fetch_all(
+            "SELECT report_date, form_code, line_code, value, period_role, "
+            "recognition FROM fact_report WHERE inn = %(i)s AND standard = 'ifrs' "
+            "ORDER BY report_date, form_code, line_code",
+            {"i": INN},
+            conn=db_conn,
+        )
+    ]
+
+
+def _forget_issuer(db_conn) -> None:
+    """Забывает эмитента внутри той же транзакции — для второго порядка.
+
+    Журнал качества стандарта не содержит и чистится по комплектам: запись
+    привязана к комплекту, а не к стандарту напрямую.
+    """
+    execute(
+        "DELETE FROM dq_log WHERE src_file_id IN ("
+        "  SELECT id FROM src_file WHERE inn = %(i)s AND standard = 'ifrs')",
+        {"i": INN},
+        conn=db_conn,
+    )
+    for table in ("fact_report", "src_file"):
+        execute(
+            f"DELETE FROM {table} WHERE inn = %(i)s AND standard = 'ifrs'",
+            {"i": INN},
+            conn=db_conn,
+        )
+
+
+def test_load_order_does_not_change_the_result(db_conn) -> None:
+    """Прямой и обратный порядок загрузки дают одно и то же состояние базы.
+
+    Один и тот же период приходит дважды: отчётным в своём комплекте
+    и сравнительным в более позднем, и величины расходятся из-за
+    переклассификации. Без правила приоритета побеждала бы та, что загружена
+    последней, — то есть результат зависел бы от порядка наших запусков.
+
+    Это второй случай зависимости от порядка за ветку: первым было чтение
+    фактов по коду без формы, где выбор зависел от порядка строк в ответе
+    базы и знак величины менялся от прогона к прогону.
+    """
+    revised = LATER.replace(
+        "Итого активы                          1 700 000      1 500 000",
+        "Итого активы                          1 700 000      1 111 111",
+    )
+
+    # Прямой порядок: сперва комплект 2024 года, затем 2025-й со своей
+    # сравнительной колонкой за 2024 год.
+    load_extraction(INN, *prepared(), db_conn, NOT_READ)
+    later = load_extraction(INN, *later_set(revised), db_conn, NOT_READ)
+    straight = _facts_snapshot(db_conn)
+
+    # Совпадение снимков — не совпадение двух бездействий: правило приоритета
+    # здесь сработало, и входящая сравнительная величина отклонена.
+    assert later.collisions.kept_by_priority > 0
+
+    _forget_issuer(db_conn)
+
+    # Обратный порядок: сперва 2025-й, и величина 2024 года приходит
+    # сравнительной; затем комплект 2024 года со своей отчётной.
+    load_extraction(INN, *later_set(revised), db_conn, NOT_READ)
+    load_extraction(INN, *prepared(), db_conn, NOT_READ)
+    reversed_order = _facts_snapshot(db_conn)
+
+    assert straight == reversed_order
+
+    # Величина за 2024 год взята из своего комплекта, где она отчётная,
+    # а не из сравнительной колонки позднего.
+    total = next(
+        item
+        for item in straight
+        if item[0] == DATES[0] and item[2] == "ifrs.total_assets"
+    )
+    assert total[3] == Decimal(1_500_000)
+    assert total[4] == "current"
+
+
 def test_ifrs_set_does_not_reach_rsbu_metrics(db_conn) -> None:
     """Расчёт по РСБУ не подхватывает факты МСФО.
 
