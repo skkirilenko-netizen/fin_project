@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS src_file (
     id                bigserial PRIMARY KEY,
     inn               text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
     report_year       integer NOT NULL,
-    source            text NOT NULL CHECK (source IN ('gir_bo', 'file')),
+    -- Способ получения комплекта, а не стандарт отчётности: `cbonds` —
+    -- нормализованные данные агрегатора, и они входят в ключ уникальности
+    -- наравне с прочими способами. Один и тот же период приходит и файлом,
+    -- и от агрегатора, и это два комплекта, а не один.
+    source            text NOT NULL CHECK (source IN ('gir_bo', 'file', 'cbonds')),
     standard          text NOT NULL DEFAULT 'rsbu' CHECK (standard IN ('rsbu', 'ifrs')),
     reporting_type    text NOT NULL DEFAULT 'full'
                       CHECK (reporting_type IN ('full', 'simplified')),
@@ -88,6 +92,10 @@ ALTER TABLE src_file ADD COLUMN IF NOT EXISTS digit_grouping text;
 ALTER TABLE src_file ADD COLUMN IF NOT EXISTS reporting_kind text;
 -- Догонка 21.09.2026: версия кода загрузки комплекта.
 ALTER TABLE src_file ADD COLUMN IF NOT EXISTS code_version text;
+-- Догонка 21.09.2026: третий способ получения комплекта — агрегатор.
+ALTER TABLE src_file DROP CONSTRAINT IF EXISTS src_file_source_check;
+ALTER TABLE src_file
+    ADD CONSTRAINT src_file_source_check CHECK (source IN ('gir_bo', 'file', 'cbonds'));
 
 DO $$
 BEGIN
@@ -183,8 +191,12 @@ CREATE TABLE IF NOT EXISTS fact_report (
     -- не писались вовсе: у Норникеля из расчёта выпадали все 64
     -- подтверждённые статьи, у Автодора — 39 из 40, включая две,
     -- в которых лежат 85 % активов.
+    -- cbonds — величина взята у агрегатора: она нормализована им, а не
+    -- прочитана из отчётности, и доверие к ней третье. Держать её без графы
+    -- нельзя: «прочие» агрегатора покрывают по четыре-шесть наших позиций,
+    -- и в документе это обязано быть видно.
     recognition  text NOT NULL DEFAULT 'catalog'
-                 CHECK (recognition IN ('catalog', 'confirmation', 'note')),
+                 CHECK (recognition IN ('catalog', 'confirmation', 'note', 'cbonds')),
     -- Откуда величина взята, когда она из примечания: номер примечания
     -- и наименования его строк. Читатель, сверяющий заключение с отчётностью,
     -- обязан видеть источник: у Автодора в строке формы 414, а начислено
@@ -224,10 +236,11 @@ COMMENT ON COLUMN fact_report.value_status IS
 -- Графа заведена 21.09.2026; правило догонки действует с 17.09.2026.
 ALTER TABLE fact_report
     ADD COLUMN IF NOT EXISTS recognition text NOT NULL DEFAULT 'catalog';
+-- Догонка 21.09.2026: четвёртая сила опознания — величина агрегатора.
 ALTER TABLE fact_report DROP CONSTRAINT IF EXISTS fact_report_recognition_check;
 ALTER TABLE fact_report
     ADD CONSTRAINT fact_report_recognition_check
-    CHECK (recognition IN ('catalog', 'confirmation', 'note'));
+    CHECK (recognition IN ('catalog', 'confirmation', 'note', 'cbonds'));
 -- Ссылка на примечание заведена 21.09.2026 вместе с третьей силой опознания.
 ALTER TABLE fact_report ADD COLUMN IF NOT EXISTS note_number integer;
 ALTER TABLE fact_report ADD COLUMN IF NOT EXISTS note_source_name text;
