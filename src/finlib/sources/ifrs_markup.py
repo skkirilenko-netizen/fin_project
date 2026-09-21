@@ -44,6 +44,7 @@ from finlib.sources.ifrs_extract import (
     materiality_base,
     materiality_share,
     nearest_total_below,
+    row_name,
 )
 from finlib.sources.ifrs_inbox import DocumentProfile, Rejection, identify, text_of
 from finlib.sources.ifrs_numbers import Grouping
@@ -955,13 +956,14 @@ def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition | None]:
 # у другого комплекта означает другую строку, поэтому перенос присвоения
 # между комплектами — не помощь, а тихое присвоение чужого кода.
 _SAVED = """
-SELECT code, inn, report_date, source_name, form_code, row_index,
+SELECT code, inn, report_date, source_name, match_key, form_code, row_index,
        relation, related_codes
 FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
 """
 
 _TAKEN = """
-SELECT code, inn, source_name FROM ifrs_line_confirmation WHERE code = %(code)s
+SELECT code, inn, source_name, match_key
+FROM ifrs_line_confirmation WHERE code = %(code)s
 """
 
 _FORGET = """
@@ -1035,7 +1037,12 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
         issuer = by_report.get((row["inn"], row["report_date"]))
         if issuer is None:
             continue
-        position = catalog.match_by_name(row["source_name"], form=row["form_code"])
+        # Справочник спрашивается чистым наименованием нынешнего разбора:
+        # по записи с мусором он не опознал бы статью, которую теперь знает,
+        # и исход «опознана справочником» не наступал бы никогда.
+        position = catalog.match_by_name(
+            row_name(row["source_name"]), form=row["form_code"]
+        )
         if position is not None and position.form == row["form_code"]:
             found.append(
                 SavedMarkup(
@@ -1146,21 +1153,26 @@ def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
     ключа нет — разметка не применяется, и `review_saved` называет это потерей.
     Записи прежних сессий индекса не имеют и ищутся только по наименованию.
     """
+    from finlib.sources.ifrs_confirmed import match_key
+
     same_form = [
         item
         for item in issuer.extraction.unrecognised
         if item.form == row["form_code"]
     ]
-    wanted = normalize_name(row["source_name"])
+    # Сравнение по ключу нынешнего разбора: запись прежнего дня несёт мусор
+    # («Поступление от выпуска акций 19 51 012 -»), и дословно она не совпадёт
+    # ни с одной строкой нынешней очереди.
+    wanted = row["match_key"] or match_key(row["source_name"])
     if row.get("row_index") is not None:
         key = (row["form_code"], int(row["row_index"]))
         at_index = next((item for item in same_form if item.key == key), None)
-        if at_index is not None and normalize_name(at_index.source_name) == wanted:
+        if at_index is not None and match_key(at_index.source_name) == wanted:
             return key
         # Индекс сместился либо строка опознана справочником. Наименование
         # переносит разметку, если оно в форме единственное: иначе решение
         # применилось бы к произвольной из тёзок.
-        named = [item for item in same_form if normalize_name(item.source_name) == wanted]
+        named = [item for item in same_form if match_key(item.source_name) == wanted]
         if len(named) == 1:
             if at_index is not None:
                 logger.info(
@@ -1172,7 +1184,7 @@ def _restore_key(issuer: IssuerMarkup, row: dict) -> tuple[str, int] | None:
                 )
             return named[0].key
         return None
-    named = [item for item in same_form if normalize_name(item.source_name) == wanted]
+    named = [item for item in same_form if match_key(item.source_name) == wanted]
     return named[0].key if len(named) == 1 and wanted else None
 
 
@@ -1205,16 +1217,26 @@ def code_is_taken(
     и охраняет.
     """
     from finlib.db import fetch_all
+    from finlib.sources.ifrs_confirmed import match_key
 
     position = catalog.get(code)
     if position is not None:
         return f"это код ядра: {position.name}"
     rows = fetch_all(_TAKEN, {"code": code}, conn=conn)
+    # **Сравнение по ключу, а не по записи.** `source_name` хранит то, что
+    # разбор прочитал тогда, вместе с мусором: у Сегежи «Обязательства,
+    # относящиеся к опционным соглашениям 19 29 140 -» и нынешнее чистое
+    # наименование той же статьи — одна вещь, а дословно они разные, и код
+    # объявлялся занятым самой же этой статьёй.
+    wanted = match_key(source_name) if source_name is not None else None
     mine = {
         row["source_name"]
         for row in rows
         if (inn is None or row["inn"] == inn)
-        and (source_name is None or row["source_name"] != source_name)
+        and (
+            wanted is None
+            or (row["match_key"] or match_key(row["source_name"])) != wanted
+        )
     }
     if mine:
         listed = ", ".join(sorted(mine)[:3])

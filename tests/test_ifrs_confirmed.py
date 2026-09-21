@@ -231,6 +231,69 @@ def test_match_key_is_recomputed_and_the_wording_is_kept(clean) -> None:
     assert len(load_confirmed(INN, extraction, profile, conn=clean).rows) == 1
 
 
+def test_glued_wording_of_the_same_article_is_found(clean) -> None:
+    """Подтверждение под старым склеенным наименованием находится по ключу.
+
+    Разбор того дня читал строку вместе с номером примечания и величинами:
+    «Задолженность Принципала 19 160 000  -». Запись остаётся такой, какой
+    была, а ключ вычисляется нынешним разбором — той же функцией, что делит
+    строку формы. Без этого прежняя разметка не находилась, и у Сегежи
+    человеку предлагалось завести второй код для одной статьи.
+    """
+    confirm(clean, INN, "Задолженность Принципала 19 160 000  -", "ifrs.principal_receivable")
+    extraction, profile = prepared()
+    # Ключа в записи нет вовсе — он вычисляется на месте: запись прежней
+    # сессии его не имела.
+    known = load_confirmed(INN, extraction, profile, conn=clean)
+    assert len(known.rows) == 1
+
+    # Присест разметки начинается пересчётом ключей, и запись получает свой.
+    assert refresh_match_keys(INN, conn=clean) == 1
+    row = fetch_one(
+        "SELECT source_name, match_key FROM ifrs_line_confirmation WHERE inn = %(i)s",
+        {"i": INN},
+        conn=clean,
+    )
+    # Дословная запись не тронута: она доказательная база.
+    assert row["source_name"] == "Задолженность Принципала 19 160 000  -"
+    assert row["match_key"] == "задолженность принципала"
+
+
+def test_code_is_not_taken_by_the_same_article(clean) -> None:
+    """Код не считается занятым той же статьёй под склеенным наименованием.
+
+    У ПАО «Сегежа Групп» «Обязательства, относящиеся к опционным соглашениям»
+    были подтверждены под наименованием с хвостом «19 29 140 -», и разметка
+    отказывала: «код занят: у этого эмитента код уже присвоен статье…» —
+    той же самой статье.
+    """
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.sources.ifrs_markup import code_is_taken
+
+    catalog = load_ifrs_lines()
+    confirm(clean, INN, "Задолженность Принципала 19 160 000  -", "ifrs.principal_receivable")
+
+    same = code_is_taken(
+        "ifrs.principal_receivable",
+        catalog,
+        INN,
+        clean,
+        source_name="Задолженность Принципала",
+    )
+    assert same is None, same
+
+    # Другая статья того же эмитента код занимает: там два разных смысла
+    # под одним кодом, и это уже не запись прошлого дня.
+    other = code_is_taken(
+        "ifrs.principal_receivable",
+        catalog,
+        INN,
+        clean,
+        source_name="Задолженность концедента",
+    )
+    assert other is not None
+
+
 def test_confirmation_of_another_issuer_is_not_knowledge(clean) -> None:
     """У чужого эмитента то же наименование может означать другое."""
     confirm(clean, OTHER_INN, "Задолженность Принципала", "ifrs.principal_receivable")
