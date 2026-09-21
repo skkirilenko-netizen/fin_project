@@ -83,20 +83,25 @@ class _Status:
         self.value = value
 
 
-def _reason_text(item: MetricValue, report_date: date) -> str:
+def _reason_text(
+    item: MetricValue, report_date: date, policy: IfrsMetricsPolicy | None = None
+) -> str:
     """Причина отказа словами: без наименования показателя, но с периодом.
 
     Недостающие величины называются словами, а не кодами: «нет входных
     величин — interest_accrued» — технический идентификатор в тексте документа,
     а правило его запрещает. Период назван потому, что утверждение «не
     рассчитан» без года ложно, когда за другой период показатель посчитан.
-    """
-    from finlib.metrics.ifrs import REASON_TEXT, named
 
-    text = REASON_TEXT.get(item.reason, "причина не названа")
-    missing = ", ".join(named(code) for code in item.missing)
-    body = f"{text} — {missing}" if missing else text
-    return f"за {report_date.year} год {body}"
+    **У невозможной поправки место называет методика.** Величины, которой
+    не хватает, в справочнике позиций нет вовсе — она стоит сноской, — и
+    назвать её словами нечем: в текст протекал код `ifrs.escrow_balance`,
+    читателю ничего не говорящий. Методика объявляет место сама: «средства
+    на счетах эскроу раскрыты сноской под балансом, а не строкой формы».
+    """
+    from finlib.metrics.ifrs import reason_text
+
+    return f"за {report_date.year} год {reason_text(item, policy)}"
 
 
 def save_metrics(

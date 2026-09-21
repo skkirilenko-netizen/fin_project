@@ -370,7 +370,12 @@ def accept_ifrs_document(
     # выпадало покрытие процентов, а с ним группа «Обслуживание долга».
     # Тип эмитента опознаётся статьями и текстом, и расчёт по фактам базы
     # документа не видит: без записи тип пришлось бы принимать умолчанием.
-    reading = read_document(text, extraction, profile, headings, document=document)
+    # Подтверждённое опознание доходит и до чтения документа: тип эмитента
+    # определяется структурными статьями, и у ЛСР обе статьи девелопера
+    # присвоены человеком.
+    reading = read_document(
+        text, extraction, profile, headings, confirmed, document=document
+    )
     report(Stage.QUALITY, reading.describe(), ok=any(item.found for item in reading.notes))
 
     intake = IfrsIntake(True, profile=profile, extraction=extraction, review=decision)

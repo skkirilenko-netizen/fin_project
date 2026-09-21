@@ -56,6 +56,7 @@ def read_document(
     extraction,
     profile,
     headings: dict[str, int],
+    confirmed,
     document: PdfDocument | None = None,
 ) -> DocumentReading:
     """Читает заключение, величины примечаний и тип эмитента одним заходом.
@@ -64,6 +65,16 @@ def read_document(
     примечания после последней, и оба рубежа структурные, а не по числу строк.
     `document` нужен заключению: без страниц нечитаемое заключение неотличимо
     от прочитанного, и признак всегда отвечал бы «потерь нет».
+
+    `confirmed` — ранее подтверждённое опознание того же эмитента, довод
+    **обязательный и позиционный**. Тип эмитента определяется структурными
+    статьями, и у ЛСР обе статьи девелопера присвоены человеком: вердикт,
+    смотревший только на опознанное справочником, отвечал «corporate»,
+    поправка ликвидности не применялась, и текущая ликвидность 4,148 шла
+    в балл группой 100 из 100 — при том, что 217 501 млн на счетах эскроу
+    организации недоступны. Довод с умолчанием означал бы, что подтверждённое
+    можно молча не передать, — это уже случалось с фактами комплекта.
+    Передать «ничего» можно, но только назвав это.
     """
     from finlib.sources.ifrs_audit import read_audit_report
     from finlib.sources.ifrs_issuer_type import determine_type
@@ -71,7 +82,20 @@ def read_document(
     before = min(headings.values(), default=0)
     audit = read_audit_report(text, document=document, before=before)
     notes = _note_values(text, extraction, profile, headings)
-    issuer = determine_type(extraction.totals(profile.report_dates[0]), text)
+    # **Опознание двух сил участвует в вердикте наравне.** Справочник
+    # утверждает о строке вообще, подтверждение — о строке этого эмитента;
+    # для признака типа этого довольно, и величина подтверждённой строки
+    # такая же величина, как опознанная справочником.
+    values = dict(extraction.totals(profile.report_dates[0]))
+    if confirmed is not None:
+        # Берутся **факты** подтверждённых строк: там присвоенный человеком код
+        # стоит рядом со своей величиной. `values` и `extras` для этого
+        # не годятся — первое сводит величины к кодам справочника, второе
+        # к итогам разделов, и присвоенного кода нет ни в том, ни в другом.
+        values |= {
+            fact.code: fact.values[0] for fact in confirmed.facts if fact.values
+        }
+    issuer = determine_type(values, text)
     return DocumentReading(
         audit=audit,
         notes=notes,

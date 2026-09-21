@@ -114,6 +114,75 @@ def test_consistency_with_the_audit_report_has_three_outcomes() -> None:
     assert "не прочитано" in unreadable_note
 
 
+def test_confirmed_value_gives_the_type_as_the_catalogue_would() -> None:
+    """Величина, присвоенная человеком, участвует в вердикте о типе наравне.
+
+    Оба структурных признака девелопера справочник не опознаёт: у ЛСР
+    «Экономия по кредитам с эскроу…» и «Движение денежных средств,
+    направленных на операционную деятельность» размечены человеком. Вердикт,
+    смотревший только на опознанное справочником, отвечал «corporate» —
+    и поправка ликвидности не применялась: 4,148 шло в балл группой
+    100 из 100 при 217 501 млн на недоступных счетах эскроу.
+
+    Это третий случай «подтверждённое человеком не доходит до…»: прежде
+    так не доходили факты комплекта.
+    """
+    from dataclasses import dataclass
+    from datetime import date
+
+    from finlib.sources.ifrs_document import read_document
+
+    policy = load_issuer_types()
+    text = (
+        "Средства на счетах эскроу, полученные от участников долевого "
+        "строительства, и проектное финансирование."
+    )
+    # Без подтверждённого: структурных статей нет, тип по умолчанию.
+    assert determine_type({}, text, policy).code == "corporate"
+    # С подтверждённой величиной — тот же вердикт, что дал бы справочник.
+    found = determine_type(
+        {"ifrs.escrow_savings_in_revenue": Decimal(-20950)}, text, policy
+    )
+    assert found.code == "developer"
+    assert found.determination is Determination.STRUCTURAL
+
+    # И довод доходит до чтения документа: он обязательный и позиционный,
+    # потому что молча не переданное подтверждение неотличимо от его отсутствия.
+    @dataclass(frozen=True)
+    class _Fact:
+        code: str
+        values: tuple
+
+    @dataclass(frozen=True)
+    class _Confirmed:
+        facts: tuple
+
+    class _Extraction:
+        notes: tuple = ()
+        forms: dict = {}
+
+        def totals(self, report_date, catalog=None) -> dict:
+            return {}
+
+        def value_of(self, code: str, report_date) -> None:
+            return None
+
+    class _Profile:
+        from finlib.sources.ifrs_numbers import Grouping
+
+        report_dates = (date(2025, 12, 31),)
+        grouping = Grouping.RUSSIAN
+
+    reading = read_document(
+        text,
+        _Extraction(),
+        _Profile(),
+        {},
+        _Confirmed(facts=(_Fact("ifrs.escrow_savings_in_revenue", (Decimal(-20950),)),)),
+    )
+    assert reading.issuer_type == "developer"
+
+
 def test_metric_adjustment_belongs_to_metrics_and_refuses_without_the_value() -> None:
     """Поправка показателя живёт в составе показателей и отказывает без величины.
 

@@ -88,9 +88,7 @@ class MetricValue:
         if self.calculable:
             mark = " (приведён к году)" if self.annualised else ""
             return f"{self.name}: {self.value.quantize(Decimal('0.001'))}{mark}"
-        text = REASON_TEXT.get(self.reason, "причина не названа")
-        missing = f" — {', '.join(self.missing)}" if self.missing else ""
-        return f"{self.name}: не рассчитан, {text}{missing}"
+        return f"{self.name}: не рассчитан, {reason_text(self)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +138,30 @@ def named(code: str) -> str:
     справочник статей, а здесь только расчёт.
     """
     return DERIVED_NAMES.get(code, code)
+
+
+def reason_text(item: "MetricValue", policy: IfrsMetricsPolicy | None = None) -> str:
+    """Причина отказа словами — **одна на все места, где она печатается**.
+
+    Прежде текст набирался дважды: здесь для терминала и в записи показателей
+    для базы. Два пути к одному ответу расходятся, и расходились: у ЛСР
+    в терминал шёл код `ifrs.escrow_balance`, а в документ — место из методики.
+
+    **У невозможной поправки место называет методика.** Недостающей величины
+    в справочнике позиций нет вовсе — она стоит сноской, — и назвать её
+    словами нечем: код читателю ничего не говорит, а методика объявляет место
+    сама («средства на счетах эскроу раскрыты сноской под балансом»).
+    """
+    text = REASON_TEXT.get(item.reason, "причина не названа")
+    missing = ", ".join(named(code) for code in item.missing)
+    if item.reason is Reason.ADJUSTMENT_IMPOSSIBLE:
+        policy = policy or load_ifrs_metrics()
+        declared = next(
+            (found.where for found in policy.adjustments if found.metric == item.code),
+            "",
+        )
+        missing = declared or missing
+    return f"{text} — {missing}" if missing else text
 
 
 def months_of(

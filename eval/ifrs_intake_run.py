@@ -252,7 +252,7 @@ def run_one(path: Path, write: bool = False, inn: str | None = None) -> Document
             document.text, load_ifrs_lines(), load_parsing_policy()
         )
         reading = read_document(
-            document.text, extraction, profile, headings, document=document
+            document.text, extraction, profile, headings, known, document=document
         )
         with connection() as conn:
             # Подтверждённое опознание передаётся записи так же, как решению:
