@@ -73,6 +73,36 @@ def test_negative_denominator_cancels_the_metric() -> None:
     assert found.reason is Reason.NEGATIVE_DENOMINATOR
 
 
+def test_upper_bound_stands_in_for_the_missing_ratio() -> None:
+    """Вывод по границе: без амортизации показатель ограничен сверху.
+
+    EBITDA есть операционная прибыль плюс амортизация, а амортизация
+    неотрицательна: при положительной операционной прибыли отношение чистого
+    долга к EBITDA не выше отношения к операционной прибыли. Для решения
+    «нужен ли человек» этого хватает, и точной величины не требуется.
+
+    Граница считается только там, где точной величины нет: рядом с посчитанной
+    она обещала бы точность, которой нет, и читатель, увидев два числа
+    об одном показателе, правильно им не верит.
+    """
+    without = {key: value for key, value in HEALTHY.items() if key != "ifrs.depreciation"}
+    computed = compute_all(Inputs(without, {}))
+    exact = value_of(computed, "net_debt_ebitda")
+    assert not exact.calculable
+    bound = value_of(computed, "net_debt_op_profit")
+    assert bound.calculable and not bound.in_scoring
+    # Граница равна отношению к операционной прибыли и печатается со словом.
+    assert bound.value == (
+        Decimal(119062) + Decimal(209715) - Decimal(14681)
+    ) / Decimal(135605)
+    assert bound.shown.startswith("не выше ")
+    assert "оценка сверху" in bound.describe()
+
+    # При раскрытой амортизации граница не считается вовсе.
+    codes = {item.code for item in compute_all(Inputs(HEALTHY, {}))}
+    assert "net_debt_ebitda" in codes and "net_debt_op_profit" not in codes
+
+
 def test_developer_liquidity_is_replaced_by_a_range() -> None:
     """У девелопера показатель заменён диапазоном, а не посчитан одним числом.
 

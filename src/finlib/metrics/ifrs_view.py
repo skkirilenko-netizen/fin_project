@@ -37,6 +37,9 @@ class IfrsMetricView:
     unit: Unit
     note: str | None = None
     benchmark: Decimal | None = None
+    # Формулировка печати оценки сверху: «не выше 2,316». Величина без неё
+    # читалась бы как точное значение показателя, а она им не является.
+    bound_shown: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +61,7 @@ class IfrsMetricsView:
                 group=item.group,
                 unit=Unit.THOUSAND_RUB if item.unit == "currency" else Unit.RATIO,
                 note=item.note,
+                bound_shown=item.bound_shown,
             )
             for item in self._policy.metrics
         }
@@ -123,7 +127,13 @@ class IfrsMetricsView:
             return word
         metric = self.get(code)
         unit = metric.unit if metric is not None else Unit.RATIO
-        return format_metric(value, unit, self.scale_for(code), money=money)
+        number = format_metric(value, unit, self.scale_for(code), money=money)
+        # **Оценка сверху печатается со своим словом.** «2,32» и «не выше 2,32» —
+        # разные утверждения, и величина границы, напечатанная как значение,
+        # обещает точность, которой нет.
+        if metric is not None and metric.bound_shown:
+            return metric.bound_shown.format(value=number)
+        return number
 
     def scale_for(self, code: str) -> int:
         """Разрядность отображения показателя — из единой точки округления."""

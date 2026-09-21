@@ -73,6 +73,21 @@ class MetricValue:
     # из тождества баланса.
     numerator: Decimal | None = None
     denominator: Decimal | None = None
+    # Показатель, который эта величина ограничивает сверху, и формулировка
+    # печати. Оценка сверху — не значение показателя, и печатать её как
+    # значение нельзя: «5,2» и «не выше 5,2» — разные утверждения.
+    bound_for: str | None = None
+    bound_shown: str | None = None
+
+    @property
+    def shown(self) -> str:
+        """Величина словами: граница — со своей формулировкой, прочее — числом."""
+        if self.value is None:  # pragma: no cover — печатается только рассчитанное
+            return ""
+        number = str(self.value.quantize(Decimal("0.001")))
+        if self.bound_shown:
+            return self.bound_shown.format(value=number)
+        return number
 
     @property
     def below_one_by_sign(self) -> bool:
@@ -93,7 +108,7 @@ class MetricValue:
         """Однострочное описание для отчёта."""
         if self.calculable:
             mark = " (приведён к году)" if self.annualised else ""
-            return f"{self.name}: {self.value.quantize(Decimal('0.001'))}{mark}"
+            return f"{self.name}: {self.shown}{mark}"
         return f"{self.name}: не рассчитан, {reason_text(self)}"
 
 
@@ -206,11 +221,23 @@ def compute_all(
     """
     policy = policy or load_ifrs_metrics()
     derived = _derived(inputs, policy)
-    return tuple(
+    applicable = [
+        item for item in policy.metrics if item.only_for_type in (None, inputs.issuer_type)
+    ]
+    found = [
         _compute(item, inputs, derived, policy)
-        for item in policy.metrics
-        if item.only_for_type in (None, inputs.issuer_type)
-    )
+        for item in applicable
+        if not item.bound_for
+    ]
+    # **Оценка сверху считается только там, где точной величины нет.** Рядом
+    # с посчитанной точной граница ничего не добавляет, а читатель, увидев два
+    # числа об одном показателе, правильно им не верит.
+    exact = {item.code: item.calculable for item in found}
+    for item in applicable:
+        if not item.bound_for or exact.get(item.bound_for):
+            continue
+        found.append(_compute(item, inputs, derived, policy))
+    return tuple(found)
 
 
 def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | None]:
@@ -296,7 +323,14 @@ def _compute(
     policy: IfrsMetricsPolicy,
 ) -> MetricValue:
     """Считает один показатель по правилам справочника."""
-    empty = MetricValue(metric.code, metric.name, metric.group, metric.in_scoring)
+    empty = MetricValue(
+        metric.code,
+        metric.name,
+        metric.group,
+        metric.in_scoring,
+        bound_for=metric.bound_for,
+        bound_shown=metric.bound_shown,
+    )
 
     adjustment = next(
         (item for item in policy.for_type(inputs.issuer_type) if item.metric == metric.code),
@@ -333,6 +367,8 @@ def _compute(
             metric.in_scoring,
             numerator,
             annualised=_is_annualised(metric.numerator, inputs, policy),
+            bound_for=metric.bound_for,
+            bound_shown=metric.bound_shown,
         )
 
     denominator = _value_of(metric.denominator, inputs, derived, metric)
@@ -358,6 +394,8 @@ def _compute(
         annualised=annualised,
         numerator=numerator,
         denominator=denominator,
+        bound_for=metric.bound_for,
+        bound_shown=metric.bound_shown,
     )
 
 
