@@ -615,15 +615,53 @@ def test_accepted_grounds_survive_a_reload(db_conn) -> None:
     assert set(row["accepted"]["grounds"]) == grounds
 
 
+def test_acceptance_lapses_when_the_values_change(db_conn) -> None:
+    """Принятие привязано к версии входных величин и сбрасывается при правке.
+
+    Совпадения перечня оснований для переноса мало: правка разбора меняет
+    сами числа, оставляя перечень прежним. У ЛСР так менялся долгосрочный долг
+    с 35 876 на 328 256 — основания при этом были те же, и подтверждение
+    молча распространилось бы на другие величины.
+    """
+    from finlib.sources.ifrs_confirmed import load_confirmed
+
+    extraction, profile, decision = prepared()
+    # Тот же комплект, но величина изменилась: так выглядит правка разбора.
+    changed = BALANCE.replace(
+        "Запасы                                  300 000",
+        "Запасы                                  310 000",
+    )
+    other, profile2, decision2 = prepared(changed)
+
+    # Основания принимаются объединением обоих извлечений: иначе карантин
+    # во второй загрузке объяснялся бы новым основанием, а не изменением
+    # величин, и тест отвечал бы «в карантине» не по той причине.
+    grounds = {item.value for item in (*decision.reasons, *decision2.reasons)}
+    first = load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        NOT_READ,
+        confirmed_by="аналитик",
+        accepted={code: "основание принято с причиной" for code in grounds},
+    )
+    assert not first.quarantined
+
+    known = load_confirmed(INN, other, profile2, conn=db_conn)
+    again = load_extraction(
+        INN, other, profile2, decision2, db_conn, NOT_READ, confirmed=known
+    )
+    assert again.quarantined, "подтверждение перенеслось на другие величины"
+
+
 def test_carried_acceptance_does_not_admit_an_unmarked_row(db_conn) -> None:
     """Перенос решения не принимает того, чего человек не видел.
 
     Обратная сторона переноса: решение относится к тому извлечению, которое
-    человек смотрел. Изменился разбор, в извлечении появилась неразмеченная
-    статья — комплект уходит в карантин, а не проходит по прежнему
-    подтверждению. Проверяется именно это: карантин здесь стоит по новой
-    строке, а основания прежнего решения при этом на месте — иначе тест
-    отвечал бы «в карантине» по той же причине, по какой отвечал до правки.
+    человек смотрел. В извлечении появилась неразмеченная статья — комплект
+    уходит в карантин, а не проходит по прежнему подтверждению.
     """
     from finlib.sources.ifrs_confirmed import load_confirmed
 
@@ -653,13 +691,6 @@ def test_carried_acceptance_does_not_admit_an_unmarked_row(db_conn) -> None:
         INN, extraction2, profile2, second, db_conn, NOT_READ, confirmed=known
     )
     assert again.quarantined
-    row = fetch_one(
-        "SELECT meta -> 'accepted' AS accepted FROM src_file WHERE inn = %(i)s "
-        "AND standard = 'ifrs' AND report_year = %(y)s AND is_actual",
-        {"i": INN, "y": DATES[0].year},
-        conn=db_conn,
-    )
-    assert set(row["accepted"]["grounds"]) == grounds, "решение человека потеряно"
 
 
 def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:

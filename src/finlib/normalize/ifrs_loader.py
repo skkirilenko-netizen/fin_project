@@ -14,6 +14,7 @@
 содержательный сигнал о переклассификации, а не техническая деталь.
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -383,6 +384,7 @@ def load_extraction(
     # и неполный вид отчётности. Теперь каждое основание экрана должно быть
     # названо человеком с причиной, а неразмеченная строка не принимается
     # ничем: извлечение без неё неполно.
+    fingerprint = input_fingerprint(extraction)
     accepted, confirmed_by = _accepted_with_previous(
         inn,
         profile.report_dates[0].year,
@@ -390,6 +392,7 @@ def load_extraction(
         conn,
         accepted,
         confirmed_by,
+        fingerprint,
     )
     grounds = {item.value for item in review.reasons}
     covered = bool(confirmed_by) and not unconfirmed and grounds <= set(accepted)
@@ -420,6 +423,7 @@ def load_extraction(
         accepted=accepted,
         confirmed_by=confirmed_by,
         audit=audit,
+        fingerprint=fingerprint,
         footnotes=tuple(
             (code, note)
             for code, form in extraction.forms.items()
@@ -506,6 +510,36 @@ WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
 """
 
 
+def input_fingerprint(extraction: Extraction) -> str:
+    """Отпечаток входных величин, которые человек видел, принимая комплект.
+
+    **Решение человека относится к тому извлечению, которое он смотрел.**
+    Перенос основания по совпадению кодов оснований этого не обеспечивает:
+    правка разбора меняет сами величины, оставляя перечень оснований прежним, —
+    и подтверждение молча распространилось бы на другие числа. У ЛСР так
+    менялся долгосрочный долг (35 876 → 328 256) при неизменном перечне
+    оснований.
+
+    В отпечаток входит то, что человек проверял глазами: величины всех форм
+    вместе с формой, кодом и датой и наименования неопознанных строк. Порядок
+    строк на отпечаток не влияет — он свойство разбора, а не извлечения.
+
+    **Оснований экрана в отпечатке нет намеренно.** Они меняются от разметки
+    строк, а не от правки разбора, и сверяются отдельно: перенос не снимает
+    основания, которого человек не принимал (`grounds <= set(accepted)`).
+    Считая их здесь, мы сбрасывали бы подтверждение ровно тогда, когда человек
+    доразметил строки, то есть наказывали бы за выполненную работу.
+    """
+    values = sorted(
+        f"{code}|{item.code}|{item.report_date:%Y-%m-%d}|{item.value}"
+        for code, form in extraction.forms.items()
+        for item in form.values
+    )
+    unrecognised = sorted(row.source_name for row in extraction.unrecognised)
+    payload = "\n".join([*values, "--", *unrecognised])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _accepted_with_previous(
     inn: str,
     report_year: int,
@@ -513,6 +547,7 @@ def _accepted_with_previous(
     conn: PgConnection,
     accepted: dict[str, str] | None,
     confirmed_by: str | None,
+    fingerprint: str = "",
 ) -> tuple[dict[str, str], str | None]:
     """Принятые человеком основания переживают повторный разбор.
 
@@ -533,6 +568,13 @@ def _accepted_with_previous(
     Прогон приёма об основаниях не говорит вовсе (`None`), и прежнее решение
     в силе; названное пустой причиной — решение не принимать, и переносить
     поверх него прежнее значило бы отменить отказ человека.
+
+    **Решение привязано к версии входных величин и сбрасывается, когда они
+    изменились** (`input_fingerprint`). Совпадения перечня оснований для
+    переноса мало: правка разбора меняет сами числа, оставляя перечень
+    прежним, — у ЛСР так менялся долгосрочный долг с 35 876 на 328 256.
+    Отпечаток не сошёлся — подтверждение не переносится, комплект уходит
+    в карантин, и человек смотрит извлечение заново.
     """
     if accepted is not None:
         return {
@@ -555,6 +597,21 @@ def _accepted_with_previous(
         if text and text.strip()
     }
     if not grounds:
+        return {}, confirmed_by
+    stored = previous.get("fingerprint") or ""
+    if not stored:
+        # Подтверждение принято до появления поля: отпечатка у него нет,
+        # и сверять не с чем. Оно переносится один раз — эта же загрузка
+        # отпечаток и запишет, поэтому дальше правило работает в полную силу.
+        logger.info("принятие комплекта перенесено без сверки: отпечаток не записан")
+        return grounds, confirmed_by or previous.get("by")
+    if stored != fingerprint:
+        logger.info(
+            "принятие комплекта не перенесено: входные величины изменились "
+            "(отпечаток %s против %s)",
+            stored[:12] or "не записан",
+            fingerprint[:12],
+        )
         return {}, confirmed_by
     return grounds, confirmed_by or previous.get("by")
 
@@ -620,6 +677,7 @@ def _write_src_file(
     accepted: dict[str, str],
     confirmed_by: str | None,
     audit: object | None = None,
+    fingerprint: str = "",
     footnotes: tuple[tuple[str, str], ...] = (),
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
@@ -663,6 +721,11 @@ def _write_src_file(
         "accepted": {
             "by": confirmed_by,
             "grounds": {code: " ".join(text.split()) for code, text in accepted.items()},
+            # Отпечаток входных величин, которые человек видел. Решение
+            # переносится на повторную загрузку только при его совпадении:
+            # перечень оснований от правки разбора не меняется, а числа
+            # меняются, и подтверждение распространилось бы на другие.
+            "fingerprint": fingerprint,
         }
         if accepted
         else None,
