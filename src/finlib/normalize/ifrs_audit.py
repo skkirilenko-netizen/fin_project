@@ -38,6 +38,49 @@ class ReportSection(BaseModel):
     note: str | None = None
 
 
+class CaveatKind(BaseModel):
+    """Вид оговорки аудитора и его следствия для оценки.
+
+    **О величинах и о раскрытии — разные обстоятельства.** Оговорка
+    о величинах ставит под вопрос сами числа, из которых считаются
+    показатели; оговорка о полноте раскрытий — состав раскрытий при
+    подтверждённых величинах. Прежде вид не различался, и нераскрытые
+    сегменты ФосАгро понижали уверенность наравне с заниженным резервом
+    Автодора.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    lowers_confidence: bool
+    bears_on_values: bool
+    # Приметы для **предложения** машины. Решение остаётся за человеком:
+    # аудитор пишет прозой, и одно слово решает, о чём речь.
+    markers: tuple[str, ...] = ()
+    # Вид, действующий до подтверждения человеком. Объявляется ровно у одного.
+    applies_until_confirmed: bool = False
+    limitation: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _default_kind_has_no_markers(self) -> Self:
+        """Вид по умолчанию приметами не опознаётся, прочие — опознаются.
+
+        Вид по умолчанию — не предмет в тексте, а состояние знания: оговорка
+        есть, а вид её человеком не установлен. Приметы у него означали бы,
+        что его можно узнать по написанию.
+        """
+        if self.applies_until_confirmed and self.markers:
+            raise ValueError(
+                f"вид оговорки {self.code} действует до подтверждения "
+                "и приметами не опознаётся"
+            )
+        if not self.applies_until_confirmed and not self.markers:
+            raise ValueError(f"вид оговорки {self.code}: не объявлено ни одной приметы")
+        return self
+
+
 class AuditSignal(BaseModel):
     """Сигнал, выводимый из заключения.
 
@@ -56,6 +99,10 @@ class AuditSignal(BaseModel):
     condition: str = Field(min_length=1)
     section: str | None = None
     markers: tuple[str, ...] = ()
+    # Вид оговорки, при котором сигнал печатается. Уровень у каждого свой:
+    # надзорный у оговорки о величинах включает эскалацию, «требует внимания»
+    # у прочих — нет.
+    caveat_kind: str | None = None
     formulation: str = Field(min_length=1)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(min_length=1)
@@ -82,6 +129,15 @@ class AuditSignal(BaseModel):
             if self.section or self.markers:
                 raise ValueError(
                     f"сигнал {self.code}: условие по виду мнения раздела не имеет"
+                )
+            return self
+        if self.condition == "caveat_kind":
+            # Условие — вид оговорки, и назвать его обязательно: иначе сигнал
+            # печатался бы при любом виде, то есть различие видов пропадало бы.
+            if not self.caveat_kind or self.section or self.markers:
+                raise ValueError(
+                    f"сигнал {self.code}: условие по виду оговорки требует вид "
+                    "и не имеет ни раздела, ни примет"
                 )
             return self
         raise ValueError(f"сигнал {self.code}: условие {self.condition} неизвестно")
@@ -164,6 +220,7 @@ class AuditPolicy(BaseModel):
     attribution: Attribution
     opinions: tuple[OpinionKind, ...] = Field(min_length=1)
     sections: tuple[ReportSection, ...] = Field(min_length=1)
+    caveat_kinds: tuple[CaveatKind, ...] = Field(min_length=2)
     signals: tuple[AuditSignal, ...] = Field(min_length=1)
     plans_reference: PlansReference
     # Разделы, печатаемые в документе дословно, — каждый со своим условием.
@@ -179,12 +236,33 @@ class AuditPolicy(BaseModel):
             if kind not in self.report_headings:
                 raise ValueError(f"не объявлены заголовки для типа задания {kind}")
         sections = {item.code for item in self.sections}
+        kinds = {item.code for item in self.caveat_kinds}
         for signal in self.signals:
             if signal.section is not None and signal.section not in sections:
                 raise ValueError(
                     f"сигнал {signal.code} ссылается на незаведённый раздел "
                     f"{signal.section}"
                 )
+            if signal.caveat_kind is not None and signal.caveat_kind not in kinds:
+                raise ValueError(
+                    f"сигнал {signal.code} ссылается на незаведённый вид оговорки "
+                    f"{signal.caveat_kind}"
+                )
+        # **У каждого вида оговорки есть свой сигнал.** Вид без сигнала молчит:
+        # оговорка была бы разобрана по виду, а документ о ней не сказал бы.
+        declared = {item.caveat_kind for item in self.signals if item.caveat_kind}
+        missing = sorted(kinds - declared)
+        if missing:
+            raise ValueError(f"виды оговорки без сигнала: {missing}")
+        # Вид по умолчанию объявляется ровно один: два означали бы, что
+        # до подтверждения человеком действуют оба сразу, ни одного — что
+        # у неподтверждённой оговорки следствий нет и об этом не сказано.
+        default = [item for item in self.caveat_kinds if item.applies_until_confirmed]
+        if len(default) != 1:
+            raise ValueError(
+                "вид оговорки, действующий до подтверждения человеком, "
+                f"объявляется ровно один, объявлено {len(default)}"
+            )
         # Цитируемый раздел обязан быть заведённым: иначе документ обещает
         # дословный текст раздела, которого чтение не ищет вовсе.
         if self.plans_reference.section not in sections:
@@ -205,9 +283,17 @@ class AuditPolicy(BaseModel):
                 "немодифицированное мнение обязано стоять последним в перечне: "
                 "его заголовок является началом остальных"
             )
-        for kind in ("review", "not_readable", "absent", "modified"):
+        for kind in ("review", "not_readable", "absent"):
             if kind not in self.limitations:
                 raise ValueError(f"не объявлена оговорка {kind}")
+        # Оговорка о модифицированном мнении здесь не объявляется: она своя
+        # у каждого вида оговорки и лежит в `caveat_kinds`.
+        if "modified" in self.limitations:
+            raise ValueError(
+                "оговорка modified объявляется у вида оговорки, а не общим текстом: "
+                "одна формулировка говорила бы о нераскрытых сегментах то же, "
+                "что о заниженном резерве"
+            )
         return self
 
     def opinion(self, code: str) -> OpinionKind | None:
@@ -217,6 +303,15 @@ class AuditPolicy(BaseModel):
     def section(self, code: str) -> ReportSection | None:
         """Раздел по коду."""
         return next((item for item in self.sections if item.code == code), None)
+
+    def caveat_kind(self, code: str | None) -> CaveatKind | None:
+        """Вид оговорки по коду; None — кода нет."""
+        return next((item for item in self.caveat_kinds if item.code == code), None)
+
+    @property
+    def caveat_kind_until_confirmed(self) -> CaveatKind:
+        """Вид оговорки, действующий до подтверждения человеком."""
+        return next(item for item in self.caveat_kinds if item.applies_until_confirmed)
 
 
 def default_path() -> Path:

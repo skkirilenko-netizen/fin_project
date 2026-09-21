@@ -161,6 +161,60 @@ def test_the_counter_of_written_facts_adds_up(db_conn) -> None:
     assert again.collisions.unchanged == again.facts_total == first.facts_total
 
 
+def test_confirmed_caveat_kind_survives_a_reload(db_conn) -> None:
+    """Вид оговорки, установленный человеком, повторный разбор не стирает.
+
+    Сведения заключения читаются из документа заново при каждой загрузке,
+    а вид оговорки читается не оттуда: его устанавливает человек. Без переноса
+    решение исчезало бы при всякой правке разбора — ровно так теряется
+    разметка строк, и это уже стоило трёх присестов у ФосАгро.
+    """
+    from finlib.sources.ifrs_audit import (
+        AuditReport,
+        Determination,
+        Engagement,
+        SectionText,
+    )
+
+    audit = AuditReport(
+        Determination.DETERMINED,
+        engagement=Engagement.AUDIT,
+        opinion="qualified",
+        opinion_name="Мнение с оговоркой",
+        modified=True,
+        sections=("basis_for_opinion",),
+        texts=(
+            SectionText(
+                code="basis_for_opinion",
+                name="Основание для выражения мнения",
+                text="Резерв занижен на 1 200 млн руб.",
+            ),
+        ),
+    )
+    reading = DocumentReading(audit=audit, notes=(), issuer_type=None)
+    extraction, profile, decision = prepared()
+    load_extraction(
+        INN,
+        extraction,
+        profile,
+        decision,
+        db_conn,
+        reading,
+        confirmed_by="аналитик",
+        caveat_kind="about_values",
+    )
+    # Повторный разбор вида не называет — он берётся из прежней записи.
+    load_extraction(INN, extraction, profile, decision, db_conn, reading)
+    row = fetch_one(
+        "SELECT meta -> 'audit' AS audit FROM src_file WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND report_year = %(y)s AND is_actual",
+        {"i": INN, "y": DATES[0].year},
+        conn=db_conn,
+    )
+    assert row["audit"]["caveat_kind"] == "about_values"
+    assert row["audit"]["caveat_confirmed_by"] == "аналитик"
+
+
 def test_facts_are_written_with_the_ifrs_standard(db_conn) -> None:
     """Факты пишутся со стандартом ifrs и не смешиваются с РСБУ."""
     extraction, profile, decision = prepared()

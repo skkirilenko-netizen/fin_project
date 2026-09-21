@@ -88,7 +88,12 @@ def test_review_is_a_separate_engagement() -> None:
     policy = load_audit_policy()
     limitations = found.limitations(policy)
     assert policy.limitations["review"] in limitations
-    assert policy.limitations["modified"] in limitations
+    # Оговорка о модифицированном мнении своя у каждого вида оговорки, и пока
+    # вид человеком не установлен, печатается оговорка вида «не установлен»:
+    # одна общая формулировка говорила бы о нераскрытых сегментах то же,
+    # что о заниженном резерве.
+    until = policy.caveat_kind_until_confirmed
+    assert " ".join(until.limitation.split()) in limitations
 
 
 def test_contents_entry_is_not_the_report() -> None:
@@ -199,6 +204,75 @@ def test_reference_to_a_section_inside_a_sentence_does_not_cut_the_quote() -> No
     found = read_audit_report(BASIS_WITH_SUBSECTIONS, policy=load_audit_policy())
     text = found.text_of("basis_for_opinion")
     assert "Ответственность аудитора за аудит" in text.text
+
+
+def test_caveat_kind_is_proposed_but_not_applied() -> None:
+    """Вид оговорки машина предлагает, а следствия применяет человек.
+
+    Оговорка о раскрытии величин не затрагивает, оговорка о величинах ставит
+    под вопрос сами числа. Различает их человек: приметы в прозе — не
+    доказательство, и до решения действует вид «не установлен».
+    """
+    from dataclasses import replace
+
+    policy = load_audit_policy()
+    disclosure = read_audit_report(
+        QUALIFIED.replace(
+            "Мы не смогли получить достаточные надлежащие аудиторские доказательства.",
+            "Руководство не раскрыло информацию о сегментах, требуемую МСФО (IFRS) 8.",
+        ),
+        policy=policy,
+    )
+    assert disclosure.proposed_caveat_kind(policy) == "about_disclosure"
+    # Предложение следствий не имеет: действует вид по умолчанию.
+    assert disclosure.effective_caveat_kind(policy) == "not_determined"
+    assert not policy.caveat_kind("not_determined").lowers_confidence
+
+    values = read_audit_report(
+        QUALIFIED.replace(
+            "Мы не смогли получить достаточные надлежащие аудиторские доказательства.",
+            "Резерв под ожидаемые кредитные убытки занижен на 1 200 млн руб.",
+        ),
+        policy=policy,
+    )
+    assert values.proposed_caveat_kind(policy) == "about_values"
+    assert values.effective_caveat_kind(policy) == "not_determined"
+
+    # Подтверждённый человеком вид действует, и следствия у него свои.
+    confirmed = replace(values, caveat_kind="about_values", caveat_confirmed_by="кто-то")
+    assert confirmed.effective_caveat_kind(policy) == "about_values"
+    assert policy.caveat_kind("about_values").lowers_confidence
+
+    # Приметы двух видов сразу предложения не дают: выбрать по написанию нельзя.
+    both = read_audit_report(
+        QUALIFIED.replace(
+            "Мы не смогли получить достаточные надлежащие аудиторские доказательства.",
+            "Резерв занижен, а информация о сегментах не раскрыта.",
+        ),
+        policy=policy,
+    )
+    assert both.proposed_caveat_kind(policy) is None
+    assert both.effective_caveat_kind(policy) == "not_determined"
+
+    # У немодифицированного мнения вида оговорки нет вовсе.
+    assert read_audit_report(UNMODIFIED).effective_caveat_kind(policy) is None
+
+
+def test_every_caveat_kind_has_a_signal_of_its_own() -> None:
+    """У каждого вида оговорки свой сигнал со своим уровнем.
+
+    Вид без сигнала молчит: оговорка разобрана по виду, а документ о ней
+    не сказал. Уровень при этом решает, возникнет ли эскалация, и держать
+    его в коде значило бы решать методический вопрос кодом.
+    """
+    policy = load_audit_policy()
+    by_kind = {
+        item.caveat_kind: item for item in policy.signals if item.caveat_kind
+    }
+    assert set(by_kind) == {item.code for item in policy.caveat_kinds}
+    assert by_kind["about_values"].level == "supervisory"
+    assert by_kind["about_disclosure"].level == "attention"
+    assert by_kind["not_determined"].level == "attention"
 
 
 def test_signing_date_is_not_taken_from_the_opinion_text() -> None:

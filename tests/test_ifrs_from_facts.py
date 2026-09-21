@@ -342,6 +342,11 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     о сегментах, требуемая МСФО (IFRS) 8, — и в первом заключении по МСФО
     об этом не было ни слова: раздел 4 был пуст, раздел 7 на него ссылался,
     а уверенность в оценке стояла высшей.
+
+    **Следствий вида оговорки при этом нет, пока вид не установлен человеком.**
+    Оговорка о раскрытии величин не затрагивает, и понижать за неё уверенность
+    в показателях не за что; приметы основания дают предложение машины,
+    а решение остаётся за человеком.
     """
     from docx import Document
 
@@ -389,13 +394,15 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
         {"i": INN, "d": DATES[0]},
         conn=db_conn,
     )
-    # Оснований два: модифицированное мнение и группы из одного показателя.
-    # Второе — свойство ветки, а не этого комплекта, и молчать о нём нельзя:
-    # балл группы, опирающийся на единственное наблюдение, высшей уверенности
-    # не заслуживает сам по себе.
+    # Уверенность понижена, но **не заключением**: основания — принятое
+    # человеком основание карантина и группы из одного показателя. Вид оговорки
+    # человеком не установлен, следствия вида не применялись, и модифицированное
+    # мнение уверенность не понижает: у ФосАгро оговорка о раскрытии,
+    # а не о величинах.
     assert stored["confidence"] == "low"
-    assert any("аудитор" in item.lower() for item in stored["confidence_reasons"])
     assert any("по одному" in item for item in stored["confidence_reasons"])
+    assert any("решением человека" in item for item in stored["confidence_reasons"])
+    assert not any("аудитор" in item.lower() for item in stored["confidence_reasons"])
 
     made = build_report(
         INN,
@@ -407,20 +414,105 @@ def test_qualified_opinion_reaches_the_document(db_conn, tmp_path) -> None:
     )
     text = "\n".join(item.text for item in Document(made.path).paragraphs)
 
-    # Сигнал в разделе 4 — с предписанной формулировкой и основанием.
-    assert "Мнение аудитора модифицировано (надзорный сигнал)." in text
+    # Сигнал в разделе 4 — с предписанной формулировкой и основанием. Уровень
+    # «требует внимания», а не надзорный: вид оговорки человеком не установлен,
+    # и приписывать ей следствия оговорки о величинах нельзя.
+    assert "Вид оговорки аудитора не установлен (требует внимания)." in text
     assert "Вид мнения: Мнение с оговоркой" in text
+    # Предложение машины печатается человеку, который вид и подтверждает.
+    assert "«Оговорка о полноте раскрытий», решение человека не принято" in text
     # Слова аудитора приведены дословно и с указанием источника.
     assert basis in text
     assert "Из аудиторского заключения, раздел «Основание для выражения мнения»" in text
     # Порядок определения уверенности — свой у ветки: флаги и длина ряда,
     # которых ветка не считает, в основаниях стоять не вправе.
     assert "Основания заданы методикой" in text
-    assert "Мнение аудитора о достоверности отчётности модифицировано" in text
     assert "Сработал флаг" not in text
-    # Надзорный сигнал даёт вопрос: иначе «Запрос пояснений» отсылает
-    # к разделу, в котором «расчётом не выявлено».
-    assert "«Мнение аудитора модифицировано»" in text
+    # Эскалация от неустановленного вида не возникает: она следует
+    # из надзорного уровня, а его здесь нет.
+    assert "Эскалация." not in text
+    # Сигнал даёт вопрос: иначе «Запрос пояснений» отсылает к разделу,
+    # в котором «расчётом не выявлено».
+    assert "«Вид оговорки аудитора не установлен»" in text
+
+
+def test_caveat_about_values_confirmed_by_a_human_lowers_confidence(
+    db_conn, tmp_path
+) -> None:
+    """Оговорка о величинах, подтверждённая человеком: надзорный уровень и эскалация.
+
+    Соразмерность различает два обстоятельства: у ФосАгро не раскрыты сегменты —
+    величины подтверждены, у Автодора занижен резерв — под вопросом сами числа,
+    из которых считаются показатели. Прежде вид оговорки не различался вовсе,
+    и оба понижали уверенность одинаково.
+    """
+    from docx import Document
+
+    from finlib.report.document import build_report
+    from finlib.sources.ifrs_audit import (
+        AuditReport,
+        Determination,
+        Engagement,
+        SectionText,
+    )
+    from finlib.standards import Standard
+
+    basis = (
+        "По нашему мнению, резерв под ожидаемые кредитные убытки занижен: "
+        "оценочное обязательство признано не в полной сумме."
+    )
+    audit = AuditReport(
+        Determination.DETERMINED,
+        engagement=Engagement.AUDIT,
+        opinion="qualified",
+        opinion_name="Мнение с оговоркой",
+        modified=True,
+        sections=("basis_for_opinion",),
+        texts=(
+            SectionText(
+                code="basis_for_opinion",
+                name="Основание для выражения мнения",
+                text=basis,
+            ),
+        ),
+        auditor="АО «Аудитор»",
+        signed_on="10 марта 2026 года",
+        caveat_kind="about_values",
+        caveat_confirmed_by="аналитик",
+    )
+    loaded(db_conn, audit=audit)
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    save_metrics(INN, DATES[0], computed, db_conn, policy)
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
+    save_ifrs_assessment(INN, DATES[0], result, computed, db_conn, policy)
+
+    stored = fetch_one(
+        "SELECT confidence_reasons FROM assessment WHERE inn = %(i)s "
+        "AND standard = 'ifrs' AND report_date = %(d)s",
+        {"i": INN, "d": DATES[0]},
+        conn=db_conn,
+    )
+    assert any(
+        "оговоркой о величинах" in item for item in stored["confidence_reasons"]
+    )
+
+    made = build_report(
+        INN,
+        db_conn,
+        standard=Standard.IFRS,
+        with_text=False,
+        directory=tmp_path,
+        is_test=True,
+    )
+    text = "\n".join(item.text for item in Document(made.path).paragraphs)
+    assert (
+        "Мнение аудитора модифицировано оговоркой о величинах (надзорный сигнал)."
+        in text
+    )
+    assert "вид оговорки подтвердил аналитик" in text
+    # Надзорный уровень включает эскалацию — в отличие от оговорки о раскрытии.
+    assert "Эскалация." in text
 
 
 def test_going_concern_section_reaches_the_document(db_conn, tmp_path) -> None:

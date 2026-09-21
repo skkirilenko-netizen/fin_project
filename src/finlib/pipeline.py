@@ -294,6 +294,7 @@ def accept_ifrs_document(
     confirmations: dict[str, str] | None = None,
     accepted: dict[str, str] | None = None,
     document: object | None = None,
+    caveat_kind: str | None = None,
 ) -> IfrsIntake:
     """Проводит документ МСФО через приём, разбор форм и экран сверки.
 
@@ -398,6 +399,9 @@ def accept_ifrs_document(
             # Основания экрана сверки, принятые человеком: карантин снимается
             # по названным, а не подтверждением вообще.
             accepted=accepted,
+            # Вид оговорки аудитора: о величинах отчётности или о полноте
+            # раскрытий. Следствия у них разные, и устанавливает вид человек.
+            caveat_kind=caveat_kind,
         )
     report(Stage.LOAD, loaded.summary(), ok=not loaded.quarantined)
     intake.loaded = loaded

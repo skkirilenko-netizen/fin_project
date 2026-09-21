@@ -135,6 +135,12 @@ class AuditReport:
     texts: tuple[SectionText, ...] = ()
     auditor: str = ""
     signed_on: str = ""
+    # Вид оговорки, **подтверждённый человеком**. `None` — не подтверждён,
+    # и тогда действует вид по умолчанию: следствия вида к оценке
+    # не применяются. Машинное предложение здесь не хранится — оно считается
+    # по методике в момент сборки, а методика правится.
+    caveat_kind: str | None = None
+    caveat_confirmed_by: str = ""
 
     def text_of(self, code: str) -> SectionText | None:
         """Дословный текст раздела по коду."""
@@ -190,6 +196,11 @@ class AuditReport:
             "unreadable_pages": list(self.unreadable_pages),
             "auditor": self.auditor,
             "signed_on": self.signed_on,
+            # Вид оговорки — решение человека о комплекте, и потому хранится
+            # с комплектом, а не в методике: методика правится диффом,
+            # а решение принимается во время работы.
+            "caveat_kind": self.caveat_kind,
+            "caveat_confirmed_by": self.caveat_confirmed_by,
             "texts": [
                 {
                     "code": item.code,
@@ -201,6 +212,40 @@ class AuditReport:
             ],
         }
 
+    def proposed_caveat_kind(self, policy: AuditPolicy) -> str | None:
+        """Вид оговорки, который машина **предлагает** по приметам основания.
+
+        Приметы — не доказательство: аудитор пишет прозой, и одно слово решает,
+        о величине речь или о раскрытии. Поэтому предложение печатается рядом
+        с сигналом человеку, а следствия вида применяются только после его
+        подтверждения. Приметы двух видов сразу — предложения нет: выбрать
+        между ними по написанию нельзя.
+        """
+        if not self.modified:
+            return None
+        section = self.text_of("basis_for_opinion")
+        if section is None or not section.text:
+            return None
+        text = section.text.lower()
+        matched = [
+            item.code
+            for item in policy.caveat_kinds
+            if item.markers and any(marker.lower() in text for marker in item.markers)
+        ]
+        return matched[0] if len(matched) == 1 else None
+
+    def effective_caveat_kind(self, policy: AuditPolicy) -> str | None:
+        """Вид оговорки, по которому действует оценка; None — мнение не модифицировано.
+
+        Подтверждённый человеком либо, пока его нет, вид по умолчанию: уровень
+        «требует внимания», уверенность не понижается, эскалации не возникает.
+        """
+        if not self.modified:
+            return None
+        if self.caveat_kind and policy.caveat_kind(self.caveat_kind) is not None:
+            return self.caveat_kind
+        return policy.caveat_kind_until_confirmed.code
+
     def limitations(self, policy: AuditPolicy) -> tuple[str, ...]:
         """Оговорки для раздела «Ограничения анализа» — дословно из методики."""
         found: list[str] = []
@@ -210,8 +255,11 @@ class AuditReport:
             found.append(policy.limitations["not_readable"])
         if self.engagement is Engagement.REVIEW:
             found.append(policy.limitations["review"])
-        if self.modified:
-            found.append(policy.limitations["modified"])
+        # Оговорка о модифицированном мнении — своя у каждого вида: о величинах,
+        # о раскрытиях и о неустановленном виде говорится разное.
+        kind = policy.caveat_kind(self.effective_caveat_kind(policy))
+        if kind is not None:
+            found.append(" ".join(kind.limitation.split()))
         return tuple(found)
 
     def quotes(self, policy: AuditPolicy) -> tuple[str, ...]:
@@ -279,6 +327,23 @@ class AuditReport:
                 if not self.modified:
                     continue
                 basis = f"Вид мнения: {self.opinion_name}"
+            elif signal.condition == "caveat_kind":
+                if signal.caveat_kind != self.effective_caveat_kind(policy):
+                    continue
+                basis = f"Вид мнения: {self.opinion_name}"
+                # **Предложение машины печатается, а не применяется.** Человеку,
+                # который вид оговорки и подтверждает, нужно видеть, к чему
+                # приметы основания её относят; следствий у предложения нет.
+                if not self.caveat_kind:
+                    proposed = policy.caveat_kind(self.proposed_caveat_kind(policy))
+                    basis += (
+                        f"; по приметам основания оговорка отнесена к виду "
+                        f"«{proposed.name}», решение человека не принято"
+                        if proposed is not None
+                        else "; приметы основания вида оговорки не называют"
+                    )
+                elif self.caveat_confirmed_by:
+                    basis += f"; вид оговорки подтвердил {self.caveat_confirmed_by}"
             elif signal.condition == "section_present":
                 # Наличие раздела и есть утверждение аудитора: искать в нём
                 # слова незачем, наименование предписано МСА.
@@ -341,6 +406,8 @@ def audit_from_meta(meta: dict | None) -> AuditReport | None:
         unreadable_pages=tuple(found.get("unreadable_pages", ())),
         auditor=found.get("auditor", ""),
         signed_on=found.get("signed_on", ""),
+        caveat_kind=found.get("caveat_kind"),
+        caveat_confirmed_by=found.get("caveat_confirmed_by", ""),
         texts=tuple(
             SectionText(
                 code=item["code"],

@@ -73,6 +73,45 @@ def _echo_stage(item: StageResult) -> None:
     typer.echo(f"  {mark} {item.stage.value}: {item.message}")
 
 
+def _echo_caveat(inn: str, report_date: date) -> None:
+    """Печатает вид оговорки аудитора: установленный и предложенный машиной.
+
+    Вид решает, понижается ли уверенность и возникает ли эскалация, поэтому
+    подтверждающий обязан видеть, что записалось: предложение машины,
+    принятое молча, было бы решением методики, сделанным приметой в прозе.
+    """
+    from finlib.db import connection, fetch_one
+    from finlib.normalize.ifrs_audit import load_audit_policy
+    from finlib.sources.ifrs_audit import audit_from_meta
+
+    with connection() as conn:
+        row = fetch_one(
+            "SELECT meta FROM src_file WHERE inn = %(inn)s AND standard = 'ifrs' "
+            "AND report_year = %(year)s AND is_actual ORDER BY id DESC LIMIT 1",
+            {"inn": inn, "year": report_date.year},
+            conn=conn,
+        )
+    audit = audit_from_meta((row or {}).get("meta"))
+    if audit is None or not audit.modified:
+        return
+    policy = load_audit_policy()
+    kind = policy.caveat_kind(audit.effective_caveat_kind(policy))
+    proposed = policy.caveat_kind(audit.proposed_caveat_kind(policy))
+    typer.echo(
+        f"  вид оговорки: {kind.name if kind is not None else 'не определён'}"
+        + (f" (подтвердил {audit.caveat_confirmed_by})" if audit.caveat_confirmed_by else "")
+    )
+    if not audit.caveat_kind:
+        typer.echo(
+            "    предложение машины по приметам основания: "
+            + (proposed.name if proposed is not None else "приметы вида не называют")
+        )
+        typer.echo(
+            "    следствия вида не применялись: уверенность не понижена, "
+            "эскалации нет. Установить: --caveat about_values | about_disclosure"
+        )
+
+
 def _fail(message: str) -> None:
     """Останавливает команду с внятной причиной."""
     typer.echo(typer.style(f"\nОстановлено. {message}", fg=typer.colors.RED), err=True)
@@ -426,12 +465,28 @@ def ifrs_confirm_command(
             "Карантин снимается только по названным основаниям",
         ),
     ] = [],  # noqa: B006 — typer требует list по умолчанию
+    caveat: Annotated[
+        str,
+        typer.Option(
+            "--caveat",
+            help="Вид оговорки аудитора: о величинах отчётности или о полноте "
+            "раскрытий. Следствия у них разные, и устанавливает вид человек",
+        ),
+    ] = "",
     path: Annotated[
         Path, typer.Option("--path", help="Каталог с документами МСФО по ИНН")
     ] = Path("data/raw/ifrs"),
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Подтверждает комплект МСФО человеком и записывает его заново.
+
+    **Вид оговорки аудитора устанавливает человек** — `--caveat about_values`
+    либо `--caveat about_disclosure`. Оговорка о величинах ставит под вопрос
+    числа, из которых считаются показатели, и понижает уверенность; оговорка
+    о полноте раскрытий величин не затрагивает. До решения человека действует
+    вид «не установлен»: уровень сигнала «требует внимания», уверенность
+    не понижается, эскалации не возникает, а приметы основания печатаются
+    предложением машины.
 
     **Разметка и подтверждение — разные действия.** Присест разметки пишет
     присвоенные коды в журнал подтверждений, но комплект остаётся в карантине:
@@ -479,6 +534,19 @@ def ifrs_confirm_command(
             )
         taken[code.strip()] = reason.strip()
 
+    from finlib.normalize.ifrs_audit import load_audit_policy
+
+    kinds = {
+        item.code
+        for item in load_audit_policy().caveat_kinds
+        if not item.applies_until_confirmed
+    }
+    if caveat.strip() and caveat.strip() not in kinds:
+        _fail(
+            f"вид оговорки «{caveat.strip()}» неизвестен; допустимы: "
+            + ", ".join(sorted(kinds))
+        )
+
     # Читается только папка этого эмитента: подтверждается один комплект,
     # и разбирать ради этого весь каталог незачем.
     issuers, skipped = _load_issuers(path, only=frozenset({inn}))
@@ -506,12 +574,14 @@ def ifrs_confirm_command(
         confirmed_by=who.strip(),
         accepted=taken,
         document=document,
+        caveat_kind=caveat.strip() or None,
     )
     if not intake.accepted:
         _fail(f"документ отклонён приёмом [{intake.check_code}]: {intake.reason}")
     loaded = intake.loaded
     if loaded is None:  # pragma: no cover — ИНН назван, запись обязана состояться
         _fail("комплект не записан")
+    _echo_caveat(inn, wanted)
     grounds = [item.value for item in intake.review.reasons]
     for code in grounds:
         mark = "принято" if code in taken else "НЕ ПРИНЯТО"

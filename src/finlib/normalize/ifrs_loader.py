@@ -333,6 +333,7 @@ def load_extraction(
     confirmed: Confirmed | None = None,
     accepted: dict[str, str] | None = None,
     organization_name: str | None = None,
+    caveat_kind: str | None = None,
 ) -> LoadResult:
     """Пишет принятый комплект МСФО одной транзакцией.
 
@@ -387,6 +388,18 @@ def load_extraction(
     covered = bool(confirmed_by) and not unconfirmed and grounds <= set(accepted)
     quarantined = not review.automatic and not covered
 
+    # Вид оговорки аудитора — решение человека о комплекте, и повторный разбор
+    # его не стирает: не названный в этой загрузке, он берётся из прежней записи.
+    audit = _audit_with_caveat(
+        inn,
+        profile.report_dates[0].year,
+        correction_version,
+        conn,
+        reading,
+        caveat_kind,
+        confirmed_by,
+    )
+
     src_file_id = _write_src_file(
         inn,
         profile,
@@ -399,6 +412,7 @@ def load_extraction(
         reading=reading,
         accepted=accepted,
         confirmed_by=confirmed_by,
+        audit=audit,
     )
 
     # Присвоения этого присеста — такое же подтверждение человека, как и
@@ -427,7 +441,7 @@ def load_extraction(
         accepted,
         confirmed_by,
     )
-    records.extend(_audit_records(inn, src_file_id, reading.audit))
+    records.extend(_audit_records(inn, src_file_id, audit))
     execute(
         _CLEAR_STATE_RECORDS,
         {
@@ -467,6 +481,60 @@ def load_extraction(
     return result
 
 
+_PREVIOUS_AUDIT = """
+SELECT meta -> 'audit' AS audit FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
+  AND source = 'file' AND correction_version = %(version)s
+"""
+
+
+def _audit_with_caveat(
+    inn: str,
+    report_year: int,
+    correction_version: int,
+    conn: PgConnection,
+    reading: DocumentReading,
+    caveat_kind: str | None,
+    confirmed_by: str | None,
+) -> object | None:
+    """Заключение с видом оговорки, подтверждённым человеком.
+
+    **Решение человека переживает повторный разбор.** Сведения заключения
+    читаются из документа заново при каждой загрузке, а вид оговорки читается
+    не оттуда: его устанавливает человек. Не названный в этой загрузке, он
+    берётся из прежней записи комплекта — иначе подтверждение исчезало бы
+    при всякой правке разбора, как исчезала бы разметка строк.
+    """
+    from dataclasses import replace
+
+    if reading.audit is None:
+        return None
+    if caveat_kind:
+        return replace(
+            reading.audit,
+            caveat_kind=caveat_kind,
+            caveat_confirmed_by=confirmed_by or "",
+        )
+    row = fetch_one(
+        _PREVIOUS_AUDIT,
+        {
+            "inn": inn,
+            "standard": Standard.IFRS.value,
+            "year": report_year,
+            "version": correction_version,
+        },
+        conn=conn,
+    )
+    previous = (row or {}).get("audit") or {}
+    if not previous.get("caveat_kind"):
+        return reading.audit
+    return replace(
+        reading.audit,
+        caveat_kind=previous["caveat_kind"],
+        caveat_confirmed_by=previous.get("caveat_confirmed_by", ""),
+    )
+
+
 def _write_src_file(
     inn: str,
     profile: DocumentProfile,
@@ -480,6 +548,7 @@ def _write_src_file(
     reading: DocumentReading,
     accepted: dict[str, str],
     confirmed_by: str | None,
+    audit: object | None = None,
 ) -> int:
     """Записывает комплект и снимает актуальность с прежних версий года."""
     report_year = profile.report_dates[0].year
@@ -507,7 +576,7 @@ def _write_src_file(
         # неоткуда: у ФосАгро мнение с оговоркой не дошло до документа вовсе.
         # Хранятся факты и дословный текст разделов, формулировки — из методики
         # в момент сборки.
-        "audit": reading.audit.as_meta() if reading.audit is not None else None,
+        "audit": audit.as_meta() if audit is not None else None,
         # **Принятое человеком основание хранится вместе с причиной.** Решение
         # «я принимаю несошедшийся итог, потому что…» — сведение о комплекте,
         # и документ обязан его напечатать: провал блокирующего контроля,
@@ -995,10 +1064,23 @@ def _audit_records(inn: str, src_file_id: int, audit) -> list[CheckRecord]:
             "Отчётность прошла обзорную проверку, а не аудит",
         )
     if audit.modified:
+        # **Вид оговорки называется вместе с мнением.** Уверенность в оценке
+        # и эскалация зависят от него, и запись без вида не говорит, применялись
+        # ли следствия: у ФосАгро оговорка о раскрытии, у Автодора о величинах.
+        from finlib.normalize.ifrs_audit import load_audit_policy
+
+        policy = load_audit_policy()
+        kind = policy.caveat_kind(audit.effective_caveat_kind(policy))
         record(
             CheckCode.AUDIT_OPINION_MODIFIED,
-            f"Мнение аудитора модифицировано: {audit.opinion_name}",
-            {"opinion": audit.opinion},
+            f"Мнение аудитора модифицировано: {audit.opinion_name}"
+            + (f"; вид оговорки — {kind.name.lower()}" if kind is not None else ""),
+            {
+                "opinion": audit.opinion,
+                "caveat_kind": kind.code if kind is not None else None,
+                "caveat_confirmed_by": audit.caveat_confirmed_by or None,
+                "caveat_kind_proposed": audit.proposed_caveat_kind(policy),
+            },
         )
     if "going_concern_uncertainty" in audit.sections:
         record(

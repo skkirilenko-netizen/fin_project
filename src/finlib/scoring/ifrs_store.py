@@ -376,14 +376,23 @@ def _audit_confidence(
     непрерывности деятельности, отчётности специального назначения, принятой
     решением человека, и одном показателе в каждой группе.
     """
+    from finlib.normalize.ifrs_audit import load_audit_policy
     from finlib.sources.ifrs_audit import audit_from_meta
 
     rule = policy.confidence
     meta = _meta_of(inn, report_date, conn)
     audit = audit_from_meta(meta)
     grounds: list[str] = []
+    # **Уверенность понижает оговорка о величинах, а не всякая модификация
+    # мнения.** Нераскрытые сегменты ФосАгро на величины, из которых считаются
+    # показатели, не влияют; заниженный резерв Автодора влияет. Следствие вида
+    # объявлено методикой у самого вида, и до подтверждения человеком оно
+    # не применяется.
     if audit is not None and audit.modified:
-        grounds.append(rule.text_of("modified_opinion"))
+        audit_policy = load_audit_policy()
+        kind = audit_policy.caveat_kind(audit.effective_caveat_kind(audit_policy))
+        if kind is not None and kind.lowers_confidence:
+            grounds.append(rule.text_of("modified_opinion"))
     if audit is not None and "going_concern_uncertainty" in audit.sections:
         grounds.append(rule.text_of("going_concern_uncertainty"))
     accepted = ((meta or {}).get("accepted") or {}).get("grounds") or {}
