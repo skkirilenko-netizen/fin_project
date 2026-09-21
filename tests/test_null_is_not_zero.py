@@ -129,13 +129,17 @@ def test_structure_shift_ignores_undisclosed_lines() -> None:
     Уход доли с нуля и отсутствие сведений о статье — разные вещи; вторая
     не может дать сдвиг структуры.
     """
-    from finlib.scoring.engine import _shares
+    from finlib.scoring.engine import shares_of
+    from finlib.scoring.signals import load_signals
 
-    shares = _shares({"1600": Decimal(1000), "1100": Decimal(400), "1200": None})
+    # Статьи и база объявлены методикой: перечень в коде был бы вторым
+    # определением того же самого.
+    rule = load_signals().structure_shift
+    shares = shares_of({"1600": Decimal(1000), "1100": Decimal(400), "1200": None}, rule)
     assert "1200" not in shares
     assert shares["1100"] == Decimal(40)
     # Нераскрытая валюта баланса не делает доли нулевыми — их нет вовсе.
-    assert _shares({"1600": None, "1100": Decimal(400)}) == {}
+    assert shares_of({"1600": None, "1100": Decimal(400)}, rule) == {}
 
 
 def test_structure_shift_needs_both_periods() -> None:

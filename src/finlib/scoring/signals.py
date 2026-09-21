@@ -94,11 +94,39 @@ class SignalRule(BaseModel):
     # Подставлять величину по модулю: знак уже выражен словами формулировки
     # («не объясняется», «расхождение»), и минус читался бы как опечатка.
     as_absolute: bool = False
+    # **Сравнивать с отсечкой модуль величины.** Важно и превышение, и падение:
+    # у структурного сдвига сигнал даёт и уход доли, и её приход, а
+    # у необъяснённого движения капитала — и недостача, и излишек. Объявляется
+    # здесь, а не подразумевается кодом: иначе по справочнику нельзя сказать,
+    # когда печатается формулировка.
+    compare_absolute: bool = False
     origin: str = Field(min_length=1)
     # Происхождение и зрелость порога — разные сведения: origin отвечает,
     # откуда взялась величина, статус — можно ли на неё опираться.
     calibration_status: str = Field(min_length=1)
     text: str = Field(min_length=1)
+    # **Недействующий сигнал объявляется вместе с причиной.** Признак, порог
+    # которого назначить пока не на чем, лучше объявить неработающим, чем
+    # подогнать отсечку под один-два наблюдения: подогнанный порог выглядит
+    # работающим правилом, а меряет он размер набора. Удалённый признак при
+    # этом не отличить от забытого, поэтому он остаётся в справочнике.
+    active: bool = True
+    inactive_reason: str = ""
+
+    @model_validator(mode="after")
+    def _inactive_names_its_reason(self) -> Self:
+        """Недействующий сигнал называет причину, действующий её не имеет."""
+        if self.active and self.inactive_reason:
+            raise ValueError(
+                f"сигнал «{self.name}» объявлен действующим и одновременно "
+                "называет причину недействия"
+            )
+        if not self.active and not self.inactive_reason.strip():
+            raise ValueError(
+                f"сигнал «{self.name}» объявлен недействующим без причины: "
+                "молчание читалось бы как «признак не нужен»"
+            )
+        return self
 
     @field_validator("calibration_status")
     @classmethod
@@ -128,22 +156,61 @@ class SignalDef(SignalRule):
 
     code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     expression: str = Field(min_length=1)
-    threshold: Decimal
+    # Порога может не быть у недействующего признака: назначать его не на чем.
+    threshold: Decimal | None = None
     # Порог задан долей этой строки, а не абсолютом: у крупной организации
-    # расхождение в миллион — округление, у малой — вся деятельность.
-    threshold_of: str | None = Field(default=None, pattern=r"^\d{4}$")
+    # расхождение в миллион — округление, у малой — вся деятельность. Код
+    # строки РСБУ либо код позиции МСФО: справочники разные, правило одно.
+    threshold_of: str | None = Field(
+        default=None, pattern=r"^(\d{4}|ifrs\.[a-z][a-z0-9_]*)$"
+    )
+
+    @model_validator(mode="after")
+    def _active_names_its_threshold(self) -> Self:
+        """Действующий сигнал обязан назвать отсечку."""
+        if self.active and self.threshold is None:
+            raise ValueError(
+                f"сигнал {self.code} объявлен действующим без отсечки: прочитав "
+                "справочник, нельзя сказать, когда печатается формулировка"
+            )
+        return self
 
 
 class StructureShift(SignalRule):
-    """Структурный сдвиг баланса: изменение доли укрупнённой статьи."""
+    """Структурный сдвиг баланса: изменение доли укрупнённой статьи.
+
+    Статьи объявлены справочником своего стандарта, а не перечислены в коде:
+    у РСБУ это итоги разделов баланса, у МСФО — итоги той же природы под
+    своими кодами, и перечень в коде был бы двумя правилами вместо одного.
+    """
 
     threshold_points: Decimal = Field(gt=0)
+    # Статья и то, как её называет **формулировка**: «Внеоборотные активы»,
+    # а не «Итого по разделу I». Наименование формы точно, но в прозе сигнала
+    # оно ничего читателю не говорит, а формулировка — методическое решение.
+    # Существование кода проверяется по справочнику строк тестом.
+    lines: dict[str, str] = Field(min_length=1)
+    # Строка-база, долей которой мерится статья: валюта баланса.
+    base: str = Field(min_length=1)
 
 
 class RevisionIntensity(SignalRule):
     """Интенсивность пересмотра сравнительных данных."""
 
-    threshold_per_set: Decimal = Field(gt=0)
+    # Порога может не быть вовсе: признак объявлен недействующим, и отсечку
+    # назначать не на чем. Действующий без порога справочник не примет.
+    threshold_per_set: Decimal | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _active_names_its_threshold(self) -> Self:
+        """Действующий признак обязан назвать отсечку."""
+        if self.active and self.threshold_per_set is None:
+            raise ValueError(
+                "интенсивность пересмотра объявлена действующей без отсечки: "
+                "прочитав справочник, нельзя сказать, когда печатается "
+                "формулировка"
+            )
+        return self
 
 
 class SignalsCatalog(BaseModel):
@@ -228,11 +295,22 @@ def evaluate_signals(
     current: dict[str, Decimal | None],
     previous: dict[str, Decimal | None],
     catalog: SignalsCatalog | None = None,
+    unit: str = "",
 ) -> list[SignalHit]:
-    """Проверяет выражения сигналов по значениям двух периодов."""
+    """Проверяет выражения сигналов по значениям двух периодов.
+
+    `unit` — наименование денежной единицы **комплекта**: консолидированная
+    отчётность составляется в миллионах, и число без единицы рядом с отсечкой
+    читатель прочтёт в тех единицах, которые сам предположит. Формулировка,
+    единицу не называющая, слот не содержит, и подстановка её не меняет.
+    """
     catalog = catalog if catalog is not None else load_signals()
     found: list[SignalHit] = []
     for signal in catalog.signals:
+        # Недействующий признак не проверяется вовсе: его отсечка объявлена
+        # ненадёжной, и срабатывание по ней мерило бы наш набор, а не эмитента.
+        if not signal.active:
+            continue
         value = _evaluate(signal.expression, current, previous)
         if value is None:
             continue
@@ -242,7 +320,8 @@ def evaluate_signals(
             if base is None or base == 0:
                 continue
             threshold = signal.threshold * abs(base)
-        if not _triggered(signal.condition, value, threshold):
+        measured = abs(value) if signal.compare_absolute else value
+        if not _triggered(signal.condition, measured, threshold):
             continue
         found.append(
             SignalHit(
@@ -250,7 +329,7 @@ def evaluate_signals(
                 name=signal.name,
                 level=signal.level,
                 value=value,
-                message=_format(signal, value, current),
+                message=_format(signal, value, current, unit),
                 details={
                     "expression": signal.expression,
                     "value": str(value),
@@ -277,14 +356,18 @@ def structure_shifts(
     """Статьи, доля которых в балансе изменилась сверх порога."""
     catalog = catalog if catalog is not None else load_signals()
     rule = catalog.structure_shift
+    if not rule.active:
+        return []
     found: list[SignalHit] = []
     for code, after in shares_now.items():
         before = shares_before.get(code)
         if before is None:
             continue
         shift = after - before
-        # Сравнивается модуль: сигнал даёт и уход доли, и её приход.
-        if not _triggered(rule.condition, abs(shift), rule.threshold_points):
+        # Сравнивается модуль: сигнал даёт и уход доли, и её приход. Правило
+        # объявлено справочником, а не подразумевается здесь.
+        measured = abs(shift) if rule.compare_absolute else shift
+        if not _triggered(rule.condition, measured, rule.threshold_points):
             continue
         found.append(
             SignalHit(
@@ -322,7 +405,7 @@ def revision_intensity(
     """Пересмотр сравнительных данных интенсивнее порога."""
     catalog = catalog if catalog is not None else load_signals()
     rule = catalog.revision_intensity
-    if sets <= 0:
+    if not rule.active or rule.threshold_per_set is None or sets <= 0:
         return None
     per_set = safe_div(Decimal(mismatches), Decimal(sets))
     if per_set is None or not _triggered(
@@ -362,13 +445,17 @@ def shown(rule: SignalRule, value: Decimal) -> str:
 
 
 def _format(
-    signal: "SignalDef", value: Decimal, values: dict[str, Decimal | None]
+    signal: "SignalDef",
+    value: Decimal,
+    values: dict[str, Decimal | None],
+    unit: str = "",
 ) -> str:
     """Подставляет величины в предписанную формулировку."""
     profit = values.get("2400")
     return signal.text.format(
         value=shown(signal, value),
         profit=_money(profit, 0) if profit is not None else "—",
+        unit=unit,
     )
 
 

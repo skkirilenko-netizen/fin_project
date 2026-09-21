@@ -93,6 +93,7 @@ _TOKEN = re.compile(
     r"""
     (?P<space>\s+)
   | (?P<number>\d+(?:\.\d+)?)
+  | (?P<ifrs>ifrs\.[a-z][a-z0-9_]*)
   | (?P<name>[A-Za-z_][A-Za-z_0-9]*)
   | (?P<op>[+\-*/()])
   | (?P<comma>,)
@@ -186,6 +187,13 @@ class _Parser:
                     f"число. Допустимы только коды строк и именованные константы ({self.source})"
                 )
             return LineRef(token.text)
+        if token.kind == "ifrs":
+            # **Код позиции МСФО — такая же ссылка на величину, как код строки
+            # РСБУ.** Четырёхзначное число уже означает код строки, прописное
+            # имя — константу методики; код с точкой не может быть ни тем,
+            # ни другим, и потому отличим с первого взгляда.
+            self.index += 1
+            return LineRef(token.text)
         if token.kind == "name":
             return self._name(token)
         raise FormulaError(f"неожиданное {token.text!r} в формуле: {self.source}")
@@ -195,7 +203,13 @@ class _Parser:
         if token.text in ("avg", "prev"):
             self._take("(")
             inner = self._peek()
-            if inner is None or inner.kind != "number" or not _LINE_CODE.match(inner.text):
+            # Код строки РСБУ либо код позиции МСФО: и то и другое — ссылка
+            # на величину, и предыдущий период у них берётся одинаково.
+            known = inner is not None and (
+                inner.kind == "ifrs"
+                or (inner.kind == "number" and _LINE_CODE.match(inner.text))
+            )
+            if not known:
                 raise FormulaError(
                     f"{token.text}() принимает только код строки: {self.source}"
                 )

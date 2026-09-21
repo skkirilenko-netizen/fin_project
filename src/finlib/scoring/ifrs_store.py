@@ -25,6 +25,7 @@ from finlib.scoring.engine import Assessment as StoredAssessment
 from finlib.scoring.engine import GroupScore as StoredGroup
 from finlib.scoring.ifrs import Assessment as IfrsAssessment
 from finlib.scoring.ifrs import StopFactors, assess, evaluate_stop_factors
+from finlib.scoring.ifrs_signals import ifrs_signals
 from finlib.scoring.metric_score import MetricScore as StoredMetric
 from finlib.scoring.store import save_assessment
 from finlib.standards import Standard
@@ -499,6 +500,12 @@ def save_ifrs_assessment(
             )
             for item in computed
         ],
+        # **Надзорные признаки ветки считаются здесь же и по её справочнику.**
+        # Прежде раздел 4 документа по МСФО держался на одном заключении
+        # аудитора: движение капитала, структурный сдвиг и выплаты акционерам
+        # расчёт не выявлял вовсе, потому что признаков у ветки не было —
+        # и отличить это от «ничего не нашлось» было нечем.
+        signals=list(ifrs_signals(inn, conn, report_date)),
         metrics_version=policy.version,
         scoring_version=policy.version,
         flags_version="",

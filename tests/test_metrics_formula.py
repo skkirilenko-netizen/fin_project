@@ -126,3 +126,33 @@ def test_missing_average_base_is_an_error() -> None:
     """Без предыдущего периода средняя величина не вычисляется."""
     with pytest.raises(FormulaError, match="предыдущ"):
         calc("avg(1600)", {"1600": Decimal(300)}, None)
+
+
+def test_ifrs_position_code_is_a_line_reference() -> None:
+    """Код позиции МСФО — такая же ссылка на величину, как код строки РСБУ.
+
+    Четырёхзначное число уже означает код строки, прописное имя — константу
+    методики; код с точкой не может быть ни тем, ни другим и потому отличим
+    с первого взгляда. Без этого признаки ветки МСФО потребовали бы второго
+    интерпретатора — то есть второго определения одного и того же языка.
+    """
+    node = parse_formula("ifrs.total_equity - prev(ifrs.total_equity)")
+    assert line_codes(node) == {"ifrs.total_equity"}
+    assert average_codes(node) == {"ifrs.total_equity"}
+    value = evaluate(
+        node,
+        {"ifrs.total_equity": Decimal(255)},
+        {"ifrs.total_equity": Decimal(1084)},
+        CONSTANTS,
+    )
+    assert value == Decimal(-829)
+
+
+def test_bare_lowercase_name_is_still_refused() -> None:
+    """Голое строчное имя кодом позиции не становится: точка обязательна.
+
+    Иначе «equity» читалось бы то как константу методики, то как позицию,
+    и по формуле нельзя было бы сказать, что она берёт.
+    """
+    with pytest.raises(FormulaError, match="неизвестная функция"):
+        parse_formula("equity + 1600")

@@ -384,11 +384,16 @@ def _signals(
     earlier = sorted((item for item in periods if item < target), reverse=True)
     previous = periods[earlier[0]].values if earlier else {}
 
+    from finlib.scoring.signals import load_signals
+
+    catalog = load_signals()
     found = list(evaluate_signals(period_values.values, previous))
     found += structure_shifts(
-        _shares(period_values.values),
-        _shares(previous),
-        _line_names(),
+        shares_of(period_values.values, catalog.structure_shift),
+        shares_of(previous, catalog.structure_shift),
+        # Наименования приходят из справочника вместе с кодами: формулировка
+        # называет статью так, как её называет методика.
+        dict(catalog.structure_shift.lines),
     )
     mismatches = fetch_all(_MISMATCHES, {"inn": inn, "s": standard.value}, conn=conn)
     sets = fetch_all(_SETS, {"inn": inn, "s": standard.value}, conn=conn)
@@ -399,27 +404,22 @@ def _signals(
     return found
 
 
-def _shares(values: dict[str, Decimal | None]) -> dict[str, Decimal]:
-    """Доли укрупнённых статей в валюте баланса, в процентах."""
-    total = values.get("1600")
+def shares_of(values: dict[str, Decimal | None], rule) -> dict[str, Decimal]:
+    """Доли укрупнённых статей в валюте баланса, в процентах.
+
+    Статьи и база объявлены методикой: перечень в коде был бы вторым
+    определением того же самого — у ветки МСФО он свой, а правило одно.
+    """
+    total = values.get(rule.base)
     if total is None or total <= 0:
         return {}
     return {
         code: values[code] / total * Decimal(100)
-        for code in ("1100", "1200", "1300", "1400", "1500")
+        for code in rule.lines
         if values.get(code) is not None
     }
 
 
-def _line_names() -> dict[str, str]:
-    """Наименования укрупнённых статей для формулировок сигналов."""
-    return {
-        "1100": "Внеоборотные активы",
-        "1200": "Оборотные активы",
-        "1300": "Капитал и резервы",
-        "1400": "Долгосрочные обязательства",
-        "1500": "Краткосрочные обязательства",
-    }
 
 
 def assess(
