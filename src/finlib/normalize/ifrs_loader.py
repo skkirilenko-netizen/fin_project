@@ -802,6 +802,86 @@ def _unconfirmed(
     ]
 
 
+def _review_passes(
+    inn: str, src_file_id: int, profile: DocumentProfile, review: ReviewResult
+) -> list[CheckRecord]:
+    """Пройденные условия экрана сверки — записями, а не молчанием.
+
+    **Сводка контролей комплекта не содержала ни одной пройденной проверки.**
+    Экран писал только основания отбраковки, и у годового комплекта ФосАгро,
+    прошедшего автоматически, в таблице стояли лишь сведения о сопоставлении
+    строк: по документу нельзя было сказать, что именно проверено. Ноль
+    нарушений при неизвестном числе проверок — не успех, а отсутствие
+    сведений; правило то же, по которому контроли сходимости пишут `pass`.
+
+    Каждое условие называет **число проверенных объектов**. Условие, у которого
+    объектов не нашлось, идёт исходом «не выполнялся» с причиной: ноль
+    сверенных итогов и все сошедшиеся итоги — разные вещи.
+    """
+    from finlib.sources.ifrs_review import ReviewReason
+
+    failed = set(review.reasons)
+    found: list[CheckRecord] = []
+    report_date = profile.report_dates[0] if profile.report_dates else None
+
+    def record(code: CheckCode, passed: bool, message: str) -> None:
+        found.append(
+            CheckRecord(
+                inn=inn,
+                check_code=code,
+                status=CheckStatus.PASS if passed else CheckStatus.INFO,
+                severity=Severity.BLOCKING if passed else Severity.INFO,
+                message=message,
+                src_file_id=src_file_id,
+                report_date=report_date,
+            )
+        )
+
+    if ReviewReason.CHECK_FAILED not in failed:
+        if review.totals_checked:
+            record(
+                CheckCode.IFRS_TOTAL_MISMATCH,
+                True,
+                f"Сходимость итогов форм: сошлись все {review.totals_checked} "
+                "сверенных итога",
+            )
+        else:
+            record(
+                CheckCode.IFRS_TOTAL_MISMATCH,
+                False,
+                "Сходимость итогов форм: не выполнялась — ни один итог "
+                "не опознан, сверять нечего",
+            )
+    if ReviewReason.UNRECOGNISED_POSITION not in failed:
+        record(
+            CheckCode.IFRS_UNRECOGNISED_POSITION,
+            bool(review.rows_total),
+            f"Опознание позиций: опознаны все {review.rows_total} строк "
+            f"с величинами (справочником {review.rows_recognised}, "
+            f"по ранее подтверждённому {len(review.rows_confirmed)})"
+            if review.rows_total
+            else "Опознание позиций: не выполнялось — строк с величинами нет",
+        )
+    if ReviewReason.MATERIAL_SPECIFIC_ITEM not in failed:
+        record(
+            CheckCode.IFRS_MATERIAL_ITEM,
+            bool(review.rows_measured),
+            f"Статьи сверх порога существенности: их нет, измерено "
+            f"{review.rows_measured} строк"
+            if review.rows_measured
+            else "Статьи сверх порога существенности: не проверялось — "
+            "неопознанных строк с измеримой существенностью нет",
+        )
+    if ReviewReason.REPORTING_KIND not in failed:
+        record(
+            CheckCode.IFRS_REPORTING_KIND,
+            True,
+            f"Вид отчётности: {profile.reporting_kind.value} — методика "
+            "применяется к нему целиком",
+        )
+    return found
+
+
 def _audit_records(inn: str, src_file_id: int, audit) -> list[CheckRecord]:
     """Записи о том, что сказано в аудиторском заключении.
 
@@ -971,6 +1051,8 @@ def _journal_records(
             },
         )
     ]
+
+    records.extend(_review_passes(inn, src_file_id, profile, review))
 
     for code, reason in zip(review.check_codes, review.reasons, strict=False):
         records.append(
