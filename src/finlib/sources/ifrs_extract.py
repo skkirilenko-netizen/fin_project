@@ -329,13 +329,35 @@ class Extraction:
         """Строк, опознанных справочником."""
         return sum(form.rows_recognised for form in self.forms.values())
 
-    def totals(self, report_date: date) -> dict[str, Decimal]:
-        """Итоговые величины за период — вход для проверки правдоподобия."""
-        return {
-            item.code: item.value
-            for item in self.values
-            if item.report_date == report_date
-        }
+    def totals(
+        self, report_date: date, catalog: IfrsCatalog | None = None
+    ) -> dict[str, Decimal]:
+        """Величины за период одним перечнем; позиция берётся из **своей** формы.
+
+        **Один код в двух формах — два разных факта, и подменять они друг
+        друга не вправе.** Плоский перечень оставлял последнюю встреченную
+        величину, и у ПАО «Сегежа Групп» «Прочий финансовый результат, нетто»
+        приходил из отчёта о движении денежных средств неденежной поправкой
+        +9 660 вместо −9 660 отчёта о прибыли, а курсовые разницы −250 вместо
+        +250. Цепочка прибыли расходилась на 18 820 у комплекта, в котором
+        она сходится копейка в копейку, и комплект уходил в карантин
+        за нашу ошибку.
+
+        Своей формой считается та, которую объявляет справочник; величина
+        из формы, названной в `also_in_forms`, заполняет пробел, но своей
+        не подменяет.
+        """
+        catalog = catalog or load_ifrs_lines()
+        found: dict[str, Decimal] = {}
+        for form_code, form in self.forms.items():
+            for item in form.values:
+                if item.report_date != report_date:
+                    continue
+                position = catalog.get(item.code)
+                own = position is not None and position.form == form_code
+                if own or item.code not in found:
+                    found[item.code] = item.value
+        return found
 
     def value_of(self, code: str, report_date: date) -> Decimal | None:
         """Величина статьи за период; None — статья не извлечена."""
