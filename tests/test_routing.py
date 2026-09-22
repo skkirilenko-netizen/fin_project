@@ -227,22 +227,84 @@ def test_approval_and_maturity_are_declared_with_their_reasons() -> None:
         RoutingPolicy.model_validate(raw)
 
 
-def test_bound_is_not_a_substitute_for_the_missing_metric() -> None:
-    """Оценка сверху заменой не считается: не рассчитан — не ниже внимания.
+def test_bound_below_the_threshold_proves_the_criterion() -> None:
+    """Вывод по границе — доказательство, и пробелом он не считается.
 
-    Правило «ниже порога — критерий пройден доказуемо» верно арифметически,
-    но давало «без внимания» там, где долговая нагрузка не рассчитана:
-    у восьми эмитентов набора решение принималось по величине, которой нет.
-    Оценка сверху при этом остаётся сведением и печатается рядом.
+    При положительной операционной прибыли амортизация неотрицательна, поэтому
+    отношение к EBITDA не выше отношения к операционной прибыли: граница ниже
+    порога означает, что и показатель ниже. Дефект был не в правиле, а в печати:
+    строка писала «не считается» и границы не показывала.
     """
     computed = (
-        metric("net_debt_op_profit", "3.3", "Чистый долг / EBITDA, оценка сверху"),
+        metric("net_debt_op_profit", "2.3", "Чистый долг / EBITDA, оценка сверху"),
+        metric("equity_ratio", "0.6"),
+        metric("cur_liq", "2.5"),
+    )
+    assert routed(computed=computed) == ("clear", ())
+
+
+def test_bound_above_the_threshold_gives_no_conclusion() -> None:
+    """Граница выше порога вывода не даёт: корзина — внимание.
+
+    «Не выше 13,4x» при пороге 5,0x не означает, что показатель выше порога:
+    настоящее значение бывает и ниже. Это отсутствие вывода, а не плохая
+    величина, и корзина у него внимание, а не разбор.
+    """
+    computed = (
+        metric("net_debt_op_profit", "13.4", "Чистый долг / EBITDA, оценка сверху"),
         metric("equity_ratio", "0.6"),
         metric("cur_liq", "2.5"),
     )
     basket, grounds = routed(computed=computed)
     assert basket == "attention"
-    assert grounds == ("data_insufficient",)
+    assert set(grounds) == {"data_insufficient", "bound_above_threshold"}
+
+
+def test_branch_mutes_the_stop_factor_of_its_business_model() -> None:
+    """В пяти отраслях отрицательный оборотный капитал основания не даёт.
+
+    Гасится основание маршрута, а не стоп-фактор: класс методика ограничивает
+    по-прежнему. Гашение считается — правило, гасящее молча, неотличимо
+    от невыполненного.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        branch="Электроэнергетика",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+    assert verdict.muted == ("negative_nwc",)
+    # Отрасль вне перечня гасителем не служит.
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        branch="Производство лекарств и биотехнологии",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.muted == ()
+
+
+def test_group_member_is_not_softer_than_attention() -> None:
+    """Если кто-то в группе в разборе, её член не мягче внимания.
+
+    Соразмерно, а не выравниванием: корзина разбора не переносится — она
+    сказана о том эмитенте, у которого обстоятельство найдено.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        group_under_review=("Мечел", "Мечел"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("group_under_review",)
 
 
 def test_non_positive_ebitda_is_its_own_ground() -> None:
@@ -295,3 +357,120 @@ def test_one_cycle_behind_stays_in_the_severity_baskets() -> None:
     )
     assert verdict.basket == "attention"
     assert verdict.grounds == ("disclosure_overdue",)
+
+
+def test_default_on_an_issue_is_a_review_ground() -> None:
+    """Дефолт по выпуску — обстоятельство разбора, и дата события называется.
+
+    Годовая отчётность события между отчётными датами не видит: у ЕвроТранса
+    числа за 2025 год спокойны, а по двенадцати выпускам стоит неурегулированный
+    дефолт.
+    """
+    from finlib.sources.cbonds_events import Issue, IssuerEvents
+
+    events = IssuerEvents(
+        inn="5029169023",
+        issues=(
+            Issue(
+                name="БО-03",
+                status="дефолт по погашению",
+                default=True,
+                unsettled=True,
+                maturity=date(2026, 8, 22),
+                offer=None,
+                outstanding=Decimal(300000000),
+                updated=date(2026, 9, 4),
+            ),
+        ),
+        issues_known=True,
+    )
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        events=events,
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("emission_default",)
+    assert "22.08.2026" in verdict.details[0]
+
+
+def test_settled_default_is_not_a_current_circumstance() -> None:
+    """Урегулированный дефолт прошлого в разбор не отправляет.
+
+    У ДВМП признак дефолта стоит по еврооблигациям, погашенным около десяти лет
+    назад: событие настоящее, но давно улаженное, и судить по нему о нынешнем
+    эмитенте значило бы мерить его прошлым.
+    """
+    from finlib.sources.cbonds_events import Issue, IssuerEvents
+
+    events = IssuerEvents(
+        inn="2540047110",
+        issues=(
+            Issue(
+                name="еврооблигации",
+                status="погашена",
+                default=True,
+                unsettled=False,
+                maturity=date(2016, 5, 2),
+                offer=None,
+                outstanding=None,
+                updated=date(2024, 3, 11),
+            ),
+        ),
+        issues_known=True,
+    )
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        events=events,
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+
+
+def test_only_credit_ratings_reach_the_grades() -> None:
+    """ESG-рейтинг о кредитоспособности не говорит и в градацию не идёт.
+
+    При первом прогоне в категориях оказались «ESG-A-», «ESG-II(c)» и «5»:
+    точки шкал, к кредитоспособности не относящихся. Кредитная шкала объявлена
+    методикой по идентификатору, а не по вхождению «ESG» в наименование.
+    """
+    from finlib.sources.cbonds_events import IssuerEvents, Rating
+
+    esg = Rating(
+        agency="Эксперт РА",
+        scale="ESG рейтинг",
+        point="ESG-C",
+        category="C",
+        outlook="",
+        assigned=date(2026, 1, 1),
+        credit=False,
+    )
+    credit = Rating(
+        agency="Эксперт РА",
+        scale="Национальная российская рейтинговая шкала",
+        point="ruC",
+        category="C",
+        outlook="",
+        assigned=date(2026, 5, 12),
+        credit=True,
+    )
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        events=IssuerEvents(inn="1", ratings=(esg,), ratings_known=True),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        events=IssuerEvents(inn="1", ratings=(credit,), ratings_known=True),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.grounds == ("rating_default",)

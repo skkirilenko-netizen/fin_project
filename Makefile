@@ -46,6 +46,12 @@ ifrs-regression:  ## Прогон набора МСФО без модели: mak
 ifrs-reference:  ## Эталонные величины по настоящим документам: расхождение — остановка
 	uv run python eval/ifrs_reference_run.py $(ARGS)
 
+events:  ## Событийный слой: дефолты, рейтинги, рефинансирование (только чтение)
+	uv run python eval/events_run.py $(ARGS)
+
+emissions-fetch:  ## Забрать выпуски по всем эмитентам справочника (481 запрос)
+	uv run python scripts/emissions_fetch.py $(ARGS)
+
 routing-reference:  ## Эталон списка наблюдения, уровень проекта: расхождение — остановка
 	uv run python eval/routing_reference_run.py $(ARGS)
 

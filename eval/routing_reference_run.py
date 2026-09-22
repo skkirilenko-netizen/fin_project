@@ -71,11 +71,35 @@ def main() -> int:
             if row is None:
                 divergences.append(f"{code}: {inn} в списке нет, проверить нечем")
                 continue
+            if expect == "review" and row.verdict.basket != "review":
+                divergences.append(
+                    f"{code}: {row.name} ({inn}) в «{row.verdict.basket_name}», "
+                    "а ожидался разбор"
+                )
             if expect == "not_clear" and row.verdict.basket == "clear":
                 divergences.append(
                     f"{code}: {row.name} ({inn}) в «Без внимания», "
                     f"а ожидалось не ниже внимания"
                 )
+            if expect == "shows_bound":
+                # Граница обязана быть видна, а «данных недостаточно»
+                # по долговой нагрузке — не сработать: пробелом граница
+                # не является.
+                if row.values.get("net_debt_op_profit") is None:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) границы нет в величинах "
+                        "строки — печатать нечего"
+                    )
+                fired = {
+                    entry.subject
+                    for entry in row.verdict.findings
+                    if entry.ground == "data_insufficient"
+                }
+                if "долговая нагрузка" in fired:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) долговая нагрузка названа "
+                        "недостающей, хотя граница есть"
+                    )
             if expect == "no_ground":
                 fired = {entry.ground for entry in row.verdict.findings}
                 if item["ground"] in fired:

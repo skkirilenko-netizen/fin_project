@@ -39,6 +39,33 @@ from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+def _coverage(item) -> str:
+    """Строка покрытия: что проверено и чего нет.
+
+    **Пустая графа читается как «ничего не проверяли».** У эмитента без
+    оснований проверено всё, что маршрут умеет: три величины и события.
+    «Долг ✓ (оценка сверху)» отличается от «долг ✓» намеренно — вывод
+    по границе доказателен, но это граница, а не величина.
+    """
+    parts = []
+    if item.values.get("net_debt_ebitda") is not None:
+        parts.append("долг ✓")
+    elif item.values.get("net_debt_op_profit") is not None:
+        parts.append("долг ✓ (оценка сверху)")
+    else:
+        parts.append("долг — нет данных")
+    parts.append(
+        "капитал ✓" if item.values.get("equity_ratio") is not None
+        else "капитал — нет данных"
+    )
+    parts.append(
+        "ликвидность ✓" if item.values.get("cur_liq") is not None
+        else "ликвидность — нет данных"
+    )
+    parts.append("события — нет данных")
+    return "проверено: " + ", ".join(parts)
+
+
 def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     """Строки списка наблюдения и сводка по корзинам и подгруппам.
 
@@ -102,7 +129,20 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                     for code, value in item.values.items()
                 ],
                 "sources": list(item.sources),
+                # **Источник, стандарт и контур.** Единица у коэффициентов
+                # не информативна, а контур — да: отдельная отчётность
+                # управляющей компании и консолидированная группы описывают
+                # разные предметы. Пока третий стандарт не заведён,
+                # неконсолидированная отчётность по МСФО отбраковывается
+                # на приёме, и контур у всех строк один — это честнее, чем
+                # печатать графу, которая не различает.
+                "origin": " · ".join(
+                    (", ".join(item.sources), "МСФО", "консолидированная")
+                ),
                 "unit": unit,
+                # Строка покрытия для «Без внимания»: перечислено то, что
+                # проверено, и названо то, чего у нас нет.
+                "coverage": _coverage(item),
                 "report_date": f"{item.report_date:%d.%m.%Y}",
                 "months": months,
                 "stale": report_policy.freshness.stale(months),
@@ -157,14 +197,30 @@ def render(rows: list[dict], summary: dict[str, int], routing, today: date) -> s
 
 
 def _row_html(item: dict) -> str:
-    """Одна строка таблицы."""
-    grounds = "".join(
-        f'<div class="g"><span class="gn">{html.escape(entry["name"])}</span>'
-        + "".join(
-            f'<span class="gd">{html.escape(text)}</span>' for text in entry["details"]
+    """Одна строка таблицы: главное основание, остальные свёрнуто.
+
+    **Одно главное основание в строке.** Перечень из четырёх формулировок
+    читается как список дел, а не как ответ на вопрос «что с эмитентом»:
+    главное стоит открыто, остальные — строкой «ещё N» под ним.
+    """
+    said = [text for entry in item["grounds"] for text in entry["details"]]
+    main = said[0] if said else ""
+    rest = said[1:]
+    grounds = (
+        f'<div class="gn">{html.escape(main)}</div>'
+        + (
+            '<details class="more"><summary>ещё '
+            f'{len(rest)}</summary>'
+            + "".join(f'<span class="gd">{html.escape(text)}</span>' for text in rest)
+            + "</details>"
+            if rest
+            else ""
         )
-        + "</div>"
-        for entry in item["grounds"]
+        if main
+        # **Строка покрытия у «Без внимания».** Пустая графа читается
+        # как «ничего не проверяли», тогда как проверено всё, что маршрут
+        # умеет: величины и события.
+        else f'<div class="cover">{html.escape(item["coverage"])}</div>'
     )
     values = "".join(
         f'<div class="v"><span class="vn">{html.escape(name)}</span>'
@@ -176,7 +232,7 @@ def _row_html(item: dict) -> str:
     action = item["actions"][0] if item["actions"] else ""
     fresh = (
         f'<span class="stale">{item["report_date"]} · {item["months"]} мес.</span>'
-        if item["stale"]
+        if item["stale"] or item["overdue"]
         else f'{item["report_date"]} · {item["months"]} мес.'
     )
     assessed = (
@@ -195,10 +251,12 @@ def _row_html(item: dict) -> str:
         f'<td class="sg">{html.escape(subgroup)}'
         + (f'<span class="act">{html.escape(action)}</span>' if action else "")
         + (f'<span class="oth">ещё: {html.escape(others)}</span>' if others else "")
-        + f"</td><td class=\"gs\">{grounds}</td><td class=\"vs\">{values}</td>"
-        f'<td class="src">{html.escape(", ".join(item["sources"]))}'
-        + (f'<span class="act">{html.escape(item["unit"])}</span>' if item["unit"] else "")
-        + "</td>"
+        + f'</td><td class="gs">{grounds}</td><td class="vs">{values}</td>'
+        # **Источник, стандарт и контур — одна графа.** Единица у коэффициентов
+        # не значит ничего, а вот чья это отчётность и какого она контура —
+        # значит: отдельная отчётность управляющей компании и консолидированная
+        # группы описывают разные предметы.
+        f'<td class="src">{html.escape(item["origin"])}</td>'
         f'<td class="fr">{fresh}</td></tr>'
     )
 

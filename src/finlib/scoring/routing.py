@@ -50,6 +50,7 @@ from finlib.normalize.ifrs_issuer_type import IssuerTypePolicy, load_issuer_type
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.scoring.ifrs import level
 from finlib.scoring.theses import load_theses
+from finlib.sources.cbonds_events import DEFAULT_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,45 @@ class SameCircumstance(BaseModel):
     origin: str = Field(min_length=1)
 
 
+class MutedStopFactor(BaseModel):
+    """Отрасли, в которых стоп-фактор основания маршрута не даёт.
+
+    **Гасится основание маршрута, а не стоп-фактор.** Класс методика
+    по-прежнему ограничивает: отрицательный оборотный капитал у сетевой
+    компании остаётся обстоятельством оценки, а к человеку по нему никого
+    не отправляют — это устройство отрасли.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stop_factor: str = Field(min_length=1)
+    branches: tuple[str, ...] = Field(min_length=1)
+    why: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
+class Events(BaseModel):
+    """Событийный слой: как дефолт и рейтинг входят в маршрут.
+
+    **Годовая отчётность события между отчётными датами не видит.** У ЕвроТранса
+    числа за 2025 год спокойны, а по двенадцати выпускам стоит неурегулированный
+    дефолт и рейтинги всех четырёх агентств отозваны. Категории берутся
+    из справочника точек шкал источника; перечни здесь — решение методики
+    о том, что с категорией делать.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    default_review: bool
+    default_origin: str = Field(min_length=1)
+    credit_scales: dict[str, str] = Field(min_length=1)
+    credit_scales_origin: str = Field(min_length=1)
+    review_categories: tuple[str, ...] = Field(min_length=1)
+    attention_categories: tuple[str, ...] = Field(min_length=1)
+    attention_outlooks: tuple[str, ...] = Field(min_length=1)
+    categories_origin: str = Field(min_length=1)
+
+
 class Severity(BaseModel):
     """Градации ограничения класса, при которых нужен человек."""
 
@@ -201,6 +241,45 @@ class Freshness(BaseModel):
         return max(expected - latest.year, 0)
 
 
+class Statements(BaseModel):
+    """Формулировки оснований: смысл, а не механика расчёта.
+
+    **«Величина маршрута за концом своей калибровочной шкалы» — правда о том,
+    как устроен расчёт, и ничего не говорит человеку, которому эмитента
+    передают.** Формулировки объявлены методикой и правятся диффом, как всякая
+    формулировка документа; у показателя бывает своя, потому что «автономия
+    0,03» и «чистый долг / EBITDA 5,2x» читаются по-разному.
+
+    Неизвестный слот в формулировке роняет справочник при загрузке: подстановка
+    обрушилась бы у первого же эмитента, у которого основание сработает.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    by_ground: dict[str, dict[str, str]] = Field(min_length=1)
+
+    def say(self, ground: str, key: str = "", **slots: object) -> str:
+        """Формулировка основания с подставленными величинами.
+
+        `key` выбирает формулировку показателя: «автономия 0,03» и «чистый долг
+        / EBITDA 5,2x» читаются по-разному, и одна формулировка на оба случая
+        говорила бы о механике, а не о смысле.
+        """
+        templates = self.by_ground.get(ground)
+        if templates is None:
+            raise KeyError(
+                f"формулировка основания {ground} не объявлена: "
+                "механический текст читателю ничего не говорит"
+            )
+        template = templates.get(key) or templates.get("default")
+        if template is None:
+            raise KeyError(
+                f"у основания {ground} нет формулировки ни для {key}, "
+                "ни по умолчанию"
+            )
+        return " ".join(template.split()).format(**slots)
+
+
 class Universe(BaseModel):
     """Состав списка: кого в нём не бывает и почему.
 
@@ -232,6 +311,9 @@ class RoutingPolicy(BaseModel):
     thresholds_origin: str = ""
     origin: str = Field(min_length=1)
     same_circumstance: tuple[SameCircumstance, ...] = ()
+    stop_factor_muted: tuple[MutedStopFactor, ...] = ()
+    events: Events
+    statements: Statements
     universe: Universe
     severity: Severity
     freshness: Freshness
@@ -255,6 +337,43 @@ class RoutingPolicy(BaseModel):
                 "зрелость величины — сведение, а не отговорка"
             )
         return self
+
+    @model_validator(mode="after")
+    def _every_ground_has_a_statement(self) -> Self:
+        """У каждого основания объявлена формулировка.
+
+        Основание без формулировки печаталось бы механическим текстом —
+        тем самым, из-за которого таблица формулировок и появилась.
+        """
+        declared = {
+            ground.code for basket in self.baskets for ground in basket.grounds
+        }
+        missing = declared - set(self.statements.by_ground)
+        if missing:
+            raise ValueError(
+                "у оснований нет формулировок: " + ", ".join(sorted(missing))
+            )
+        stray = set(self.statements.by_ground) - declared
+        if stray:
+            raise ValueError(
+                "формулировки объявлены для оснований, которых нет: "
+                + ", ".join(sorted(stray))
+            )
+        return self
+
+    def say(self, ground: str, key: str = "", **slots: object) -> str:
+        """Формулировка основания: одно место на список, замер и выгрузку."""
+        return self.statements.say(ground, key, **slots)
+
+    def muted_for(self, branch: str) -> frozenset[str]:
+        """Стоп-факторы, не дающие основания маршрута в этой отрасли."""
+        if not branch:
+            return frozenset()
+        return frozenset(
+            item.stop_factor
+            for item in self.stop_factor_muted
+            if branch in item.branches
+        )
 
     def basket(self, code: str) -> Basket:
         """Корзина по коду."""
@@ -315,6 +434,10 @@ class Verdict:
     subgroups: tuple[str, ...] = ()
     subgroup_names: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
+    # Стоп-факторы, погашенные отраслью: основания маршрута они не дали,
+    # и счётчик обязан их назвать — правило, гасящее молча, неотличимо
+    # от невыполненного.
+    muted: tuple[str, ...] = ()
     # Показатели, у которых основание **не** поставлено, потому что о том же
     # обстоятельстве уже сказал стоп-фактор. Считается это наравне
     # со сработавшим: правило, гасящее молча, неотличимо от невыполненного.
@@ -362,6 +485,22 @@ def route(
     # а не «оценка есть»: класс A у эмитента с тяжёлым балансом агрегатора —
     # не обстоятельство, а опровержение признака.
     assessed_class: str | None = None,
+    # Отрасль карточки источника: в пяти отраслях отрицательный оборотный
+    # капитал — модель бизнеса, и основания маршрута он не даёт.
+    branch: str = "",
+    # Эмитент той же группы, стоящий в разборе: обстоятельство группы говорит
+    # и о её члене, но корзину ему не назначает — оно не мягче внимания.
+    group_under_review: tuple[str, str] | None = None,
+    # Группа карточки и её представитель в списке: формулировка SPV называет
+    # обоих — «оценка по группе» без имени группы ничего не значит.
+    group: str = "",
+    group_leader: str = "",
+    # Чем присвоен класс: вид отчётности и отчётная дата. Страницы у оценки
+    # нет — класс присвоен комплекту, а не месту в документе.
+    assessed_where: str = "",
+    # События эмитента: выпуски и рейтинги. Годовая отчётность их не видит
+    # по устройству, и без них «Без внимания» стоит у эмитента с дефолтом.
+    events: object | None = None,
     today: date | None = None,
     policy: IfrsMetricsPolicy | None = None,
     routing: RoutingPolicy | None = None,
@@ -404,36 +543,94 @@ def route(
     severe = tuple(
         code for code in stop_factors if routing.severity.severe(caps.get(code))
     )
-    capped = tuple(code for code in stop_factors if code not in severe)
+    # **Гашение считается наравне со сработавшим.** Правило, гасящее молча,
+    # неотличимо от невыполненного, и «в этой отрасли признак не в счёт»
+    # обязано быть видно числом.
+    muted_here = routing.muted_for(branch)
+    muted = tuple(
+        code for code in stop_factors if code not in severe and code in muted_here
+    )
+    capped = tuple(
+        code
+        for code in stop_factors
+        if code not in severe and code not in muted_here
+    )
     # **Стоп-фактор называется наименованием, а не кодом.** Основание читает
     # человек — на экране наблюдения и в сводке, — и `negative_nwc` ему
     # не говорит ничего; код остаётся предметом основания, по нему считают.
-    names = {factor.code: factor.name for factor in types.stop_factors}
+    view = IfrsMetricsView(policy)
+    by_factor = {factor.code: factor for factor in types.stop_factors}
+
+    def about(code: str) -> str:
+        # Формулировка стоп-фактора: наименование и его величина в скобках.
+        # «Стоп-фактор: отрицательный собственный капитал» без величины
+        # заставляет читателя искать её в других графах.
+        factor = by_factor.get(code)
+        extra = ""
+        if factor is not None and factor.metric:
+            item = by_code.get(factor.metric)
+            if item is not None and item.calculable:
+                extra = (
+                    f" ({view.require(factor.metric).name.lower()} "
+                    f"{view.shown(factor.metric, item.value)})"
+                )
+        return routing.say(
+            "stop_factor_severe" if code in severe else "stop_factor_capped",
+            name=(factor.name if factor is not None else code),
+            extra=extra,
+        )
+
     for code in severe:
-        review.append(
-            Finding("stop_factor_severe", code, names.get(code, code))
-        )
+        review.append(Finding("stop_factor_severe", code, about(code)))
     for code in capped:
+        attention.append(Finding("stop_factor_capped", code, about(code)))
+    if group_under_review is not None:
+        whose, member = group_under_review
         attention.append(
-            Finding("stop_factor_capped", code, names.get(code, code))
+            Finding(
+                "group_under_review",
+                whose,
+                routing.say("group_under_review", group=whose, leader=member),
+            )
         )
+    if events is not None:
+        review.extend(_event_findings(events, routing))
+        attention.extend(_rating_watch(events, routing))
     if financing_structure:
         review.append(
-            Finding("financing_structure", "", "финансирующая структура группы")
+            Finding(
+                "financing_structure",
+                group,
+                routing.say(
+                    "financing_structure",
+                    group=group or "не названа в справочнике",
+                    leader=group_leader or "головной компании в списке нет",
+                ),
+            )
         )
     if assessed_class and assessed_class in routing.severity.review_caps:
         review.append(
             Finding(
                 "assessed_class_low",
                 assessed_class,
-                f"класс {assessed_class} по разобранному документу",
+                routing.say(
+                    "assessed_class_low",
+                    where=assessed_where or "разобранному документу",
+                    **{"class": assessed_class},
+                ),
             )
         )
-    for name in sorted(_absent(by_code)):
-        attention.append(Finding("data_insufficient", name, f"не считается: {name}"))
+    debt_threshold = max(
+        x for x, _ in policy.calibration_points.metrics["net_debt_ebitda"].points
+    )
+    for name in sorted(_absent(by_code, debt_threshold)):
+        attention.append(
+            Finding(
+                "data_insufficient", name, routing.say("data_insufficient", field=name)
+            )
+        )
 
     lower = load_theses().bands.lower_below
-    view = IfrsMetricsView(policy)
     spoken_for = _spoken_for(stop_factors, routing, types)
     silenced: list[str] = []
 
@@ -448,7 +645,7 @@ def route(
             Finding(
                 "negative_ebitda",
                 "ebitda",
-                f"EBITDA {view.shown('ebitda', ebitda.value)}",
+                routing.say("negative_ebitda", value=view.shown("ebitda", ebitda.value)),
             )
         )
         spoken_for = spoken_for | {"net_debt_ebitda"}
@@ -472,25 +669,35 @@ def route(
         # не ставятся — величина одна, и говорить о ней дважды значило бы
         # считать одно обстоятельство за два.
         if score == 0:
-            # Величина печатается единой точкой округления, а не своим
-            # выражением: «−0,000» читается как ноль, которым она не является,
-            # и словесную замену знает справочник показателей.
+            # Формулировка говорит о смысле, а не о механике: «за опорной
+            # точкой калибровочной шкалы» — правда об устройстве расчёта
+            # и ничего не значит для того, кому эмитента передают. Величина
+            # печатается единой точкой округления: «−0,000» читается как ноль,
+            # которым она не является.
             review.append(
                 Finding(
                     "level_off_scale",
                     code,
-                    f"{item.name}: {view.shown(code, item.value)} за опорной "
-                    f"точкой {view.shown(code, scale.points[0][0])} своей шкалы",
+                    routing.say(
+                        "level_off_scale",
+                        code,
+                        metric=item.name,
+                        value=view.shown(code, item.value),
+                        threshold=view.shown(code, scale.points[0][0]),
+                    ),
                 )
             )
         elif score < lower:
-            # Разрядность балла здесь не украшение: «балл уровня 34 ниже 34»
-            # получался округлением 33,5 и опровергал сам себя.
             attention.append(
                 Finding(
                     "metric_in_lower_band",
                     code,
-                    f"{item.name}: балл уровня {score:.1f} ниже {lower:.1f}",
+                    routing.say(
+                        "metric_in_lower_band",
+                        code,
+                        metric=item.name,
+                        value=view.shown(code, item.value),
+                    ),
                 )
             )
 
@@ -504,7 +711,13 @@ def route(
                 Finding(
                     "bound_above_threshold",
                     bound.code,
-                    f"оценка сверху {bound.value:.2f} выше порога {threshold}",
+                    # **Граница сверху — не «не менее».** Настоящее значение
+                    # бывает и ниже порога: это отсутствие вывода, а не плохая
+                    # величина, и формулировка обязана говорить именно так.
+                    routing.say(
+                        "bound_above_threshold",
+                        value=view.shown("net_debt_ebitda", bound.value),
+                    ),
                 )
             )
 
@@ -519,7 +732,7 @@ def route(
             Finding(
                 "operating_loss",
                 "ifrs.operating_profit",
-                f"операционная прибыль {money(operating_profit)}",
+                routing.say("operating_loss", value=money(operating_profit)),
             )
         )
 
@@ -528,7 +741,10 @@ def route(
             Finding(
                 "disclosure_overdue",
                 "",
-                f"свежая годовая отчётность: {latest_annual or 'нет вовсе'}",
+                routing.say(
+                    "disclosure_overdue",
+                    date=f"{latest_annual:%Y}" if latest_annual else "— её нет вовсе",
+                ),
             )
         )
 
@@ -536,12 +752,110 @@ def route(
     if status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
         # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
-        return _verdict(routing, "status_unknown", found, tuple(silenced))
+        return _verdict(routing, "status_unknown", found, tuple(silenced), muted)
     if review:
-        return _verdict(routing, "review", found, tuple(silenced))
+        return _verdict(routing, "review", found, tuple(silenced), muted)
     return _verdict(
-        routing, "attention" if attention else "clear", found, tuple(silenced)
+        routing, "attention" if attention else "clear", found, tuple(silenced), muted
     )
+
+
+def _event_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
+    """Основания разбора из событий: дефолт по выпуску и рейтинг категории.
+
+    **Дата события источником не приводится.** У дефолта по погашению опорой
+    служит дата погашения — день, когда платёж был должен состояться;
+    у дефолта по выпуску в обращении остаётся дата обновления записи. Каждая
+    называется тем, чем является: выдумывать дату события мы не будем.
+    """
+    found: list[Finding] = []
+    if routing.events.default_review:
+        for issue in getattr(events, "defaulted", ()):
+            where = (
+                f"погашение {issue.maturity:%d.%m.%Y}"
+                if issue.maturity is not None
+                else (
+                    f"запись обновлена {issue.updated:%d.%m.%Y}"
+                    if issue.updated is not None
+                    else "даты события источник не приводит"
+                )
+            )
+            # **Статус выпуска и признак неурегулированности — разные
+            # сведения.** «Дефолт по погашению» говорит, что случилось;
+            # признак у выпуска в обращении — что случившееся не улажено,
+            # и называть это «в обращении» значило бы сказать обратное.
+            what = (
+                issue.status.capitalize()
+                if issue.status in DEFAULT_STATUSES
+                else f"Неурегулированный дефолт (выпуск {issue.status})"
+            )
+            found.append(
+                Finding(
+                    "emission_default",
+                    issue.name,
+                    routing.say(
+                        "emission_default", what=what, issue=issue.name, where=where
+                    ),
+                )
+            )
+    # **Одно агентство — одно основание.** У агентства бывает две шкалы
+    # (национальная и собственной кредитоспособности), и обе дают одну и ту же
+    # категорию: два основания об одном читались бы как два события.
+    seen: set[tuple[str, str]] = set()
+    for rating in getattr(events, "live", ()):
+        if (rating.agency, rating.category) in seen:
+            continue
+        seen.add((rating.agency, rating.category))
+        if rating.category in routing.events.review_categories:
+            found.append(
+                Finding(
+                    "rating_default",
+                    rating.category,
+                    routing.say(
+                        "rating_default",
+                        point=rating.point,
+                        agency=rating.agency,
+                        date=(
+                            f"{rating.assigned:%d.%m.%Y}"
+                            if rating.assigned is not None
+                            else "дата не указана"
+                        ),
+                        category=rating.category,
+                    ),
+                )
+            )
+    return found
+
+
+def _rating_watch(events: object, routing: RoutingPolicy) -> list[Finding]:
+    """Основание внимания: спекулятивная категория с негативным прогнозом.
+
+    Категория сама по себе — уровень, а не событие; событием её делает
+    объявленный агентством прогноз.
+    """
+    found: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+    for rating in getattr(events, "live", ()):
+        if (rating.agency, rating.category) in seen:
+            continue
+        seen.add((rating.agency, rating.category))
+        if (
+            rating.category in routing.events.attention_categories
+            and rating.outlook in routing.events.attention_outlooks
+        ):
+            found.append(
+                Finding(
+                    "rating_watch",
+                    rating.category,
+                    routing.say(
+                        "rating_watch",
+                        point=rating.point,
+                        agency=rating.agency,
+                        outlook=rating.outlook.lower(),
+                    ),
+                )
+            )
+    return found
 
 
 def _spoken_for(
@@ -575,6 +889,7 @@ def _verdict(
     code: str,
     findings: list[Finding],
     spoken_for: tuple[str, ...] = (),
+    muted: tuple[str, ...] = (),
 ) -> Verdict:
     """Собирает вердикт, упорядочивая основания по объявлению в справочнике.
 
@@ -601,27 +916,30 @@ def _verdict(
             entry.order for entry in basket.groups if entry.code == item
         ),
     )
+    # Доводы по именам: порядок полей вердикта менялся трижды, и позиционная
+    # передача однажды положила зрелость порогов в перечень погашенных.
     return Verdict(
-        basket.code,
-        basket.name,
-        ordered,
-        routing.status,
-        tuple(findings),
-        tuple(groups),
-        tuple(
+        basket=basket.code,
+        basket_name=basket.name,
+        grounds=ordered,
+        status=routing.status,
+        findings=tuple(findings),
+        subgroups=tuple(groups),
+        subgroup_names=tuple(
             found.name for code in groups if (found := basket.subgroup(code)) is not None
         ),
-        tuple(
+        actions=tuple(
             found.action
             for code in groups
             if (found := basket.subgroup(code)) is not None
         ),
-        spoken_for,
-        routing.thresholds,
+        muted=muted,
+        spoken_for=spoken_for,
+        thresholds=routing.thresholds,
     )
 
 
-def _absent(by_code: dict[str, MetricValue]) -> set[str]:
+def _absent(by_code: dict[str, MetricValue], threshold: Decimal) -> set[str]:
     """Величины решения, которых расчёт не собрал.
 
     Текущая ликвидность у девелопера заменена диапазоном, и верхняя граница
@@ -629,14 +947,16 @@ def _absent(by_code: dict[str, MetricValue]) -> set[str]:
     методики.
     """
     absent: set[str] = set()
-    # **Оценка сверху заменой не считается** (решение 22.09.2026). Правило
-    # «ниже порога — критерий пройден доказуемо» верно арифметически, но давало
-    # «без внимания» там, где долговая нагрузка не рассчитана: у восьми
-    # эмитентов набора решение принималось по величине, которой нет. Оценка
-    # сверху остаётся сведением и печатается рядом, а корзина — не ниже
-    # внимания. Замена диапазоном — другое: там величина заменена решением
-    # методики, а не пропущена.
-    if not _ok(by_code, "net_debt_ebitda"):
+    # **Вывод по границе — доказательство, а не пробел, и он обязан быть
+    # виден.** При положительной операционной прибыли амортизация неотрицательна,
+    # поэтому отношение к EBITDA не выше отношения к операционной прибыли: граница
+    # ниже порога означает, что и показатель ниже. Дефект был не в правиле,
+    # а в печати — строка писала «не считается» и границы не показывала.
+    # Граница берётся только от операционной прибыли отчётности: замена EBITDA
+    # полем источника в неё не входит по устройству показателя.
+    bound = by_code.get("net_debt_op_profit")
+    proven = bound is not None and bound.calculable and bound.value <= threshold
+    if not _ok(by_code, "net_debt_ebitda") and not proven:
         absent.add("долговая нагрузка")
     if not _ok(by_code, "equity_ratio"):
         absent.add("автономия")

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ежедневный снимок рейтингов. Метод источника отдаёт только последнее
+  значение, и без снимков истории понижений не будет никогда.
+
+  Установка (агент пользователя, не системный демон):
+
+      cp scripts/ru.finanalysis.ratings-snapshot.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ru.finanalysis.ratings-snapshot.plist
+      launchctl kickstart -p gui/$(id -u)/ru.finanalysis.ratings-snapshot   # проверка
+
+  Снятие:
+
+      launchctl bootout gui/$(id -u)/ru.finanalysis.ratings-snapshot
+
+  **Если машина спала, launchd выполняет пропущенный календарный запуск при
+  пробуждении** — на это и рассчитано: снимок дня не перезаписывается, поэтому
+  запуск после пробуждения и запуск по расписанию дают один файл, а не два.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ru.finanalysis.ratings-snapshot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>scripts/ratings_snapshot.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/sk/Work/fin-analysis</string>
+
+  <!-- Раз в сутки, после открытия рынка: рейтинговые действия публикуются
+       днём, и снимок к вечеру застаёт их того же дня. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>19</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+
+  <!-- Журнал прогона: без него «снимка за день нет» не отличить
+       от «прогон не запускался». -->
+  <key>StandardOutPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/ratings_snapshot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/ratings_snapshot.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

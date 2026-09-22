@@ -18,7 +18,7 @@
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +26,7 @@ from pathlib import Path
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
 from finlib.scoring.routing import RoutingPolicy, Verdict, load_routing, route
+from finlib.sources.cbonds_events import IssuerEvents, events_of, latest_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ class RoutingRow:
     assessed_class: str = ""
     branch: str = ""
     group: str = ""
+    # События эмитента: выпуски и рейтинги. «Данных нет» и «событий нет» —
+    # разные вещи, и признак их различает.
+    events: IssuerEvents | None = None
     # Величины, названные порознь: отрицательное отношение чистого долга
     # к EBITDA означает либо чистую денежную позицию, либо убыток, и путать
     # их нельзя.
@@ -153,6 +157,12 @@ def routing_rows(
     spv = {
         inn for inn, card in known.items() if str(card.get("emitent_spv")) == "1"
     }
+    on, snapshot = latest_snapshot()
+    if on is None:
+        logger.warning(
+            "снимка рейтингов на диске нет: событийный слой будет пуст, "
+            "и это не «событий нет», а отсутствие данных"
+        )
     assessed: dict[str, str] = {}
     for row in fetch_all(_ASSESSED, {}, conn=conn):
         assessed.setdefault(row["inn"], row["class_code"])
@@ -175,6 +185,7 @@ def routing_rows(
             continue
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
+        events = events_of(inn, snapshot)
         verdict = route(
             computed,
             quarantined=(inn, moment.year) in quarantined,
@@ -183,6 +194,9 @@ def routing_rows(
             operating_profit=_operating_profit(inn, moment, conn),
             latest_annual=moment,
             assessed_class=assessed.get(inn),
+            branch=str((known.get(inn) or {}).get("branch_name_rus") or ""),
+            group=str((known.get(inn) or {}).get("group_name_rus") or ""),
+            events=events,
             today=today,
             policy=policy,
             routing=routing,
@@ -213,6 +227,7 @@ def routing_rows(
                 assessed_class=assessed.get(inn, ""),
                 branch=str(card.get("branch_name_rus") or ""),
                 group=str(card.get("group_name_rus") or ""),
+                events=events,
                 values={
                     code: value
                     for code in ("net_debt", "ebitda", "net_debt_ebitda",
@@ -221,6 +236,53 @@ def routing_rows(
                 },
             )
         )
+
+    # **Групповой контур — второй проход, и иначе он невозможен.** Корзину
+    # члена группы решает обстоятельство другого эмитента, а оно известно
+    # только после того, как посчитаны все. Выравнивания при этом нет:
+    # разбор не переносится, член группы поднимается до внимания.
+    in_review = {
+        item.group: item
+        for item in rows
+        if item.group and item.verdict.basket == "review"
+    }
+    counts["поднято по группе"] = 0
+    if in_review:
+        lifted: list[RoutingRow] = []
+        for item in rows:
+            leader = in_review.get(item.group)
+            if leader is None or item.inn == leader.inn:
+                lifted.append(item)
+                continue
+            if item.verdict.basket in ("review", "status_unknown"):
+                lifted.append(item)
+                continue
+            counts["поднято по группе"] += 1
+            lifted.append(
+                replace(
+                    item,
+                    verdict=route(
+                        item.computed,
+                        quarantined=False,
+                        stop_factors=item.stop_factors,
+                        financing_structure=item.inn in spv,
+                        operating_profit=_operating_profit(
+                            item.inn, item.report_date, conn
+                        ),
+                        latest_annual=item.report_date,
+                        assessed_class=assessed.get(item.inn),
+                        branch=item.branch,
+                        group=item.group,
+                        events=item.events,
+                        group_under_review=(item.group, leader.name),
+                        today=today,
+                        policy=policy,
+                        routing=routing,
+                        types=types,
+                    ),
+                )
+            )
+        rows = lifted
     return rows, counts
 
 
