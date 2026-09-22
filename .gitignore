@@ -15,3 +15,5 @@ data/*
 data/raw/*
 !data/raw/probe/
 eval/out/
+docs/reviews/
+*.docx
