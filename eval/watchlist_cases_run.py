@@ -157,11 +157,11 @@ def main() -> int:
         # длиннее «C» и любым сравнением строк выходит «больше»: графа считала
         # бы не то, как называется.
         worst = events.worst
-        event = events.unsettled_event(date.today())
+        event = events.event()
         when = (
             f"{event.when:%d.%m.%Y} ({event.origin})"
             if event.known
-            else ("не определена" if events.defaulted else "—")
+            else ("не определена" if events.unsettled_default else "—")
         )
         print(
             f"| {label} | {len(events.issues) if events.issues_known else 'данных нет'} "
