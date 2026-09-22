@@ -909,7 +909,16 @@ def _default_findings(
         if unsettled and hasattr(events, "unsettled_event")
         else None
     )
-    if unsettled and event is not None and event.known and event.when < edge:
+    # **Датированное обстоятельство недатированного не закрывает.** У эмитента
+    # бывают оба: дефолт 2018 года по закрытому выпуску и признак
+    # неурегулированности по выпуску в обращении, дата которого в будущем.
+    # Давность считается по самому свежему событию, и взятая в одиночку она
+    # объявила бы старым то, о чём даты нет вовсе, — то есть понизила бы
+    # корзину по отсутствию данных.
+    dated = all(
+        item.maturity is not None and item.maturity <= today for item in unsettled
+    )
+    if unsettled and dated and event is not None and event.known and event.when < edge:
         attention.append(
             Finding(
                 "default_unsettled_stale",

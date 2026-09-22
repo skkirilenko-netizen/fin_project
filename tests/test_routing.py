@@ -546,6 +546,24 @@ def test_unsettled_default_without_a_date_stays_in_review() -> None:
     assert verdict.grounds == ("emission_default",)
 
 
+def test_a_dated_old_default_does_not_close_an_undated_one() -> None:
+    """Давность по старому событию не гасит признак без даты.
+
+    У эмитента бывают оба: дефолт 2018 года по закрытому выпуску и признак
+    неурегулированности по выпуску в обращении, дата погашения которого
+    в будущем. Давность считается по свежайшему событию, и взятая в одиночку
+    она объявила бы старым то, о чём даты нет вовсе.
+    """
+    verdict = verdict_for(
+        with_issues(
+            issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
+            issue("БО-05", "в обращении", date(2031, 3, 27), unsettled=True),
+        )
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("emission_default",)
+
+
 def test_recently_settled_default_is_credit_history() -> None:
     """Улаженный недавно дефолт — кредитная история, то есть внимание."""
     verdict = verdict_for(
