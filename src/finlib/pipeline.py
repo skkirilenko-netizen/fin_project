@@ -484,7 +484,14 @@ def accept_cbonds_report(
         f"строк источника {len(rows)}, из них годовых {len(annual)}",
         ok=bool(annual),
     )
-    if not annual:
+    # **Строка, не ставшая комплектом, не молчит.** Прежде неготовые строки
+    # отсеивались здесь, до загрузчика, и причина не называлась нигде:
+    # у девяти эмитентов списка отчётность у источника есть — только
+    # квартальная, — а в журнале о них не было ни записи, и замер охвата
+    # писал «причина не записана». Отсев при этом повторял проверку, которая
+    # у загрузчика уже объявлена (`annual_only`), то есть был вторым путём
+    # к тому же ответу — и путём молчаливым.
+    if not rows:
         return []
     if not write:
         raise ValueError(
@@ -495,7 +502,7 @@ def accept_cbonds_report(
 
     outcomes: list[object] = []
     with connection() if conn is None else _kept(conn) as active:
-        for item in annual:
+        for item in rows:
             outcome = load_row(item, active, report_name=report)
             outcomes.append(outcome)
             # **Контроли качества прогоняются и по комплекту агрегатора.**
@@ -509,7 +516,8 @@ def accept_cbonds_report(
     accepted = [item for item in outcomes if item.accepted]
     say(
         Stage.LOAD,
-        f"комплектов принято {len(accepted)} из {len(annual)}, "
+        f"комплектов принято {len(accepted)} из {len(rows)} строк источника "
+        f"({len(annual)} годовых), "
         f"в карантине {sum(1 for item in accepted if item.quarantined)}",
         ok=bool(accepted),
     )
