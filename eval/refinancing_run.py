@@ -86,6 +86,7 @@ def main() -> int:
     )
 
     measured: list[tuple[str, str, Decimal, Decimal, Decimal, str]] = []
+    dry: list[tuple[str, str, Decimal, str]] = []
     no_issues = no_schedule = no_cash = no_unit = no_offers = 0
     for item in rows:
         if item.events is None or not item.events.issues_known:
@@ -109,7 +110,14 @@ def main() -> int:
             no_unit += 1
             continue
         if money_on_hand is None or money_on_hand <= 0:
+            # **Платежи есть, а денежных средств нет — самое тяжёлое сочетание,
+            # и отношением его не выразить.** Ноль у агрегатора означает
+            # и нераскрытие, поэтому эмитент называется отдельно, а не выпадает
+            # из замера молча.
             no_cash += 1
+            if due > 0:
+                dry.append((item.name, item.verdict.basket_name, due,
+                            units.name_of(item.unit_code)))
             continue
         measured.append(
             (
@@ -142,6 +150,21 @@ def main() -> int:
     for name, _ in BANDS:
         found = sum(1 for entry in measured if band(entry[4]) == name)
         print(f"| {name} | {found} |")
+
+    if dry:
+        print(
+            "\n## Платежи есть, денежных средств нет вовсе\n\n"
+            "Отношением это не выражается, а обстоятельство тяжелее любого "
+            "отношения. **Ноль у агрегатора означает и нераскрытие**, поэтому "
+            "сказано ровно то, что известно: величина платежей есть, величины "
+            "денежных средств нет.\n"
+        )
+        print("| Эмитент | Корзина | Платежи 12 мес. | Единица |")
+        print("|---|---|---|---|")
+        for name, basket, due, unit in sorted(
+            dry, key=lambda entry: entry[2], reverse=True
+        ):
+            print(f"| {name} | {basket} | {money(due)} | {unit} |")
 
     print("\n## Двадцать наибольших отношений\n")
     print(
