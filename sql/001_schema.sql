@@ -164,6 +164,21 @@ COMMENT ON COLUMN src_file.reporting_type IS
 -- и разница проходит по цепочке до прибыли, то есть это пересмотр эмитентом.
 -- Без этого правила приоритет роли периода решал бы наоборот: величина
 -- агрегатора приходит отчётной и затёрла бы пересмотренную сравнительную.
+-- **Факт отбракованного комплекта уступает факту принятого.** Величина
+-- комплекта в карантине в расчёт не идёт вовсе, и место, которое она занимает,
+-- пустует: у О'КЕЙ, Автодора и Самолёта PDF-комплект отбракован, величины
+-- агрегатора за тот же период не записывались правилом приоритета источника,
+-- и период оставался без величин совсем. Ступень стоит прежде источника:
+-- отсутствие величины хуже величины агрегатора.
+CREATE OR REPLACE FUNCTION set_rank(file_id bigint) RETURNS smallint
+    LANGUAGE sql STABLE AS $$
+    SELECT CASE WHEN status = 'quarantine' THEN 1 ELSE 0 END::smallint
+    FROM src_file WHERE id = file_id
+$$;
+
+COMMENT ON FUNCTION set_rank(bigint) IS
+    'Сила комплекта: 0 — принят, 1 — в карантине; факт карантинного уступает';
+
 CREATE OR REPLACE FUNCTION source_rank(recognition text) RETURNS smallint
     LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE WHEN recognition = 'cbonds' THEN 1 ELSE 0 END::smallint

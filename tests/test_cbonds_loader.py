@@ -168,6 +168,43 @@ def test_document_value_is_not_overwritten_by_the_aggregator(db_conn) -> None:
     assert journal and "448" in journal[0]["message"]
 
 
+def test_aggregator_fills_the_period_of_a_quarantined_document(db_conn) -> None:
+    """Факт отбракованного комплекта уступает факту принятого.
+
+    Величина карантинного комплекта в расчёт не идёт вовсе, и занятое ею место
+    пустует: у О'КЕЙ, Автодора и Самолёта PDF отбракован, величины агрегатора
+    за тот же период правилом источника не записывались, и период оставался
+    без величин совсем — хуже, чем с величинами агрегатора.
+    """
+    execute(
+        "INSERT INTO src_file (inn, standard, report_year, source, reporting_type, "
+        "unit_code, unit_source, status) VALUES (%(i)s, 'ifrs', %(y)s, 'file', "
+        "'full', '385', 'explicit', 'quarantine')",
+        {"i": INN, "y": YEAR},
+        conn=db_conn,
+    )
+    document = fetch_one(
+        "SELECT id FROM src_file WHERE inn = %(i)s AND standard = 'ifrs' "
+        "AND source = 'file'",
+        {"i": INN},
+        conn=db_conn,
+    )
+    execute(
+        "INSERT INTO fact_report (src_file_id, inn, standard, report_date, "
+        "form_code, line_code, source_line_code, value, value_status, "
+        "period_role, recognition) VALUES (%(s)s, %(i)s, 'ifrs', %(d)s, "
+        "'ifrs.statement_of_financial_position', 'ifrs.total_assets', "
+        "'ifrs.total_assets', 1, 'ok', 'current', 'catalog')",
+        {"s": document["id"], "i": INN, "d": date(YEAR, 12, 31)},
+        conn=db_conn,
+    )
+
+    load_row(ROW, db_conn)
+    facts = facts_of(db_conn)
+    assert facts["ifrs.total_assets"]["value"] == Decimal(671935)
+    assert facts["ifrs.total_assets"]["recognition"] == "cbonds"
+
+
 def test_zero_that_breaks_the_identity_sends_the_set_to_quarantine(db_conn) -> None:
     """Ноль, ломающий тождество отчётности, ставит комплект в карантин.
 
