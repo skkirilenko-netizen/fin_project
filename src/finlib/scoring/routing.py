@@ -368,6 +368,10 @@ class RoutingPolicy(BaseModel):
     stop_factor_muted: tuple[MutedStopFactor, ...] = ()
     events: Events
     statements: Statements
+    # Откуда пришло обстоятельство: выпуск, рейтинг, отчётность, группа,
+    # поручитель. Перечень один на замер и на выгрузку — второй экземпляр
+    # разошёлся бы при первом же новом основании.
+    ground_sources: dict[str, str] = Field(min_length=1)
     universe: Universe
     severity: Severity
     systemic: Systemic
@@ -432,7 +436,24 @@ class RoutingPolicy(BaseModel):
                 "основания объявлены и справочными, и основаниями корзины: "
                 + ", ".join(sorted(both))
             )
+        # Источник объявлен у каждого основания: корзина без источника ничего
+        # не доказывает, а перечень вторым экземпляром разошёлся бы с первым.
+        nameless = declared - set(self.ground_sources)
+        if nameless:
+            raise ValueError(
+                "у оснований не объявлен источник: " + ", ".join(sorted(nameless))
+            )
+        unknown = set(self.ground_sources) - declared
+        if unknown:
+            raise ValueError(
+                "источник объявлен у оснований, которых нет: "
+                + ", ".join(sorted(unknown))
+            )
         return self
+
+    def source_of(self, ground: str) -> str:
+        """Откуда пришло основание; неизвестное основание — свой же код."""
+        return self.ground_sources.get(ground, ground)
 
     def say(self, ground: str, key: str = "", **slots: object) -> str:
         """Формулировка основания: одно место на список, замер и выгрузку."""

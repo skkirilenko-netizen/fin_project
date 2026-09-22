@@ -9,8 +9,9 @@
 группой. Корзина без источника основания ничего не доказывает: совпасть она
 может и по другой причине.
 
-**Источник основания выводится из самого основания**, а не из прозы: у каждого
-`Finding` объявлен код, и код говорит, откуда пришло обстоятельство.
+**Источник основания объявлен справочником** (`routing.ground_sources`)
+и берётся оттуда: перечень «основание → источник» вторым экземпляром
+разошёлся бы с первым при первом же новом основании.
 
 **Замер не считает сам**: корзины берёт боевая маршрутизация через
 `scoring.routing_store.routing_rows`.
@@ -39,30 +40,6 @@ CASES: dict[str, tuple[str, str]] = {
     "5003077160": ("Русагро", "не ниже внимания: контурное ожидание"),
 }
 
-# Откуда приходит основание. Перечень не «для красоты»: без него корзина
-# совпадает с ожиданием и по чужой причине, а это не то же самое.
-SOURCE_OF: dict[str, str] = {
-    "emission_default": "выпуск",
-    "rating_default": "рейтинг",
-    "rating_watch": "рейтинг",
-    "default_unsettled_stale": "выпуск",
-    "default_settled_recent": "выпуск",
-    "default_settled_stale": "выпуск (справочно)",
-    "group_under_review": "группа",
-    "financing_structure": "группа (SPV)",
-    "assessed_class_low": "отчётность (наша оценка)",
-    "stop_factor_severe": "отчётность",
-    "stop_factor_capped": "отчётность",
-    "level_off_scale": "отчётность",
-    "metric_in_lower_band": "отчётность",
-    "bound_above_threshold": "отчётность",
-    "negative_ebitda": "отчётность",
-    "operating_loss": "отчётность",
-    "data_insufficient": "отчётность (пробел)",
-    "disclosure_overdue": "отчётность (срок)",
-    "reporting_two_cycles_old": "отчётность (срок)",
-    "zero_check_failed": "отчётность (карантин)",
-}
 
 
 def cell(text: str) -> str:
@@ -122,14 +99,14 @@ def main() -> int:
                 for item in verdict.findings
                 if item.ground == ground and item is not main
             ]
-            where = SOURCE_OF.get(ground, ground)
+            where = routing.source_of(ground)
             tail = f" и ещё {len(same) - 1}" if len(same) > 1 else ""
             others.append(f"{cell(same[0].text)}{tail} ({where})")
         print(
             f"| {label} | {inn} | **{verdict.basket_name}** "
             f"| {verdict.subgroup_names[0] if verdict.subgroup_names else '—'} "
             f"| {cell(main.text) if main is not None else '—'} "
-            f"| {SOURCE_OF.get(main.ground, '—') if main is not None else '—'} "
+            f"| {routing.source_of(main.ground) if main is not None else '—'} "
             f"| {'; '.join(others) or '—'} | {expected} |"
         )
     print(
