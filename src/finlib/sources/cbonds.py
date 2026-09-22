@@ -239,6 +239,75 @@ def msfo_real(inn: str, refresh: bool = False) -> list[dict]:
     return found.get("items", [])
 
 
+def deliveries_of(report: object, inn: str, refresh: bool = False) -> list[dict]:
+    """Строки вида отчёта по ИНН, сведённые по отчётной дате.
+
+    **Комплект РСБУ приходит тремя доставками.** Баланс, отчёт о финансовых
+    результатах и отчёт о движении денежных средств — разные методы источника,
+    и одна строка ответа несёт одну форму. Комплект же — это три формы одного
+    периода, поэтому доставки сводятся по дате.
+
+    **Отчёт о движении денежных средств отбирается по идентификатору
+    эмитента**: поля ИНН у него нет вовсе, а неподдерживаемое поле отбора
+    Cbonds пропускает молча и отдаёт весь справочник. Идентификатор берётся
+    из ответа предыдущей доставки; не нашёлся — доставка называется
+    пропущенной, а не молчит.
+
+    **Столкновение полей при сведении не проглатывается.** Одно поле
+    с разными величинами в двух ответах — событие: оно попадает в комплект
+    вместе с доставками, из которых он собран.
+    """
+    merged: dict[str, dict] = {}
+    emitent_id: str | None = None
+    skipped: list[str] = []
+    for delivery in report.deliveries:  # type: ignore[attr-defined]
+        value = inn if delivery.filter_field == "emitent_inn" else emitent_id
+        if not value:
+            skipped.append(delivery.method)
+            logger.warning(
+                "Cbonds %s: отбор по %s нечем — идентификатор эмитента неизвестен",
+                delivery.method,
+                delivery.filter_field,
+            )
+            continue
+        found = fetch(
+            delivery.method,
+            f"{delivery.cache}_{value}",
+            filters=({"field": delivery.filter_field, "operator": "eq", "value": value},),
+            refresh=refresh,
+        )
+        for row in found.get("items", []):
+            emitent_id = emitent_id or str(row.get("emitent_id") or "") or None
+            moment = str(row.get("date") or "")
+            if not moment:
+                continue
+            into = merged.setdefault(
+                moment,
+                {
+                    "date": moment,
+                    "emitent_inn": inn,
+                    "emitent_name_rus": row.get("emitent_name_rus"),
+                    "_deliveries": [],
+                    "_collisions": [],
+                },
+            )
+            into["_deliveries"].append(delivery.method)
+            for key, item in row.items():
+                if item in (None, ""):
+                    continue
+                if key in into and key.startswith("ln") and into[key] != item:
+                    into["_collisions"].append(
+                        f"{key}: {into[key]} против {item} ({delivery.method})"
+                    )
+                    continue
+                if key.startswith("ln") or key not in into:
+                    into[key] = item
+    if skipped:
+        for row in merged.values():
+            row["_deliveries"].append(f"пропущено: {', '.join(skipped)}")
+    return [merged[moment] for moment in sorted(merged)]
+
+
 def msfo_universe(refresh: bool = False) -> list[dict]:
     """Все записи нормализованной отчётности по МСФО, какие есть у источника.
 

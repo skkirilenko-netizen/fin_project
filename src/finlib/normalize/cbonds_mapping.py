@@ -10,9 +10,17 @@
 или сверка. Агрегат обязан сказать, что он покрывает и где это видно;
 агрегат, который всё-таки грузится, обязан назвать причину — без неё
 величина неизвестного состава попадала бы в факты молча.
+
+**Перечень полей и правило — разные способы объявить состав, и выбор между
+ними не в удобстве.** У МСФО имена полей источника с нашими позициями ничем
+не связаны, и перечень необходим. У РСБУ поле названо кодом строки,
+утверждённым приказом 66н, и перечень был бы вторым экземпляром справочника
+строк — расхождение двух перечней вопрос времени. Поэтому объявляется
+правило, а состав решает `lines.yaml`.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Self
 
@@ -73,6 +81,13 @@ class FieldDef(BaseModel):
         return FORMS[self.form]
 
 
+# Откуда берётся допуск сверки. **Своего числа здесь нет и быть не должно:**
+# допуск на округление при проверке сходимости итогов объявлен в
+# `thresholds.yaml` (блок `rounding`), и второй экземпляр той же величины
+# однажды разойдётся с первым. Пусто — сверка требует точного равенства.
+TOLERANCE_SOURCES: frozenset[str] = frozenset({"thresholds.rounding"})
+
+
 class SumControl(BaseModel):
     """Сверка итога с суммой частей."""
 
@@ -81,7 +96,18 @@ class SumControl(BaseModel):
     total: str = Field(min_length=1)
     parts: tuple[str, ...] = Field(min_length=2)
     check: str = Field(min_length=1)
+    tolerance_from: str | None = None
     origin: str | None = None
+
+    @model_validator(mode="after")
+    def _tolerance_is_taken_from_methodology(self) -> Self:
+        """Допуск берётся из объявленного места, а не задаётся числом."""
+        if self.tolerance_from and self.tolerance_from not in TOLERANCE_SOURCES:
+            raise ValueError(
+                f"допуск {self.tolerance_from} неизвестен; допустимы: "
+                + ", ".join(sorted(TOLERANCE_SOURCES))
+            )
+        return self
 
 
 class EqualityControl(BaseModel):
@@ -92,6 +118,17 @@ class EqualityControl(BaseModel):
     left: str = Field(min_length=1)
     right: str = Field(min_length=1)
     check: str = Field(min_length=1)
+    tolerance_from: str | None = None
+
+    @model_validator(mode="after")
+    def _tolerance_is_taken_from_methodology(self) -> Self:
+        """Допуск берётся из объявленного места, а не задаётся числом."""
+        if self.tolerance_from and self.tolerance_from not in TOLERANCE_SOURCES:
+            raise ValueError(
+                f"допуск {self.tolerance_from} неизвестен; допустимы: "
+                + ", ".join(sorted(TOLERANCE_SOURCES))
+            )
+        return self
 
 
 class ZeroTotal(BaseModel):
@@ -105,13 +142,51 @@ class ZeroTotal(BaseModel):
 
 
 class Controls(BaseModel):
-    """Сверки вида отчёта."""
+    """Сверки вида отчёта.
+
+    Сверки суммой — перечень, а не поимённые поля: у баланса РСБУ их две
+    (актив по разделам и пассив по разделам), у МСФО две других. Поле на каждую
+    заставляло бы заводить новое имя всякий раз, а загрузчик — знать эти имена
+    наизусть.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    debt_split: SumControl
     identity: EqualityControl
-    sections: SumControl
+    sums: tuple[SumControl, ...] = Field(min_length=1)
+
+
+class Delivery(BaseModel):
+    """Доставка вида отчёта: метод источника и поле отбора.
+
+    Комплект РСБУ приходит тремя доставками — баланс, отчёт о финансовых
+    результатах и отчёт о движении денежных средств, — и сводится по паре
+    «ИНН, дата». Поле отбора объявлено у каждой: у отчёта о движении денежных
+    средств поля ИНН нет вовсе, отбор идёт по идентификатору эмитента,
+    а неподдерживаемое поле Cbonds пропускает молча.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    method: str = Field(min_length=1)
+    filter_field: str = Field(min_length=1)
+    cache: str = Field(min_length=1)
+
+
+class FieldRule(BaseModel):
+    """Правило, по которому имя поля означает код строки.
+
+    Перечень полей и правило — не одно и то же. У МСФО перечень необходим:
+    имена полей источника с нашими позициями ничем не связаны. У РСБУ поле
+    названо кодом строки, утверждённым приказом 66н, и перечень был бы
+    вторым экземпляром справочника строк — с неизбежным расхождением.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pattern: str = Field(min_length=1)
+    catalog: str = Field(pattern="^rsbu_lines$")
+    origin: str = Field(min_length=1)
 
 
 class ReportDef(BaseModel):
@@ -119,20 +194,38 @@ class ReportDef(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    standard: str = Field(min_length=1)
+    standard: str = Field(pattern="^(rsbu|ifrs)$")
     name: str = Field(min_length=1)
-    filter_field: str = Field(min_length=1)
+    deliveries: tuple[Delivery, ...] = Field(min_length=1)
     annual_only: bool
-    currency_field: str = Field(min_length=1)
-    unit_field: str = Field(min_length=1)
-    standard_field: str = Field(min_length=1)
-    units: dict[str, str] = Field(min_length=1)
-    consolidated_marks: tuple[str, ...] = Field(min_length=1)
-    standalone_marks: tuple[str, ...] = Field(min_length=1)
-    fields: dict[str, FieldDef] = Field(min_length=1)
+    # Валюта и единица — либо поле источника, либо объявленное правило
+    # с причиной. Умолчания нет ни у одной: ошибка здесь тихая, баланс
+    # сойдётся, и неверными окажутся только сами величины.
+    currency_field: str | None = None
+    currency: str | None = None
+    currency_origin: str = ""
+    unit_field: str | None = None
+    units: dict[str, str] = Field(default_factory=dict)
+    unit_from: str | None = Field(default=None, pattern="^forms$")
+    unit_origin: str = ""
+    # Признак стандарта и требование консолидации: у РСБУ их нет по устройству,
+    # и это объявляется, а не подразумевается.
+    standard_field: str | None = None
+    consolidated_marks: tuple[str, ...] = ()
+    standalone_marks: tuple[str, ...] = ()
+    consolidation_required: bool = True
+    consolidation_origin: str = ""
+    reporting_type: str = Field(default="full", pattern="^(full|simplified)$")
+    reporting_type_origin: str = ""
+    # Знак величины — решение о данных, и оно объявляется у каждого вида
+    # отчёта: молча изменённый знак не ловится ни одним контролем сходимости.
+    sign_rule: str = Field(pattern="^(as_reported|expense_magnitude)$")
+    sign_origin: str = Field(min_length=1)
+    fields: dict[str, FieldDef] = Field(default_factory=dict)
+    field_rule: FieldRule | None = None
     controls: Controls
     zero_total: ZeroTotal
-    reported: dict[str, str] = Field(min_length=1)
+    reported: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _marks_are_not_empty(self) -> Self:
@@ -148,20 +241,84 @@ class ReportDef(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _one_way_to_know_each_thing(self) -> Self:
+        """Валюта, единица, состав полей — по одному объявлению у каждого.
+
+        Два объявления одной величины однажды расходятся, а ни одного —
+        означает умолчание, которого здесь быть не должно: ошибка в валюте
+        и в единице тихая. Причина обязательна у объявленного правила:
+        «RUB» без основания неотличимо от догадки.
+        """
+        if bool(self.currency_field) == bool(self.currency):
+            raise ValueError(
+                f"{self.name}: валюта объявляется либо полем источника, "
+                "либо правилом с причиной — ровно одним из двух"
+            )
+        if self.currency and not self.currency_origin.strip():
+            raise ValueError(f"{self.name}: валюта объявлена правилом без причины")
+        if bool(self.unit_field) == bool(self.unit_from):
+            raise ValueError(
+                f"{self.name}: единица объявляется либо полем источника, "
+                "либо правилом форм — ровно одним из двух"
+            )
+        if self.unit_field and not self.units:
+            raise ValueError(f"{self.name}: поле единицы названо без перечня единиц")
+        if self.unit_from and not self.unit_origin.strip():
+            raise ValueError(f"{self.name}: единица объявлена правилом без причины")
+        if bool(self.fields) == bool(self.field_rule):
+            raise ValueError(
+                f"{self.name}: состав полей объявляется либо перечнем, "
+                "либо правилом — ровно одним из двух"
+            )
+        if self.field_rule and not self.reporting_type_origin.strip():
+            raise ValueError(
+                f"{self.name}: вид отчётности принят без причины, а он решает, "
+                "по какому набору строк комплект проверяется"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _consolidation_is_declared(self) -> Self:
+        """Требование консолидации объявлено вместе со способом проверки.
+
+        Требовать консолидацию и не назвать признака, по которому она видна, —
+        то же, что контроль без входа: он отвечал бы одно и то же. Не требовать
+        её молча нельзя по обратной причине: неконсолидированная отчётность
+        по МСФО относится к другому предмету.
+        """
+        if self.consolidation_required:
+            if not self.standard_field or not self.consolidated_marks:
+                raise ValueError(
+                    f"{self.name}: консолидация требуется, а признака стандарта "
+                    "либо его написаний не объявлено"
+                )
+        elif not self.consolidation_origin.strip():
+            raise ValueError(
+                f"{self.name}: консолидация не требуется, и не сказано почему"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _controls_name_known_fields(self) -> Self:
-        """Сверка ссылается на поля, которые справочник знает."""
-        known = set(self.fields) | set(self.reported.values())
+        """Сверка ссылается на поля, которые справочник знает.
+
+        У вида отчёта с перечнем полей это буквально перечень; у вида
+        с правилом — соответствие правилу: иначе сверка назвала бы поле,
+        которого источник не отдаёт, и не выполнялась бы никогда.
+        """
         named = {
             self.controls.identity.left,
             self.controls.identity.right,
-            self.controls.debt_split.total,
-            *self.controls.debt_split.parts,
-            self.controls.sections.total,
-            *self.controls.sections.parts,
+            *(item.total for item in self.controls.sums),
+            *(part for item in self.controls.sums for part in item.parts),
             *self.zero_total.totals,
             *self.zero_total.activity,
         }
-        stray = named - known
+        if self.field_rule is not None:
+            pattern = re.compile(self.field_rule.pattern)
+            stray = {name for name in named if not pattern.match(name)}
+        else:
+            stray = named - (set(self.fields) | set(self.reported.values()))
         if stray:
             raise ValueError(f"сверка ссылается на неизвестные поля: {sorted(stray)}")
         return self
@@ -171,11 +328,27 @@ class ReportDef(BaseModel):
         return frozenset(
             {
                 self.controls.identity.check,
-                self.controls.sections.check,
-                self.controls.debt_split.check,
+                *(item.check for item in self.controls.sums),
                 self.zero_total.check,
             }
         )
+
+    def controls_declared(self) -> int:
+        """Сколько сверок объявлено: знаменатель для сводки проверенного.
+
+        Число в коде было бы тем самым «ноль срабатываний неотличим
+        от невыполненного», только в знаменателе: сверок стало больше,
+        а счётчик остался бы прежним.
+        """
+        return 2 + len(self.controls.sums)
+
+    def code_of(self, name: str) -> str | None:
+        """Код строки по имени поля источника; None — поле кодом не является."""
+        if self.field_rule is None:
+            item = self.fields.get(name)
+            return item.code if item is not None else None
+        found = re.match(self.field_rule.pattern, name)
+        return found.group(1) if found else None
 
     def loaded_fields(self) -> dict[str, FieldDef]:
         """Поля, которые становятся фактами."""

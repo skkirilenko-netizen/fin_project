@@ -167,6 +167,12 @@ class CheckCode(StrEnum):
     # период. Первоисточник старше, и величина не перезаписывается, но
     # расхождение содержательно: у Автодора так виден пересмотр 2024 года.
     CBONDS_VALUE_MISMATCH = "cbonds_value_mismatch"
+    # **Ноль агрегатора против нераскрытой строки первоисточника — не
+    # расхождение величин, а прямая улика** того, что ноль здесь означает
+    # нераскрытие. Три объявленных признака этого рода — арифметические,
+    # то есть косвенные; здесь первоисточник говорит о той же клетке прямо,
+    # и путать это с пересмотром нельзя.
+    CBONDS_ZERO_FOR_UNDISCLOSED = "cbonds_zero_for_undisclosed"
 
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
@@ -250,6 +256,7 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.CBONDS_FIELD_MAPPING: Severity.INFO,
     CheckCode.CBONDS_SET_REJECTED: Severity.BLOCKING,
     CheckCode.CBONDS_VALUE_MISMATCH: Severity.INFO,
+    CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: Severity.INFO,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -311,6 +318,7 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.CBONDS_FIELD_MAPPING: "сопоставление полей агрегатора",
     CheckCode.CBONDS_SET_REJECTED: "приём комплекта агрегатора",
     CheckCode.CBONDS_VALUE_MISMATCH: "расхождение агрегатора с первоисточником",
+    CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: "ноль агрегатора против нераскрытой строки",
 }
 
 

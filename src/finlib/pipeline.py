@@ -469,7 +469,15 @@ def accept_cbonds_report(
     # раз по каждому ИНН значило бы тратить суточную норму запросов на то,
     # что уже лежит на диске. Решение о том, что делать со строками, остаётся
     # здесь — у цикла.
-    rows = rows if rows is not None else cbonds.msfo_real(inn, refresh=refresh)
+    from finlib.normalize.cbonds_mapping import load_cbonds_mapping
+
+    definition = load_cbonds_mapping().report(report)
+    # **Доставки объявлены справочником, и клиент их не знает наизусть.**
+    # У показателей МСФО доставка одна, у отчётности РСБУ три — баланс, отчёт
+    # о финансовых результатах и отчёт о движении денежных средств, — и комплект
+    # сводится по отчётной дате: комплект РСБУ это три формы одного периода.
+    if rows is None:
+        rows = cbonds.deliveries_of(definition, inn, refresh=refresh)
     annual = [item for item in rows if str(item.get("date") or "").endswith("12-31")]
     say(
         Stage.FETCH,
@@ -483,10 +491,21 @@ def accept_cbonds_report(
             "доставка агрегатора без записи не предусмотрена: пробный прогон "
             "откатывает транзакцию, а не обходит загрузку"
         )
+    from finlib.quality.runner import run_checks
+
     outcomes: list[object] = []
     with connection() if conn is None else _kept(conn) as active:
         for item in annual:
-            outcomes.append(load_row(item, active, report_name=report))
+            outcome = load_row(item, active, report_name=report)
+            outcomes.append(outcome)
+            # **Контроли качества прогоняются и по комплекту агрегатора.**
+            # У отчётности РСБУ они применимы целиком — равенство 1600 = 1700,
+            # состав разделов, правдоподобие величин, — и это независимая
+            # проверка данных источника. У комплекта МСФО тот же вызов пишет
+            # объявленный пропуск: комплект без записей в журнале неотличим
+            # от проверенного и чистого.
+            if outcome.src_file_id is not None:
+                run_checks(outcome.src_file_id, active)
     accepted = [item for item in outcomes if item.accepted]
     say(
         Stage.LOAD,

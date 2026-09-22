@@ -281,6 +281,7 @@ REGISTRY: dict[CheckCode, Wiring] = {
             CheckCode.CBONDS_FIELD_MAPPING,
             CheckCode.CBONDS_SET_REJECTED,
             CheckCode.CBONDS_VALUE_MISMATCH,
+            CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED,
         )
     },
 }

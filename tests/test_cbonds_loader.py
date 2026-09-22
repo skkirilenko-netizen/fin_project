@@ -158,11 +158,16 @@ def test_document_value_is_not_overwritten_by_the_aggregator(db_conn) -> None:
     assert facts["ifrs.operating_profit"]["value"] == Decimal(2272)
     assert facts["ifrs.operating_profit"]["recognition"] == "catalog"
     # Расхождение не замалчивается: оно содержательный сигнал о пересмотре.
-    assert any("operating_profit" in item for item in outcome.mismatches)
+    # Рядом с ним стоит исход — записана величина или нет: исход решает правило
+    # приоритета, и записывать его со слов правила нельзя.
+    assert any("operating_profit" in text for text, _ in outcome.mismatches)
+    assert all("не записана" in note for _, note in outcome.mismatches)
+    # Выборка по комплекту, а не по ИНН: у того же ИНН в базе лежат настоящие
+    # записи доставок РСБУ, и запрос по одной организации брал бы их тоже.
     journal = fetch_all(
-        "SELECT check_code, message FROM dq_log WHERE inn = %(i)s "
+        "SELECT check_code, message FROM dq_log WHERE src_file_id = %(s)s "
         "AND check_code = %(c)s",
-        {"i": INN, "c": CheckCode.CBONDS_VALUE_MISMATCH.value},
+        {"s": outcome.src_file_id, "c": CheckCode.CBONDS_VALUE_MISMATCH.value},
         conn=db_conn,
     )
     assert journal and "448" in journal[0]["message"]
