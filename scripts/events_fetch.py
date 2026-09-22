@@ -1,7 +1,14 @@
 """Поручители, платежи и оферты выпусков: доставка на диск.
 
     uv run python scripts/events_fetch.py [--limit N]
-                                         [--only guarantors|flows|defaults]
+                          [--only defaults-list|guarantors|flows|defaults]
+
+**Перечень дефолтов берётся целиком по стране, а не по выпуску.**
+`get_emission_default` отдаёт события дефолтов с плановым сроком, датой
+дефолта, датой фактического исполнения и неисполненной суммой; отбор
+по `emission_emitent_country_id` даёт 3 529 записей в четырёх запросах против
+одного запроса на выпуск. Метод объявлен в `docs/cbonds/openapi.yaml`, и найти
+его следовало там, а не перебором имён.
 
 Три метода, открытые источником 22.09.2026:
 
@@ -110,6 +117,20 @@ def emissions(defaults_only: bool = False) -> list[tuple[str, str, str]]:
     return found
 
 
+def defaults() -> None:
+    """Забирает перечень дефолтов по стране: события, даты и суммы."""
+    if ask(
+        "get_emission_default",
+        "defaults_ru",
+        "emission_emitent_country_id",
+        "1",
+        1000,
+    ):
+        print("перечень дефолтов: получен")
+    else:
+        print("перечень дефолтов: не получен, причина в журнале")
+
+
 def guarantors(limit: int) -> None:
     """Забирает поручителей по каждому эмитенту справочника."""
     cards = json.loads(CARDS.read_text(encoding="utf-8"))
@@ -156,6 +177,8 @@ def main() -> int:
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 0
     only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else ""
 
+    if only in ("", "defaults-list"):
+        defaults()
     if only in ("", "guarantors"):
         guarantors(limit)
     if only in ("", "flows", "defaults"):

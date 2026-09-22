@@ -422,6 +422,8 @@ def test_settled_default_is_not_a_current_circumstance() -> None:
             ),
         ),
         issues_known=True,
+        records=(record("9", "2016-06-03", met="2016-07-01"),),
+        records_known=True,
     )
     verdict = route(
         healthy(),
@@ -495,11 +497,41 @@ def issue(name: str, status: str, maturity: date, *, unsettled: bool):
     )
 
 
-def with_issues(*issues):
-    """События эмитента из одних выпусков."""
+def record(
+    emission: str,
+    when: str,
+    *,
+    met: str | None = None,
+    kind: str = "Купон",
+    status: str = "Дефолт",
+    amount: str | None = None,
+):
+    """Событие дефолта: дата, вид, факт исполнения и неисполненная сумма."""
+    from finlib.sources.cbonds_events import DefaultRecord
+
+    return DefaultRecord(
+        emission_id=emission,
+        kind=kind,
+        status=status,
+        due=date.fromisoformat(when),
+        when=date.fromisoformat(when),
+        announced=None,
+        met=date.fromisoformat(met) if met else None,
+        amount=Decimal(amount) if amount else None,
+    )
+
+
+def with_issues(*issues, records=()):
+    """События эмитента: выпуски и события дефолтов по ним."""
     from finlib.sources.cbonds_events import IssuerEvents
 
-    return IssuerEvents(inn="1", issues=issues, issues_known=True)
+    return IssuerEvents(
+        inn="1",
+        issues=issues,
+        issues_known=True,
+        records=tuple(records),
+        records_known=bool(records),
+    )
 
 
 def verdict_for(events, today: date = date(2026, 9, 22)):
@@ -524,6 +556,10 @@ def test_stale_unsettled_default_asks_about_settlement() -> None:
         with_issues(
             issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
             issue("БО-02", "дефолт по погашению", date(2017, 11, 28), unsettled=True),
+            records=(
+                record("БО-01", "2018-03-15", kind="Погашение"),
+                record("БО-02", "2017-12-12", kind="Погашение"),
+            ),
         )
     )
     assert verdict.basket == "attention"
@@ -535,9 +571,9 @@ def test_stale_unsettled_default_asks_about_settlement() -> None:
 def test_unsettled_default_without_a_date_stays_in_review() -> None:
     """Неизвестная давность корзину не понижает.
 
-    У ЕвроТранса и Антерры выпуски в обращении, и дата погашения лежит
-    в будущем: она говорит о сроке, а не о событии. Понизить корзину по ней
-    значило бы принять решение по отсутствию данных.
+    Перечня событий может не быть на диске вовсе, и тогда дата неизвестна:
+    понизить корзину по неизвестной давности значило бы принять решение
+    по отсутствию данных.
     """
     verdict = verdict_for(
         with_issues(issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True))
@@ -546,18 +582,39 @@ def test_unsettled_default_without_a_date_stays_in_review() -> None:
     assert verdict.grounds == ("emission_default",)
 
 
+def test_fresh_unsettled_default_names_the_amount() -> None:
+    """Разбор называет вид события, дату и неисполненную сумму.
+
+    «Дефолт по погашению» говорит, что случилось; «купон 03.08.2026,
+    не исполнено 86 602 000» говорит, сколько именно не заплатили, — и этого
+    сведения нет больше нигде.
+    """
+    verdict = verdict_for(
+        with_issues(
+            issue("БО-001Р-07", "в обращении", date(2027, 3, 31), unsettled=True),
+            records=(record("БО-001Р-07", "2026-08-17", amount="86602000"),),
+        )
+    )
+    assert verdict.basket == "review"
+    # Разряды разделяет неразрывный пробел — единая точка округления;
+    # обычный пробел здесь означал бы, что число набрано вторым способом.
+    assert "86 602 000" in verdict.details[0]
+    assert "17.08.2026" in verdict.details[0]
+
+
 def test_a_dated_old_default_does_not_close_an_undated_one() -> None:
     """Давность по старому событию не гасит признак без даты.
 
-    У эмитента бывают оба: дефолт 2018 года по закрытому выпуску и признак
-    неурегулированности по выпуску в обращении, дата погашения которого
-    в будущем. Давность считается по свежайшему событию, и взятая в одиночку
-    она объявила бы старым то, о чём даты нет вовсе.
+    У эмитента бывают оба: событие 2018 года по одному выпуску и признак
+    неурегулированности по другому, о котором события нет вовсе. Давность
+    считается по свежайшему событию, и взятая в одиночку она объявила бы
+    старым то, о чём даты нет.
     """
     verdict = verdict_for(
         with_issues(
             issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
             issue("БО-05", "в обращении", date(2031, 3, 27), unsettled=True),
+            records=(record("БО-01", "2018-03-15", kind="Погашение"),),
         )
     )
     assert verdict.basket == "review"
@@ -567,7 +624,10 @@ def test_a_dated_old_default_does_not_close_an_undated_one() -> None:
 def test_recently_settled_default_is_credit_history() -> None:
     """Улаженный недавно дефолт — кредитная история, то есть внимание."""
     verdict = verdict_for(
-        with_issues(issue("001P-02", "погашена", date(2025, 11, 25), unsettled=False))
+        with_issues(
+            issue("001P-02", "погашена", date(2025, 11, 25), unsettled=False),
+            records=(record("001P-02", "2025-11-25", met="2025-12-02"),),
+        )
     )
     assert verdict.basket == "attention"
     assert verdict.grounds == ("default_settled_recent",)
@@ -581,7 +641,10 @@ def test_stale_settled_default_is_a_note_and_not_a_silence() -> None:
     и молчание маршрута он прочтёт как недосмотр.
     """
     verdict = verdict_for(
-        with_issues(issue("еврооблигации", "погашена", date(2016, 5, 2), unsettled=False))
+        with_issues(
+            issue("еврооблигации", "погашена", date(2016, 5, 2), unsettled=False),
+            records=(record("еврооблигации", "2016-06-03", met="2016-08-01"),),
+        )
     )
     assert verdict.basket == "clear"
     assert verdict.grounds == ()
@@ -605,26 +668,23 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
         assert routing.say(ground.code, year="2016", years=3, issue="выпуск")
 
 
-def test_default_date_prefers_the_issue_whose_status_names_it() -> None:
-    """Дата берётся у выпуска, статус которого называет неисполненное погашение.
+def test_unsettled_event_outweighs_a_later_settled_one() -> None:
+    """Давность считается по неисполненному, а не по тому, что позже улажено.
 
-    У ДВМП еврооблигация, погашенная досрочно, имеет срок 02.05.2020 —
-    события в тот день не было вовсе, а дефолтные БО-01 и БО-02 дают 2018 год.
-    Близость даты опорой не служит: опора — строение записи.
+    У ТГК-2 семь событий, из них два без даты исполнения: они и называют
+    давность. Событие, которое позже и улажено, обстоятельством не является.
     """
     from finlib.sources.cbonds_events import default_event
 
     found = default_event(
         (
-            issue("еврооблигации", "досрочно погашена", date(2020, 5, 2), unsettled=True),
-            issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
-            issue("БО-02", "дефолт по погашению", date(2017, 11, 28), unsettled=True),
+            record("БО-01", "2013-10-17"),
+            record("БО-02", "2019-04-26", met="2019-05-14"),
         ),
-        date(2026, 9, 22),
+        unsettled=True,
     )
-    assert found.when == date(2018, 2, 27)
-    assert found.issue == "БО-01"
-    assert "неисполненного погашения" in found.origin
+    assert found.when == date(2013, 10, 17)
+    assert "купон" in found.origin
 
 
 def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
@@ -714,13 +774,27 @@ def test_an_offeror_is_not_a_guarantor() -> None:
     assert [item.name for item in found] == ["Поручитель"]
 
 
-def test_default_date_in_the_future_is_not_an_event_date() -> None:
-    """Дата погашения в будущем датой события не становится."""
+def test_without_records_there_is_no_event_date() -> None:
+    """Перечня событий нет — давности нет, и это не ноль лет."""
     from finlib.sources.cbonds_events import default_event
 
-    found = default_event(
-        (issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True),),
-        date(2026, 9, 22),
-    )
+    found = default_event((), unsettled=True)
     assert not found.known
     assert found.origin == ""
+
+
+def test_sources_disagreeing_about_settlement_keep_the_circumstance() -> None:
+    """Пока хоть один источник говорит о неурегулированности — она в силе.
+
+    У Росгеологии карточка эмитента объявляет неурегулированный дефолт, а все
+    семь событий исполнены. Расхождение и есть тот вопрос, который задаётся
+    эмитенту, поэтому обстоятельство остаётся, а корзину решает давность.
+    """
+    events = with_issues(
+        issue("001Р-02", "досрочно погашена", date(2026, 11, 15), unsettled=True),
+        records=(record("001Р-02", "2025-07-07", met="2025-07-21"),),
+    )
+    assert events.unsettled_default
+    assert events.sources_disagree
+    verdict = verdict_for(events)
+    assert verdict.basket == "review"

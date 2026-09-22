@@ -17,15 +17,29 @@
 и прежнего значения метод `…_maxdate` не хранит: история берётся
 из последовательности снимков.
 
-**Дата события источником не приводится, и графиком платежей она
-не восстанавливается — проверено.** `get_flow_new` отдаёт поле
+**Дата события приходит отдельным методом, и искать её пришлось дважды.**
+`get_emission_default` отдаёт по каждому дефолту плановый срок исполнения
+(`estimated_date`), дату дефолта (`default_date`), дату объявления, **дату
+фактического исполнения** (`actual_date`) и неисполненную сумму. Перечень
+берётся целиком по стране — 3 529 записей в четырёх запросах, — и лежит
+в `defaults_ru.json`.
+
+Прежде дата выводилась из даты погашения выпуска, и это было неверно:
+у Мечела неисполнение оферты датировано 17.09.2015, а дата погашения его
+выпусков — 25.02.2020, то есть ошибка в пять лет. Ошибка была нашей дважды:
+метод объявлен в `docs/cbonds/openapi.yaml`, лежащем в самом репозитории,
+а первая проба его имени оборвалась на транспорте и была записана как
+«метода нет». **Отсутствие ответа ответом не является**, и справочник методов
+следует читать прежде, чем угадывать имена.
+
+**Факт платежа в графике платежей не лежит.** `get_flow_new` отдаёт поле
 `actual_payment_date`, которое выглядит датой фактического платежа, а является
 **сроком, сдвинутым на рабочий день**: у Кириллицы купон со сроком
 07.10.2023 (суббота) стоит с «фактом» 09.10.2023, а у ЕвроТранса заполнены
 и платежи 2027 года, которых ещё не было. По 93 выпускам с признаком дефолта
-неуплаченным не оказался ни один, включая выпуск Кириллицы в статусе «Дефолт
-по погашению». Опорой служит дата погашения — день, когда платёж был должен
-состояться, — и она называется тем, чем является.
+неуплаченным не оказался ни один — включая выпуск Кириллицы в статусе «Дефолт
+по погашению», у которого неисполненная сумма 300 000 000 стоит в записи
+дефолта.
 """
 
 import json
@@ -40,6 +54,9 @@ logger = logging.getLogger(__name__)
 
 CACHE = Path("data/raw/cbonds")
 SNAPSHOTS = CACHE / "ratings"
+# Перечень дефолтов по стране целиком: события, даты, суммы и дата
+# фактического исполнения. Собирает `scripts/events_fetch.py`.
+DEFAULTS = CACHE / "defaults_ru.json"
 SCALE_POINTS = CACHE / "rating_scale_points.json"
 SCALES = CACHE / "rating_scales.json"
 
@@ -160,13 +177,43 @@ def guarantees_of(inn: str, statuses: frozenset[str]) -> tuple[Guarantee, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class DefaultRecord:
+    """Одно событие дефолта: что не исполнено, когда и на какую сумму.
+
+    **Исполнено ли обязательство, говорит дата фактического исполнения**
+    (`actual_date`): у ДВМП купон, просроченный 05.05.2017, уплачен 23.05.2017,
+    а погашение 2018 года не исполнено до сих пор. Признак карточки эмитента
+    говорит о том же, но одним словом на всего эмитента.
+    """
+
+    emission_id: str
+    kind: str
+    status: str
+    due: date | None
+    when: date | None
+    announced: date | None
+    met: date | None
+    amount: Decimal | None
+
+    @property
+    def settled(self) -> bool:
+        """Исполнено ли обязательство в конце концов."""
+        return self.met is not None
+
+    @property
+    def moment(self) -> date | None:
+        """Дата события: дата дефолта, иначе плановый срок, иначе объявление."""
+        return self.when or self.due or self.announced
+
+
+@dataclass(frozen=True, slots=True)
 class DefaultEvent:
     """Дата дефолта, чем она является и по какому выпуску получена.
 
     **Дата может быть неизвестна, и это не то же самое, что её отсутствие
-    в природе.** У выпуска в обращении с неурегулированным дефолтом дата
-    погашения лежит в будущем и о событии не говорит ничего; молча подставить
-    её значило бы объявить событие ненаступившим.
+    в природе.** Перечня дефолтов может не быть на диске вовсе, и тогда
+    давность не считается: понизить корзину по неизвестной давности значило бы
+    решить по отсутствию данных.
     """
 
     when: date | None
@@ -179,34 +226,52 @@ class DefaultEvent:
         return self.when is not None
 
 
-def default_event(issues: tuple[Issue, ...], today: date) -> DefaultEvent:
-    """Дата дефолта по перечню выпусков: чем позже, тем важнее.
+def default_records() -> dict[str, tuple[DefaultRecord, ...]]:
+    """События дефолтов по выпускам с диска; пусто — перечня нет.
 
-    **Опора выбирается строением, а не близостью даты.** Статус «дефолт
-    по погашению» называет сам предмет — неисполненное погашение, — и дата
-    погашения такого выпуска и есть день, когда платёж был должен состояться.
-    У выпуска, закрытого иначе (погашен, погашен досрочно), дата погашения —
-    только **верхняя граница**: событие случилось не позже неё. Поэтому
-    выпуски со статусом дефолта старше остальных, а не просто складываются
-    с ними в общий перечень: у ДВМП дефолтные БО-01 и БО-02 дают 2018 год,
-    а еврооблигация, погашенная досрочно, — 2020-й, которого события
-    не было вовсе.
-
-    Дата в будущем опорой не служит: у выпуска в обращении она говорит
-    о сроке, а не о событии.
+    Перечень забирается целиком по стране (`emission_emitent_country_id = 1`):
+    3 529 записей в четырёх запросах против одного запроса на выпуск.
     """
-    past = [item for item in issues if item.maturity and item.maturity <= today]
-    named = [item for item in past if item.status in DEFAULT_STATUSES]
-    pool = named or past
-    if not pool:
+    if not DEFAULTS.exists():
+        logger.warning("перечня дефолтов на диске нет: %s", DEFAULTS)
+        return {}
+    found: dict[str, list[DefaultRecord]] = {}
+    for item in json.loads(DEFAULTS.read_text(encoding="utf-8")).get("items", []):
+        emission = str(item.get("emission_id") or "")
+        found.setdefault(emission, []).append(
+            DefaultRecord(
+                emission_id=emission,
+                kind=str(item.get("type_name_rus") or ""),
+                status=str(item.get("status_name_rus") or ""),
+                due=_as_date(item.get("estimated_date")),
+                when=_as_date(item.get("default_date")),
+                announced=_as_date(item.get("announcement_date")),
+                met=_as_date(item.get("actual_date")),
+                amount=_as_number(item.get("unsettled_amount")),
+            )
+        )
+    return {key: tuple(rows) for key, rows in found.items()}
+
+
+def default_event(records: tuple[DefaultRecord, ...], unsettled: bool) -> DefaultEvent:
+    """Дата дефолта по событиям: свежайшая, и у неурегулированного своя.
+
+    **Неисполненное обязательство старше исполненного.** У ТГК-2 семь записей,
+    из них две без даты исполнения: давность считается по ним, а не по той,
+    что позже и улажена. Если неисполненных записей нет, а признак эмитента
+    говорит о неурегулированности, берётся свежайшая из имеющихся — источники
+    расходятся, и вопрос о статусе урегулирования как раз и задаётся.
+    """
+    dated = [item for item in records if item.moment is not None]
+    if not dated:
         return DefaultEvent(None, "", "")
-    latest = max(pool, key=lambda item: item.maturity)
-    origin = (
-        "срок неисполненного погашения"
-        if any(latest is item for item in named)
-        else "дата погашения выпуска — событие не позже неё"
-    )
-    return DefaultEvent(latest.maturity, origin, latest.name)
+    open_ones = [item for item in dated if not item.settled]
+    pool = open_ones if (unsettled and open_ones) else dated
+    latest = max(pool, key=lambda item: item.moment)
+    origin = f"{latest.kind.lower()}, {latest.status.lower()}"
+    if latest.due is not None:
+        origin += f", срок {latest.due:%d.%m.%Y}"
+    return DefaultEvent(latest.moment, origin, latest.emission_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +315,53 @@ class IssuerEvents:
     # одинаково, а значат противоположное.
     issues_known: bool = False
     ratings_known: bool = False
+    # События дефолтов по выпускам эмитента: даты, суммы, факт исполнения.
+    # Пусто при непустом `defaulted` означает, что перечня нет на диске.
+    records: tuple[DefaultRecord, ...] = ()
+    records_known: bool = False
+
+    @property
+    def open_records(self) -> tuple[DefaultRecord, ...]:
+        """События, обязательство по которым не исполнено до сих пор."""
+        return tuple(item for item in self.records if not item.settled)
+
+    @property
+    def unsettled_default(self) -> bool:
+        """Есть ли неурегулированный дефолт — по любому из двух источников.
+
+        **Источники расходятся, и берётся тяжелейший.** Признак карточки —
+        сводка на всего эмитента, дата фактического исполнения — свидетельство
+        по каждому событию. У Росгеологии карточка объявляет неурегулированность,
+        а все семь событий исполнены; у Концессий теплоснабжения то же. Пока
+        хоть один источник утверждает неурегулированность, обстоятельство
+        остаётся, а расхождение и есть тот вопрос, который задаётся эмитенту.
+        """
+        return bool(self.defaulted) or bool(self.open_records)
+
+    @property
+    def settled_only(self) -> bool:
+        """Дефолт был и улажен целиком: кредитная история, а не состояние."""
+        had = bool(self.settled) or bool(self.records)
+        return had and not self.unsettled_default
+
+    @property
+    def undated_defaults(self) -> tuple[Issue, ...]:
+        """Выпуски с признаком дефолта, о которых событий нет вовсе.
+
+        **Датированное обстоятельство недатированного не закрывает.** Если
+        у выпуска стоит признак, а события о нём в перечне нет, дата его
+        неизвестна — и считать давность по событию другого выпуска значило бы
+        объявить старым то, о чём даты нет.
+        """
+        known = {item.emission_id for item in self.records}
+        return tuple(
+            item for item in self.defaulted if item.emission_id not in known
+        )
+
+    @property
+    def sources_disagree(self) -> bool:
+        """Расходятся ли карточка и события в том, улажен ли дефолт."""
+        return bool(self.defaulted) and bool(self.records) and not self.open_records
 
     @property
     def defaulted(self) -> tuple[Issue, ...]:
@@ -286,13 +398,14 @@ class IssuerEvents:
             item for item in self.ratings if item.credit and not item.withdrawn
         )
 
-    def unsettled_event(self, today: date) -> DefaultEvent:
-        """Дата неурегулированного дефолта: обстоятельство настоящего."""
-        return default_event(self.defaulted, today)
+    def event(self) -> DefaultEvent:
+        """Дата дефолта: свежайшая, у неурегулированного — по неисполненному.
 
-    def settled_event(self, today: date) -> DefaultEvent:
-        """Дата урегулированного дефолта: кредитная история, а не состояние."""
-        return default_event(self.settled, today)
+        Одна дата на оба исхода: дефолт у эмитента либо улажен, либо нет,
+        и двух событий разной давности одновременно у него не бывает —
+        давность считается от свежайшего.
+        """
+        return default_event(self.records, self.unsettled_default)
 
     # **Рефинансирование здесь не считается, и это правило, а не пробел.**
     # Прежде объём к погашению брался как остаток выпуска целиком, если
@@ -457,16 +570,19 @@ def events_of(
     snapshot: dict[str, list[dict]] | None = None,
     credit: frozenset[str] | None = None,
     order: dict[tuple[str, str], int] | None = None,
+    defaults: dict[str, tuple[DefaultRecord, ...]] | None = None,
 ) -> IssuerEvents:
-    """События эмитента: выпуски с диска и рейтинги из свежего снимка."""
+    """События эмитента: выпуски с диска, рейтинги снимка, события дефолтов."""
     if snapshot is None:
         _, snapshot = latest_snapshot()
     if credit is None:
         credit = credit_scales()
     if order is None:
         order = point_order()
+    if defaults is None:
+        defaults = default_records()
     issues, known = issues_of(inn)
-    records = snapshot.get(inn)
+    rated = snapshot.get(inn)
     ratings = tuple(
         Rating(
             agency=str(item.get("agency_name_rus") or ""),
@@ -480,12 +596,16 @@ def events_of(
             ),
             credit=str(item.get("scale_id")) in credit,
         )
-        for item in (records or ())
+        for item in (rated or ())
     )
     return IssuerEvents(
         inn=inn,
         issues=issues,
         ratings=ratings,
         issues_known=known,
-        ratings_known=records is not None,
+        ratings_known=rated is not None,
+        records=tuple(
+            entry for item in issues for entry in defaults.get(item.emission_id, ())
+        ),
+        records_known=bool(defaults),
     )

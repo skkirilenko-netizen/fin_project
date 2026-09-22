@@ -50,7 +50,7 @@ from finlib.normalize.ifrs_issuer_type import IssuerTypePolicy, load_issuer_type
 from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.scoring.ifrs import level
 from finlib.scoring.theses import load_theses
-from finlib.sources.cbonds_events import DEFAULT_STATUSES
+from finlib.sources.cbonds_events import DEFAULT_STATUSES, DefaultEvent
 
 logger = logging.getLogger(__name__)
 
@@ -903,44 +903,36 @@ def _default_findings(
     edge = routing.events.stale_before(today)
     years = routing.events.default_stale_years
 
-    unsettled = tuple(getattr(events, "defaulted", ()))
-    event = (
-        events.unsettled_event(today)
-        if unsettled and hasattr(events, "unsettled_event")
-        else None
-    )
-    # **Датированное обстоятельство недатированного не закрывает.** У эмитента
-    # бывают оба: дефолт 2018 года по закрытому выпуску и признак
-    # неурегулированности по выпуску в обращении, дата которого в будущем.
-    # Давность считается по самому свежему событию, и взятая в одиночку она
-    # объявила бы старым то, о чём даты нет вовсе, — то есть понизила бы
-    # корзину по отсутствию данных.
-    dated = all(
-        item.maturity is not None and item.maturity <= today for item in unsettled
-    )
-    if unsettled and dated and event is not None and event.known and event.when < edge:
+    unsettled = bool(getattr(events, "unsettled_default", False))
+    settled_only = bool(getattr(events, "settled_only", False))
+    if not unsettled and not settled_only:
+        return review, attention, notes
+    event = events.event() if hasattr(events, "event") else DefaultEvent(None, "", "")
+    # Выпуск с признаком дефолта, о котором событий нет вовсе, давности
+    # не имеет: считать её по событию другого выпуска значило бы объявить
+    # старым то, о чём даты нет.
+    undated = bool(getattr(events, "undated_defaults", ()))
+    stale = event.known and event.when < edge and not undated
+
+    if unsettled and stale:
         attention.append(
             Finding(
                 "default_unsettled_stale",
-                event.issue,
+                _issue_name(events, event.issue) or event.issue,
                 routing.say(
                     "default_unsettled_stale",
                     year=f"{event.when:%Y} года",
-                    where=event.origin,
+                    where=event.origin or "вид события источник не называет",
                 ),
             )
         )
-    else:
-        for issue in unsettled:
-            where = (
-                f"погашение {issue.maturity:%d.%m.%Y}"
-                if issue.maturity is not None
-                else (
-                    f"запись обновлена {issue.updated:%d.%m.%Y}"
-                    if issue.updated is not None
-                    else "даты события источник не приводит"
-                )
-            )
+    elif unsettled:
+        # **Свежий либо недатированный неурегулированный дефолт — разбор,
+        # и он называется по выпускам.** Перечня дефолтов может не быть
+        # на диске вовсе, и тогда давность неизвестна: понизить корзину
+        # по неизвестной давности значило бы решить по отсутствию данных.
+        for issue in getattr(events, "defaulted", ()):
+            where = _where_of(events, issue)
             # **Статус выпуска и признак неурегулированности — разные
             # сведения.** «Дефолт по погашению» говорит, что случилось;
             # признак у выпуска в обращении — что случившееся не улажено,
@@ -948,7 +940,7 @@ def _default_findings(
             what = (
                 issue.status.capitalize()
                 if issue.status in DEFAULT_STATUSES
-                else f"Неурегулированный дефолт (выпуск {issue.status})"
+                else f"Неурегулированный дефолт (выпуск в статусе «{issue.status}»)"
             )
             review.append(
                 Finding(
@@ -959,30 +951,38 @@ def _default_findings(
                     ),
                 )
             )
-
-    settled = tuple(getattr(events, "settled", ()))
-    past = (
-        events.settled_event(today)
-        if settled and hasattr(events, "settled_event")
-        else None
-    )
-    if settled and past is not None:
-        # Неизвестная давность здесь так же не понижает: урегулированный
-        # дефолт без даты остаётся обстоятельством внимания, а не сведением.
-        stale = past.known and past.when < edge
-        # Выпуск называется и тогда, когда даты нет: «выпуск » с пустым
-        # наименованием — графа, считающая не то, как называется.
-        named = past.issue or _issues_named(settled)
+        if not review:
+            # Признак стоит у событий, а не у выпуска: обстоятельство
+            # называется им, иначе оно исчезнет вместе с корзиной.
+            review.append(
+                Finding(
+                    "emission_default",
+                    event.issue,
+                    routing.say(
+                        "emission_default",
+                        what="Неурегулированный дефолт",
+                        issue=event.issue or "выпуск источник не называет",
+                        where=event.origin or "даты события источник не приводит",
+                    ),
+                )
+            )
+    elif settled_only:
+        # **Выпуск называется наименованием, а не своим номером у источника.**
+        # «Выпуск 525165» человеку не говорит ничего, а событие приходит
+        # с идентификатором, а не с наименованием.
+        issue = _issue_name(events, event.issue) or _issues_named(
+            getattr(events, "settled", ())
+        )
         if stale:
             notes.append(
                 Finding(
                     "default_settled_stale",
-                    named,
+                    issue,
                     routing.say(
                         "default_settled_stale",
-                        year=f"{past.when:%Y}",
+                        year=f"{event.when:%Y}",
                         years=years,
-                        issue=named,
+                        issue=issue,
                     ),
                 )
             )
@@ -990,16 +990,51 @@ def _default_findings(
             attention.append(
                 Finding(
                     "default_settled_recent",
-                    named,
+                    issue,
                     routing.say(
                         "default_settled_recent",
-                        "" if past.known else "no_year",
-                        year=f"{past.when:%Y}" if past.known else "",
-                        issue=named,
+                        "" if event.known else "no_year",
+                        year=f"{event.when:%Y}" if event.known else "",
+                        issue=issue,
                     ),
                 )
             )
     return review, attention, notes
+
+
+def _issue_name(events: object, emission_id: str) -> str:
+    """Наименование выпуска по идентификатору источника; пусто — не найдено."""
+    for item in getattr(events, "issues", ()):
+        if getattr(item, "emission_id", "") == emission_id:
+            return str(getattr(item, "name", ""))
+    return ""
+
+
+def _where_of(events: object, issue: object) -> str:
+    """Чем подтверждён дефолт выпуска: событие с суммой либо срок погашения.
+
+    **Неисполненная сумма — сведение, которого нет больше нигде.** «Дефолт
+    по погашению» говорит, что случилось; «купон, срок 03.08.2026, не исполнено
+    86 602 000» говорит, сколько именно не заплатили.
+    """
+    from finlib.metrics.display import money
+
+    mine = [
+        item
+        for item in getattr(events, "open_records", ())
+        if item.emission_id == getattr(issue, "emission_id", "")
+    ]
+    dated = [item for item in mine if item.moment is not None]
+    if dated:
+        latest = max(dated, key=lambda item: item.moment)
+        text = f"{latest.kind.lower()} {latest.moment:%d.%m.%Y}, {latest.status.lower()}"
+        if latest.amount is not None:
+            text += f", не исполнено {money(latest.amount)}"
+        return text
+    maturity = getattr(issue, "maturity", None)
+    if maturity is not None:
+        return f"погашение {maturity:%d.%m.%Y}, события источник не датирует"
+    return "даты события источник не приводит"
 
 
 def _issues_named(issues: tuple[object, ...]) -> str:

@@ -36,6 +36,7 @@ from finlib.sources.cbonds_events import (
     Guarantee,
     IssuerEvents,
     credit_scales,
+    default_records,
     events_of,
     guarantees_of,
     latest_snapshot,
@@ -192,6 +193,9 @@ def routing_rows(
     # один и тот же, а эмитентов триста.
     credit = credit_scales()
     order = point_order()
+    # Перечень дефолтов — один файл на всю страну, 3 529 событий: читается
+    # один раз, а не по эмитенту.
+    defaults = default_records()
     if on is None:
         logger.warning(
             "снимка рейтингов на диске нет: событийный слой будет пуст, "
@@ -219,7 +223,7 @@ def routing_rows(
             continue
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
-        events = events_of(inn, snapshot, credit, order)
+        events = events_of(inn, snapshot, credit, order, defaults)
         # Поручитель нужен уже здесь: формулировка финансирующей структуры
         # без него говорила бы о группе там, где речь о том, кто отвечает
         # по долгу. Корзина же его берётся вторым проходом.
