@@ -1,7 +1,7 @@
 """Поручители, платежи и оферты выпусков: доставка на диск.
 
     uv run python scripts/events_fetch.py [--limit N]
-                          [--only defaults-list|guarantors|flows|defaults]
+                 [--only defaults-list|guarantors|flows|payments|defaults]
 
 **Перечень дефолтов берётся целиком по стране, а не по выпуску.**
 `get_emission_default` отдаёт события дефолтов с плановым сроком, датой
@@ -153,8 +153,18 @@ def guarantors(limit: int) -> None:
     print(f"поручители: эмитентов {done} из {len(chosen)}")
 
 
-def flows(limit: int, defaults_only: bool) -> None:
-    """Забирает платежи выпусков и оферты там, где они нужны."""
+def flows(limit: int, defaults_only: bool, payments_only: bool = False) -> None:
+    """Забирает платежи выпусков и оферты там, где они нужны.
+
+    **Платежи и оферты забираются порознь, когда бюджета не хватает на оба.**
+    Запрос у них свой у каждого, и на универсуме облигаций их вдвое больше,
+    чем суточная норма позволяет за одну ночь: 4 191 выпуск без графика —
+    это 8 382 запроса. Платежи при этом называют корзину («Внимание»
+    по нехватке денежных средств), а оферты остаются справочной мерой,
+    и порядок отсюда очевиден. Что именно забрано, печатается числом:
+    «оферт ноль» у выпуска, о котором не спрашивали, и у выпуска без оферт —
+    разные сведения.
+    """
     wanted = emissions(defaults_only=defaults_only)
     chosen = wanted[:limit] if limit else wanted
     paid = offers = 0
@@ -162,13 +172,14 @@ def flows(limit: int, defaults_only: bool) -> None:
         paid += ask(
             "get_flow_new", f"flow_{emission}", "emission_id", emission, 500
         )
-        if defaults_only:
+        if defaults_only or payments_only:
             # Оферта говорит о рефинансировании, а не о дате дефолта.
             continue
         offers += ask(
             "get_offert", f"offert_{emission}", "emission_id", emission, 100
         )
-    print(f"платежи: выпусков {paid} из {len(chosen)}; оферты: запрошено {offers}")
+    told = "оферты не запрашивались" if payments_only else f"оферты: запрошено {offers}"
+    print(f"платежи: выпусков {paid} из {len(chosen)}; {told}")
 
 
 def main() -> int:
@@ -184,8 +195,12 @@ def main() -> int:
         defaults()
     if only in ("", "guarantors"):
         guarantors(limit)
-    if only in ("", "flows", "defaults"):
-        flows(limit, defaults_only=only == "defaults")
+    if only in ("", "flows", "defaults", "payments"):
+        flows(
+            limit,
+            defaults_only=only == "defaults",
+            payments_only=only == "payments",
+        )
 
     print(
         f"запросов к источнику {cbonds.pace.requested}, ответов с диска "
