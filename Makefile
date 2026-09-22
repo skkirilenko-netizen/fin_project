@@ -58,6 +58,9 @@ routing-reference:  ## Эталон списка наблюдения, уров�
 watchlist:  ## Собрать список наблюдения в data/output/watchlist_<дата>.html
 	uv run python eval/watchlist_run.py $(ARGS)
 
+watchlist-coverage:  ## Охват списка: кого он видит и кого не видит по построению
+	uv run python eval/watchlist_coverage_run.py $(ARGS)
+
 ratings-snapshot:  ## Снимок рейтингов на сегодня (ежедневно; один запрос на эмитента)
 	uv run python scripts/ratings_snapshot.py $(ARGS)
 
