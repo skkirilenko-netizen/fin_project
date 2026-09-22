@@ -146,7 +146,25 @@ ON CONFLICT (inn, standard, report_date, form_code, line_code) DO UPDATE SET
     value_status = EXCLUDED.value_status,
     period_role = EXCLUDED.period_role,
     updated_at = now()
-WHERE period_rank(EXCLUDED.period_role) <= period_rank(fact_report.period_role)
+-- **Правило приоритета одно на оба стандарта.** Ступени те же: состояние
+-- комплекта, источник, роль периода. До появления данных агрегатора по РСБУ
+-- первые две ступени здесь ничего не меняют — все величины приходят
+-- от первоисточника и из принятых комплектов, — но расходиться правилам
+-- нельзя: разойдясь, они дадут разный ответ на один вопрос.
+WHERE (
+        set_rank(EXCLUDED.src_file_id) < set_rank(fact_report.src_file_id)
+        OR (
+          set_rank(EXCLUDED.src_file_id) = set_rank(fact_report.src_file_id)
+          AND (
+            source_rank(EXCLUDED.recognition) < source_rank(fact_report.recognition)
+            OR (
+              source_rank(EXCLUDED.recognition) = source_rank(fact_report.recognition)
+              AND period_rank(EXCLUDED.period_role)
+                  <= period_rank(fact_report.period_role)
+            )
+          )
+        )
+      )
   AND (fact_report.value IS DISTINCT FROM EXCLUDED.value
        OR fact_report.value_status IS DISTINCT FROM EXCLUDED.value_status
        OR fact_report.source_line_code IS DISTINCT FROM EXCLUDED.source_line_code
