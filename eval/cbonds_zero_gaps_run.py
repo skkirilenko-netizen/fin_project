@@ -116,7 +116,55 @@ def main() -> int:
             "они не идут — о нынешней доставке они не говорят, — но и молчать "
             "о них нельзя: молчание читалось бы как «журнал чист»."
         )
+
+    _disagreements()
     return 0
+
+
+def _disagreements() -> None:
+    """Печатает расхождения карточки эмитента с его же событиями дефолта.
+
+    **Это противоречие внутри источника, а не вопрос к эмитенту.** Карточка
+    объявляет неурегулированный дефолт, а все события дефолта того же
+    источника имеют дату фактического исполнения. Предъявляется оно туда же,
+    куда прочерки: разбираться с ним источнику.
+    """
+    from datetime import date
+
+    from finlib.scoring.routing_store import routing_rows
+
+    with connection() as conn:
+        rows, _ = routing_rows(conn, date.today())
+    found = [item for item in rows if item.events and item.events.sources_disagree]
+    print("\n## Карточка эмитента против его же событий дефолта\n")
+    print(
+        "Признак `has_unsettled_default` в карточке объявляет дефолт "
+        "неурегулированным, а у всех событий дефолта этого эмитента стоит дата "
+        "фактического исполнения. Маршрут считает первичными события — они "
+        "датированы и подробнее, — но расхождение остаётся сведением "
+        "об источнике.\n"
+    )
+    if not found:
+        print(
+            "Расхождений нет. Проверено эмитентов с событиями дефолта: "
+            f"{sum(1 for item in rows if item.events and item.events.records)}."
+        )
+        return
+    print("| Организация | ИНН | Событий | Исполнено | Свежайшее исполнение |")
+    print("|---|---|---|---|---|")
+    for item in found:
+        events = item.events
+        met = [entry.met for entry in events.records if entry.met is not None]
+        print(
+            f"| {item.name[:34]} | {item.inn} | {len(events.records)} "
+            f"| {len(events.records) - len(events.open_records)} "
+            f"| {max(met).isoformat() if met else '—'} |"
+        )
+    print(
+        f"\nРасхождений **{len(found)}** у эмитентов с событиями дефолта "
+        f"({sum(1 for item in rows if item.events and item.events.records)} "
+        "эмитентов проверено)."
+    )
 
 
 if __name__ == "__main__":

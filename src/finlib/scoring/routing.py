@@ -908,10 +908,9 @@ def _default_findings(
     if not unsettled and not settled_only:
         return review, attention, notes
     event = events.event() if hasattr(events, "event") else DefaultEvent(None, "", "")
-    # Выпуск с признаком дефолта, о котором событий нет вовсе, давности
-    # не имеет: считать её по событию другого выпуска значило бы объявить
-    # старым то, о чём даты нет.
-    undated = bool(getattr(events, "undated_defaults", ()))
+    # Событие без даты давности не имеет: считать её по другому событию
+    # значило бы объявить старым то, о чём даты нет.
+    undated = bool(getattr(events, "undated_records", ()))
     stale = event.known and event.when < edge and not undated
 
     if unsettled and stale:

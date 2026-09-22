@@ -524,6 +524,22 @@ def record(
     )
 
 
+def undated_record(emission: str):
+    """Событие дефолта, у которого нет ни одной даты."""
+    from finlib.sources.cbonds_events import DefaultRecord
+
+    return DefaultRecord(
+        emission_id=emission,
+        kind="Купон",
+        status="Дефолт",
+        due=None,
+        when=None,
+        announced=None,
+        met=None,
+        amount=None,
+    )
+
+
 def with_issues(*issues, records=()):
     """События эмитента: выпуски и события дефолтов по ним."""
     from finlib.sources.cbonds_events import IssuerEvents
@@ -605,19 +621,34 @@ def test_fresh_unsettled_default_names_the_amount() -> None:
     assert "17.08.2026" in verdict.details[0]
 
 
-def test_a_dated_old_default_does_not_close_an_undated_one() -> None:
-    """Давность по старому событию не гасит признак без даты.
+def test_events_outweigh_the_card_flag() -> None:
+    """События первичны, признак карточки — только при их отсутствии.
 
-    У эмитента бывают оба: событие 2018 года по одному выпуску и признак
-    неурегулированности по другому, о котором события нет вовсе. Давность
-    считается по свежайшему событию, и взятая в одиночку она объявила бы
-    старым то, о чём даты нет.
+    Событие подробнее и датировано; признак карточки отстаёт, и это видно
+    на ДВМП: обязательства 2018 года, а признак стоит бессрочно. Поэтому
+    выпуск с признаком, о котором события нет, обстоятельства не создаёт,
+    пока события есть у других выпусков.
     """
+    events = with_issues(
+        issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
+        issue("БО-05", "в обращении", date(2031, 3, 27), unsettled=True),
+        records=(record("БО-01", "2018-03-15", kind="Погашение"),),
+    )
+    verdict = verdict_for(events)
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("default_unsettled_stale",)
+    assert "2018" in verdict.details[0]
+
+
+def test_an_undated_event_is_not_made_old_by_a_dated_one() -> None:
+    """Событие без даты давности не имеет, и датированное его не закрывает."""
     verdict = verdict_for(
         with_issues(
             issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
-            issue("БО-05", "в обращении", date(2031, 3, 27), unsettled=True),
-            records=(record("БО-01", "2018-03-15", kind="Погашение"),),
+            records=(
+                record("БО-01", "2018-03-15", kind="Погашение"),
+                undated_record("БО-02"),
+            ),
         )
     )
     assert verdict.basket == "review"
@@ -786,18 +817,21 @@ def test_without_records_there_is_no_event_date() -> None:
     assert found.origin == ""
 
 
-def test_sources_disagreeing_about_settlement_keep_the_circumstance() -> None:
-    """Пока хоть один источник говорит о неурегулированности — она в силе.
+def test_settled_events_outweigh_the_card_flag_but_are_counted() -> None:
+    """Все события исполнены — обстоятельства нет, а расхождение считается.
 
     У Росгеологии карточка эмитента объявляет неурегулированный дефолт, а все
-    семь событий исполнены. Расхождение и есть тот вопрос, который задаётся
-    эмитенту, поэтому обстоятельство остаётся, а корзину решает давность.
+    семь событий исполнены. Событие первично: оно датировано и подробнее.
+    Расхождение при этом не исчезает — оно противоречие внутри агрегатора
+    и идёт в перечень к нему, а не вопросом к эмитенту.
     """
     events = with_issues(
         issue("001Р-02", "досрочно погашена", date(2026, 11, 15), unsettled=True),
         records=(record("001Р-02", "2025-07-07", met="2025-07-21"),),
     )
-    assert events.unsettled_default
+    assert not events.unsettled_default
+    assert events.settled_only
     assert events.sources_disagree
     verdict = verdict_for(events)
-    assert verdict.basket == "review"
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("default_settled_recent",)
