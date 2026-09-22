@@ -28,7 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
-from finlib.scoring.routing_store import routing_rows  # noqa: E402
+from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.scoring.routing_store import cards, exclusions, routing_rows  # noqa: E402
+from finlib.sources.cbonds import bond_issuers  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,12 @@ def main() -> int:
     with connection() as conn:
         rows, counts = routing_rows(conn, date.today())
     by_inn = {item.inn: item for item in rows}
+    # **Состав универсума и журнал исключений — предмет ожиданий фазы 1.**
+    # Берутся они теми же вызовами, что и список: второй перечень исключённых
+    # разошёлся бы с первым, и увидеть это было бы нечем.
+    known = cards()
+    bonds = bond_issuers()
+    left, unconfirmed = exclusions(known, load_routing())
 
     print("# Эталон списка наблюдения: уровень проекта\n")
     print(
@@ -62,6 +70,32 @@ def main() -> int:
                 for row in rows
                 if (value := row.values.get("ebitda")) is not None and value <= 0
             ]
+        # **Каждый эмитент с долгом в обращении — предмет фазы 1.** Либо
+        # у него есть корзина, либо он вышел из списка записью в журнале
+        # исключений: третьего исхода нет, и молчание — не исход.
+        if item.get("rule") == "every_bond_issuer":
+            issuers = sorted(bonds)
+        # Эмитенты, у которых поле преемника заполнено, а статус карточки —
+        # действующий. Прочитанное как «поглощён», поле вывело из списка
+        # 24 живых эмитента; правило требует, чтобы они в нём стояли.
+        if item.get("rule") == "every_live_issuer_with_successor_field":
+            # **Круг сужен до эмитентов с долгом намеренно.** Ожидание о том,
+            # что поле преемника не выводит живого эмитента из списка,
+            # а не о том, что в списке стоят все карточки справочника:
+            # у Самараэнерго и Саратовэнерго поле заполнено и статус
+            # действующий, но выпусков в обращении нет и отчётности у нас
+            # тоже — их отсутствие говорит о составе списка, а не о правиле.
+            issuers = sorted(
+                inn
+                for inn, card in known.items()
+                if str(card.get("emitents_id_absorption") or "").strip()
+                not in ("", "0", "None")
+                and inn in bonds
+                and inn not in left
+                and inn not in unconfirmed
+            )
+        if item.get("rule") == "every_excluded_issuer":
+            issuers = sorted(left)
         for inn in issuers:
             checked += 1
             row = by_inn.get(inn)
@@ -69,6 +103,24 @@ def main() -> int:
                 if row is not None:
                     divergences.append(
                         f"{code}: {inn} в списке есть, а ожидалось отсутствие"
+                    )
+                continue
+            # **Третьего исхода нет.** Эмитент с долгом либо имеет корзину,
+            # либо назван в журнале исключений с причиной и преемником.
+            # Молчание — не исход, и ровно им список однажды и уменьшился.
+            if expect == "routed_or_excluded":
+                if row is None and inn not in left:
+                    divergences.append(
+                        f"{code}: эмитент {inn} с выпусками в обращении "
+                        "не имеет ни корзины, ни записи в журнале исключений"
+                    )
+                continue
+            if expect == "excluded_with_reason":
+                record = left.get(inn)
+                if record is None or not record.reason or not record.successor:
+                    divergences.append(
+                        f"{code}: выход эмитента {inn} объявлен без причины "
+                        "либо без преемника"
                     )
                 continue
             if row is None:
