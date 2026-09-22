@@ -1,9 +1,10 @@
 """Маршрутизация: корзина по обстоятельствам, а не по нашему усмотрению.
 
-Правила — черновик, и тем нужнее тест: он закрепляет не пороги, а **развод
-оснований по корзинам**. Стоп-фактор с ограничением средним и стоп-фактор
-с ограничением низшим — разные обстоятельства, и первое отправляло к человеку
-половину универсума, пока разводом не занялись.
+Структура правил утверждена человеком, пороги остаются предварительными,
+и тест закрепляет не пороги, а **развод оснований по корзинам**. Стоп-фактор
+с ограничением средним и стоп-фактор с ограничением низшим — разные
+обстоятельства, и первое отправляло к человеку половину универсума, пока
+разводом не занялись.
 """
 
 from datetime import date
@@ -13,7 +14,7 @@ import pytest
 
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
-from finlib.scoring.routing import load_routing, route
+from finlib.scoring.routing import RoutingPolicy, load_routing, route
 
 
 def metric(code: str, value: str, name: str = "показатель") -> MetricValue:
@@ -194,9 +195,33 @@ def test_overdue_disclosure_is_its_own_ground() -> None:
     assert (basket, grounds) == ("attention", ("disclosure_overdue",))
 
 
-def test_draft_status_travels_with_the_verdict() -> None:
-    """Статус черновика печатается вместе с корзиной."""
+def test_status_and_maturity_travel_with_the_verdict() -> None:
+    """Утверждённая структура и зрелость порогов — два разных сведения.
+
+    Согласие с составом корзин не делает величины калиброванными, и вердикт
+    обязан нести оба: умолчание о зрелости выдало бы предварительный порог
+    за проверенный.
+    """
+    policy = load_routing()
     verdict = route(healthy(), quarantined=False, latest_annual=date(2025, 12, 31),
                     today=date(2026, 5, 1))
-    assert verdict.status == load_routing().status
-    assert "черновик" in verdict.describe() or verdict.status == "approved"
+    assert verdict.status == policy.status
+    assert verdict.thresholds == policy.thresholds
+    if policy.status != "approved":
+        assert "черновик" in verdict.describe()
+    elif policy.thresholds == "preliminary":
+        assert "пороги предварительны" in verdict.describe()
+
+
+def test_approval_and_maturity_are_declared_with_their_reasons() -> None:
+    """Утверждение называет автора, предварительность — причину."""
+    policy = load_routing()
+    raw = policy.model_dump()
+    raw["approved_by"] = None
+    with pytest.raises(ValueError, match="кем"):
+        RoutingPolicy.model_validate(raw)
+    raw = policy.model_dump()
+    raw["thresholds_origin"] = ""
+    raw["thresholds"] = "preliminary"
+    with pytest.raises(ValueError, match="почему"):
+        RoutingPolicy.model_validate(raw)
