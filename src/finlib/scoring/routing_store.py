@@ -42,6 +42,7 @@ from finlib.sources.cbonds_events import (
     events_of,
     guarantees_of,
     in_unit,
+    issues_of,
     latest_snapshot,
     point_order,
 )
@@ -217,7 +218,23 @@ def routing_rows(
         for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
     }
 
-    counts = {"эмитентов": 0, "исключено поглощённых": 0, "карточек": len(known)}
+    # **Верхний десяток по объёму долга в обращении.** Доля считается
+    # от эмитентов, у которых объём известен и положителен: у эмитента
+    # без облигаций величины нет вовсе, и в знаменателе он мерил бы состав
+    # списка, а не долг.
+    volumes = {
+        inn: total
+        for inn in known
+        if (total := _outstanding(inn)) is not None and total > 0
+    }
+    systemic = _top_share(volumes, routing.systemic.top_share)
+    counts = {
+        "эмитентов": 0,
+        "исключено поглощённых": 0,
+        "карточек": len(known),
+        "с раскрытым объёмом долга": len(volumes),
+        "системно значимых": len(systemic),
+    }
     rows: list[RoutingRow] = []
     for row in fetch_all(_LATEST, {}, conn=conn):
         inn, moment = row["inn"], row["report_date"]
@@ -270,6 +287,7 @@ def routing_rows(
             today=today,
             policy=policy,
             refinance=refinance,
+            systemic_volume=systemic.get(inn),
             routing=routing,
             types=types,
         )
@@ -438,6 +456,39 @@ def routing_rows(
             )
         rows = lifted
     return rows, counts
+
+
+def _outstanding(inn: str) -> Decimal | None:
+    """Объём долга в обращении по выпускам эмитента; None — объём не раскрыт.
+
+    Складываются выпуски в обращении и размещаемые: у погашенного долга нет.
+    `None` означает, что ни у одного выпуска объёма не раскрыто, — и это
+    не ноль: эмитент без облигаций и эмитент с нераскрытым объёмом
+    в верхнем десятке различаются.
+    """
+    issues, known = issues_of(inn)
+    if not known:
+        return None
+    parts = [
+        item.outstanding
+        for item in issues
+        if item.status in ("в обращении", "размещается") and item.outstanding is not None
+    ]
+    return sum(parts, start=Decimal(0)) if parts else None
+
+
+def _top_share(volumes: dict[str, Decimal], share: Decimal) -> dict[str, Decimal]:
+    """Верхняя доля перечня по величине; при пустом перечне — пусто.
+
+    Округление вверх намеренно: у 33 эмитентов десятая часть — четыре,
+    а не три, и потерять четвёртого значило бы сдвинуть отсечку тише,
+    чем объявлено.
+    """
+    if not volumes:
+        return {}
+    ordered = sorted(volumes.items(), key=lambda item: item[1], reverse=True)
+    size = -(-int(len(ordered) * share * 1000) // 1000) or 1
+    return dict(ordered[:size])
 
 
 def _cash(inn: str, moment: date, conn: PgConnection) -> Decimal | None:

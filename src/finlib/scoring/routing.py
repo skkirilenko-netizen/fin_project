@@ -226,6 +226,20 @@ class Refinancing(BaseModel):
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
 
 
+class Systemic(BaseModel):
+    """Верхний десяток по объёму долга: «Без внимания» даётся строже.
+
+    Отсечка — доля, а не сумма: рублёвый порог устарел бы с первым
+    размещением, а верхний десяток остаётся верхним.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    top_share: Decimal = Field(gt=0, le=1)
+    origin: str = Field(min_length=1)
+    calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+
+
 class Severity(BaseModel):
     """Градации ограничения класса, при которых нужен человек."""
 
@@ -356,6 +370,7 @@ class RoutingPolicy(BaseModel):
     statements: Statements
     universe: Universe
     severity: Severity
+    systemic: Systemic
     refinancing: Refinancing
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
@@ -580,6 +595,9 @@ def route(
     # Поручитель эмитента, стоящий в разборе: его обстоятельство говорит
     # о том, кто отвечает по долгу, и член такой пары не мягче внимания.
     guarantor_under_review: str = "",
+    # Объём долга в обращении, если эмитент в верхнем десятке по нему:
+    # такому «Без внимания» даётся строже — только при полном покрытии.
+    systemic_volume: Decimal | None = None,
     # Поручитель финансирующей структуры, названный источником. Корзина его
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
@@ -760,6 +778,29 @@ def route(
                         due=money(refinance.due),
                         cash=money(refinance.cash),
                         unit=refinance.unit,
+                    ),
+                )
+            )
+    # **Крупному долгу «Без внимания» даётся строже.** Оценка сверху
+    # прохождение критерия доказывает, а величину не заменяет, и у эмитента
+    # верхнего десятка цена этой замены выше всех прочих. Обстоятельство
+    # здесь о нашем знании, а не о нём.
+    if systemic_volume is not None:
+        thin = [
+            view.require(code).name.lower()
+            for code in ROUTING_METRICS
+            if not _ok(by_code, code)
+        ]
+        if thin:
+            attention.append(
+                Finding(
+                    "systemic_partial_cover",
+                    "systemic",
+                    routing.say(
+                        "systemic_partial_cover",
+                        volume=money(systemic_volume),
+                        unit="руб.",
+                        missing="не рассчитано — " + ", ".join(sorted(thin)),
                     ),
                 )
             )

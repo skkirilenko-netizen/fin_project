@@ -821,6 +821,42 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     assert led.notes[0].text == "SPV группы Группа: корзина поручителя Головная компания"
 
 
+def test_large_debt_is_not_left_clear_on_an_upper_bound() -> None:
+    """Эмитенту верхнего десятка «Без внимания» даётся только при полном покрытии.
+
+    Оценка сверху прохождение критерия доказывает, а величину не заменяет,
+    и у эмитента с крупным долгом в обращении цена этой замены выше всех
+    прочих. Обстоятельство здесь о нашем знании, а не о нём.
+    """
+    computed = (
+        metric("net_debt_op_profit", "2.0", "Чистый долг / операционная прибыль"),
+        metric("equity_ratio", "0.6", "Коэффициент автономии"),
+        metric("cur_liq", "2.5", "Текущая ликвидность"),
+    )
+    verdict = route(
+        computed,
+        quarantined=False,
+        systemic_volume=Decimal("3902500000000"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert "systemic_partial_cover" in verdict.grounds
+    assert "покрытие неполное" in verdict.details[0]
+
+
+def test_large_debt_with_full_cover_stays_clear() -> None:
+    """Величины рассчитаны — крупный долг сам обстоятельством не является."""
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        systemic_volume=Decimal("1714000000000"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+
+
 def test_a_guarantor_under_review_is_not_softer_than_attention() -> None:
     """Обстоятельство поручителя говорит и о заёмщике, но корзины не переносит.
 
