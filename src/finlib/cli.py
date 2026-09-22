@@ -8,6 +8,7 @@
 import logging
 import re
 import sys
+from collections import Counter
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -1453,6 +1454,160 @@ def _save_confirmation(
             },
             conn=conn,
         )
+
+
+@app.command("ifrs-reapply")
+def ifrs_reapply_command(
+    path: Annotated[
+        Path, typer.Option("--path", help="Каталог с документами МСФО по ИНН")
+    ] = Path("data/raw/ifrs"),
+    only_inn: Annotated[
+        list[str],
+        typer.Option(
+            "--inn",
+            help="Только эти организации. Можно повторять; без отбора — все",
+        ),
+    ] = [],  # noqa: B006 — typer требует list по умолчанию
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Применяет заново решения человека после правок разбора — без вопросов.
+
+    **Изменился ключ, а не решение.** Наименование строки хранится дословно,
+    вместе с мусором того разбора, который его прочитал, а ключ поиска
+    вычисляется разбором нынешним. После правки разбора ключ в журнале
+    устаревает, подтверждение перестаёт находиться, и строка возвращается
+    в очередь — хотя человек о ней уже сказал, чем она является. Пересчитать
+    ключ и записать комплект заново — не новое суждение, и спрашивать
+    человека тут не о чем.
+
+    **Что заново не применяется, называется поимённо.** Притязание строки
+    чужой формы или чужого раздела отклоняется правилом, и отклонение
+    остаётся: решение человека здесь не сильнее справочника. Такие строки
+    и строки, которых разбор больше не даёт, перечисляются — это работа,
+    которую придётся делать глазами.
+    """
+    _setup_logging(verbose)
+    from finlib.pipeline import accept_ifrs_document
+    from finlib.sources.ifrs_confirmed import refresh_match_keys
+    from finlib.sources.ifrs_inbox import text_of
+    from finlib.sources.ifrs_markup import review_saved
+
+    chosen = {item.strip() for item in only_inn if item.strip()}
+    issuers, skipped = _load_issuers(path, only=frozenset(chosen) or None)
+    if not issuers:
+        _fail(f"в каталоге {path} нет документов, прошедших приём")
+    for name, reason in skipped:
+        typer.echo(typer.style(f"  пропущен {name}: {reason}", fg=typer.colors.YELLOW))
+
+    refreshed = sum(refresh_match_keys(inn) for inn in sorted({i.inn for i in issuers}))
+    typer.echo(f"Ключей сопоставления пересчитано: {refreshed}")
+
+    saved = review_saved(issuers)
+    lost = [item for item in saved if item.lost]
+    # Судьбы называются все, а не только потери: «восстановлено» и «опознано
+    # справочником» — разные исходы, и второй означает, что работу человека
+    # перенял справочник, а не что она пропала.
+    fates: Counter[str] = Counter(item.fate for item in saved)
+    typer.echo(
+        f"Подтверждений у этих комплектов: {len(saved)}, "
+        f"не применяется: {len(lost)}"
+    )
+    for fate, count in fates.most_common():
+        typer.echo(f"  {fate}: {count}")
+
+    written = 0
+    for issuer in issuers:
+        document = text_of(issuer.path)
+        intake = accept_ifrs_document(
+            document.text,
+            inn=issuer.inn,
+            raw_path=str(issuer.path),
+            document=document,
+        )
+        if not intake.accepted or intake.loaded is None:
+            typer.echo(
+                typer.style(
+                    f"  {issuer.inn} {issuer.report_date}: не записан — "
+                    f"{intake.reason or 'запись не выполнена'}",
+                    fg=typer.colors.YELLOW,
+                )
+            )
+            continue
+        loaded = intake.loaded
+        written += loaded.collisions.by_confirmation
+        mark = "КАРАНТИН" if loaded.quarantined else "расчёт разрешён"
+        typer.echo(
+            f"  {issuer.inn} {issuer.report_date}: фактов по подтверждению "
+            f"{loaded.collisions.by_confirmation}, всего записано "
+            f"{loaded.facts_written} из {loaded.facts_total}, {mark}"
+        )
+
+    typer.echo(
+        typer.style(
+            f"\nФактов по подтверждению человека записано: {written}", bold=True
+        )
+    )
+    if lost:
+        typer.echo(
+            typer.style(
+                "\nОстаётся глазами — притязание отклонено правилом формы "
+                "и раздела либо разметка не применилась:",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        )
+        for item in lost:
+            typer.echo(typer.style(f"  {item.describe()}", fg=typer.colors.YELLOW))
+
+    # **«Справочник даёт другой код» и «строки в очереди нет» — не потери,
+    # но и не применённое решение.** В первом случае расходятся наш код
+    # и код человека, и разойтись они могли только в одну сторону: кто-то
+    # из двух неправ. Во втором строки в разборе больше нет — либо её
+    # опознали под другим написанием, либо разбор её потерял, и различить
+    # это может только человек. Молчание здесь читалось бы как «применено».
+    from finlib.sources.ifrs_markup import FATE_GONE, FATE_OTHER_CODE
+
+    eyes = [item for item in saved if item.fate in (FATE_OTHER_CODE, FATE_GONE)]
+    if eyes:
+        typer.echo(
+            typer.style(
+                f"\nТребует глаз, но потерей не считается: {len(eyes)}",
+                bold=True,
+            )
+        )
+        for item in eyes:
+            typer.echo(f"  {item.describe()}")
+
+    # **Специфическая статья, у которой строки больше нет, — единственный
+    # случай, когда «строки в очереди нет» означает потерю величины.** Код
+    # из справочника объясняется просто: строку опознал справочник, и она
+    # в очередь не попала. Код вне справочника опознать нечем — значит, строки
+    # в разборе нет вовсе, и величина не учтена нигде.
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+    from finlib.sources.ifrs_markup import NOT_A_LINE_CODE
+
+    # Именно справочник, а не `known_codes`: тот включает и подтверждённые
+    # человеком коды, то есть ответил бы «код известен» на любой из них.
+    codes = {item.code for item in load_ifrs_lines().positions}
+    orphans = [
+        item
+        for item in eyes
+        if item.fate == FATE_GONE
+        and item.code not in codes
+        and item.code != NOT_A_LINE_CODE
+    ]
+    if orphans:
+        typer.echo(
+            typer.style(
+                f"\nИз них статьи вне справочника, строки которых разбор больше "
+                f"не даёт: {len(orphans)}. Величина такой строки не учтена "
+                "нигде, и смотреть надо документ, а не разметку:",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        )
+        for item in orphans:
+            typer.echo(typer.style(f"  {item.describe()}", fg=typer.colors.YELLOW))
 
 
 @app.command("ifrs-assess")
