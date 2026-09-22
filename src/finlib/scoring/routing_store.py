@@ -49,6 +49,7 @@ from finlib.sources.cbonds_events import (
     point_order,
 )
 from finlib.sources.cbonds_flows import refinancing
+from finlib.sources.moex_risk import risk_sectors
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,15 @@ def routing_rows(
     # один раз, а не по эмитенту.
     defaults = default_records()
     units = load_lines().units
+    # Сектор повышенного риска биржи: один файл перечня и карточки выпусков.
+    # Пустой словарь означает, что доставки не было, — и это не «переводов
+    # нет»: `scripts/moex_fetch.py`.
+    risky = risk_sectors()
+    if not risky:
+        logger.warning(
+            "перечня сектора риска на диске нет: событие биржи в маршрут "
+            "не попадёт, и это отсутствие данных, а не отсутствие переводов"
+        )
     if on is None:
         logger.warning(
             "снимка рейтингов на диске нет: событийный слой будет пуст, "
@@ -313,6 +323,11 @@ def routing_rows(
             policy=policy,
             refinance=refinance,
             systemic_volume=systemic.get(inn),
+            risk_sector=tuple(
+                replace(risky[item.isin], name=item.name)
+                for item in events.issues
+                if item.isin and item.isin in risky
+            ),
             routing=routing,
             types=types,
         )

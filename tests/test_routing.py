@@ -374,6 +374,7 @@ def test_default_on_an_issue_is_a_review_ground() -> None:
             Issue(
                 emission_id="1505283",
                 name="БО-03",
+                isin="RU000A106UB7",
                 status="дефолт по погашению",
                 default=True,
                 unsettled=True,
@@ -415,6 +416,7 @@ def test_settled_default_is_not_a_current_circumstance() -> None:
             Issue(
                 emission_id="9",
                 name="еврооблигации",
+                isin="XS0000000000",
                 status="погашена",
                 default=True,
                 unsettled=False,
@@ -490,6 +492,7 @@ def issue(name: str, status: str, maturity: date, *, unsettled: bool):
     return Issue(
         emission_id=name,
         name=name,
+        isin=f"RU{name}",
         status=status,
         default=True,
         unsettled=unsettled,
@@ -819,6 +822,60 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     assert led.grounds == backer.grounds
     assert led.subgroup_names == backer.subgroup_names
     assert led.notes[0].text == "SPV группы Группа: корзина поручителя Головная компания"
+
+
+def test_the_exchange_moving_an_issue_to_the_risk_sector_is_a_review_ground() -> None:
+    """Перевод выпуска в сектор повышенного риска — решение биржи с датой.
+
+    Биржа не предполагает и не считает: она перевела бумагу в другой режим
+    и день перевода назвала. Обстоятельство при этом о выпуске, и называется
+    каждый переведённый выпуск.
+    """
+    from finlib.sources.moex_risk import RiskSector
+
+    moved = RiskSector(
+        isin="RU000A1061K1",
+        board="TQRD",
+        since=date(2026, 8, 6),
+        came_from="TQCB",
+        left_on=date(2026, 8, 5),
+        name="ЕвроТранс, БО-001Р-03",
+    )
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        risk_sector=(moved,),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 22),
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("risk_sector",)
+    assert "06.08.2026" in verdict.details[0]
+    assert "TQCB" in verdict.details[0]
+
+
+def test_an_undated_transfer_says_so_instead_of_inventing_a_date() -> None:
+    """Даты перевода нет — формулировка говорит это, а не молчит о ней."""
+    from finlib.sources.moex_risk import RiskSector
+
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        risk_sector=(
+            RiskSector(
+                isin="RU000A105SZ2",
+                board="TQRD",
+                since=None,
+                came_from="",
+                left_on=None,
+                name="выпуск",
+            ),
+        ),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 22),
+    )
+    assert verdict.basket == "review"
+    assert "даты перевода биржа не приводит" in verdict.details[0]
 
 
 def test_large_debt_is_not_left_clear_on_an_upper_bound() -> None:

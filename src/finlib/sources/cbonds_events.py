@@ -104,6 +104,9 @@ class Issue:
     # и без него выпуск с графиком не связать.
     emission_id: str
     name: str
+    # ISIN: ключ к бирже. У торгуемой облигации SECID Московской биржи равен
+    # ISIN, и переходника между источниками не требуется.
+    isin: str
     status: str
     default: bool
     unsettled: bool
@@ -552,6 +555,7 @@ def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:
             Issue(
                 emission_id=str(item.get("id") or ""),
                 name=str(item.get("document_rus") or item.get("isin_code") or "—"),
+                isin=str(item.get("isin_code") or "").strip(),
                 status=str(item.get("status_name_rus") or "").strip().lower(),
                 default=str(item.get("has_default")) == "1",
                 unsettled=str(item.get("has_unsettled_default")) == "1",

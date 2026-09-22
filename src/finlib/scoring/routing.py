@@ -619,6 +619,9 @@ def route(
     # Объём долга в обращении, если эмитент в верхнем десятке по нему:
     # такому «Без внимания» даётся строже — только при полном покрытии.
     systemic_volume: Decimal | None = None,
+    # Выпуски, переведённые биржей в сектор повышенного риска: решение биржи
+    # с датой, а не наше суждение о величинах.
+    risk_sector: tuple[object, ...] = (),
     # Поручитель финансирующей структуры, названный источником. Корзина его
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
@@ -731,6 +734,28 @@ def route(
                 guarantor_under_review,
                 routing.say(
                     "guarantor_under_review", guarantor=guarantor_under_review
+                ),
+            )
+        )
+    # **Перевод в сектор риска — событие биржи, и корзина у него разбора.**
+    # Биржа не предполагает и не считает: она перевела бумагу в другой режим
+    # и день назвала. Обстоятельство при этом о выпуске, поэтому называется
+    # каждый переведённый выпуск, а не эмитент одной строкой.
+    for entry in risk_sector:
+        named = str(getattr(entry, "name", "") or getattr(entry, "isin", ""))
+        board = str(getattr(entry, "board", ""))
+        when = getattr(entry, "since", None)
+        review.append(
+            Finding(
+                "risk_sector",
+                str(getattr(entry, "isin", "")),
+                routing.say(
+                    "risk_sector",
+                    "" if when is not None else "undated",
+                    issue=named,
+                    board=board,
+                    date=f"{when:%d.%m.%Y}" if when is not None else "",
+                    came_from=str(getattr(entry, "came_from", "")) or "не назван",
                 ),
             )
         )
