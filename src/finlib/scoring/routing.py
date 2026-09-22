@@ -44,6 +44,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finlib.config import settings
+from finlib.metrics.display import money
 from finlib.metrics.ifrs import MetricValue
 from finlib.metrics.ifrs_view import IfrsMetricsView
 from finlib.normalize.ifrs_issuer_type import IssuerTypePolicy, load_issuer_types
@@ -443,6 +444,24 @@ def load_routing(path: Path | None = None) -> RoutingPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class Refinance:
+    """Платежи по облигациям ближайших месяцев против денежных средств.
+
+    **Обе величины приведены к единице комплекта, и единица названа рядом.**
+    Объём выпуска источник отдаёт в рублях, отчётность бывает в миллионах,
+    и число без единицы читатель прочтёт в той, которую предположит сам.
+
+    `due is None` означает, что графиков платежей нет на диске; `cash is None` —
+    что денежные средства не раскрыты. Ни то ни другое не ноль.
+    """
+
+    due: Decimal | None
+    cash: Decimal | None
+    unit: str
+    months: int
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """Одно сработавшее основание: код, предмет и текст.
 
@@ -537,6 +556,9 @@ def route(
     # обоих — «оценка по группе» без имени группы ничего не значит.
     group: str = "",
     group_leader: str = "",
+    # Платежи по облигациям ближайших месяцев против денежных средств:
+    # срочность долга, которой в балансе нет вовсе.
+    refinance: "Refinance | None" = None,
     # Поручитель финансирующей структуры, названный источником. Корзина его
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
@@ -683,7 +705,31 @@ def route(
     debt_threshold = max(
         x for x, _ in policy.calibration_points.metrics["net_debt_ebitda"].points
     )
-    for name in sorted(_absent(by_code, debt_threshold)):
+    absent = _absent(by_code, debt_threshold)
+    # **Рефинансирование — обстоятельство отчётности, а не события.** График
+    # платежей говорит о срочности долга, которой в балансе нет: «долг
+    # 40 млрд» у эмитента с погашением через восемь лет и с погашением
+    # в марте означает разное.
+    if refinance is not None and refinance.due:
+        if refinance.cash is None:
+            # Величина платежей есть, знаменателя нет: это пробел данных,
+            # а не обстоятельство риска, и поле называется.
+            absent.add("денежные средства")
+        elif refinance.cash * routing.refinancing.cover_ratio < refinance.due:
+            attention.append(
+                Finding(
+                    "refinancing_gap",
+                    "refinancing",
+                    routing.say(
+                        "refinancing_gap",
+                        months=refinance.months,
+                        due=money(refinance.due),
+                        cash=money(refinance.cash),
+                        unit=refinance.unit,
+                    ),
+                )
+            )
+    for name in sorted(absent):
         attention.append(
             Finding(
                 "data_insufficient", name, routing.say("data_insufficient", field=name)

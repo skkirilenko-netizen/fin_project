@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Ежедневный снимок рейтингов. Метод источника отдаёт только последнее
-  значение, и без снимков истории понижений не будет никогда.
+  Ежедневные снимки рейтингов и котировок. Метод рейтингов отдаёт только
+  последнее значение, метод торгов хранит около сорока дней, — и без снимков
+  ни истории понижений, ни истории цен не будет никогда.
 
   Установка (агент пользователя, не системный демон):
 
@@ -22,12 +23,15 @@
   <key>Label</key>
   <string>ru.finanalysis.ratings-snapshot</string>
 
+  <!-- Два снимка одним агентом и по очереди: у источника предел тридцать
+       запросов в минуту, и параллельные прогоны делили бы его между собой,
+       удлиняя оба. Рейтинги идут первыми — их 481 запрос против 1 207
+       у котировок, и при обрыве сети потерять дешевле второе. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/uv</string>
-    <string>run</string>
-    <string>python</string>
-    <string>scripts/ratings_snapshot.py</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/opt/homebrew/bin/uv run python scripts/ratings_snapshot.py; /opt/homebrew/bin/uv run python scripts/quotes_snapshot.py</string>
   </array>
 
   <key>WorkingDirectory</key>
