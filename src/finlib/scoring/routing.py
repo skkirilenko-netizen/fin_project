@@ -577,6 +577,9 @@ def route(
     # Платежи по облигациям ближайших месяцев против денежных средств:
     # срочность долга, которой в балансе нет вовсе.
     refinance: "Refinance | None" = None,
+    # Поручитель эмитента, стоящий в разборе: его обстоятельство говорит
+    # о том, кто отвечает по долгу, и член такой пары не мягче внимания.
+    guarantor_under_review: str = "",
     # Поручитель финансирующей структуры, названный источником. Корзина его
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
@@ -677,6 +680,19 @@ def route(
                 "group_under_review",
                 whose,
                 routing.say("group_under_review", group=whose, leader=member),
+            )
+        )
+    # **Поручитель — тот же контур, только объявленный договором.** Корзина
+    # его не переносится: разбор сказан о нём, а не о заёмщике, — но член
+    # такой пары не мягче внимания.
+    if guarantor_under_review:
+        attention.append(
+            Finding(
+                "guarantor_under_review",
+                guarantor_under_review,
+                routing.say(
+                    "guarantor_under_review", guarantor=guarantor_under_review
+                ),
             )
         )
     notes: list[Finding] = []

@@ -821,6 +821,25 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     assert led.notes[0].text == "SPV группы Группа: корзина поручителя Головная компания"
 
 
+def test_a_guarantor_under_review_is_not_softer_than_attention() -> None:
+    """Обстоятельство поручителя говорит и о заёмщике, но корзины не переносит.
+
+    То же соразмерно, что у группового контура: разбор сказан о поручителе,
+    а не о том, за кого он отвечает. Поручительство при этом объявлено
+    договором, а не выведено из принадлежности к группе.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        guarantor_under_review="Головная компания",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("guarantor_under_review",)
+    assert verdict.details[0] == "Поручитель Головная компания в разборе"
+
+
 def test_an_offeror_is_not_a_guarantor() -> None:
     """Оферент отвечает за выкуп бумаги, а не за долг.
 

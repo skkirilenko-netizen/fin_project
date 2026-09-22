@@ -232,13 +232,13 @@ def routing_rows(
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
         events = events_of(inn, snapshot, credit, order, defaults)
-        # Поручитель нужен уже здесь: формулировка финансирующей структуры
-        # без него говорила бы о группе там, где речь о том, кто отвечает
-        # по долгу. Корзина же его берётся вторым проходом.
-        secured = (
-            guarantees_of(inn, frozenset(routing.events.guarantee_statuses))
-            if inn in spv
-            else ()
+        # Поручительства читаются у всех, а не только у финансирующих
+        # структур: у обычного эмитента поручитель в разборе — такое же
+        # обстоятельство, как эмитент своей группы. Корзина берётся вторым
+        # проходом, а имя нужно уже здесь: формулировка SPV без него говорила
+        # бы о группе там, где речь о том, кто отвечает по долгу.
+        secured = guarantees_of(
+            inn, frozenset(routing.events.guarantee_statuses)
         )
         delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
         unit_code = next(
@@ -316,6 +316,10 @@ def routing_rows(
     by_inn = {item.inn: item for item in rows}
     counts["финансирующих структур"] = sum(1 for item in rows if item.inn in spv)
     counts["из них корзина взята у поручителя"] = 0
+    # Знаменатель правила поручителя: «поднято ноль» без числа пар,
+    # у которых поручитель вообще есть в списке, ничего не значит.
+    counts["пар с поручителем в списке"] = 0
+    counts["поднято по поручителю"] = 0
     secured_rows: list[RoutingRow] = []
     for item in rows:
         backing = [
@@ -326,21 +330,62 @@ def routing_rows(
         if not backing:
             secured_rows.append(item)
             continue
+        counts["пар с поручителем в списке"] += 1
         # Поручителей бывает несколько — берётся тяжелейший: обязательство
         # каждого действует само по себе, и слабейшее ничего не отменяет.
         heaviest = min(
             backing, key=lambda entry: routing.basket(entry.verdict.basket).order
         )
-        counts["из них корзина взята у поручителя"] += 1
+        if item.inn in spv:
+            # Финансирующая структура собой не оценивается: её корзина —
+            # корзина того, кто отвечает по её долгу.
+            counts["из них корзина взята у поручителя"] += 1
+            secured_rows.append(
+                replace(
+                    item,
+                    verdict=led_by_guarantor(
+                        item.verdict,
+                        heaviest.name,
+                        heaviest.verdict,
+                        item.group,
+                        routing,
+                    ),
+                )
+            )
+            continue
+        # **У обычного эмитента корзина поручителя не переносится.** Разбор
+        # сказан о поручителе, а не о заёмщике; обстоятельство же говорит
+        # и о заёмщике, и он не мягче внимания — то же соразмерно, что
+        # у группового контура.
+        if heaviest.verdict.basket != "review" or item.verdict.basket in (
+            "review",
+            "status_unknown",
+        ):
+            secured_rows.append(item)
+            continue
+        counts["поднято по поручителю"] += 1
         secured_rows.append(
             replace(
                 item,
-                verdict=led_by_guarantor(
-                    item.verdict,
-                    heaviest.name,
-                    heaviest.verdict,
-                    item.group,
-                    routing,
+                verdict=route(
+                    item.computed,
+                    quarantined=False,
+                    stop_factors=item.stop_factors,
+                    financing_structure=False,
+                    operating_profit=_operating_profit(
+                        item.inn, item.report_date, conn
+                    ),
+                    latest_annual=item.report_date,
+                    assessed_class=assessed.get(item.inn),
+                    branch=item.branch,
+                    group=item.group,
+                    events=item.events,
+                    refinance=item.refinance,
+                    guarantor_under_review=heaviest.name,
+                    today=today,
+                    policy=policy,
+                    routing=routing,
+                    types=types,
                 ),
             )
         )
