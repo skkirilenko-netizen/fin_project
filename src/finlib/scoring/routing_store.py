@@ -66,6 +66,16 @@ WHERE d.status = 'fail' AND s.standard = 'ifrs' AND d.check_code IN (
 )
 """
 
+# Денежные средства комплекта: знаменатель рефинансирования. Выборка называет
+# стандарт и предпочтение источника, как всякая выборка по ИНН.
+_CASH = """
+SELECT f.value FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
+WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
+  AND f.line_code = 'ifrs.cash' AND s.is_actual AND s.status <> 'quarantine'
+ORDER BY source_rank(s.source)
+LIMIT 1
+"""
+
 # Величина вместе со способом получения: ноль от агрегатора означает
 # и нераскрытие, и судить по нему нельзя.
 _OPERATING_PROFIT = """
@@ -119,6 +129,9 @@ class RoutingRow:
     # Поручительства финансирующей структуры: у SPV корзина берётся
     # у того, кто отвечает по долгу, и перечень нужен второму проходу.
     guarantees: tuple[Guarantee, ...] = ()
+    # Денежные средства комплекта: знаменатель рефинансирования. Лежат здесь,
+    # а не в каждом замере своим запросом: один вопрос — один запрос.
+    cash: Decimal | None = None
     # Величины, названные порознь: отрицательное отношение чистого долга
     # к EBITDA означает либо чистую денежную позицию, либо убыток, и путать
     # их нельзя.
@@ -253,6 +266,7 @@ def routing_rows(
                 group=str(card.get("group_name_rus") or ""),
                 events=events,
                 guarantees=secured,
+                cash=_cash(inn, moment, conn),
                 values={
                     code: value
                     for code in ("net_debt", "ebitda", "net_debt_ebitda",
@@ -347,6 +361,18 @@ def routing_rows(
             )
         rows = lifted
     return rows, counts
+
+
+def _cash(inn: str, moment: date, conn: PgConnection) -> Decimal | None:
+    """Денежные средства комплекта; None — величина не раскрыта.
+
+    Ноль здесь остаётся нулём: денежные средства бывают нулевыми, а правило
+    нераскрытия относится к величинам, которые ломают тождество отчётности
+    либо равны нулю у итога при ненулевом составе. Знаменатель из нуля
+    отношения не даёт, и решает это тот, кто делит.
+    """
+    found = fetch_all(_CASH, {"inn": inn, "d": moment}, conn=conn)
+    return found[0]["value"] if found else None
 
 
 def _operating_profit(inn: str, moment: date, conn: PgConnection) -> Decimal | None:

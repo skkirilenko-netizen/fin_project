@@ -113,20 +113,6 @@ class Issue:
         """Дефолт в прошлом: признак есть, неурегулированности нет."""
         return self.default and not self.defaulted
 
-    def due_within(self, months: int, today: date) -> Decimal | None:
-        """Объём к погашению или оферте в ближайшие месяцы; None — нечего."""
-        if self.outstanding is None:
-            return None
-        edge = date(
-            today.year + (today.month - 1 + months) // 12,
-            (today.month - 1 + months) % 12 + 1,
-            1,
-        )
-        soon = [item for item in (self.maturity, self.offer) if item is not None]
-        if any(today <= item < edge for item in soon):
-            return self.outstanding
-        return None
-
 
 @dataclass(frozen=True, slots=True)
 class Guarantee:
@@ -308,12 +294,12 @@ class IssuerEvents:
         """Дата урегулированного дефолта: кредитная история, а не состояние."""
         return default_event(self.settled, today)
 
-    def due(self, months: int, today: date) -> Decimal:
-        """Объём к погашению и оферте в ближайшие месяцы."""
-        return sum(
-            (item.due_within(months, today) or Decimal(0) for item in self.issues),
-            start=Decimal(0),
-        )
+    # **Рефинансирование здесь не считается, и это правило, а не пробел.**
+    # Прежде объём к погашению брался как остаток выпуска целиком, если
+    # погашение либо оферта попадали в окно; график платежей отвечает точнее —
+    # купоны и амортизация порознь от оферты, потому что предъявление бумаги
+    # право владельца, а не обязанность. Мера оставлена одна:
+    # `sources/cbonds_flows.py::refinancing`.
 
 
 def _as_date(value: object) -> date | None:

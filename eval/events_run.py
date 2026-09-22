@@ -21,32 +21,16 @@ import logging
 import sys
 from collections import Counter
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from finlib.db import connection, fetch_all  # noqa: E402
-from finlib.metrics.display import money  # noqa: E402
+from finlib.db import connection  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
-from finlib.sources.cbonds_events import (  # noqa: E402
-    in_unit,
-    latest_snapshot,
-    unknown_scales,
-)
+from finlib.sources.cbonds_events import latest_snapshot, unknown_scales  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-# Денежные средства отчётного периода: знаменатель рефинансирования.
-_CASH = """
-SELECT f.value FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND f.line_code = 'ifrs.cash' AND s.is_actual AND s.status <> 'quarantine'
-ORDER BY source_rank(s.source)
-LIMIT 1
-"""
-
 
 def main() -> int:
     """Печатает разбор событийного слоя; 1 — если событий читать нечем."""
@@ -56,16 +40,9 @@ def main() -> int:
     on, snapshot = latest_snapshot()
     with connection() as conn:
         rows, counts = routing_rows(conn, today)
-        cash = {}
-        for item in rows:
-            found = fetch_all(
-                _CASH, {"inn": item.inn, "d": item.report_date}, conn=conn
-            )
-            if found:
-                cash[item.inn] = Decimal(found[0]["value"])
 
     known = [item for item in rows if item.events and item.events.issues_known]
-    print("# Событийный слой: дефолты, рейтинги, рефинансирование\n")
+    print("# Событийный слой: дефолты и рейтинги\n")
     if not known:
         print(
             "**Выпусков не прочитано ни у одного эмитента.** Это не «событий "
@@ -120,13 +97,23 @@ def main() -> int:
         "текущее от прошлого по самому признаку нельзя — он бессрочен.\n"
     )
     print(
-        "**Предложение правила давности (решение за человеком).** Опора — дата "
-        "погашения выпуска, по которому объявлен дефолт: это день, когда платёж "
-        "был должен состояться. Дефолт считается текущим, если эта дата "
-        "не старше трёх лет либо выпуск ещё в обращении; старше — обстоятельство "
-        "внимания со словами «дефолт в прошлом», а не разбора. Три года взяты "
-        "не из данных: за такой срок сменяется весь набор отчётности, попадающий "
-        "в оценку, и число подлежит вашему решению, а не подгонке.\n"
+        "**Правило давности принято 22.09.2026: три года, четыре исхода.** "
+        "Неурегулированный до трёх лет — разбор; старше — внимание с вопросом "
+        "о статусе урегулирования; урегулированный до трёх лет — внимание как "
+        "кредитная история; урегулированный старше — справочное основание, "
+        "корзины не называющее. Порог остаётся предварительным: он назван "
+        "человеком, а не измерен.\n"
+    )
+    print(
+        "**Дата события источником не приводится и графиком платежей "
+        "не восстанавливается.** Поле `actual_payment_date` метода "
+        "`get_flow_new` — срок, сдвинутый на рабочий день: у Кириллицы купон "
+        "со сроком 07.10.2023 (суббота) стоит с «фактом» 09.10.2023, "
+        "а у ЕвроТранса заполнены платежи 2027 года. По 93 выпускам с признаком "
+        "дефолта неуплаченным не оказался ни один. Опора — дата погашения "
+        "выпуска, и выпуск выбирается строением записи: статус «дефолт "
+        "по погашению» называет сам предмет, у закрытого иначе дата погашения — "
+        "только верхняя граница.\n"
     )
 
     # --- 2. рейтинги --------------------------------------------------------
@@ -164,54 +151,20 @@ def main() -> int:
         f"с {on or 'первого'}.\n"
     )
 
-    # --- 3. рефинансирование ------------------------------------------------
-    print("## Рефинансирование: погашения 12 месяцев против денежных средств\n")
+    # --- 3. рефинансирование: вынесено, и вот почему -------------------------
+    # **Две меры одной величины разошлись бы, и увидеть это было бы нечем.**
+    # Здесь объём к погашению считался как сумма выпусков, у которых погашение
+    # либо оферта приходятся на окно, — то есть весь остаток целиком. График
+    # платежей отвечает точнее: купоны и амортизация в окне, а оферта порознь,
+    # потому что предъявление — право владельца. Мера оставлена одна
+    # (`eval/refinancing_run.py`, `sources/cbonds_flows.py`), а здесь названа
+    # ссылка: удалённая мера иначе не отличается от забытой.
+    print("## Рефинансирование\n")
     print(
-        "Порога нет: показано распределение. Объём к погашению — сумма выпусков "
-        "в обращении, у которых погашение либо оферта приходятся на ближайшие "
-        "12 месяцев; знаменатель — денежные средства отчётного периода.\n"
-    )
-    ratios: list[tuple[str, str, Decimal, Decimal, Decimal]] = []
-    unknown_unit = 0
-    for item in rows:
-        if item.events is None or not item.events.issues_known:
-            continue
-        # **Объём выпуска приходит в рублях, отчётность бывает в миллионах.**
-        # Без приведения к единице комплекта отношение ошибалось бы в тысячу
-        # раз — тот же класс дефекта, что единица измерения комплекта.
-        due = in_unit(item.events.due(12, today), item.unit_code)
-        if due is None:
-            unknown_unit += 1 if item.events.due(12, today) else 0
-            continue
-        if due == 0:
-            continue
-        have = cash.get(item.inn)
-        if have is None or have <= 0:
-            ratios.append((item.name, item.inn, due, Decimal(0), Decimal(-1)))
-            continue
-        ratios.append((item.name, item.inn, due, have, due / have))
-    ratios.sort(key=lambda row: row[4], reverse=True)
-    print(f"Эмитентов с погашениями в ближайшие 12 месяцев: **{len(ratios)}**.\n")
-    print("| Эмитент | ИНН | К погашению | Денежные средства | Отношение |")
-    print("|---|---|---|---|---|")
-    for name, inn, due, have, ratio in ratios[:40]:
-        shown = "денежных средств нет" if ratio < 0 else f"{ratio:.2f}"
-        print(
-            f"| {name[:26]} | {inn} | {money(due)} | "
-            f"{money(have) if have else '—'} | {shown} |"
-        )
-    if len(ratios) > 40:
-        print(f"| …и ещё {len(ratios) - 40} | | | | |")
-    inside = [row for row in ratios if 0 <= row[4] <= 1]
-    print(
-        f"\nУкладываются в денежные средства **{len(inside)}** из {len(ratios)}; "
-        f"у {sum(1 for row in ratios if row[4] < 0)} денежных средств нет вовсе. "
-        "**Единица у выпусков и у отчётности разная** — объём выпуска источник "
-        "отдаёт в рублях, отчётность бывает в миллионах, — и отношение "
-        "поэтому считается только там, где обе величины приведены к одной "
-        "единице комплекта по коду ОКЕИ: иначе получилась бы ошибка в тысячу "
-        f"раз. Эмитентов с погашениями, у которых единица комплекта неизвестна, "
-        f"— {unknown_unit}.\n"
+        "Вынесено в `eval/refinancing_run.py`: платежи считаются по графику "
+        "(`get_flow_new`), а не по остатку выпуска целиком, и оферта стоит "
+        "порознь от купонов. Две меры одной величины расходились бы, и какая "
+        "из них попала в отчёт, зависело бы от того, кто спросил.\n"
     )
     return 0
 
