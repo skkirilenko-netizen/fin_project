@@ -14,6 +14,22 @@
 
 **Поглощённый эмитент в список не попадает** (`routing.universe`): его
 отчётность — история, а поглощение объявлено карточкой источника.
+
+**Универсум задаётся долгом, а не отчётностью** (дорожная карта, фаза 1,
+22.09.2026). Прежде перечень собирался из доставок МСФО, и список видел
+206 эмитентов из 702 с выпусками в обращении; 403 раскрывают только РСБУ,
+а 93 не раскрывают у источника ничего — и отсутствие их не было видно даже
+как отсутствие. Теперь перечень — эмитенты с выпусками в обращении вместе
+с теми, чья отчётность у нас загружена: эмитент без долга из списка
+не выбрасывается, но и в сводные доли не идёт — маршрут спрашивает, нужен ли
+человек, а нужен он там, где есть долг.
+
+**База маршрута выбирается порядком предпочтения стандартов**
+(`standards.yaml`, `base_standard.preference`): консолидированная отчётность
+описывает периметр деятельности, отчётность юридического лица — то, чем долг
+привлечён. Правило одно на оценку и на маршрут, и второго порядка здесь
+не заводится. Отчётности нет ни по одному стандарту — маршрут строится
+по событиям и рейтингам: они от стандарта не зависят вовсе.
 """
 
 import json
@@ -35,6 +51,8 @@ from finlib.scoring.routing import (
     load_routing,
     route,
 )
+from finlib.scoring.routing_catalogue import RoutingCatalogue, catalogue_for
+from finlib.sources.cbonds import bond_issuers
 from finlib.sources.cbonds_events import (
     DEFAULT_STATUSES,
     Guarantee,
@@ -51,7 +69,7 @@ from finlib.sources.cbonds_events import (
 )
 from finlib.sources.cbonds_flows import refinancing
 from finlib.sources.moex_risk import risk_sectors
-from finlib.standards import Standard
+from finlib.standards import Standard, load_standards
 
 logger = logging.getLogger(__name__)
 
@@ -81,30 +99,32 @@ WHERE d.status = 'fail' AND s.standard = 'ifrs' AND d.check_code IN (
 
 # Денежные средства комплекта: знаменатель рефинансирования. Выборка называет
 # стандарт и предпочтение источника, как всякая выборка по ИНН.
-_CASH = """
-SELECT f.value FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND f.line_code = 'ifrs.cash' AND s.is_actual AND s.status <> 'quarantine'
-ORDER BY source_rank(s.source)
-LIMIT 1
-"""
-
-# Величина вместе со способом получения: ноль от агрегатора означает
-# и нераскрытие, и судить по нему нельзя.
-_OPERATING_PROFIT = """
+# Величина строки комплекта вместе со способом получения: ноль от агрегатора
+# означает и нераскрытие, и судить по нему нельзя. Стандарт и код строки —
+# доводы: у РСБУ денежные средства стоят строкой 1250, у МСФО позицией
+# `ifrs.cash`, и второго запроса на тот же вопрос здесь не заводится.
+_LINE = """
 SELECT f.value, s.source FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND f.line_code = 'ifrs.operating_profit' AND s.is_actual
-  AND s.status <> 'quarantine'
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
+  AND f.line_code = %(code)s AND s.is_actual AND s.status <> 'quarantine'
 ORDER BY source_rank(s.source)
 LIMIT 1
 """
 
 _SOURCES = """
 SELECT DISTINCT source, unit_code, reporting_type FROM src_file
-WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
+WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
   AND status <> 'quarantine' AND report_year = %(year)s
 """
+
+# Эмитенты, по которым комплект до нас дошёл — в любом состоянии. Отличает
+# «источник отчётности не отдаёт» от «отчётность есть и отбракована нами».
+_HAS_SETS = "SELECT DISTINCT inn FROM src_file"
+
+# Основной вид деятельности из ЕГРЮЛ: у холдинга отчётность РСБУ описывает
+# управляющую компанию, а не группу. Код приходит от ГИР БО; наименование
+# вида объявлено методикой, а не берётся из выписки — там оно пишется свободно.
+_OKVED = "SELECT okved FROM organization WHERE inn = %(inn)s"
 
 _ASSESSED = """
 SELECT a.inn, a.class_code, a.report_date
@@ -169,9 +189,26 @@ class RoutingRow:
 
     inn: str
     name: str
-    report_date: date
+    # Отчётная дата комплекта, по которому построен маршрут. `None` — маршрут
+    # построен без отчётности, по событиям и рейтингам: ноль здесь означал бы
+    # дату, а даты нет вовсе.
+    report_date: date | None
     verdict: Verdict
     computed: tuple[MetricValue, ...]
+    # Чем маршрут построен: стандарт отчётности и его периметр. Графа
+    # обязательна — «МСФО · консолидированная» у строки, посчитанной по РСБУ,
+    # было бы утверждением о другом предмете.
+    standard: Standard | None = None
+    basis: str = ""
+    # Есть ли у эмитента выпуски в обращении: строки без долга показываются
+    # отдельным разделом и в сводные доли не идут.
+    has_bonds: bool = True
+    # Величины строки, напечатанные один раз: код показателя, наименование
+    # и величина в единице комплекта. Набирать их второй раз нельзя —
+    # справочник показателей у стандартов свой, и `cur_liq` МСФО зовётся
+    # иначе, чем `cur_liq` РСБУ. Код остаётся при них для выгрузки: графа
+    # там названа кодом, и по наименованию её не найти.
+    shown_values: tuple[tuple[str, str, str], ...] = ()
     stop_factors: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     unit_code: str | None = None
@@ -281,6 +318,55 @@ def value_of(computed: tuple[MetricValue, ...], code: str) -> Decimal | None:
     return item.value if item is not None and item.calculable else None
 
 
+# Чем маршрут построен, когда отчётности нет вовсе. Графа обязана называть
+# это прямо: пустое место читалось бы как «стандарт не указан», а маршрут
+# при этом построен — по событиям и рейтингам.
+_NO_REPORTING = "События и рейтинги · отчётности нет"
+
+
+def _row_metrics(catalogue: "RoutingCatalogue") -> tuple[str, ...]:
+    """Величины, которые строка списка печатает порознь.
+
+    **Чистый долг и результат называются отдельно от отношения.**
+    Отрицательное отношение означает либо чистую денежную позицию, либо
+    убыток, и по одному отношению их не различить.
+    """
+    rule = catalogue.rule
+    named = ("net_debt", rule.earnings, rule.burden, rule.bound, *rule.metrics)
+    return tuple(dict.fromkeys(code for code in named if code))
+
+
+def _shown_values(
+    catalogue: "RoutingCatalogue", computed: tuple[MetricValue, ...], unit: str
+) -> tuple[tuple[str, str, str], ...]:
+    """Код, наименование и напечатанная величина каждого показателя строки.
+
+    Набирается один раз и здесь: справочник показателей у стандартов свой,
+    и выход, набравший их сам, печатал бы наименования чужого справочника —
+    ровно так в приложении по МСФО стояло «Коэффициент текущей ликвидности»
+    вместо «Текущая ликвидность».
+    """
+    found: list[tuple[str, str, str]] = []
+    for code in _row_metrics(catalogue):
+        value = value_of(computed, code)
+        if value is None:
+            continue
+        found.append(
+            (code, catalogue.name_of(code), catalogue.shown(code, value, unit))
+        )
+    return tuple(found)
+
+
+def _why_no_reporting(inn: str, delivered: set[str]) -> str:
+    """Почему отчётности нет: её не поступало либо комплекты в карантине.
+
+    Различие содержательное: в первом случае данных нет у источника,
+    во втором они есть и отбракованы нами. Молчание об этом выдало бы
+    наш карантин за пробел источника.
+    """
+    return "quarantined" if inn in delivered else ""
+
+
 def routing_rows(
     conn: PgConnection,
     today: date | None = None,
@@ -300,14 +386,13 @@ def routing_rows(
     его не передаёт, и второго пути к вердикту не появляется.
     """
     from finlib.metrics.ifrs_store import compute_from_facts
-    from finlib.normalize.ifrs_issuer_type import load_issuer_types
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
     from finlib.scoring.ifrs_store import stop_factors_of
+    from finlib.scoring.rsbu_routing import latest_annual
 
     today = today or date.today()
     policy = load_ifrs_metrics()
     routing = load_routing()
-    types = load_issuer_types()
     known = cards()
     skip, unconfirmed = exclusions(known, routing)
     spv = {
@@ -344,13 +429,30 @@ def routing_rows(
         for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
     }
 
+    # **Универсум: эмитенты с выпусками в обращении и те, чья отчётность
+    # у нас загружена.** Первое — предмет маршрута, второе — то, о чём нам
+    # уже есть что сказать: эмитент, погасивший долг, из списка молча
+    # не исчезает, но в сводные доли не идёт.
+    bonds = bond_issuers()
+    ifrs_latest = {
+        row["inn"]: (row["report_date"], (row["name"] or row["inn"]).strip())
+        for row in fetch_all(_LATEST, {}, conn=conn)
+    }
+    rsbu_latest = latest_annual(conn)
+    universe = sorted(set(bonds) | set(ifrs_latest) | set(rsbu_latest))
+    preference = load_standards().base_standard
+    # Комплекты, которые до нас дошли, — независимо от их состояния.
+    # «Отчётности у источника нет» и «отчётность отбракована нами» — разные
+    # сведения, и различает их этот перечень.
+    has_sets = {row["inn"] for row in fetch_all(_HAS_SETS, {}, conn=conn)}
+
     # **Верхний десяток по объёму долга в обращении.** Доля считается
     # от эмитентов, у которых объём известен и положителен: у эмитента
     # без облигаций величины нет вовсе, и в знаменателе он мерил бы состав
     # списка, а не долг.
     volumes = {
         inn: total
-        for inn in known
+        for inn in universe
         if (total := _outstanding(inn)) is not None and total > 0
     }
     systemic = _top_share(volumes, routing.systemic.top_share)
@@ -363,6 +465,17 @@ def routing_rows(
         "карточек": len(known),
         "с раскрытым объёмом долга": len(volumes),
         "системно значимых": len(systemic),
+        # Состав универсума: знаменатель всех долей списка. «В списке 347»
+        # без «из 702» выглядит полнотой.
+        "универсум": len(universe),
+        "с выпусками в обращении": len(bonds),
+        "без выпусков в обращении": len(set(universe) - set(bonds)),
+        # Чем построен маршрут у каждого: три исхода, и ноль в любом из них
+        # означает сведение, а не пустоту.
+        "маршрут по МСФО": 0,
+        "маршрут по РСБУ": 0,
+        "маршрут по событиям и рейтингам": 0,
+        "холдингов на одной РСБУ": 0,
     }
     # **Решения человека и их истёкшие записи считаются порознь.** Ноль
     # сработавших при неизвестном числе истёкших неотличим от журнала,
@@ -383,8 +496,7 @@ def routing_rows(
     # Доводы маршрута по каждому эмитенту: второй проход добавляет к ним
     # обстоятельство другого эмитента, а не набирает перечень заново.
     given: dict[str, dict[str, object]] = {}
-    for row in fetch_all(_LATEST, {}, conn=conn):
-        inn, moment = row["inn"], row["report_date"]
+    for inn in universe:
         if inn in skip:
             counts["вышло из списка"] += 1
             logger.info(
@@ -396,8 +508,48 @@ def routing_rows(
             )
             continue
         counts["статус не подтверждён"] += int(inn in unconfirmed)
-        computed = compute_from_facts(inn, moment, conn, policy)
-        stops = stop_factors_of(inn, moment, computed, conn)
+        # **База маршрута выбирается порядком предпочтения стандартов.**
+        # Правило одно на оценку и на маршрут (`standards.yaml`), и второго
+        # порядка здесь не заводится.
+        standard = preference.choose(
+            {
+                item
+                for item, found in (
+                    (Standard.IFRS, ifrs_latest.get(inn)),
+                    (Standard.RSBU, rsbu_latest.get(inn)),
+                )
+                if found is not None
+            }
+        )
+        moment = (
+            (ifrs_latest if standard is Standard.IFRS else rsbu_latest)[inn][0]
+            if standard is not None
+            else None
+        )
+        card = known.get(inn, {})
+        name = (
+            (ifrs_latest.get(inn) or rsbu_latest.get(inn) or (None, ""))[1]
+            or bonds.get(inn)
+            or str(card.get("name_rus") or "")
+            or inn
+        )
+        catalogue = catalogue_for(standard or Standard.IFRS)
+        computed: tuple[MetricValue, ...] = ()
+        fired: dict[str, str] = {}
+        triggered: tuple[str, ...] = ()
+        okved = ""
+        if standard is Standard.IFRS:
+            computed = compute_from_facts(inn, moment, conn, policy)
+            stops = stop_factors_of(inn, moment, computed, conn)
+            triggered = stops.triggered
+            counts["маршрут по МСФО"] += 1
+        elif standard is Standard.RSBU:
+            computed, fired, okved = _rsbu_inputs(inn, moment, conn)
+            triggered = tuple(dict.fromkeys(fired))
+            counts["маршрут по РСБУ"] += 1
+            counts["холдингов на одной РСБУ"] += int(routing.holdings.holds(okved))
+        else:
+            counts["маршрут по событиям и рейтингам"] += 1
         events = events_of(inn, snapshot, credit, order, defaults)
         if blind:
             # **Прячутся признаки дефолта, а не выпуски.** Выпуск нужен
@@ -420,11 +572,25 @@ def routing_rows(
         secured = guarantees_of(
             inn, frozenset(routing.events.guarantee_statuses)
         )
-        delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
+        delivered = (
+            fetch_all(
+                _SOURCES,
+                {
+                    "inn": inn,
+                    "year": moment.year,
+                    "standard": (standard or Standard.IFRS).value,
+                },
+                conn=conn,
+            )
+            if moment is not None
+            else []
+        )
         unit_code = next(
             (item["unit_code"] for item in delivered if item["unit_code"]), None
         )
-        cash = _cash(inn, moment, conn)
+        cash = (
+            _cash(inn, moment, conn, standard) if standard is not None else None
+        )
         # **Единица комплекта набирается один раз и одна на всю строку.**
         # Основания маршрута, графы списка и графы выгрузки печатают одни
         # и те же величины, и вторая точка набора единицы разошлась бы
@@ -449,18 +615,27 @@ def routing_rows(
         # ответу», только незаметный — корзина при этом получалась правдоподобной.
         inputs: dict[str, object] = dict(
             unit=unit,
-            quarantined=(inn, moment.year) in quarantined,
-            stop_factors=stops.triggered,
+            quarantined=moment is not None and (inn, moment.year) in quarantined,
+            stop_factors=triggered,
+            stop_factor_values=fired,
             financing_structure=inn in spv,
             guarantor=", ".join(sorted({item.name for item in secured})),
-            operating_profit=_operating_profit(inn, moment, conn),
+            operating_profit=(
+                _operating_profit(inn, moment, conn, standard)
+                if standard is not None
+                else None
+            ),
             latest_annual=moment,
             assessed_class=assessed.get(inn),
-            branch=str((known.get(inn) or {}).get("branch_name_rus") or ""),
-            group=str((known.get(inn) or {}).get("group_name_rus") or ""),
+            branch=str(card.get("branch_name_rus") or ""),
+            group=str(card.get("group_name_rus") or ""),
+            okved=okved,
+            reporting_unavailable=_why_no_reporting(inn, has_sets)
+            if standard is None
+            else "",
             events=events,
             today=today,
-            policy=policy,
+            catalogue=catalogue,
             refinance=refinance,
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
@@ -471,20 +646,22 @@ def routing_rows(
                 if item.isin and item.isin in risky
             ),
             routing=routing,
-            types=types,
         )
         verdict = route(computed, **inputs)
         given[inn] = inputs
-        card = known.get(inn, {})
         counts["эмитентов"] += 1
         rows.append(
             RoutingRow(
                 inn=inn,
-                name=(row["name"] or inn).strip(),
+                name=name,
                 report_date=moment,
                 verdict=verdict,
                 computed=computed,
-                stop_factors=stops.triggered,
+                standard=standard,
+                basis=catalogue.label if standard is not None else _NO_REPORTING,
+                has_bonds=inn in bonds,
+                shown_values=_shown_values(catalogue, computed, unit),
+                stop_factors=triggered,
                 sources=tuple(
                     sorted(
                         {
@@ -502,10 +679,13 @@ def routing_rows(
                 guarantees=secured,
                 cash=cash,
                 refinance=refinance,
+                # **Состав величин строки объявлен стандартом, а не кодом.**
+                # У РСБУ долговой нагрузки нет вовсе, и перечень кодов МСФО
+                # дал бы пустую графу там, где величина есть, — только под
+                # другим именем.
                 values={
                     code: value
-                    for code in ("net_debt", "ebitda", "net_debt_ebitda",
-                                 "net_debt_op_profit", "equity_ratio", "cur_liq")
+                    for code in _row_metrics(catalogue)
                     if (value := value_of(computed, code)) is not None
                 },
             )
@@ -674,40 +854,85 @@ def _top_share(volumes: dict[str, Decimal], share: Decimal) -> dict[str, Decimal
     return dict(ordered[:size])
 
 
-def _cash(inn: str, moment: date, conn: PgConnection) -> Decimal | None:
+def _cash(
+    inn: str, moment: date, conn: PgConnection, standard: Standard
+) -> Decimal | None:
     """Денежные средства комплекта; None — величина не раскрыта.
 
     Ноль здесь остаётся нулём: денежные средства бывают нулевыми, а правило
     нераскрытия относится к величинам, которые ломают тождество отчётности
     либо равны нулю у итога при ненулевом составе. Знаменатель из нуля
     отношения не даёт, и решает это тот, кто делит.
+
+    Код строки берётся у стандарта: у МСФО это позиция `ifrs.cash`,
+    у РСБУ строка 1250.
     """
-    found = fetch_all(_CASH, {"inn": inn, "d": moment}, conn=conn)
+    code = catalogue_for(standard).rule.cash_line
+    found = fetch_all(
+        _LINE,
+        {"inn": inn, "d": moment, "code": code, "standard": standard.value},
+        conn=conn,
+    )
     return found[0]["value"] if found else None
 
 
-def _operating_profit(inn: str, moment: date, conn: PgConnection) -> Decimal | None:
-    """Операционная прибыль периода; ноль от агрегатора величиной не считается.
+def _operating_profit(
+    inn: str, moment: date, conn: PgConnection, standard: Standard
+) -> Decimal | None:
+    """Операционный результат периода; ноль от агрегатора величиной не считается.
 
     **Ноль у агрегатора означает и нераскрытие**, и судить по нему нельзя:
     у ЯКОВЛЕВА ноль читался как операционный убыток, то есть как утверждение
     об эмитенте, сделанное по величине, которой источник не раскрыл. Правило
     то же, что у контролей сходимости, и объявлено там же.
+
+    У МСФО это операционная прибыль, у РСБУ — прибыль от продаж (строка 2200):
+    знаменатель вывода по границе и он же знак операционного результата.
     """
-    found = fetch_all(_OPERATING_PROFIT, {"inn": inn, "d": moment}, conn=conn)
+    code = catalogue_for(standard).rule.operating_line
+    found = fetch_all(
+        _LINE,
+        {"inn": inn, "d": moment, "code": code, "standard": standard.value},
+        conn=conn,
+    )
     if not found:
         return None
     value, source = Decimal(found[0]["value"]), found[0]["source"]
     if value == 0 and _zero_is_unknown(source):
         logger.info(
-            "%s за %s: операционная прибыль доставлена нулём (%s) — "
+            "%s за %s: операционный результат (%s) доставлен нулём (%s) — "
             "величиной не считается",
             inn,
             moment,
+            code,
             source,
         )
         return None
     return value
+
+
+def _rsbu_inputs(
+    inn: str, moment: date, conn: PgConnection
+) -> tuple[tuple[MetricValue, ...], dict[str, str], str]:
+    """Показатели, сработавшие стоп-факторы и вид деятельности эмитента РСБУ.
+
+    Величины считает боевой расчёт, стоп-факторы — та же функция, что
+    и при оценке. Здесь только сборка: перечень, написанный второй раз,
+    разошёлся бы с первым.
+    """
+    from finlib.metrics.definitions import load_metrics
+    from finlib.scoring.definitions import load_scoring
+    from finlib.scoring.engine import triggered_stop_factors
+    from finlib.scoring.rsbu_routing import computed_of, with_denominator
+
+    computed = computed_of(inn, moment, conn)
+    profit = _operating_profit(inn, moment, conn, Standard.RSBU)
+    bound = catalogue_for(Standard.RSBU).rule.bound
+    computed = with_denominator(computed, bound, profit)
+    values = {item.code: item.value for item in computed}
+    fired = dict(triggered_stop_factors(values, load_metrics(), load_scoring()))
+    row = fetch_all(_OKVED, {"inn": inn}, conn=conn)
+    return computed, fired, str((row[0]["okved"] if row else "") or "")
 
 
 def _zero_is_unknown(source: str) -> bool:

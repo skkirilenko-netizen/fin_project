@@ -43,6 +43,7 @@ from finlib.sources.cbonds import (  # noqa: E402
     CACHE,
     CbondsError,
     CbondsUnavailableError,
+    bond_issuers,
     pace,
 )
 from finlib.version import code_version  # noqa: E402
@@ -51,8 +52,9 @@ logger = logging.getLogger(__name__)
 
 REPORT = "report_rsbu"
 
-# Организации, о которых есть смысл спрашивать: те, что уже заведены у нас.
-# Перечень берётся из базы, а не из файла: файл устарел бы в день правки набора.
+# Организации, уже заведённые у нас. Перечень берётся из базы, а не из файла:
+# файл устарел бы в день правки набора. К нему добавляются эмитенты с выпусками
+# в обращении — о них спрашивать и надо, а в базе их ещё нет.
 # **Графа называет то, что считает**: фактов РСБУ **первоисточника**, а не всех.
 # Считая все, она включала бы величины самого агрегатора, и при повторном
 # прогоне графа «у нас» росла бы от наших же загрузок.
@@ -119,9 +121,17 @@ def main() -> int:
     quarantined: list[str] = []
     with connection() as conn:
         organizations = fetch_all(_ORGANIZATIONS, {}, conn=conn)
+        # **Перечень задаётся долгом, а не тем, что уже заведено у нас**
+        # (дорожная карта, фаза 1). Спрашивать об организации, которой в базе
+        # нет, и есть весь смысл: из 702 эмитентов с выпусками в обращении
+        # 403 раскрывают только РСБУ, и о них у нас не было ни строки.
+        # Наименование берётся у источника выпусков — своего у нас ещё нет.
+        by_inn = {item["inn"]: item for item in organizations}
+        for inn, name in bond_issuers().items():
+            by_inn.setdefault(inn, {"inn": inn, "name": name, "rsbu_facts": 0})
         wanted = [
             item
-            for item in organizations
+            for item in sorted(by_inn.values(), key=lambda row: row["inn"])
             if not only or item["inn"] in only
         ]
         for item in wanted:

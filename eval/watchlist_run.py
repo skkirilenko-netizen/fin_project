@@ -31,10 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
-from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
-from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -46,11 +45,18 @@ def _coverage(item) -> str:
     оснований проверено всё, что маршрут умеет: три величины и события.
     «Долг ✓ (оценка сверху)» отличается от «долг ✓» намеренно — вывод
     по границе доказателен, но это граница, а не величина.
+
+    **Чем зовётся каждая из трёх, объявляет стандарт.** У РСБУ долговой
+    нагрузки нет вовсе, и графа, спрашивающая о ней кодом МСФО, отвечала бы
+    «нет данных» у каждого эмитента без консолидированной отчётности.
     """
+    if item.standard is None:
+        return "проверено: отчётности нет, только события и рейтинги"
+    rule = catalogue_for(item.standard).rule
     parts = []
-    if item.values.get("net_debt_ebitda") is not None:
+    if rule.burden and item.values.get(rule.burden) is not None:
         parts.append("долг ✓")
-    elif item.values.get("net_debt_op_profit") is not None:
+    elif rule.bound and item.values.get(rule.bound) is not None:
         parts.append("долг ✓ (оценка сверху)")
     else:
         parts.append("долг — нет данных")
@@ -86,7 +92,6 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     и расхождение «в списке иначе, чем в отчёте» увидеть было бы нечем.
     """
     routing = load_routing()
-    view = IfrsMetricsView(load_ifrs_metrics())
     report_policy = load_policy()
     found, counts = routing_rows(conn, today)
 
@@ -95,7 +100,13 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
         verdict = item.verdict
         basket = routing.basket(verdict.basket)
         ground_names = {entry.code: entry.name for entry in basket.grounds}
-        months = months_between(item.report_date, today)
+        # Отчётности может не быть вовсе: тогда давности не существует,
+        # и ноль месяцев здесь означал бы свежую отчётность.
+        months = (
+            months_between(item.report_date, today)
+            if item.report_date is not None
+            else None
+        )
         # Единица берётся у строки, а не набирается здесь: она одна на весь
         # выход, и второй её набор однажды разошёлся с первым.
         unit = item.unit
@@ -139,31 +150,32 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 # Единица — комплекта, а не стандарта: консолидированная
                 # отчётность составляется в миллионах, и «тыс. руб.» у неё —
                 # ошибка в тысячу раз, которую не ловит ни один контроль.
-                "values": [
-                    (
-                        view.require(code).name,
-                        view.shown(code, value, unit),
-                    )
-                    for code, value in item.values.items()
-                ],
+                # Набраны они один раз — в маршруте, который знает справочник
+                # своего стандарта: `cur_liq` МСФО и `cur_liq` РСБУ зовутся
+                # по-разному, и второй набор печатал бы чужое наименование.
+                "values": [[name, shown] for _, name, shown in item.shown_values],
                 "sources": list(item.sources),
                 # **Источник, стандарт и контур.** Единица у коэффициентов
                 # не информативна, а контур — да: отдельная отчётность
                 # управляющей компании и консолидированная группы описывают
-                # разные предметы. Пока третий стандарт не заведён,
-                # неконсолидированная отчётность по МСФО отбраковывается
-                # на приёме, и контур у всех строк один — это честнее, чем
-                # печатать графу, которая не различает.
+                # разные предметы, и теперь в списке стоят обе. Графа берёт
+                # контур у строки: прежде она была написана здесь словами
+                # и говорила «МСФО · консолидированная» у каждой.
                 "origin": " · ".join(
-                    (", ".join(item.sources), "МСФО", "консолидированная")
+                    part for part in (", ".join(item.sources), item.basis) if part
                 ),
                 "unit": unit,
                 # Строка покрытия для «Без внимания»: перечислено то, что
                 # проверено, и названо то, чего у нас нет.
                 "coverage": _coverage(item),
-                "report_date": f"{item.report_date:%d.%m.%Y}",
+                "bonds": item.has_bonds,
+                "report_date": (
+                    f"{item.report_date:%d.%m.%Y}"
+                    if item.report_date is not None
+                    else "отчётности нет"
+                ),
                 "months": months,
-                "stale": report_policy.freshness.stale(months),
+                "stale": months is not None and report_policy.freshness.stale(months),
                 "overdue": overdue,
                 "assessed": item.assessed_class,
             }
@@ -365,10 +377,15 @@ def _row_html(item: dict) -> str:
     subgroup = item["subgroups"][0] if item["subgroups"] else ""
     others = ", ".join(item["subgroups"][1:])
     action = item["actions"][0] if item["actions"] else ""
+    # Давность считается от отчётной даты, а её может не быть вовсе:
+    # «0 мес.» у эмитента без отчётности читалось бы как свежая.
+    when = item["report_date"] + (
+        f' · {item["months"]} мес.' if item["months"] is not None else ""
+    )
     fresh = (
-        f'<span class="stale">{item["report_date"]} · {item["months"]} мес.</span>'
+        f'<span class="stale">{when}</span>'
         if item["stale"] or item["overdue"]
-        else f'{item["report_date"]} · {item["months"]} мес.'
+        else when
     )
     assessed = (
         f'<span class="cls">класс {html.escape(item["assessed"])}</span>'

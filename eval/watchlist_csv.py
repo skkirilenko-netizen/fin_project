@@ -36,19 +36,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection  # noqa: E402
 from finlib.metrics.definitions import Unit  # noqa: E402
 from finlib.metrics.display import foreign_units, format_metric, ratio  # noqa: E402
-from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
-from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 # Величины строки: те же, что на странице наблюдения, и в той же разрядности.
+# **Графы объявлены по обоим стандартам сразу.** У эмитента, маршрут которого
+# построен по РСБУ, долговой нагрузки нет вовсе, а граница зовётся
+# `debt_to_op_profit`; графа под чужим кодом стояла бы пустой при известной
+# величине. Пустая графа здесь означает «величины нет у этого эмитента»,
+# а не «стандарт другой»: стандарт назван своей графой.
 VALUES = (
     "net_debt",
     "ebitda",
     "net_debt_ebitda",
     "net_debt_op_profit",
+    "debt_to_op_profit",
     "equity_ratio",
     "cur_liq",
 )
@@ -93,7 +97,6 @@ def main() -> int:
     if "--out" in sys.argv:
         out = Path(sys.argv[sys.argv.index("--out") + 1])
     routing = load_routing()
-    view = IfrsMetricsView(load_ifrs_metrics())
     with connection() as conn:
         rows, counts = routing_rows(conn, today)
     if not rows:
@@ -114,14 +117,13 @@ def main() -> int:
             # она разошлась бы с той, которую печатают основания.
             unit = item.unit
             # Величины печатаются той же единой точкой округления, что
-            # в документе и на странице: третье представление разошлось бы
-            # с первыми двумя.
-            values = [
-                view.shown(code, value, unit)
-                if (value := item.values.get(code)) is not None
-                else ""
-                for code in VALUES
-            ]
+            # в документе и на странице, и набраны они один раз — маршрутом,
+            # который знает справочник своего стандарта. Третий набор
+            # разошёлся бы с первыми двумя.
+            printed_by_code = {
+                code: shown for code, _, shown in item.shown_values
+            }
+            values = [printed_by_code.get(code, "") for code in VALUES]
             # **Единица сверяется у каждой строки той же функцией, что
             # у документа.** Выгрузка печатала мимо проверки, и контур получал
             # миллионы, подписанные тысячами.
@@ -155,9 +157,18 @@ def main() -> int:
                         )
                     ),
                     " | ".join(entry.text for entry in verdict.notes),
-                    f"{item.report_date:%Y-%m-%d}",
-                    "МСФО",
-                    "консолидированная",
+                    (
+                        f"{item.report_date:%Y-%m-%d}"
+                        if item.report_date is not None
+                        else ""
+                    ),
+                    # **Стандарт и контур берутся у строки.** Прежде они были
+                    # написаны здесь словами и говорили «МСФО ·
+                    # консолидированная» у каждой строки; теперь маршрут
+                    # строится и по отчётности юридического лица, и по одним
+                    # событиям, и графа обязана это различать.
+                    item.standard.value if item.standard is not None else "",
+                    item.basis,
                     "; ".join(item.sources),
                     unit,
                     item.assessed_class,

@@ -147,7 +147,9 @@ def main() -> int:
         )
         if len(examples[verdict.basket]) < 5:
             examples[verdict.basket].append(
-                f"{item.name} ({inn}), {moment:%d.%m.%Y}{where}: "
+                f"{item.name} ({inn}), "
+                f"{f'{moment:%d.%m.%Y}' if moment is not None else 'отчётности нет'}"
+                f"{where}: "
                 + ("; ".join(verdict.details) or "оснований нет")
             )
         if inn in KNOWN:

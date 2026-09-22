@@ -6,6 +6,7 @@
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -211,6 +212,37 @@ def _total_score(groups: list[GroupScore]) -> Decimal | None:
     return sum(item.score * item.effective_weight for item in live)
 
 
+def triggered_stop_factors(
+    values: Mapping[str, Decimal | None],
+    catalog: MetricsCatalog,
+    scoring: ScoringCatalog,
+) -> list[tuple[str, str]]:
+    """Сработавшие стоп-факторы РСБУ: код стоп-фактора и величина, которой он сработал.
+
+    **Величина называется, а не подразумевается.** Стоп-фактор бывает объявлен
+    сразу по нескольким показателям — «Нехватка оборотного капитала и покрытия
+    процентов» по двум, — и то, каким из них он сработал, решает, о каком
+    обстоятельстве речь: отрицательный чистый оборотный капитал означает
+    текущую ликвидность ниже единицы, а покрытие процентов ниже единицы —
+    обстоятельство другое.
+
+    Реализация одна на оценку и на маршрут: перечень, написанный дважды,
+    однажды разойдётся, и увидеть это можно будет, только сравнив документ
+    со списком.
+    """
+    found: list[tuple[str, str]] = []
+    for policy in scoring.stop_factors:
+        for code in policy.metrics:
+            metric: MetricDef | None = catalog.get(code)
+            value = values.get(code)
+            if metric is None or metric.stop_factor is None or value is None:
+                continue
+            if metric.stop_factor.triggered(value):
+                found.append((policy.code, code))
+                break
+    return found
+
+
 def _stop_factor(
     metric_scores: list[MetricScore],
     catalog: MetricsCatalog,
@@ -223,17 +255,12 @@ def _stop_factor(
     документу: он называл один, и остальные обстоятельства до читателя
     не доходили вовсе.
     """
-    triggered: list[tuple[StopFactorPolicy, str]] = []
     values = {item.metric_code: item.value for item in metric_scores}
-    for policy in scoring.stop_factors:
-        for code in policy.metrics:
-            metric: MetricDef | None = catalog.get(code)
-            value = values.get(code)
-            if metric is None or metric.stop_factor is None or value is None:
-                continue
-            if metric.stop_factor.triggered(value):
-                triggered.append((policy, code))
-                break
+    fired = triggered_stop_factors(values, catalog, scoring)
+    by_policy = {item.code: item for item in scoring.stop_factors}
+    triggered: list[tuple[StopFactorPolicy, str]] = [
+        (by_policy[code], metric) for code, metric in fired
+    ]
     if not triggered:
         return None, [], []
     order = {StopEffect.LOWEST_CLASS: 0, StopEffect.CAP_AT_CLASS: 1}

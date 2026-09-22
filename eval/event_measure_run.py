@@ -135,7 +135,8 @@ def main() -> int:
         print(
             f"| {item['when']} | {item['name'][:26]} | {item['inn']} | {item['kind']} "
             f"| {money(item['amount']) if item['amount'] is not None else '—'} "
-            f"| {'да' if item['settled'] else 'нет'} | {item['report_date']} |"
+            f"| {'да' if item['settled'] else 'нет'} "
+            f"| {item['report_date'] or 'отчётности нет'} |"
         )
     if len(fresh) > 60:
         print(f"| …и ещё {len(fresh) - 60} | | | | | | |")

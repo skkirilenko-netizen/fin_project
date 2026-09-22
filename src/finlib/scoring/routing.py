@@ -46,23 +46,22 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from finlib.config import settings
 from finlib.metrics.display import money
 from finlib.metrics.ifrs import MetricValue
-from finlib.metrics.ifrs_view import IfrsMetricsView
-from finlib.normalize.ifrs_issuer_type import IssuerTypePolicy, load_issuer_types
-from finlib.normalize.ifrs_metrics import IfrsMetricsPolicy, load_ifrs_metrics
 from finlib.scoring.ifrs import level
+from finlib.scoring.routing_catalogue import (
+    RoutingCatalogue,
+    StandardRules,
+    catalogue_for,
+)
 from finlib.scoring.theses import load_theses
 from finlib.sources.cbonds_events import DEFAULT_STATUSES, DefaultEvent
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
-# Величины решения. Перечень здесь, а не в справочнике корзин: это состав
-# расчёта, и он тот же, что в замере — пять величин, по которым решается
-# «нужен ли человек».
-ROUTING_METRICS: tuple[str, ...] = (
-    "net_debt_ebitda",
-    "equity_ratio",
-    "cur_liq",
-)
+# **Величины решения объявлены справочником, а не кодом.** Прежде перечень
+# стоял здесь константой — и был перечнем одного стандарта: в РСБУ долговой
+# нагрузки нет вовсе, вместо неё граница. Теперь состав называет
+# `routing.yaml`, блок `standards`, и берётся он через `catalogue_for`.
 
 
 class Ground(BaseModel):
@@ -144,6 +143,12 @@ class SameCircumstance(BaseModel):
 
     stop_factor: str = Field(min_length=1)
     metric: str = Field(min_length=1)
+    # Величина, которой стоп-фактор обязан был сработать, чтобы обстоятельство
+    # совпало. Стоп-фактор РСБУ объявлен по паре величин, и совпадает
+    # с ликвидностью только одна из них: покрытие процентов ниже единицы —
+    # обстоятельство другое, и гасить им ликвидность нельзя. Пусто — стоп-фактор
+    # объявлен по одной величине, и уточнять нечего.
+    by_value: str = ""
     why: str = Field(min_length=1)
     origin: str = Field(min_length=1)
 
@@ -224,6 +229,40 @@ class Refinancing(BaseModel):
     cover_ratio: Decimal = Field(gt=0)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+
+
+class Holdings(BaseModel):
+    """Виды деятельности, при которых отчётность РСБУ описывает не группу.
+
+    Коды сравниваются началом: подвид 64.20.1 означает то же, что 64.20,
+    а сравнивать по наименованию нельзя — оно пишется свободно, и слово
+    «холдинг» встречается у видов деятельности, к холдингам не относящихся.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    okved: dict[str, str] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+    calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+
+    def holds(self, okved: str) -> bool:
+        """Относится ли вид деятельности к холдинговым."""
+        return bool(self.activity(okved))
+
+    def activity(self, okved: str) -> str:
+        """Наименование холдингового вида деятельности; пусто — вид не тот.
+
+        Наименование берётся отсюда, а не из выписки: в выписке оно пишется
+        свободно, и основание маршрута читал бы человек, которому нужен вид
+        деятельности, а не код.
+        """
+        code = (okved or "").strip()
+        if not code:
+            return ""
+        for item, name in self.okved.items():
+            if code == item or code.startswith(f"{item}."):
+                return " ".join(name.split())
+        return ""
 
 
 class Systemic(BaseModel):
@@ -384,6 +423,9 @@ class RoutingPolicy(BaseModel):
     thresholds: str = Field(default="preliminary", pattern="^(preliminary|calibrated)$")
     thresholds_origin: str = ""
     origin: str = Field(min_length=1)
+    # Чем зовутся величины маршрута в каждом стандарте: маршрут один,
+    # справочника показателей два.
+    standards: StandardRules
     same_circumstance: tuple[SameCircumstance, ...] = ()
     stop_factor_muted: tuple[MutedStopFactor, ...] = ()
     events: Events
@@ -395,6 +437,7 @@ class RoutingPolicy(BaseModel):
     universe: Universe
     severity: Severity
     systemic: Systemic
+    holdings: Holdings
     refinancing: Refinancing
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
@@ -685,10 +728,23 @@ def route(
     # События эмитента: выпуски и рейтинги. Годовая отчётность их не видит
     # по устройству, и без них «Без внимания» стоит у эмитента с дефолтом.
     events: object | None = None,
+    # Основной вид деятельности из ЕГРЮЛ: у холдинга отчётность РСБУ описывает
+    # управляющую компанию, а не группу, и это обстоятельство маршрута.
+    okved: str = "",
+    # Почему отчётности нет вовсе: пусто — она есть. Обстоятельство одно,
+    # а не три недостающие величины, и называется оно причиной.
+    reporting_unavailable: str = "",
     today: date | None = None,
-    policy: IfrsMetricsPolicy | None = None,
     routing: RoutingPolicy | None = None,
-    types: IssuerTypePolicy | None = None,
+    # Справочник величин своего стандарта: коды, шкалы, наименования, печать
+    # и стоп-факторы. Умолчание — МСФО: маршрут начинался с неё, и менять
+    # умолчание значило бы менять поведение вызовов, стандарта не назвавших.
+    catalogue: RoutingCatalogue | None = None,
+    # Величина, которой сработал стоп-фактор: код стоп-фактора → код
+    # показателя. Нужна там, где стоп-фактор объявлен сразу по нескольким
+    # величинам, — «по какому проверяется» и «каким сработал» это разные
+    # сведения, и второе знает расчёт, а не справочник.
+    stop_factor_values: dict[str, str] | None = None,
 ) -> Verdict:
     """Определяет корзину эмитента по посчитанным величинам и обстоятельствам.
 
@@ -696,10 +752,11 @@ def route(
     второй путь к тем же величинам разошёлся бы с первым, и корзина зависела
     бы от того, кто спросил.
     """
-    policy = policy or load_ifrs_metrics()
     routing = routing or load_routing()
-    types = types or load_issuer_types()
-    caps = {factor.code: factor.cap for factor in types.stop_factors}
+    catalogue = catalogue or catalogue_for(Standard.IFRS)
+    rule = catalogue.rule
+    fired = stop_factor_values or {}
+    caps = {factor.code: factor.cap for factor in catalogue.stop_factors}
     by_code = {item.code: item for item in computed}
     review: list[Finding] = []
     attention: list[Finding] = []
@@ -756,21 +813,26 @@ def route(
     # **Стоп-фактор называется наименованием, а не кодом.** Основание читает
     # человек — на экране наблюдения и в сводке, — и `negative_nwc` ему
     # не говорит ничего; код остаётся предметом основания, по нему считают.
-    view = IfrsMetricsView(policy)
-    by_factor = {factor.code: factor for factor in types.stop_factors}
+    by_factor = {factor.code: factor for factor in catalogue.stop_factors}
 
     def about(code: str) -> str:
         # Формулировка стоп-фактора: наименование и его величина в скобках.
         # «Стоп-фактор: отрицательный собственный капитал» без величины
         # заставляет читателя искать её в других графах.
+        #
+        # **Печатается та величина, которой стоп-фактор сработал.** Объявлен
+        # он бывает по нескольким: у РСБУ «Нехватка оборотного капитала
+        # и покрытия процентов» — по двум, и напечатать заранее выбранную
+        # значило бы назвать величину, основанием не ставшую.
         factor = by_factor.get(code)
+        metric = fired.get(code) or (factor.metric if factor is not None else "")
         extra = ""
-        if factor is not None and factor.metric:
-            item = by_code.get(factor.metric)
+        if metric:
+            item = by_code.get(metric)
             if item is not None and item.calculable:
                 extra = (
-                    f" ({view.require(factor.metric).name.lower()} "
-                    f"{view.shown(factor.metric, item.value, unit)})"
+                    f" ({catalogue.name_of(metric).lower()} "
+                    f"{catalogue.shown(metric, item.value, unit)})"
                 )
         return routing.say(
             "stop_factor_severe" if code in severe else "stop_factor_capped",
@@ -875,10 +937,22 @@ def route(
                 ),
             )
         )
-    debt_threshold = max(
-        x for x, _ in policy.calibration_points.metrics["net_debt_ebitda"].points
-    )
-    absent = _absent(by_code, debt_threshold)
+    debt_threshold = catalogue.threshold_of(rule.bound_of)
+    # **Отчётности нет вовсе — одно обстоятельство, а не перечень пробелов.**
+    # Маршрут при этом строится: события и рейтинги от стандарта не зависят.
+    # Называть три недостающие величины значило бы перечислять следствия,
+    # а молчать — выдавать отсутствие данных за отсутствие обстоятельств.
+    absent: set[str] = set()
+    if reporting_unavailable:
+        attention.append(
+            Finding(
+                "reporting_unavailable",
+                "",
+                routing.say("reporting_unavailable", reporting_unavailable),
+            )
+        )
+    else:
+        absent = _absent(by_code, debt_threshold, rule, operating_profit)
     # **Рефинансирование — обстоятельство отчётности, а не события.** График
     # платежей говорит о срочности долга, которой в балансе нет: «долг
     # 40 млрд» у эмитента с погашением через восемь лет и с погашением
@@ -906,10 +980,14 @@ def route(
     # прохождение критерия доказывает, а величину не заменяет, и у эмитента
     # верхнего десятка цена этой замены выше всех прочих. Обстоятельство
     # здесь о нашем знании, а не о нём.
-    if systemic_volume is not None:
+    if systemic_volume is not None and not reporting_unavailable:
+        # Состав полноты объявлен стандартом: у МСФО требуется сама величина
+        # нагрузки, у РСБУ — граница, потому что иной величины там не бывает
+        # вовсе, и требовать её значило бы объявить неполным всякого эмитента
+        # без консолидированной отчётности.
         thin = [
-            view.require(code).name.lower()
-            for code in ROUTING_METRICS
+            catalogue.name_of(code).lower()
+            for code in rule.cover
             if not _ok(by_code, code)
         ]
         if thin:
@@ -933,7 +1011,7 @@ def route(
         )
 
     lower = load_theses().bands.lower_below
-    spoken_for = _spoken_for(stop_factors, routing, types)
+    spoken_for = _spoken_for(stop_factors, routing, catalogue, fired)
     silenced: list[str] = []
 
     # **Знак EBITDA — своё основание, и он гасит величины отношения к ней.**
@@ -941,22 +1019,23 @@ def route(
     # шкалой как низкая нагрузка: у эмитента с убытком выходило бы «без
     # внимания». Обстоятельство при этом одно, поэтому величина отношения
     # своего основания не даёт — его даёт знак.
-    ebitda = by_code.get("ebitda")
+    ebitda = by_code.get(rule.earnings) if rule.earnings else None
     if ebitda is not None and ebitda.calculable and ebitda.value <= 0:
         attention.append(
             Finding(
                 "negative_ebitda",
-                "ebitda",
+                rule.earnings,
                 routing.say(
                     "negative_ebitda",
-                    value=view.shown("ebitda", ebitda.value, unit),
+                    value=catalogue.shown(rule.earnings, ebitda.value, unit),
                 ),
             )
         )
-        spoken_for = spoken_for | {"net_debt_ebitda"}
-    for code in ROUTING_METRICS:
+        if rule.burden:
+            spoken_for = spoken_for | {rule.burden}
+    for code in rule.metrics:
         item = by_code.get(code)
-        scale = policy.calibration_points.metrics.get(code)
+        scale = catalogue.scale(code)
         if item is None or not item.calculable or scale is None:
             continue
         score = level(item.value, scale)
@@ -987,8 +1066,8 @@ def route(
                         "level_off_scale",
                         code,
                         metric=item.name,
-                        value=view.shown(code, item.value, unit),
-                        threshold=view.shown(code, scale.points[0][0], unit),
+                        value=catalogue.shown(code, item.value, unit),
+                        threshold=catalogue.shown(code, scale.points[0][0], unit),
                     ),
                 )
             )
@@ -1001,30 +1080,26 @@ def route(
                         "metric_in_lower_band",
                         code,
                         metric=item.name,
-                        value=view.shown(code, item.value, unit),
+                        value=catalogue.shown(code, item.value, unit),
                     ),
                 )
             )
 
-    bound = by_code.get("net_debt_op_profit")
-    if bound is not None and bound.calculable:
-        threshold = max(
-            x for x, _ in policy.calibration_points.metrics["net_debt_ebitda"].points
-        )
-        if bound.value > threshold:
-            attention.append(
-                Finding(
+    bound = by_code.get(rule.bound) if rule.bound else None
+    if _bound_proves(bound, operating_profit) and bound.value > debt_threshold:
+        attention.append(
+            Finding(
+                "bound_above_threshold",
+                bound.code,
+                # **Граница сверху — не «не менее».** Настоящее значение
+                # бывает и ниже порога: это отсутствие вывода, а не плохая
+                # величина, и формулировка обязана говорить именно так.
+                routing.say(
                     "bound_above_threshold",
-                    bound.code,
-                    # **Граница сверху — не «не менее».** Настоящее значение
-                    # бывает и ниже порога: это отсутствие вывода, а не плохая
-                    # величина, и формулировка обязана говорить именно так.
-                    routing.say(
-                        "bound_above_threshold",
-                        value=view.shown("net_debt_ebitda", bound.value, unit),
-                    ),
-                )
+                    value=catalogue.shown(rule.bound_of, bound.value, unit),
+                ),
             )
+        )
 
     if operating_profit is not None and operating_profit <= 0:
         # Величина денежная, и печатается она единой точкой округления:
@@ -1036,9 +1111,30 @@ def route(
         attention.append(
             Finding(
                 "operating_loss",
-                "ifrs.operating_profit",
+                rule.operating_line,
                 routing.say(
                     "operating_loss", value=money(operating_profit), unit=unit
+                ),
+            )
+        )
+
+    # **Отчётность управляющей компании группой не является.** Действует
+    # только там, где маршрут построен по РСБУ: у эмитента с консолидированной
+    # отчётностью группа видна, и холдинговый вид деятельности ничего
+    # не скрывает.
+    if (
+        catalogue.standard is Standard.RSBU
+        and not reporting_unavailable
+        and routing.holdings.holds(okved)
+    ):
+        attention.append(
+            Finding(
+                "holding_rsbu_only",
+                okved,
+                routing.say(
+                    "holding_rsbu_only",
+                    okved=okved,
+                    activity=routing.holdings.activity(okved),
                 ),
             )
         )
@@ -1386,7 +1482,10 @@ def _rating_outlook_adverse(events: object, routing: RoutingPolicy) -> list[Find
 
 
 def _spoken_for(
-    stop_factors: tuple[str, ...], routing: RoutingPolicy, types: IssuerTypePolicy
+    stop_factors: tuple[str, ...],
+    routing: RoutingPolicy,
+    catalogue: RoutingCatalogue,
+    fired: dict[str, str],
 ) -> set[str]:
     """Показатели, о которых уже сказал сработавший стоп-фактор.
 
@@ -1396,19 +1495,47 @@ def _spoken_for(
     (`same_circumstance`): отрицательный чистый оборотный капитал считается
     по `nwc`, а ликвидность ниже единицы — по `cur_liq`, и то, что это одно
     обстоятельство, выводу из имён не поддаётся.
+
+    **Уточнение величиной.** Стоп-фактор бывает объявлен сразу по нескольким
+    величинам — у РСБУ «Нехватка оборотного капитала и покрытия процентов»
+    по двум, — и совпадает с ликвидностью только одна из них. Поэтому пара
+    объявляет, какой величиной стоп-фактор обязан был сработать; сработавшую
+    называет расчёт, а не справочник.
     """
     triggered = set(stop_factors)
     metrics = {
         factor.metric
-        for factor in types.stop_factors
+        for factor in catalogue.stop_factors
         if factor.code in triggered and factor.metric
     }
+    metrics |= {fired[code] for code in triggered if fired.get(code)}
     metrics |= {
         item.metric
         for item in routing.same_circumstance
         if item.stop_factor in triggered
+        and (not item.by_value or fired.get(item.stop_factor) == item.by_value)
     }
     return metrics
+
+
+def _bound_proves(bound: MetricValue | None, operating_profit: Decimal | None) -> bool:
+    """Доказывает ли вывод по границе хоть что-нибудь.
+
+    **Граница осмысленна только при положительном знаменателе.** Отношение
+    чистого долга к убытку отрицательно, и шкала читает его как низкую
+    нагрузку — тот же обман, что у отношения к неположительной EBITDA.
+    У показателя МСФО положительность знаменателя объявлена самим
+    справочником (`denominator_must_be_positive`), у РСБУ — нет: там
+    та же формула считается и при убытке, и правило обязано стоять здесь.
+
+    Знаменатель берётся у самой границы — он хранится рядом с отношением, —
+    и лишь когда его нет, у величины отчётности, поданной доводом.
+    """
+    if bound is None or not bound.calculable:
+        return False
+    if bound.denominator is not None:
+        return bound.denominator > 0
+    return operating_profit is None or operating_profit > 0
 
 
 def _verdict(
@@ -1468,14 +1595,26 @@ def _verdict(
     )
 
 
-def _absent(by_code: dict[str, MetricValue], threshold: Decimal) -> set[str]:
+def _absent(
+    by_code: dict[str, MetricValue],
+    threshold: Decimal,
+    rule: object,
+    operating_profit: Decimal | None,
+) -> set[str]:
     """Величины решения, которых расчёт не собрал.
 
     Текущая ликвидность у девелопера заменена диапазоном, и верхняя граница
     заменяет её здесь: «не считается» означало бы пробел данных, а это решение
     методики.
+
+    **Что чем зовётся, объявляет стандарт.** У МСФО долговая нагрузка —
+    величина, и граница лишь доказывает её прохождение; у РСБУ величины нет
+    вовсе, и граница — единственный способ о ней судить. Наименования
+    недостающего берутся из справочника: основание читает человек,
+    и `net_debt_ebitda` ему не говорит ничего.
     """
     absent: set[str] = set()
+    names: dict[str, str] = dict(getattr(rule, "absent_names", {}))
     # **Вывод по границе — доказательство, а не пробел, и он обязан быть
     # виден.** При положительной операционной прибыли амортизация неотрицательна,
     # поэтому отношение к EBITDA не выше отношения к операционной прибыли: граница
@@ -1483,14 +1622,18 @@ def _absent(by_code: dict[str, MetricValue], threshold: Decimal) -> set[str]:
     # а в печати — строка писала «не считается» и границы не показывала.
     # Граница берётся только от операционной прибыли отчётности: замена EBITDA
     # полем источника в неё не входит по устройству показателя.
-    bound = by_code.get("net_debt_op_profit")
-    proven = bound is not None and bound.calculable and bound.value <= threshold
-    if not _ok(by_code, "net_debt_ebitda") and not proven:
-        absent.add("долговая нагрузка")
-    if not _ok(by_code, "equity_ratio"):
-        absent.add("автономия")
-    if not _ok(by_code, "cur_liq") and not _ok(by_code, "cur_liq_ex_inventories"):
-        absent.add("текущая ликвидность")
+    bound_code = getattr(rule, "bound", "")
+    bound = by_code.get(bound_code) if bound_code else None
+    proven = _bound_proves(bound, operating_profit) and bound.value <= threshold
+    replaced = dict(getattr(rule, "replaced_by", {}))
+    for code in getattr(rule, "cover", ()):
+        if _ok(by_code, code):
+            continue
+        if proven and code in (bound_code, getattr(rule, "burden", "")):
+            continue
+        if code in replaced and _ok(by_code, replaced[code]):
+            continue
+        absent.add(names.get(code, code))
     return absent
 
 
