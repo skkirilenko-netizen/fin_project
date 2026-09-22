@@ -139,12 +139,16 @@ def main() -> int:
 
     baskets: Counter[str] = Counter()
     grounds: dict[str, Counter[str]] = defaultdict(Counter)
+    senior: dict[str, Counter[str]] = defaultdict(Counter)
+    overlap: dict[str, Counter[str]] = defaultdict(Counter)
     examples: dict[str, list[str]] = defaultdict(list)
     known: dict[str, str] = {}
     by_factor: Counter[str] = Counter()
     off_scale: Counter[str] = Counter()
     off_scale_issuers: dict[str, set[str]] = {}
     with_nwc: set[str] = set()
+    silenced: Counter[str] = Counter()
+    silenced_issuers = 0
     with_factor = 0
     substituted = 0
 
@@ -183,6 +187,10 @@ def main() -> int:
             baskets[verdict.basket] += 1
             for ground in verdict.grounds:
                 grounds[verdict.basket][ground] += 1
+            if verdict.subgroup:
+                senior[verdict.basket][verdict.subgroup] += 1
+                if len(verdict.subgroups) > 1:
+                    overlap[verdict.basket][verdict.subgroup] += 1
             # Предмет основания берётся у самого основания (`Finding.subject`),
             # а не вытаскивается из прозы: второй разбор того же ответа
             # разошёлся бы с первым и молча.
@@ -192,15 +200,27 @@ def main() -> int:
                     off_scale_issuers.setdefault(inn, set()).add(item.subject)
             if "negative_nwc" in stops.triggered:
                 with_nwc.add(inn)
+            # Гашение основания стоп-фактором считается наравне
+            # со сработавшим: правило, гасящее молча, неотличимо
+            # от невыполненного.
+            for code in verdict.spoken_for:
+                silenced[code] += 1
+            if verdict.spoken_for:
+                silenced_issuers += 1
             name = (row["name"] or inn).strip()
+            where = (
+                " [" + ", ".join(verdict.subgroup_names) + "]"
+                if verdict.subgroup_names
+                else ""
+            )
             if len(examples[verdict.basket]) < 5:
                 examples[verdict.basket].append(
-                    f"{name} ({inn}), {moment:%d.%m.%Y}: "
+                    f"{name} ({inn}), {moment:%d.%m.%Y}{where}: "
                     + ("; ".join(verdict.details) or "оснований нет")
                 )
             if inn in KNOWN:
                 known[inn] = (
-                    f"{verdict.basket_name} — "
+                    f"{verdict.basket_name}{where} — "
                     + (", ".join(verdict.grounds) or "оснований нет")
                     + (f"; {'; '.join(verdict.details)}" if verdict.details else "")
                 )
@@ -242,6 +262,20 @@ def main() -> int:
         count = baskets.get(basket.code, 0)
         print(f"| {basket.name} | {count} | {count / total * 100:.0f} % |")
 
+    print("\n### Одно обстоятельство — одно решение: сколько раз сработало\n")
+    print(
+        f"Основание по величине погашено стоп-фактором того же показателя "
+        f"у **{silenced_issuers}** эмитентов, всего погашено величин "
+        f"**{sum(silenced.values())}**"
+        + (
+            ": " + ", ".join(f"{code} — {count}" for code, count in silenced.most_common())
+            if silenced
+            else ""
+        )
+        + ". Считается это наравне со сработавшим: правило, гасящее молча, "
+        "неотличимо от невыполненного.\n"
+    )
+
     print("\n## Стоп-факторы по видам\n")
     print(
         f"Стоп-фактор сработал у **{with_factor}** эмитентов из {total}. "
@@ -261,6 +295,20 @@ def main() -> int:
         found = grounds.get(basket.code)
         print(f"\n## {basket.name} — {baskets.get(basket.code, 0)}\n")
         print(f"{' '.join(basket.meaning.split())}\n")
+        if basket.groups:
+            # **Корзина одной строкой скрыла бы три природы обстоятельств.**
+            # Эмитент показывается по старшей подгруппе, и рядом стоит число
+            # тех, у кого сработала не одна: без него подгруппы читались бы
+            # как разделение набора, а они пересекаются.
+            print("| Подгруппа | Действие | Эмитентов | Из них с другими |")
+            print("|---|---|---|---|")
+            for group in sorted(basket.groups, key=lambda item: item.order):
+                print(
+                    f"| {group.name} | {group.action} | "
+                    f"{senior[basket.code][group.code]} | "
+                    f"{overlap[basket.code][group.code]} |"
+                )
+            print("")
         if found:
             print("| Основание | Эмитентов |")
             print("|---|---|")
@@ -303,15 +351,13 @@ def main() -> int:
         only_liquidity = {
             inn for inn, codes in off_scale_issuers.items() if codes == {"cur_liq"}
         }
-        print(
-            f"\nТолько текущей ликвидностью за концом шкалы держится "
-            f"**{len(only_liquidity)}** эмитентов, и у **{len(only_liquidity & with_nwc)}** "
-            "из них сработал отрицательный чистый оборотный капитал — тот самый "
-            "стоп-фактор, который по тяжести отправлен во внимание. Величина "
-            "и стоп-фактор здесь об одном и том же: краткосрочные обязательства "
-            "выше оборотных активов. Развилка записана в NIGHT_QUESTIONS.md; "
-            "порог не трогается.\n"
-        )
+        if only_liquidity:  # pragma: no cover — печатается, пока правило не решено
+            print(
+                f"\nТолько текущей ликвидностью держится "
+                f"**{len(only_liquidity)}** эмитентов, из них "
+                f"**{len(only_liquidity & with_nwc)}** со сработавшим "
+                "отрицательным чистым оборотным капиталом.\n"
+            )
 
     print("\n## Известные случаи\n")
     print("| Эмитент | Корзина и основания |")

@@ -69,6 +69,19 @@ class Ground(BaseModel):
     name: str = Field(min_length=1)
     why: str = Field(min_length=1)
     threshold_from: str | None = None
+    group: str | None = None
+
+
+class Subgroup(BaseModel):
+    """Подгруппа корзины: своя природа обстоятельства и своё действие."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    name: str = Field(min_length=1)
+    order: int = Field(ge=1)
+    action: str = Field(min_length=1)
+    why: str = Field(min_length=1)
 
 
 class Basket(BaseModel):
@@ -80,7 +93,54 @@ class Basket(BaseModel):
     name: str = Field(min_length=1)
     order: int = Field(ge=1)
     meaning: str = Field(min_length=1)
+    groups: tuple[Subgroup, ...] = ()
     grounds: tuple[Ground, ...] = ()
+
+    @model_validator(mode="after")
+    def _grounds_name_a_declared_group(self) -> Self:
+        """Подгруппа объявлена у всех оснований корзины либо ни у одного.
+
+        Основание без подгруппы в корзине с подгруппами не показалось бы
+        нигде — то есть исчезло бы вместе со своим действием, а подгруппа,
+        названная там, где их нет, читалась бы как объявленная.
+        """
+        declared = {item.code for item in self.groups}
+        named = {item.group for item in self.grounds if item.group}
+        unknown = named - declared
+        if unknown:
+            raise ValueError(
+                f"корзина {self.code}: основания называют подгруппы, которых "
+                f"в ней нет: {', '.join(sorted(unknown))}"
+            )
+        if declared:
+            silent = [item.code for item in self.grounds if not item.group]
+            if silent:
+                raise ValueError(
+                    f"корзина {self.code} разделена на подгруппы, а основания "
+                    f"{', '.join(silent)} ни одной не называют: показать их "
+                    "было бы негде"
+                )
+        return self
+
+    def subgroup(self, code: str) -> Subgroup | None:
+        """Подгруппа по коду; None — подгрупп у корзины нет."""
+        return next((item for item in self.groups if item.code == code), None)
+
+    def group_of(self, ground: str) -> str:
+        """Подгруппа основания; пустая строка — корзина не разделена."""
+        found = next((item for item in self.grounds if item.code == ground), None)
+        return (found.group or "") if found is not None else ""
+
+
+class SameCircumstance(BaseModel):
+    """Стоп-фактор и показатель маршрута, говорящие об одном обстоятельстве."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stop_factor: str = Field(min_length=1)
+    metric: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
 
 
 class Severity(BaseModel):
@@ -132,6 +192,7 @@ class RoutingPolicy(BaseModel):
     status: str = Field(pattern="^(draft|approved)$")
     approved_by: str | None = None
     origin: str = Field(min_length=1)
+    same_circumstance: tuple[SameCircumstance, ...] = ()
     severity: Severity
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
@@ -203,17 +264,33 @@ class Verdict:
     status: str
     # Величины, по которым решение принято: без них корзина — слово без опоры.
     findings: tuple[Finding, ...] = ()
+    # Подгруппы корзины в порядке старшинства: первая — та, по которой
+    # эмитент показывается, остальные называются рядом. Пусто — корзина
+    # на подгруппы не разделена.
+    subgroups: tuple[str, ...] = ()
+    subgroup_names: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+    # Показатели, у которых основание **не** поставлено, потому что о том же
+    # обстоятельстве уже сказал стоп-фактор. Считается это наравне
+    # со сработавшим: правило, гасящее молча, неотличимо от невыполненного.
+    spoken_for: tuple[str, ...] = ()
 
     @property
     def details(self) -> tuple[str, ...]:
         """Основания словами — в порядке, в каком сработали."""
         return tuple(item.text for item in self.findings)
 
+    @property
+    def subgroup(self) -> str:
+        """Старшая подгруппа: по ней эмитент и показывается."""
+        return self.subgroups[0] if self.subgroups else ""
+
     def describe(self) -> str:
         """Однострочное описание для прогона и сводки."""
         listed = ", ".join(self.grounds) or "оснований нет"
+        where = f" [{self.subgroup_names[0]}]" if self.subgroup_names else ""
         mark = "" if self.status == "approved" else " (правила — черновик)"
-        return f"{self.basket_name}: {listed}{mark}"
+        return f"{self.basket_name}{where}: {listed}{mark}"
 
 
 def route(
@@ -282,12 +359,23 @@ def route(
 
     lower = load_theses().bands.lower_below
     view = IfrsMetricsView(policy)
+    spoken_for = _spoken_for(stop_factors, routing, types)
+    silenced: list[str] = []
     for code in ROUTING_METRICS:
         item = by_code.get(code)
         scale = policy.calibration_points.metrics.get(code)
         if item is None or not item.calculable or scale is None:
             continue
         score = level(item.value, scale)
+        # **Одно обстоятельство — одно решение.** По этому показателю уже
+        # сработал стоп-фактор, и тяжесть обстоятельства названа методикой;
+        # величина повторяет его и своего основания не даёт. Гашение считается
+        # только там, где основание было бы поставлено: иначе счётчик мерил бы
+        # число здоровых показателей.
+        if code in spoken_for:
+            if score < lower:
+                silenced.append(code)
+            continue
         # Ноль балла и есть «за концом шкалы»: балл нуля стоит у крайней
         # опорной точки, и дальше шкала не продолжается. Оба основания сразу
         # не ставятся — величина одна, и говорить о ней дважды значило бы
@@ -349,11 +437,44 @@ def route(
 
     found = review + attention
     if review:
-        return _verdict(routing, "review", found)
-    return _verdict(routing, "attention" if attention else "clear", found)
+        return _verdict(routing, "review", found, tuple(silenced))
+    return _verdict(
+        routing, "attention" if attention else "clear", found, tuple(silenced)
+    )
 
 
-def _verdict(routing: RoutingPolicy, code: str, findings: list[Finding]) -> Verdict:
+def _spoken_for(
+    stop_factors: tuple[str, ...], routing: RoutingPolicy, types: IssuerTypePolicy
+) -> set[str]:
+    """Показатели, о которых уже сказал сработавший стоп-фактор.
+
+    Два источника, и оба нужны. Совпадение кода показателя действует само:
+    отрицательная автономия проверяется по тому же `equity_ratio`, что
+    и маршрут. Совпадение предмета при разных кодах объявляется методикой
+    (`same_circumstance`): отрицательный чистый оборотный капитал считается
+    по `nwc`, а ликвидность ниже единицы — по `cur_liq`, и то, что это одно
+    обстоятельство, выводу из имён не поддаётся.
+    """
+    triggered = set(stop_factors)
+    metrics = {
+        factor.metric
+        for factor in types.stop_factors
+        if factor.code in triggered and factor.metric
+    }
+    metrics |= {
+        item.metric
+        for item in routing.same_circumstance
+        if item.stop_factor in triggered
+    }
+    return metrics
+
+
+def _verdict(
+    routing: RoutingPolicy,
+    code: str,
+    findings: list[Finding],
+    spoken_for: tuple[str, ...] = (),
+) -> Verdict:
     """Собирает вердикт, упорядочивая основания по объявлению в справочнике.
 
     Перечень, собранный в порядке проверок, читался бы как старшинство,
@@ -371,7 +492,31 @@ def _verdict(routing: RoutingPolicy, code: str, findings: list[Finding]) -> Verd
         sorted({item.ground for item in findings if item.ground in declared},
                key=declared.index)
     )
-    return Verdict(basket.code, basket.name, ordered, routing.status, tuple(findings))
+    # Подгруппы — в порядке старшинства, объявленном справочником: эмитент
+    # показывается по старшей, остальные называются рядом.
+    groups = sorted(
+        {basket.group_of(item) for item in ordered} - {""},
+        key=lambda item: next(
+            entry.order for entry in basket.groups if entry.code == item
+        ),
+    )
+    return Verdict(
+        basket.code,
+        basket.name,
+        ordered,
+        routing.status,
+        tuple(findings),
+        tuple(groups),
+        tuple(
+            found.name for code in groups if (found := basket.subgroup(code)) is not None
+        ),
+        tuple(
+            found.action
+            for code in groups
+            if (found := basket.subgroup(code)) is not None
+        ),
+        spoken_for,
+    )
 
 
 def _absent(by_code: dict[str, MetricValue]) -> set[str]:

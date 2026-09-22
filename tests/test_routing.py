@@ -115,6 +115,77 @@ def test_lower_band_and_off_scale_are_not_counted_twice() -> None:
     assert (basket, grounds) == ("review", ("level_off_scale",))
 
 
+def test_stop_factor_speaks_for_its_metric() -> None:
+    """Величина не повторяет стоп-фактор: обстоятельство одно, решение одно.
+
+    Отрицательный чистый оборотный капитал означает ликвидность ниже единицы,
+    и её положение за концом шкалы о новом не говорит. Иначе правило о тяжести
+    отменялось бы следующим правилом — у 82 эмитентов набора ровно так
+    и выходило.
+    """
+    computed = (
+        metric("net_debt_ebitda", "1.0"),
+        metric("equity_ratio", "0.6"),
+        metric("cur_liq", "0.3", "Текущая ликвидность"),
+    )
+    assert routed(computed=computed, stop_factors=("negative_nwc",)) == (
+        "attention",
+        ("stop_factor_capped",),
+    )
+    # Без стоп-фактора та же величина основание даёт: правило гасит повтор,
+    # а не саму проверку.
+    assert routed(computed=computed) == ("review", ("level_off_scale",))
+
+
+def test_matching_metric_code_needs_no_declaration() -> None:
+    """Совпадение кода показателя действует само — это тот же показатель."""
+    computed = (
+        metric("net_debt_ebitda", "1.0"),
+        metric("equity_ratio", "-0.2", "Коэффициент автономии"),
+        metric("cur_liq", "2.5"),
+    )
+    assert routed(computed=computed, stop_factors=("negative_autonomy",)) == (
+        "review",
+        ("stop_factor_severe",),
+    )
+
+
+def test_attention_is_split_by_nature_of_the_circumstance() -> None:
+    """Внимание показывается по старшей подгруппе, остальные называются."""
+    verdict = route(
+        (metric("equity_ratio", "0.6"),),
+        quarantined=False,
+        latest_annual=date(2024, 12, 31),
+        today=date(2026, 6, 2),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.subgroups == ("data_gap", "disclosure")
+    assert verdict.actions[0] == "добрать данные"
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        latest_annual=date(2024, 12, 31),
+        today=date(2026, 6, 2),
+    )
+    assert verdict.subgroups == ("value_risk", "disclosure")
+    assert verdict.subgroup == "value_risk"
+
+
+def test_review_has_no_subgroups() -> None:
+    """Корзина без подгрупп их не выдумывает: показывать было бы нечего."""
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_equity",),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "review"
+    assert verdict.subgroups == ()
+    assert verdict.subgroup == ""
+
+
 def test_overdue_disclosure_is_its_own_ground() -> None:
     """Срок раскрытия нарушен — внимание, и величинам это не приписывается."""
     basket, grounds = routed(
