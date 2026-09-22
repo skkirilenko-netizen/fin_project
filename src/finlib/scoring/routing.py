@@ -209,6 +209,23 @@ class Events(BaseModel):
             )
 
 
+class Refinancing(BaseModel):
+    """Отсечка срочности долга: платежи года против денежных средств.
+
+    **Единица объяснима словами, а не калибровкой** — денежных средств
+    не хватает на платежи ближайших двенадцати месяцев. Замер показал,
+    что единица и двойка дают на наборе одно и то же, и выбрана та, у которой
+    есть смысл помимо подгонки.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    months: int = Field(gt=0)
+    cover_ratio: Decimal = Field(gt=0)
+    origin: str = Field(min_length=1)
+    calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+
+
 class Severity(BaseModel):
     """Градации ограничения класса, при которых нужен человек."""
 
@@ -339,6 +356,7 @@ class RoutingPolicy(BaseModel):
     statements: Statements
     universe: Universe
     severity: Severity
+    refinancing: Refinancing
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
     # **Справочные основания корзины не называют.** Урегулированный дефолт
@@ -832,8 +850,6 @@ def route(
         # «-7378338.000» — не число для человека, а внутреннее представление.
         # Единица здесь не называется: она свойство комплекта, и объявляет её
         # тот, кто печатает строку целиком.
-        from finlib.metrics.display import money
-
         attention.append(
             Finding(
                 "operating_loss",
@@ -1062,8 +1078,6 @@ def _where_of(events: object, issue: object) -> str:
     по погашению» говорит, что случилось; «купон, срок 03.08.2026, не исполнено
     86 602 000» говорит, сколько именно не заплатили.
     """
-    from finlib.metrics.display import money
-
     mine = [
         item
         for item in getattr(events, "open_records", ())

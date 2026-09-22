@@ -25,7 +25,9 @@ from pathlib import Path
 
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
+from finlib.normalize.lines import load_lines
 from finlib.scoring.routing import (
+    Refinance,
     RoutingPolicy,
     Verdict,
     led_by_guarantor,
@@ -39,9 +41,11 @@ from finlib.sources.cbonds_events import (
     default_records,
     events_of,
     guarantees_of,
+    in_unit,
     latest_snapshot,
     point_order,
 )
+from finlib.sources.cbonds_flows import refinancing
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +139,9 @@ class RoutingRow:
     # Денежные средства комплекта: знаменатель рефинансирования. Лежат здесь,
     # а не в каждом замере своим запросом: один вопрос — один запрос.
     cash: Decimal | None = None
+    # Платежи по облигациям ближайших месяцев против денежных средств —
+    # в единице комплекта, готовыми: замер и список печатают одно и то же.
+    refinance: Refinance | None = None
     # Величины, названные порознь: отрицательное отношение чистого долга
     # к EBITDA означает либо чистую денежную позицию, либо убыток, и путать
     # их нельзя.
@@ -196,6 +203,7 @@ def routing_rows(
     # Перечень дефолтов — один файл на всю страну, 3 529 событий: читается
     # один раз, а не по эмитенту.
     defaults = default_records()
+    units = load_lines().units
     if on is None:
         logger.warning(
             "снимка рейтингов на диске нет: событийный слой будет пуст, "
@@ -232,6 +240,21 @@ def routing_rows(
             if inn in spv
             else ()
         )
+        delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
+        unit_code = next(
+            (item["unit_code"] for item in delivered if item["unit_code"]), None
+        )
+        cash = _cash(inn, moment, conn)
+        # **Срочность долга собирается здесь, а не в маршруте**: маршрут
+        # решает по величинам, а величины берутся из одного места. Обе
+        # приведены к единице комплекта — иначе ошибка в тысячу раз.
+        plan = refinancing(events.issues, routing.refinancing.months, today)
+        refinance = Refinance(
+            due=in_unit(plan.scheduled, unit_code) if plan.known else None,
+            cash=cash,
+            unit=units.name_of(unit_code) if unit_code else "",
+            months=routing.refinancing.months,
+        )
         verdict = route(
             computed,
             quarantined=(inn, moment.year) in quarantined,
@@ -246,10 +269,10 @@ def routing_rows(
             events=events,
             today=today,
             policy=policy,
+            refinance=refinance,
             routing=routing,
             types=types,
         )
-        delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
         card = known.get(inn, {})
         counts["эмитентов"] += 1
         rows.append(
@@ -268,15 +291,14 @@ def routing_rows(
                         }
                     )
                 ),
-                unit_code=next(
-                    (item["unit_code"] for item in delivered if item["unit_code"]), None
-                ),
+                unit_code=unit_code,
                 assessed_class=assessed.get(inn, ""),
                 branch=str(card.get("branch_name_rus") or ""),
                 group=str(card.get("group_name_rus") or ""),
                 events=events,
                 guarantees=secured,
-                cash=_cash(inn, moment, conn),
+                cash=cash,
+                refinance=refinance,
                 values={
                     code: value
                     for code in ("net_debt", "ebitda", "net_debt_ebitda",

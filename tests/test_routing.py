@@ -721,6 +721,68 @@ def test_unsettled_event_outweighs_a_later_settled_one() -> None:
     assert "купон" in found.origin
 
 
+def refinance(due: str | None, cash: str | None):
+    """Платежи года и денежные средства в единице комплекта."""
+    from finlib.scoring.routing import Refinance
+
+    return Refinance(
+        due=Decimal(due) if due is not None else None,
+        cash=Decimal(cash) if cash is not None else None,
+        unit="тыс. руб.",
+        months=12,
+    )
+
+
+def test_payments_above_cash_are_their_own_ground() -> None:
+    """Срочность долга в балансе не видна, и это отдельное обстоятельство.
+
+    «Долг 40 млрд» у эмитента с погашением через восемь лет и с погашением
+    в марте означает разное, а балансовые коэффициенты их не различают.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        refinance=refinance("7552350", "223194"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("refinancing_gap",)
+    # Разряды разделяет неразрывный пробел — единая точка округления.
+    assert "223 194 тыс. руб." in verdict.details[0]
+
+
+def test_payments_within_cash_give_no_ground() -> None:
+    """Денежных средств хватает — обстоятельства нет."""
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        refinance=refinance("100", "900"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+
+
+def test_payments_without_cash_are_a_gap_and_not_a_risk() -> None:
+    """Платежи есть, денежных средств нет — это пробел данных, а не риск.
+
+    Так устроены семь эмитентов группы Роснефти: агрегатор не раскрывает
+    им ни денежных средств, ни долга. Отношением обстоятельство не выражается,
+    и объявлять по нему риск значило бы судить по величине, которой нет.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        refinance=refinance("10424", None),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("data_insufficient",)
+    assert "денежные средства" in verdict.details[0]
+
+
 def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     """SPV оценивается не собой, а тем, кто отвечает по её долгу.
 
