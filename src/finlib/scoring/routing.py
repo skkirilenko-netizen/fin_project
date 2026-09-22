@@ -1026,10 +1026,17 @@ def _where_of(events: object, issue: object) -> str:
     ]
     dated = [item for item in mine if item.moment is not None]
     if dated:
-        latest = max(dated, key=lambda item: item.moment)
+        # На одну дату приходится и купон, и погашение — у Кириллицы 4 068 000
+        # и 300 000 000: называется большее, потому что оно и есть предмет.
+        latest = max(
+            dated, key=lambda item: (item.moment, item.amount or Decimal(0))
+        )
         text = f"{latest.kind.lower()} {latest.moment:%d.%m.%Y}, {latest.status.lower()}"
         if latest.amount is not None:
-            text += f", не исполнено {money(latest.amount)}"
+            # **Единица называется.** Величина события приходит в рублях,
+            # а не в единице комплекта, и число без единицы читатель прочтёт
+            # в той, которую предположит сам.
+            text += f", не исполнено {money(latest.amount)} руб."
         return text
     maturity = getattr(issue, "maturity", None)
     if maturity is not None:
