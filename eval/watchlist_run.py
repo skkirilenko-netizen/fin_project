@@ -172,7 +172,11 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     for item in rows:
         for name in item["subgroups"][:1]:
             summary[f"— {name}"] += 1
-    summary["исключено поглощённых"] = counts["исключено поглощённых"]
+    # **Число вышедших из списка печатается всегда**, и рядом — число тех,
+    # у кого статус не подтверждён: список, уменьшившийся без записи, врёт
+    # о себе сам.
+    summary["вышло из списка"] = counts["вышло из списка"]
+    summary["статус не подтверждён"] = counts["статус не подтверждён"]
     # Знаменатель правила поручителя: «ноль корзин, взятых у поручителя»
     # без числа самих финансирующих структур неотличим от невыполненного.
     summary["финансирующих структур"] = counts["финансирующих структур"]
@@ -455,6 +459,48 @@ _PAGE = """<!DOCTYPE html>
 """
 
 
+def _journal(where: Path, today: date) -> None:
+    """Пишет журнал исключений: кто вышел из списка, почему и когда.
+
+    **Ни один эмитент не покидает список молча.** Журнал ведётся тем же
+    правилом, которым маршрут исключает, — `routing_store.exclusions`, —
+    и второго перечня не появляется: разойтись с ним было бы нечем замечено.
+    """
+    from finlib.scoring.routing_store import cards, exclusions
+
+    known = cards()
+    out, unconfirmed = exclusions(known, load_routing())
+    lines = [
+        f"# Журнал исключений списка наблюдения на {today:%d.%m.%Y}\n",
+        "**Ни один эмитент не покидает список молча.** Выход объявляется "
+        "причиной, датой и преемником; неподтверждённое — не выход, а очередь "
+        "«установить статус эмитента».\n",
+        "**Поле поглощения выходом не является**: оно названо у источника "
+        "«Компания, оставшаяся после слияния/поглощения» и заполнено у живых "
+        "тоже — у Ростелекома, МегаФона, Норникеля. Прочитанное как "
+        "«поглощён», оно вывело из списка 24 живых эмитента 22.09.2026. "
+        "Решает статус карточки, а поле лишь называет преемника.\n",
+        f"Карточек справочника — {len(known)}. Вышли из списка — "
+        f"**{len(out)}**, статус не подтверждён у **{len(unconfirmed)}**.\n",
+        "## Вышли из списка\n",
+        "| Эмитент | ИНН | Причина | Преемник | Карточка обновлена |",
+        "|---|---|---|---|---|",
+    ]
+    for item in sorted(out.values(), key=lambda entry: entry.name):
+        lines.append(
+            f"| {item.name} | {item.inn} | {item.reason} | {item.successor} "
+            f"| {item.updated or 'не указана'} |"
+        )
+    lines.append("\n## Статус не подтверждён: остались в очереди статуса\n")
+    lines.append("| Эмитент | ИНН | Что говорит карточка |")
+    lines.append("|---|---|---|")
+    for inn, reason in sorted(
+        unconfirmed.items(), key=lambda pair: str(known[pair[0]].get("name_rus"))
+    ):
+        lines.append(f"| {known[inn].get('name_rus')} | {inn} | {reason} |")
+    where.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     """Собирает файл списка наблюдения; 1 — если эмитентов не нашлось."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
@@ -472,6 +518,7 @@ def main() -> int:
         return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(rows, summary, load_routing(), today), encoding="utf-8")
+    _journal(out.with_name(f"watchlist_exclusions_{today:%Y-%m-%d}.md"), today)
     print(f"{out}: эмитентов {len(rows)}")
     for name, count in summary.items():
         print(f"  {name}: {count}")

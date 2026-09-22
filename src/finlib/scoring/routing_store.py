@@ -160,15 +160,69 @@ def cards() -> dict[str, dict]:
     return json.loads(CARDS.read_text(encoding="utf-8"))
 
 
-def absorbed(known: dict[str, dict], routing: RoutingPolicy) -> dict[str, str]:
-    """ИНН поглощённых эмитентов и идентификатор преемника у каждого."""
-    if not routing.universe.exclude_absorbed:
-        return {}
-    return {
-        inn: str(card.get("emitents_id_absorption"))
-        for inn, card in known.items()
-        if str(card.get("emitents_id_absorption") or "0") != "0"
-    }
+@dataclass(frozen=True, slots=True)
+class Exclusion:
+    """Запись журнала исключений: кто вышел из списка, почему и когда.
+
+    **Список, уменьшившийся без записи, врёт о себе сам.** Поэтому выход
+    называет причину, дату и преемника, а дата называется тем, чем является:
+    у карточки есть только дата обновления, и днём поглощения она не является.
+    """
+
+    inn: str
+    name: str
+    reason: str
+    updated: str
+    successor: str
+
+
+def exclusions(
+    known: dict[str, dict], routing: RoutingPolicy
+) -> tuple[dict[str, Exclusion], dict[str, str]]:
+    """Кто выходит из списка и кто идёт в очередь статуса.
+
+    **Основание выхода — статус, а не поле поглощения.** Поле названо
+    у источника «Компания, оставшаяся после слияния/поглощения» и заполнено
+    у живых тоже: прочитанное как «поглощён», оно вывело из списка 24 живых
+    эмитента. Выходит ликвидированный эмитент, **преемник которого известен**;
+    ликвидированный без известного преемника не выходит, а идёт в очередь
+    статуса — о нём нечего сказать, и это не то же, что «его нет».
+    """
+    universe = routing.universe
+    by_id = {str(card.get("id")): card for card in known.values()}
+    out: dict[str, Exclusion] = {}
+    unconfirmed: dict[str, str] = {}
+    for inn, card in known.items():
+        status = str(card.get("emitent_statuses_id") or "")
+        if not universe.known_status(status):
+            unconfirmed[inn] = universe.status_of(status)
+            continue
+        if status not in universe.exclude_statuses:
+            continue
+        # Ноль и пустота в поле преемника означают одно: преемник не назван.
+        target = str(card.get("emitents_id_absorption") or "").strip()
+        if target in ("", "0", "None"):
+            target = ""
+        successor = by_id.get(target)
+        if universe.require_successor and successor is None:
+            unconfirmed[inn] = (
+                f"{universe.status_of(status)}, преемник не назван"
+                if not target
+                else f"{universe.status_of(status)}, преемника {target} нет в справочнике"
+            )
+            continue
+        out[inn] = Exclusion(
+            inn=inn,
+            name=str(card.get("name_rus") or inn),
+            reason=universe.status_of(status),
+            updated=str(card.get("updating_date") or "")[:10],
+            successor=(
+                f"{successor.get('name_rus')} (ИНН {successor.get('emitent_inn')})"
+                if successor is not None
+                else "не назван"
+            ),
+        )
+    return out, unconfirmed
 
 
 def value_of(computed: tuple[MetricValue, ...], code: str) -> Decimal | None:
@@ -205,7 +259,7 @@ def routing_rows(
     routing = load_routing()
     types = load_issuer_types()
     known = cards()
-    skip = absorbed(known, routing)
+    skip, unconfirmed = exclusions(known, routing)
     spv = {
         inn for inn, card in known.items() if str(card.get("emitent_spv")) == "1"
     }
@@ -252,7 +306,10 @@ def routing_rows(
     systemic = _top_share(volumes, routing.systemic.top_share)
     counts = {
         "эмитентов": 0,
-        "исключено поглощённых": 0,
+        # **Число вышедших печатается всегда.** Список, уменьшившийся без
+        # записи, врёт о себе сам, а «ноль вышедших» — сведение, а не пустота.
+        "вышло из списка": 0,
+        "статус не подтверждён": 0,
         "карточек": len(known),
         "с раскрытым объёмом долга": len(volumes),
         "системно значимых": len(systemic),
@@ -261,13 +318,16 @@ def routing_rows(
     for row in fetch_all(_LATEST, {}, conn=conn):
         inn, moment = row["inn"], row["report_date"]
         if inn in skip:
-            counts["исключено поглощённых"] += 1
+            counts["вышло из списка"] += 1
             logger.info(
-                "%s исключён: карточка объявляет поглощение (преемник %s)",
+                "%s вышел из списка: %s, преемник %s (карточка обновлена %s)",
                 inn,
-                skip[inn],
+                skip[inn].reason,
+                skip[inn].successor,
+                skip[inn].updated,
             )
             continue
+        counts["статус не подтверждён"] += int(inn in unconfirmed)
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
         events = events_of(inn, snapshot, credit, order, defaults)
@@ -323,6 +383,7 @@ def routing_rows(
             policy=policy,
             refinance=refinance,
             systemic_volume=systemic.get(inn),
+            status_unconfirmed=unconfirmed.get(inn, ""),
             risk_sector=tuple(
                 replace(risky[item.isin], name=item.name)
                 for item in events.issues

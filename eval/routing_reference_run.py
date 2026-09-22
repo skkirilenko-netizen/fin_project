@@ -44,8 +44,8 @@ def main() -> int:
 
     print("# Эталон списка наблюдения: уровень проекта\n")
     print(
-        f"Эмитентов в списке {counts['эмитентов']}, исключено поглощённых "
-        f"{counts['исключено поглощённых']}, карточек справочника "
+        f"Эмитентов в списке {counts['эмитентов']}, вышло из списка "
+        f"{counts['вышло из списка']}, карточек справочника "
         f"{counts['карточек']}.\n"
     )
     divergences: list[str] = []
@@ -70,6 +70,10 @@ def main() -> int:
                 continue
             if row is None:
                 divergences.append(f"{code}: {inn} в списке нет, проверить нечем")
+                continue
+            if expect == "present":
+                # Дальше проверять нечего: ожидание было именно о присутствии,
+                # и оно уже выполнено — строка в списке есть.
                 continue
             if expect == "review" and row.verdict.basket != "review":
                 divergences.append(
