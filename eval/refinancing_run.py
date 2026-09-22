@@ -33,6 +33,7 @@ import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -55,6 +56,24 @@ BANDS: tuple[tuple[str, Decimal | None], ...] = (
     ("1–2", Decimal(2)),
     ("более 2", None),
 )
+
+
+class Measured(NamedTuple):
+    """Посчитанный эмитент: величины названы полями, а не местами.
+
+    **Позиционный кортеж однажды разъезжается.** В этом проекте это уже
+    случалось — зрелость порогов легла в перечень погашенных, — и здесь цена
+    та же: перепутанные местами отношение и величина дадут правдоподобную
+    таблицу с неверными числами.
+    """
+
+    name: str
+    basket: str
+    scheduled: Decimal
+    offered: Decimal
+    cash: Decimal
+    share: Decimal
+    unit: str
 
 
 def band(share: Decimal) -> str:
@@ -85,7 +104,7 @@ def main() -> int:
         "по двум наблюдениям она мерила бы размер набора.\n"
     )
 
-    measured: list[tuple[str, str, Decimal, Decimal, Decimal, str]] = []
+    measured: list[Measured] = []
     dry: list[tuple[str, str, Decimal, str]] = []
     no_issues = no_schedule = no_cash = no_unit = no_offers = 0
     for item in rows:
@@ -119,14 +138,17 @@ def main() -> int:
                 dry.append((item.name, item.verdict.basket_name, due,
                             units.name_of(item.unit_code)))
             continue
+        # Денежные средства несутся величиной, а не восстанавливаются делением
+        # обратно из отношения: одна величина — один код, считающий её.
         measured.append(
-            (
-                item.name,
-                item.verdict.basket_name,
-                due,
-                offered,
-                due / money_on_hand,
-                units.name_of(item.unit_code),
+            Measured(
+                name=item.name,
+                basket=item.verdict.basket_name,
+                scheduled=due,
+                offered=offered,
+                cash=money_on_hand,
+                share=due / money_on_hand,
+                unit=units.name_of(item.unit_code),
             )
         )
 
@@ -157,9 +179,9 @@ def main() -> int:
     )
     print("|---" * (len(baskets) + 2) + "|")
     for name, _ in BANDS:
-        rows_here = [entry for entry in measured if band(entry[4]) == name]
+        rows_here = [entry for entry in measured if band(entry.share) == name]
         counted = " | ".join(
-            str(sum(1 for entry in rows_here if entry[1] == basket))
+            str(sum(1 for entry in rows_here if entry.basket == basket))
             for basket in baskets
         )
         print(f"| {name} | {len(rows_here)} | {counted} |")
@@ -168,8 +190,12 @@ def main() -> int:
     # не видит, и ценность порога измеряется этим перечнем, а не числом
     # эмитентов с высоким отношением.
     unseen = sorted(
-        (entry for entry in measured if entry[1] == "Без внимания" and entry[4] > 1),
-        key=lambda entry: entry[4],
+        (
+            entry
+            for entry in measured
+            if entry.basket == "Без внимания" and entry.share > 1
+        ),
+        key=lambda entry: entry.share,
         reverse=True,
     )
     print(
@@ -181,10 +207,10 @@ def main() -> int:
     if unseen:
         print("| Эмитент | Платежи 12 мес. | Денежные средства | Отношение | Единица |")
         print("|---|---|---|---|---|")
-        for name, _, due, _, share, unit in unseen:
+        for entry in unseen:
             print(
-                f"| {name} | {money(due)} | {money(due / share)} "
-                f"| {ratio(share)} | {unit} |"
+                f"| {entry.name} | {money(entry.scheduled)} | {money(entry.cash)} "
+                f"| {ratio(entry.share)} | {entry.unit} |"
             )
 
     if dry:
@@ -208,13 +234,11 @@ def main() -> int:
         "| Отношение | Единица |"
     )
     print("|---|---|---|---|---|---|---|")
-    for name, basket, due, offered, share, unit in sorted(
-        measured, key=lambda entry: entry[4], reverse=True
-    )[:20]:
-        on_hand = due / share if share else Decimal(0)
+    for entry in sorted(measured, key=lambda item: item.share, reverse=True)[:20]:
         print(
-            f"| {name} | {basket} | {money(due)} | {money(offered)} "
-            f"| {money(on_hand)} | {ratio(share)} | {unit} |"
+            f"| {entry.name} | {entry.basket} | {money(entry.scheduled)} "
+            f"| {money(entry.offered)} | {money(entry.cash)} "
+            f"| {ratio(entry.share)} | {entry.unit} |"
         )
     return 0
 
