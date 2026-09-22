@@ -49,8 +49,11 @@ ifrs-reference:  ## Эталонные величины по настоящим 
 events:  ## Событийный слой: дефолты, рейтинги, рефинансирование (только чтение)
 	uv run python eval/events_run.py $(ARGS)
 
-emissions-fetch:  ## Забрать выпуски по всем эмитентам справочника (481 запрос)
+emissions-fetch:  ## Забрать выпуски по всем эмитентам справочника (977 запросов)
 	uv run python scripts/emissions_fetch.py $(ARGS)
+
+okved-fetch:  ## Основной вид деятельности эмитентов из ГИР БО: правило холдинга
+	uv run python scripts/okved_fetch.py $(ARGS)
 
 routing-reference:  ## Эталон списка наблюдения, уровень проекта: расхождение — остановка
 	uv run python eval/routing_reference_run.py $(ARGS)
@@ -60,6 +63,9 @@ watchlist:  ## Собрать список наблюдения в data/output/w
 
 watchlist-coverage:  ## Охват списка: кого он видит и кого не видит по построению
 	uv run python eval/watchlist_coverage_run.py $(ARGS)
+
+event-measure:  ## Календарь событий и замер маршрута без событийного правила
+	uv run python eval/event_measure_run.py $(ARGS)
 
 ratings-snapshot:  ## Снимок рейтингов на сегодня (ежедневно; один запрос на эмитента)
 	uv run python scripts/ratings_snapshot.py $(ARGS)

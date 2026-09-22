@@ -201,8 +201,14 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 f"«{', '.join(wrong)}», а комплект составлен в «{item['unit']}»"
             )
     logger.info("единица сверена у строк: %d, расхождений 0", checked)
-    summary = Counter(item["basket_name"] for item in rows)
-    for item in rows:
+    # **Сводные доли считаются по эмитентам с долгом в обращении.** Маршрут
+    # спрашивает, нужен ли человек, а нужен он там, где есть долг: эмитент,
+    # долг которого погашен, из списка не исчезает, но доли корзин мерили бы
+    # по нему состав списка, а не охват рынка. Число таких строк стоит рядом
+    # отдельной графой — молчание о них читалось бы как «их нет».
+    with_bonds = [item for item in rows if item["bonds"]]
+    summary = Counter(item["basket_name"] for item in with_bonds)
+    for item in with_bonds:
         for name in item["subgroups"][:1]:
             summary[f"— {name}"] += 1
     # **Число вышедших из списка печатается всегда**, и рядом — число тех,
@@ -397,11 +403,21 @@ def _row_html(item: dict) -> str:
         if item["assessed"]
         else ""
     )
+    # **Строка без выпусков в обращении помечена и отделена.** В сводные доли
+    # она не идёт: маршрут спрашивает, нужен ли человек, а нужен он там,
+    # где есть долг. Из списка она не исчезает — отчётность у нас есть,
+    # и молчание о ней читалось бы как «такого эмитента нет».
+    idle = (
+        ""
+        if item["bonds"]
+        else '<span class="idle">без выпусков в обращении</span>'
+    )
     return (
         f'<tr data-basket="{html.escape(item["basket"])}" '
         f'data-group="{html.escape(subgroup)}" '
+        f'data-bonds="{"1" if item["bonds"] else "0"}" '
         f'data-name="{html.escape(item["name"].lower())}">'
-        f'<td class="nm">{html.escape(item["name"])} {assessed}</td>'
+        f'<td class="nm">{html.escape(item["name"])} {assessed} {idle}</td>'
         f'<td class="inn">{html.escape(item["inn"])}</td>'
         f'<td class="bk b-{html.escape(item["basket"])}">'
         f'{html.escape(item["basket_name"])}</td>'
@@ -482,7 +498,7 @@ _PAGE = """<!DOCTYPE html>
   .vs {{ min-width: 220px; }}
   .fr {{ white-space: nowrap; }}
   .stale {{ color: var(--review); }}
-  .cls {{
+  .cls, .idle {{
     font-size: 11px; color: var(--mut); border: 1px solid var(--line);
     border-radius: 6px; padding: 1px 5px; white-space: nowrap;
   }}
@@ -505,6 +521,11 @@ _PAGE = """<!DOCTYPE html>
   <div class="bar">
     <select id="basket"><option value="">все корзины</option>{options}</select>
     <select id="group"><option value="">все подгруппы</option>{groups}</select>
+    <select id="bonds">
+      <option value="1">с выпусками в обращении</option>
+      <option value="">и с выпусками, и без</option>
+      <option value="0">только без выпусков в обращении</option>
+    </select>
     <input id="search" type="search" placeholder="поиск по наименованию"
            autocomplete="off">
     <span id="shown" class="cap"></span>
@@ -530,13 +551,19 @@ _PAGE = """<!DOCTYPE html>
   const group = document.getElementById('group');
   const search = document.getElementById('search');
   const shown = document.getElementById('shown');
+  // **Отбор по долгу стоит первым и по умолчанию показывает эмитентов
+  // с выпусками в обращении.** Сводные доли считаются по ним же: строка
+  // без долга из списка не исчезает, но маршрут спрашивает, нужен ли человек,
+  // а нужен он там, где есть долг.
+  const bonds = document.getElementById('bonds');
   function apply() {{
-    const b = basket.value, g = group.value;
+    const b = basket.value, g = group.value, d = bonds.value;
     const q = search.value.trim().toLowerCase();
     let visible = 0;
     for (const row of rows) {{
       const ok = (!b || row.dataset.basket === b)
         && (!g || row.dataset.group === g)
+        && (!d || row.dataset.bonds === d)
         && (!q || row.dataset.name.includes(q));
       row.hidden = !ok;
       if (ok) visible++;
@@ -545,6 +572,7 @@ _PAGE = """<!DOCTYPE html>
   }}
   basket.addEventListener('change', apply);
   group.addEventListener('change', apply);
+  bonds.addEventListener('change', apply);
   search.addEventListener('input', apply);
   apply();
 </script>
