@@ -76,6 +76,20 @@ def main() -> int:
                     f"{code}: {row.name} ({inn}) в «{row.verdict.basket_name}», "
                     "а ожидался разбор"
                 )
+            if expect == "attention":
+                # Корзина и основание проверяются вместе: внимание, полученное
+                # по другой причине, о правиле давности не говорит ничего.
+                if row.verdict.basket != "attention":
+                    divergences.append(
+                        f"{code}: {row.name} ({inn}) в «{row.verdict.basket_name}», "
+                        "а ожидалось внимание"
+                    )
+                fired = {entry.ground for entry in row.verdict.findings}
+                if item["ground"] not in fired:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) основание "
+                        f"{item['ground']} не сработало"
+                    )
             if expect == "not_clear" and row.verdict.basket == "clear":
                 divergences.append(
                     f"{code}: {row.name} ({inn}) в «Без внимания», "
