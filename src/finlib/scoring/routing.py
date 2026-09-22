@@ -1038,6 +1038,11 @@ def _where_of(events: object, issue: object) -> str:
             # в той, которую предположит сам.
             text += f", не исполнено {money(latest.amount)} руб."
         return text
+    # **«Перечня нет» и «события не датированы» — разные сведения.** Первое
+    # о нашей доставке, второе об источнике, и путать их значило бы выдать
+    # недошедшие данные за свойство источника.
+    if not getattr(events, "records_known", False):
+        return "перечня событий дефолта на диске нет"
     maturity = getattr(issue, "maturity", None)
     if maturity is not None:
         return f"погашение {maturity:%d.%m.%Y}, события источник не датирует"

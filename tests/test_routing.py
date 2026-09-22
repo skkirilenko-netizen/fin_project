@@ -394,7 +394,10 @@ def test_default_on_an_issue_is_a_review_ground() -> None:
     )
     assert verdict.basket == "review"
     assert verdict.grounds == ("emission_default",)
-    assert "22.08.2026" in verdict.details[0]
+    # **Перечня событий у этого эмитента на диске нет, и строка говорит именно
+    # это.** «Погашение 22.08.2026» было бы сведением об источнике, тогда как
+    # дело в недошедшей доставке.
+    assert "перечня событий дефолта на диске нет" in verdict.details[0]
 
 
 def test_settled_default_is_not_a_current_circumstance() -> None:
