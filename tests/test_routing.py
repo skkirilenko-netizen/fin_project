@@ -225,3 +225,73 @@ def test_approval_and_maturity_are_declared_with_their_reasons() -> None:
     raw["thresholds"] = "preliminary"
     with pytest.raises(ValueError, match="почему"):
         RoutingPolicy.model_validate(raw)
+
+
+def test_bound_is_not_a_substitute_for_the_missing_metric() -> None:
+    """Оценка сверху заменой не считается: не рассчитан — не ниже внимания.
+
+    Правило «ниже порога — критерий пройден доказуемо» верно арифметически,
+    но давало «без внимания» там, где долговая нагрузка не рассчитана:
+    у восьми эмитентов набора решение принималось по величине, которой нет.
+    Оценка сверху при этом остаётся сведением и печатается рядом.
+    """
+    computed = (
+        metric("net_debt_op_profit", "3.3", "Чистый долг / EBITDA, оценка сверху"),
+        metric("equity_ratio", "0.6"),
+        metric("cur_liq", "2.5"),
+    )
+    basket, grounds = routed(computed=computed)
+    assert basket == "attention"
+    assert grounds == ("data_insufficient",)
+
+
+def test_non_positive_ebitda_is_its_own_ground() -> None:
+    """Неположительная EBITDA не делает долговую нагрузку хорошей.
+
+    Отношение чистого долга к неположительной EBITDA отрицательно, и шкала
+    читает его как низкую нагрузку: эмитент с убытком оставался бы без
+    внимания. Знак объявлен своим основанием, и величина отношения своего
+    основания уже не даёт — обстоятельство одно.
+    """
+    computed = (
+        metric("net_debt_ebitda", "-2.0", "Чистый долг / EBITDA"),
+        metric("ebitda", "-500", "EBITDA"),
+        metric("equity_ratio", "0.6"),
+        metric("cur_liq", "2.5"),
+    )
+    basket, grounds = routed(computed=computed)
+    assert basket == "attention"
+    assert grounds == ("negative_ebitda",)
+
+
+def test_two_cycles_without_reporting_open_their_own_queue() -> None:
+    """Давность старше двух циклов раскрытия уводит из корзин тяжести.
+
+    По числам такой давности маршрут не строится: они описывают организацию,
+    которой могло не стать, и вопрос к ней другой — о статусе. Очередь
+    старше любого основания тяжести, в том числе стоп-фактора.
+    """
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_equity",),
+        latest_annual=date(2022, 12, 31),
+        today=date(2026, 9, 22),
+    )
+    assert verdict.basket == "status_unknown"
+    assert verdict.grounds == ("reporting_two_cycles_old",)
+    # Обстоятельство тяжести при этом не исчезает: человек, которому комплект
+    # передают, обязан видеть и его.
+    assert any(item.ground == "stop_factor_severe" for item in verdict.findings)
+
+
+def test_one_cycle_behind_stays_in_the_severity_baskets() -> None:
+    """Один пропущенный цикл очередь статуса не открывает."""
+    verdict = route(
+        healthy(),
+        quarantined=False,
+        latest_annual=date(2024, 12, 31),
+        today=date(2026, 9, 22),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("disclosure_overdue",)

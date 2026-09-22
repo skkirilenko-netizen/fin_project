@@ -21,159 +21,55 @@
 """
 
 import html
-import json
 import logging
 import sys
 from collections import Counter
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from finlib.db import connection, fetch_all  # noqa: E402
-from finlib.metrics.ifrs_store import compute_from_facts  # noqa: E402
+from finlib.db import connection  # noqa: E402
 from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
-from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
 from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
-from finlib.scoring.ifrs_store import stop_factors_of  # noqa: E402
-from finlib.scoring.routing import ROUTING_METRICS, load_routing, route  # noqa: E402
+from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Те же выборки, что у замера распределения: страница и замер обязаны
-# показывать одно, иначе «в списке иначе, чем в отчёте» станет нормой.
-_LATEST = """
-SELECT f.inn, max(f.report_date) AS report_date, max(o.name) AS name
-FROM fact_report f
-JOIN src_file s ON s.id = f.src_file_id
-LEFT JOIN organization o ON o.inn = f.inn
-WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
-GROUP BY f.inn
-"""
-
-# **Выборка называет стандарт, и это не формальность.** Те же коды проверок
-# нуля пишет доставка РСБУ, и без стандарта запись о комплекте РСБУ отправляла
-# бы в разбор эмитента по его комплекту МСФО — ровно то смешение, о котором
-# правило: всякая выборка по ИНН обязана называть стандарт. Поймано числами:
-# после загрузки РСБУ корзина разбора выросла на двух эмитентов.
-_ZERO_FAILED = """
-SELECT DISTINCT d.inn, s.report_year
-FROM dq_log d JOIN src_file s ON s.id = d.src_file_id
-WHERE d.status = 'fail' AND s.standard = 'ifrs' AND d.check_code IN (
-    'cbonds_identity_mismatch', 'cbonds_sections_mismatch', 'cbonds_zero_total'
-)
-"""
-
-_OPERATING_PROFIT = """
-SELECT f.value FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND f.line_code = 'ifrs.operating_profit' AND s.is_actual
-  AND s.status <> 'quarantine'
-ORDER BY source_rank(s.source)
-LIMIT 1
-"""
-
-# Способ получения и единица измерения: оба — свойства комплекта, а не
-# организации, и у одного периода комплектов бывает два. **Единица называется
-# на странице**: абсолютные величины в основаниях печатаются без неё, и без
-# объявления читатель прочтёт их в единице, которую предположит сам.
-_SOURCES = """
-SELECT DISTINCT source, unit_code FROM src_file
-WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
-  AND status <> 'quarantine' AND report_year = %(year)s
-"""
-
-_ASSESSED = """
-SELECT a.inn, a.class_code, a.report_date
-FROM assessment a
-WHERE a.standard = 'ifrs' AND a.class_code IS NOT NULL
-  AND EXISTS (
-      SELECT 1 FROM src_file s
-      WHERE s.inn = a.inn AND s.standard = 'ifrs' AND s.source <> 'cbonds'
-        AND s.report_year = EXTRACT(YEAR FROM a.report_date)::int
-  )
-ORDER BY a.inn, a.report_date DESC
-"""
-
-SOURCE_NAMES = {"file": "PDF", "gir_bo": "ГИР БО", "cbonds": "Cbonds"}
-
-
-def spv_issuers() -> set[str]:
-    """ИНН с признаком финансирующей структуры из справочника эмитентов."""
-    cards = Path("data/raw/cbonds/emitents.json")
-    if not cards.exists():
-        return set()
-    found = json.loads(cards.read_text(encoding="utf-8"))
-    return {inn for inn, card in found.items() if str(card.get("emitent_spv")) == "1"}
-
-
 def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
-    """Строки списка наблюдения и сводка по корзинам и подгруппам."""
-    policy = load_ifrs_metrics()
+    """Строки списка наблюдения и сводка по корзинам и подгруппам.
+
+    Входы и вердикт берёт `scoring.routing_store.routing_rows` — одно место
+    на список и на замер распределения: прежде оба собирали величины сами,
+    и расхождение «в списке иначе, чем в отчёте» увидеть было бы нечем.
+    """
     routing = load_routing()
-    types = load_issuer_types()
-    view = IfrsMetricsView(policy)
+    view = IfrsMetricsView(load_ifrs_metrics())
+    units = load_lines().units
     report_policy = load_policy()
-    spv = spv_issuers()
-    assessed: dict[str, str] = {}
-    for row in fetch_all(_ASSESSED, {}, conn=conn):
-        assessed.setdefault(row["inn"], row["class_code"])
-    quarantined = {
-        (row["inn"], row["report_year"]) for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
-    }
+    found, counts = routing_rows(conn, today)
 
     rows: list[dict] = []
-    for row in fetch_all(_LATEST, {}, conn=conn):
-        inn, moment = row["inn"], row["report_date"]
-        computed = compute_from_facts(inn, moment, conn, policy)
-        profit = fetch_all(_OPERATING_PROFIT, {"inn": inn, "d": moment}, conn=conn)
-        stops = stop_factors_of(inn, moment, computed, conn)
-        verdict = route(
-            computed,
-            quarantined=(inn, moment.year) in quarantined,
-            stop_factors=stops.triggered,
-            financing_structure=inn in spv,
-            operating_profit=Decimal(profit[0]["value"]) if profit else None,
-            latest_annual=moment,
-            assessed_class=assessed.get(inn),
-            today=today,
-            policy=policy,
-            routing=routing,
-            types=types,
-        )
+    for item in found:
+        verdict = item.verdict
         basket = routing.basket(verdict.basket)
-        ground_names = {item.code: item.name for item in basket.grounds}
-        delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
-        sources = [
-            SOURCE_NAMES.get(item["source"], item["source"]) for item in delivered
-        ]
-        units = load_lines().units
-        unit = ", ".join(
-            sorted(
-                {
-                    units.name_of(item["unit_code"])
-                    for item in delivered
-                    if item["unit_code"]
-                }
-            )
+        ground_names = {entry.code: entry.name for entry in basket.grounds}
+        months = months_between(item.report_date, today)
+        unit = units.name_of(item.unit_code) if item.unit_code else ""
+        # **Давность видна всегда.** Более сильное основание её не гасит:
+        # признак берётся у вердикта, а не у корзины, и печатается в своей
+        # графе даже тогда, когда корзину назвало другое основание.
+        overdue = any(
+            entry.ground in ("disclosure_overdue", "reporting_two_cycles_old")
+            for entry in verdict.findings
         )
-        months = months_between(moment, today)
-        values = []
-        for code in ROUTING_METRICS:
-            item = next(
-                (entry for entry in computed if entry.code == code and entry.calculable),
-                None,
-            )
-            if item is None:
-                continue
-            values.append((item.name, view.shown(code, item.value)))
         rows.append(
             {
-                "name": (row["name"] or inn).strip(),
-                "inn": inn,
+                "name": item.name,
+                "inn": item.inn,
                 "basket": verdict.basket,
                 "basket_name": verdict.basket_name,
                 "order": basket.order,
@@ -185,20 +81,33 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                     {
                         "name": ground_names.get(ground, ground),
                         "details": [
-                            item.text
-                            for item in verdict.findings
-                            if item.ground == ground
+                            entry.text
+                            for entry in verdict.findings
+                            if entry.ground == ground
                         ],
                     }
                     for ground in verdict.grounds
                 ],
-                "values": values,
-                "sources": sorted(set(sources)),
+                # **Чистый долг и EBITDA называются порознь.** Отрицательное
+                # отношение означает либо чистую денежную позицию, либо убыток,
+                # и по одному отношению их не различить.
+                # Единица — комплекта, а не стандарта: консолидированная
+                # отчётность составляется в миллионах, и «тыс. руб.» у неё —
+                # ошибка в тысячу раз, которую не ловит ни один контроль.
+                "values": [
+                    (
+                        view.require(code).name,
+                        view.shown(code, value, money=unit or None),
+                    )
+                    for code, value in item.values.items()
+                ],
+                "sources": list(item.sources),
                 "unit": unit,
-                "report_date": f"{moment:%d.%m.%Y}",
+                "report_date": f"{item.report_date:%d.%m.%Y}",
                 "months": months,
-                "stale": months > report_policy.freshness.max_months,
-                "assessed": assessed.get(inn, ""),
+                "stale": report_policy.freshness.stale(months),
+                "overdue": overdue,
+                "assessed": item.assessed_class,
             }
         )
     rows.sort(key=lambda item: (item["order"], item["name"].lower()))
@@ -206,6 +115,7 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     for item in rows:
         for name in item["subgroups"][:1]:
             summary[f"— {name}"] += 1
+    summary["исключено поглощённых"] = counts["исключено поглощённых"]
     return rows, dict(summary)
 
 

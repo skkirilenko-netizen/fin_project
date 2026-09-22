@@ -46,6 +46,15 @@ ifrs-regression:  ## Прогон набора МСФО без модели: mak
 ifrs-reference:  ## Эталонные величины по настоящим документам: расхождение — остановка
 	uv run python eval/ifrs_reference_run.py $(ARGS)
 
+routing-reference:  ## Эталон списка наблюдения, уровень проекта: расхождение — остановка
+	uv run python eval/routing_reference_run.py $(ARGS)
+
+watchlist:  ## Собрать список наблюдения в data/output/watchlist_<дата>.html
+	uv run python eval/watchlist_run.py $(ARGS)
+
+ratings-snapshot:  ## Снимок рейтингов на сегодня (ежедневно; один запрос на эмитента)
+	uv run python scripts/ratings_snapshot.py $(ARGS)
+
 ifrs-scale:  ## Масштаб разметки: сколько работы одного эмитента достаётся другим
 	uv run python eval/ifrs_markup_scale.py
 

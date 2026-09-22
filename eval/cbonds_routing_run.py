@@ -17,18 +17,16 @@ import logging
 import sys
 from collections import Counter, defaultdict
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
-from finlib.metrics.ifrs_store import compute_from_facts  # noqa: E402
 from finlib.normalize.cbonds_mapping import load_cbonds_mapping  # noqa: E402
 from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
-from finlib.scoring.ifrs_store import stop_factors_of  # noqa: E402
-from finlib.scoring.routing import load_routing, route  # noqa: E402
+from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,59 +40,9 @@ KNOWN = {
     "7826087713": "О'КЕЙ",
 }
 
-_LATEST = """
-SELECT f.inn, max(f.report_date) AS report_date,
-       max(o.name) AS name,
-       bool_or(s.status = 'quarantine') AS has_quarantine
-FROM fact_report f
-JOIN src_file s ON s.id = f.src_file_id
-LEFT JOIN organization o ON o.inn = f.inn
-WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
-GROUP BY f.inn
-"""
 
-# **Основание называется «провал проверки нуля», и считать надо его, а не
-# карантин вообще.** Комплект уходит в карантин и по другим причинам —
-# неопознанная позиция, потерянная страница, — и у О'КЕЙ, Автодора и Самолёта
-# признак, взятый по карантину, отправлял в разбор эмитентов, у которых
-# проверки нуля как раз сошлись. Графа считает то, как называется.
-# **Выборка называет стандарт, и это не формальность.** Те же коды проверок
-# нуля пишет доставка РСБУ, и без стандарта запись о комплекте РСБУ отправляла
-# бы в разбор эмитента по его комплекту МСФО — ровно то смешение, о котором
-# правило: всякая выборка по ИНН обязана называть стандарт. Поймано числами:
-# после загрузки РСБУ корзина разбора выросла на двух эмитентов.
-_ZERO_FAILED = """
-SELECT DISTINCT d.inn, s.report_year
-FROM dq_log d JOIN src_file s ON s.id = d.src_file_id
-WHERE d.status = 'fail' AND s.standard = 'ifrs' AND d.check_code IN (
-    'cbonds_identity_mismatch', 'cbonds_sections_mismatch', 'cbonds_zero_total'
-)
-"""
 
-_OPERATING_PROFIT = """
-SELECT f.value FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND f.line_code = 'ifrs.operating_profit' AND s.is_actual
-  AND s.status <> 'quarantine'
-ORDER BY source_rank(s.source)
-LIMIT 1
-"""
 
-# **Оценка из базы — только по разобранному документу.** Класс, присвоенный
-# нами, опирается на состав величин самой отчётности; комплект агрегатора
-# оценки не получает вовсе, и требование к источнику здесь не формальность,
-# а то, что делает основание сильнее признака.
-_ASSESSED = """
-SELECT a.inn, a.class_code, a.report_date
-FROM assessment a
-WHERE a.standard = 'ifrs' AND a.class_code IS NOT NULL
-  AND EXISTS (
-      SELECT 1 FROM src_file s
-      WHERE s.inn = a.inn AND s.standard = 'ifrs' AND s.source <> 'cbonds'
-        AND s.report_year = EXTRACT(YEAR FROM a.report_date)::int
-  )
-ORDER BY a.inn, a.report_date DESC
-"""
 
 _WITHOUT_SET = """
 SELECT count(DISTINCT d.inn) AS issuers
@@ -159,78 +107,57 @@ def main() -> int:
 
     with connection() as conn:
         outside = fetch_all(_WITHOUT_SET, {}, conn=conn)
-        assessed: dict[str, str] = {}
-        for row in fetch_all(_ASSESSED, {}, conn=conn):
-            assessed.setdefault(row["inn"], row["class_code"])
-        quarantined = {
-            (row["inn"], row["report_year"])
-            for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
-        }
-        rows = fetch_all(_LATEST, {}, conn=conn)
-        for row in rows:
-            inn, moment = row["inn"], row["report_date"]
-            computed = compute_from_facts(inn, moment, conn, policy)
-            profit = fetch_all(_OPERATING_PROFIT, {"inn": inn, "d": moment}, conn=conn)
-            stops = stop_factors_of(inn, moment, computed, conn)
-            if stops.triggered:
-                with_factor += 1
-                for code in stops.triggered:
-                    by_factor[code] += 1
-            verdict = route(
-                computed,
-                quarantined=(inn, moment.year) in quarantined,
-                stop_factors=stops.triggered,
-                financing_structure=inn in spv,
-                operating_profit=Decimal(profit[0]["value"]) if profit else None,
-                latest_annual=moment,
-                assessed_class=assessed.get(inn),
-                today=today,
-                policy=policy,
-                routing=routing,
-                types=types,
-            )
-            baskets[verdict.basket] += 1
-            for ground in verdict.grounds:
-                grounds[verdict.basket][ground] += 1
-            if verdict.subgroup:
-                senior[verdict.basket][verdict.subgroup] += 1
-                if len(verdict.subgroups) > 1:
-                    overlap[verdict.basket][verdict.subgroup] += 1
-            # Предмет основания берётся у самого основания (`Finding.subject`),
-            # а не вытаскивается из прозы: второй разбор того же ответа
-            # разошёлся бы с первым и молча.
-            for item in verdict.findings:
-                if item.ground == "level_off_scale":
-                    off_scale[item.subject] += 1
-                    off_scale_issuers.setdefault(inn, set()).add(item.subject)
-            if "negative_nwc" in stops.triggered:
-                with_nwc.add(inn)
-            # Гашение основания стоп-фактором считается наравне
-            # со сработавшим: правило, гасящее молча, неотличимо
-            # от невыполненного.
-            for code in verdict.spoken_for:
-                silenced[code] += 1
-            if verdict.spoken_for:
-                silenced_issuers += 1
-            name = (row["name"] or inn).strip()
-            where = (
-                " [" + ", ".join(verdict.subgroup_names) + "]"
-                if verdict.subgroup_names
-                else ""
-            )
-            if len(examples[verdict.basket]) < 5:
-                examples[verdict.basket].append(
-                    f"{name} ({inn}), {moment:%d.%m.%Y}{where}: "
-                    + ("; ".join(verdict.details) or "оснований нет")
-                )
-            if inn in KNOWN:
-                known[inn] = (
-                    f"{verdict.basket_name}{where} — "
-                    + (", ".join(verdict.grounds) or "оснований нет")
-                    + (f"; {'; '.join(verdict.details)}" if verdict.details else "")
-                )
+        # **Входы маршрута собирает боевой путь** (`scoring.routing_store`):
+        # прежде замер и экран наблюдения собирали их порознь одними и теми же
+        # запросами, и расхождение между отчётом и списком увидеть было нечем.
+        rows, selection = routing_rows(conn, today)
 
-    measured = {row["inn"] for row in rows}
+    for item in rows:
+        inn, moment, verdict = item.inn, item.report_date, item.verdict
+        if item.stop_factors:
+            with_factor += 1
+            for code in item.stop_factors:
+                by_factor[code] += 1
+        baskets[verdict.basket] += 1
+        for ground in verdict.grounds:
+            grounds[verdict.basket][ground] += 1
+        if verdict.subgroup:
+            senior[verdict.basket][verdict.subgroup] += 1
+            if len(verdict.subgroups) > 1:
+                overlap[verdict.basket][verdict.subgroup] += 1
+        # Предмет основания берётся у самого основания (`Finding.subject`),
+        # а не вытаскивается из прозы: второй разбор того же ответа
+        # разошёлся бы с первым и молча.
+        for entry in verdict.findings:
+            if entry.ground == "level_off_scale":
+                off_scale[entry.subject] += 1
+                off_scale_issuers.setdefault(inn, set()).add(entry.subject)
+        if "negative_nwc" in item.stop_factors:
+            with_nwc.add(inn)
+        # Гашение основания стоп-фактором считается наравне со сработавшим:
+        # правило, гасящее молча, неотличимо от невыполненного.
+        for code in verdict.spoken_for:
+            silenced[code] += 1
+        if verdict.spoken_for:
+            silenced_issuers += 1
+        where = (
+            " [" + ", ".join(verdict.subgroup_names) + "]"
+            if verdict.subgroup_names
+            else ""
+        )
+        if len(examples[verdict.basket]) < 5:
+            examples[verdict.basket].append(
+                f"{item.name} ({inn}), {moment:%d.%m.%Y}{where}: "
+                + ("; ".join(verdict.details) or "оснований нет")
+            )
+        if inn in KNOWN:
+            known[inn] = (
+                f"{verdict.basket_name}{where} — "
+                + (", ".join(verdict.grounds) or "оснований нет")
+                + (f"; {'; '.join(verdict.details)}" if verdict.details else "")
+            )
+
+    measured = {item.inn for item in rows}
     total = sum(baskets.values())
     aside = int(outside[0]["issuers"]) if outside else 0
     print("# Маршрутизация: распределение по корзинам\n")
@@ -257,9 +184,12 @@ def main() -> int:
     )
 
     print(
-        f"Оценка по разобранному документу есть у **{len(assessed)}** эмитентов; "
+        "Оценка по разобранному документу есть у "
+        f"**{sum(1 for item in rows if item.assessed_class)}** эмитентов; "
         "класс из неё старше любого признака агрегатора и берётся тем, "
-        "который присвоен за последний оценённый период.\n"
+        "который присвоен за последний оценённый период. Поглощённых эмитентов "
+        f"исключено из списка **{selection['исключено поглощённых']}**: "
+        "их отчётность — история, и поглощение объявлено карточкой источника.\n"
     )
 
     print("| Корзина | Эмитентов | Доля |")

@@ -250,7 +250,8 @@ def _apply_aggregator_reading(
     reading = report.zero_reading
     if reading is None:
         return
-    undelivered = set(reading.lines_not_delivered)
+    catalog = load_lines()
+    kind = ReportingType(src.get("reporting_type") or "full")
     for facts in periods.values():
         if reading.as_not_disclosed:
             for (form_code, line_code), item in facts.values.items():
@@ -259,15 +260,27 @@ def _apply_aggregator_reading(
                         "величина доставлена агрегатором как ноль, а ноль у него "
                         "означает и нераскрытие: проверить сумму нельзя"
                     )
-        for line_code in undelivered:
-            # Форма строки берётся у справочника: строки нет в фактах, и форму
-            # взять оттуда нельзя, а знать её контролю нужно.
-            line = load_lines().get(line_code)
-            if line is None:
+        if not reading.missing_as_not_disclosed:
+            continue
+        # **Поля нет в доставке — то же нераскрытие.** Различить «поля нет
+        # в наборе источника» и «поле есть, а в этой строке пусто» по одной
+        # доставке нельзя, и оба случая означают одно: величины у нас нет,
+        # а подставленный вместо неё ноль сделал бы сумму заведомо меньше итога.
+        own = set(reading.not_source_lines)
+        for line in catalog.lines:
+            if line.reporting_type is not kind or line.code in own:
                 continue
-            facts.unverifiable[(line.form, line_code)] = (
-                f"строки {line_code} нет в наборе полей источника: отсутствие "
-                "её — свойство доставки, а не нераскрытие эмитентом"
+            # **Нераскрытая величина и отсутствующая — для доставки одно и то
+            # же.** Факт с пустым значением приходит от первоисточника того же
+            # периода: он говорит «не раскрыто» о своей отчётности, а о том,
+            # что доставил агрегатор, не говорит ничего. Подставленный вместо
+            # неё ноль делал бы сумму заведомо меньше итога — у 9704056704
+            # так и выходило: −113 013 против 113 013.
+            if facts.get(line.form, line.code) is not None:
+                continue
+            facts.unverifiable[(line.form, line.code)] = (
+                f"строки {line.code} в доставке агрегатора нет: величины у нас "
+                "нет, и подстановка нуля сделала бы сумму заведомо меньше итога"
             )
 
 

@@ -175,6 +175,7 @@ class Freshness(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     annual_due: str = Field(pattern=r"^\d{2}-\d{2}$")
+    status_unknown_after_cycles: int = Field(gt=0)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(min_length=1)
 
@@ -184,6 +185,36 @@ class Freshness(BaseModel):
         if today < date(today.year, month, day):
             return False
         return latest is None or latest.year < today.year - 1
+
+    def cycles_behind(self, latest: date | None, today: date) -> int | None:
+        """Сколько циклов раскрытия прошло без годовой отчётности.
+
+        Цикл — год: отчётность за истекший год публикуется к сроку `annual_due`.
+        До этого срока последняя ожидаемая отчётность — за позапрошлый год,
+        после — за прошлый. `None` означает, что годовой отчётности нет вовсе:
+        сравнивать не с чем, и это не «ноль циклов».
+        """
+        if latest is None:
+            return None
+        month, day = (int(part) for part in self.annual_due.split("-"))
+        expected = today.year - 1 if today >= date(today.year, month, day) else today.year - 2
+        return max(expected - latest.year, 0)
+
+
+class Universe(BaseModel):
+    """Состав списка: кого в нём не бывает и почему.
+
+    **Поглощённый эмитент строкой списка быть не может.** Карточка агрегатора
+    объявляет поглощение полем `emitents_id_absorption`, и его отчётность —
+    история: у «Глоракс (не сущ.)» это поле равно идентификатору живого
+    «Глоракса». Правило структурное, а не по наименованию: статусы эмитента
+    приходят кодами, справочника к ним у API нет.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    exclude_absorbed: bool
+    origin: str = Field(min_length=1)
 
 
 class RoutingPolicy(BaseModel):
@@ -201,6 +232,7 @@ class RoutingPolicy(BaseModel):
     thresholds_origin: str = ""
     origin: str = Field(min_length=1)
     same_circumstance: tuple[SameCircumstance, ...] = ()
+    universe: Universe
     severity: Severity
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
@@ -349,6 +381,22 @@ def route(
     review: list[Finding] = []
     attention: list[Finding] = []
 
+    status: list[Finding] = []
+    # **Давность видна всегда и более сильным основанием не гасится.** Если
+    # последняя годовая отчётность старше двух циклов раскрытия, маршрут
+    # по её числам не строится вовсе: они описывают организацию, которой могло
+    # не стать, и вопрос к ней другой — о статусе, а не о нагрузке.
+    cycles = routing.freshness.cycles_behind(latest_annual, today or date.today())
+    if cycles is not None and cycles >= routing.freshness.status_unknown_after_cycles:
+        status.append(
+            Finding(
+                "reporting_two_cycles_old",
+                "",
+                f"последняя годовая отчётность за {latest_annual:%Y} год, "
+                f"циклов раскрытия прошло {cycles}",
+            )
+        )
+
     if quarantined:
         review.append(
             Finding("zero_check_failed", "", "комплект в карантине по проверке нуля")
@@ -388,6 +436,22 @@ def route(
     view = IfrsMetricsView(policy)
     spoken_for = _spoken_for(stop_factors, routing, types)
     silenced: list[str] = []
+
+    # **Знак EBITDA — своё основание, и он гасит величины отношения к ней.**
+    # Отношение чистого долга к неположительной EBITDA отрицательно и читается
+    # шкалой как низкая нагрузка: у эмитента с убытком выходило бы «без
+    # внимания». Обстоятельство при этом одно, поэтому величина отношения
+    # своего основания не даёт — его даёт знак.
+    ebitda = by_code.get("ebitda")
+    if ebitda is not None and ebitda.calculable and ebitda.value <= 0:
+        attention.append(
+            Finding(
+                "negative_ebitda",
+                "ebitda",
+                f"EBITDA {view.shown('ebitda', ebitda.value)}",
+            )
+        )
+        spoken_for = spoken_for | {"net_debt_ebitda"}
     for code in ROUTING_METRICS:
         item = by_code.get(code)
         scale = policy.calibration_points.metrics.get(code)
@@ -468,7 +532,11 @@ def route(
             )
         )
 
-    found = review + attention
+    found = status + review + attention
+    if status:
+        # Очередь статуса старше корзин тяжести: по числам такой давности
+        # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
+        return _verdict(routing, "status_unknown", found, tuple(silenced))
     if review:
         return _verdict(routing, "review", found, tuple(silenced))
     return _verdict(
@@ -561,7 +629,14 @@ def _absent(by_code: dict[str, MetricValue]) -> set[str]:
     методики.
     """
     absent: set[str] = set()
-    if not _ok(by_code, "net_debt_ebitda") and not _ok(by_code, "net_debt_op_profit"):
+    # **Оценка сверху заменой не считается** (решение 22.09.2026). Правило
+    # «ниже порога — критерий пройден доказуемо» верно арифметически, но давало
+    # «без внимания» там, где долговая нагрузка не рассчитана: у восьми
+    # эмитентов набора решение принималось по величине, которой нет. Оценка
+    # сверху остаётся сведением и печатается рядом, а корзина — не ниже
+    # внимания. Замена диапазоном — другое: там величина заменена решением
+    # методики, а не пропущена.
+    if not _ok(by_code, "net_debt_ebitda"):
         absent.add("долговая нагрузка")
     if not _ok(by_code, "equity_ratio"):
         absent.add("автономия")
