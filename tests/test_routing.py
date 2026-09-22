@@ -14,7 +14,7 @@ import pytest
 
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
-from finlib.scoring.routing import RoutingPolicy, load_routing, route
+from finlib.scoring.routing import ManualFloor, RoutingPolicy, load_routing, route
 
 # Единица комплекта: довод маршрута обязательный, и умолчания у него нет
 # намеренно — «тыс. руб.» по умолчанию однажды подписало тысячами миллионы.
@@ -300,11 +300,19 @@ def test_branch_mutes_the_stop_factor_of_its_business_model() -> None:
     assert verdict.muted == ()
 
 
-def test_group_member_is_not_softer_than_attention() -> None:
-    """Если кто-то в группе в разборе, её член не мягче внимания.
+def test_group_is_a_note_and_not_a_basket_ground() -> None:
+    """Группа карточки корзины не называет, но и молчания о ней нет.
 
-    Соразмерно, а не выравниванием: корзина разбора не переносится — она
-    сказана о том эмитенте, у которого обстоятельство найдено.
+    **Поле группы отражает бенефициара, а не финансовую связь** (решение
+    22.09.2026 по проверке семи пар: Озон у «Системы» — ассоциированное
+    общество, Славнефть у «Газпрома» — совместное предприятие, ОАК в группе
+    «ИРКУT» — дочерняя вместо материнской, ПГК у НЛМК и СТМ у ТМК — общий
+    бенефициар, Монополия и ГТМ у «Globaltrans» — совпадение написаний).
+    Прежде обстоятельство поднимало члена группы до внимания — 31 эмитент.
+
+    Проверяется здесь и то и другое: корзина не меняется, а справочное
+    обстоятельство в вердикте есть. Молчание было бы третьим исходом там,
+    где объявлено два.
     """
     verdict = route(
         healthy(),
@@ -314,8 +322,9 @@ def test_group_member_is_not_softer_than_attention() -> None:
         latest_annual=date(2025, 12, 31),
         today=date(2026, 5, 1),
     )
-    assert verdict.basket == "attention"
-    assert verdict.grounds == ("group_under_review",)
+    assert verdict.basket == "clear"
+    assert verdict.grounds == ()
+    assert [entry.ground for entry in verdict.notes] == ["group_under_review"]
 
 
 def test_non_positive_ebitda_is_its_own_ground() -> None:
@@ -720,7 +729,14 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
     }
     assert {ground.code for ground in routing.reference} & in_baskets == set()
     for ground in routing.reference:
-        assert routing.say(ground.code, year="2016", years=3, issue="выпуск")
+        assert routing.say(
+            ground.code,
+            year="2016",
+            years=3,
+            issue="выпуск",
+            group="Мечел",
+            leader="Мечел",
+        )
 
 
 def test_unsettled_event_outweighs_a_later_settled_one() -> None:
@@ -1037,3 +1053,76 @@ def test_settled_events_outweigh_the_card_flag_but_are_counted() -> None:
     verdict = verdict_for(events)
     assert verdict.basket == "attention"
     assert verdict.grounds == ("default_settled_recent",)
+
+
+# --- решение человека о корзине ----------------------------------------------
+
+
+def _decision(basket: str = "attention") -> ManualFloor:
+    """Действующее решение человека о корзине."""
+    return ManualFloor(
+        basket=basket,
+        author="владелец методики",
+        reason="АКРА поставило рейтинг под наблюдение 22.04.2026",
+        decided_on=date(2026, 9, 22),
+        valid_until=date(2027, 4, 22),
+    )
+
+
+def test_a_human_decision_raises_the_floor() -> None:
+    """Решение человека держит корзину не ниже названной.
+
+    **Статуса наблюдения у источника нет вовсе**: у Русагро АКРА объявило
+    наблюдение 22.04.2026, а в карточке стоит стабильный прогноз, и вывести
+    одно из другого нельзя. Обстоятельство вносится журналом решений.
+    """
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        manual_floor=_decision(),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("manual_floor",)
+    said = [entry.text for entry in verdict.findings]
+    # Автор и срок стоят в формулировке: решение без автора читалось бы
+    # как правило, без срока — пережило бы своё основание.
+    assert "владелец методики" in said[0]
+    assert "22.04.2027" in said[0]
+
+
+def test_a_human_decision_does_not_lower_a_heavier_basket() -> None:
+    """«Не ниже» — пол, а не назначение корзины.
+
+    Решение о внимании не выводит из разбора: иначе журнал стал бы способом
+    обойти оценку, а машинные обстоятельства — отменяемыми вручную.
+    """
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        stop_factors=("negative_equity",),
+        manual_floor=_decision(),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("stop_factor_severe",)
+    # Корзину назвало машинное обстоятельство, а решение человека осталось
+    # среди оснований: потерять его значило бы скрыть, что человек смотрел.
+    assert "manual_floor" in {entry.ground for entry in verdict.findings}
+
+
+def test_a_human_decision_can_ask_for_review() -> None:
+    """Решением человека корзина бывает и разбором, если он так решил."""
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        manual_floor=_decision("review"),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "review"

@@ -536,6 +536,28 @@ class Refinance:
 
 
 @dataclass(frozen=True, slots=True)
+class ManualFloor:
+    """Решение человека о корзине: не ниже названной, с именем и сроком.
+
+    **Обстоятельство, которого машина не видит, вносит человек.** Статуса
+    наблюдения у источника нет вовсе: у Русагро АКРА объявило наблюдение
+    22.04.2026, а в карточке стоит стабильный прогноз, и одно из другого
+    не следует.
+
+    «Не ниже», а не «назначить»: решение добавляется к машинным основаниям,
+    а не отменяет их, — иначе журнал стал бы способом вывести эмитента
+    из разбора. Срок обязателен: наблюдение агентства снимается, а запись
+    о нём без срока пережила бы своё основание.
+    """
+
+    basket: str
+    author: str
+    reason: str
+    decided_on: date
+    valid_until: date
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """Одно сработавшее основание: код, предмет и текст.
 
@@ -650,6 +672,9 @@ def route(
     # Статус карточки говорит о ликвидации, а преемник не подтверждён: эмитент
     # из списка не выходит, но и величинами о нём судить нельзя.
     status_unconfirmed: str = "",
+    # Действующее решение человека о корзине: обстоятельство, которого машина
+    # не видит. Истёкшие решения сюда не доходят — их отбирает выборка журнала.
+    manual_floor: "ManualFloor | None" = None,
     # Поручитель финансирующей структуры, названный источником. Корзина его
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
@@ -678,6 +703,9 @@ def route(
     by_code = {item.code: item for item in computed}
     review: list[Finding] = []
     attention: list[Finding] = []
+    # Справочные обстоятельства: корзину не называют, но и молчать о них
+    # нельзя — молчание маршрута человек прочтёт как недосмотр.
+    notes: list[Finding] = []
 
     status: list[Finding] = []
     # **Неподтверждённый выход — не выход, а вопрос о статусе.** Прежде такой
@@ -754,9 +782,18 @@ def route(
         review.append(Finding("stop_factor_severe", code, about(code)))
     for code in capped:
         attention.append(Finding("stop_factor_capped", code, about(code)))
+    # **Группа карточки — справочное обстоятельство, а не основание корзины.**
+    # Поле источника отражает бенефициара, и проверка семи названных пар
+    # не нашла ни одной финансовой связи: ассоциированное общество (Озон
+    # у «Системы»), совместное предприятие (Славнефть у «Газпрома»), дочерняя
+    # вместо материнской (ОАК в группе «ИРКУT»), общий бенефициар (ПГК
+    # у НЛМК, СТМ у ТМК) и совпадение написаний (Монополия и ГТМ
+    # у «Globaltrans»). Признака головной компании у источника нет вовсе,
+    # поэтому распространять вниз нечего, а вверх — нечем: консолидированных
+    # активов группы у нас нет.
     if group_under_review is not None:
         whose, member = group_under_review
-        attention.append(
+        notes.append(
             Finding(
                 "group_under_review",
                 whose,
@@ -798,7 +835,6 @@ def route(
                 ),
             )
         )
-    notes: list[Finding] = []
     if events is not None:
         by_default, watched, referenced = _default_findings(
             events, routing, today or date.today()
@@ -806,7 +842,7 @@ def route(
         review.extend(by_default)
         review.extend(_rating_findings(events, routing))
         attention.extend(watched)
-        attention.extend(_rating_watch(events, routing))
+        attention.extend(_rating_outlook_adverse(events, routing))
         notes.extend(referenced)
     if financing_structure:
         # **Поручитель вне списка — не то же самое, что поручителя нет.**
@@ -1018,6 +1054,23 @@ def route(
                 ),
             )
         )
+
+    # **Решение человека — основание наравне с машинными, и последнее
+    # по очереди.** Оно добавляется к тому, что нашёл маршрут, а не заменяет
+    # найденное: «не ниже» означает пол, а не назначение корзины.
+    if manual_floor is not None:
+        told = Finding(
+            "manual_floor",
+            manual_floor.author,
+            routing.say(
+                "manual_floor",
+                author=manual_floor.author,
+                reason=manual_floor.reason,
+                date=f"{manual_floor.decided_on:%d.%m.%Y}",
+                until=f"{manual_floor.valid_until:%d.%m.%Y}",
+            ),
+        )
+        (review if manual_floor.basket == "review" else attention).append(told)
 
     found = status + review + attention
     if status:
@@ -1298,11 +1351,14 @@ def _rating_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
     return found
 
 
-def _rating_watch(events: object, routing: RoutingPolicy) -> list[Finding]:
-    """Основание внимания: спекулятивная категория с негативным прогнозом.
+def _rating_outlook_adverse(events: object, routing: RoutingPolicy) -> list[Finding]:
+    """Основание внимания: спекулятивная категория с неблагоприятным прогнозом.
 
     Категория сама по себе — уровень, а не событие; событием её делает
-    объявленный агентством прогноз.
+    объявленный агентством прогноз. **Неблагоприятны оба объявленных**, и имя
+    основания это называет: прежде оно звалось `rating_watch` и «негативным
+    прогнозом», а срабатывало и на «развивающийся». Слово «watch» при этом
+    обещало статус наблюдения, которого у источника нет вовсе.
     """
     found: list[Finding] = []
     seen: set[tuple[str, str]] = set()
@@ -1316,10 +1372,10 @@ def _rating_watch(events: object, routing: RoutingPolicy) -> list[Finding]:
         ):
             found.append(
                 Finding(
-                    "rating_watch",
+                    "rating_outlook_adverse",
                     rating.category,
                     routing.say(
-                        "rating_watch",
+                        "rating_outlook_adverse",
                         point=rating.point,
                         agency=rating.agency,
                         outlook=rating.outlook.lower(),

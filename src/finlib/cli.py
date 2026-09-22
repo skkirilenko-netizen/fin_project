@@ -1848,6 +1848,98 @@ def _echo_pdf_check(path: Path, document) -> bool:
     return not inside
 
 
+_DECISION_ADD = """
+INSERT INTO routing_decision
+       (inn, standard, basket, author, reason, decided_on, valid_until)
+VALUES (%(inn)s, %(standard)s, %(basket)s, %(author)s, %(reason)s,
+        %(decided_on)s, %(valid_until)s)
+ON CONFLICT (inn, standard, decided_on) DO UPDATE SET
+    basket = EXCLUDED.basket,
+    author = EXCLUDED.author,
+    reason = EXCLUDED.reason,
+    valid_until = EXCLUDED.valid_until
+"""
+
+_DECISION_LIST = """
+SELECT inn, standard, basket, author, reason, decided_on, valid_until
+FROM routing_decision
+ORDER BY inn, decided_on DESC
+"""
+
+
+@app.command("routing-decide")
+def routing_decide_command(
+    inn: Annotated[str, typer.Option("--inn", help=INN_HELP)],
+    basket: Annotated[
+        str, typer.Option("--basket", help="Корзина не ниже: attention либо review")
+    ],
+    author: Annotated[str, typer.Option("--who", help="Кто принял решение")],
+    reason: Annotated[str, typer.Option("--reason", help="Основание словами")],
+    until: Annotated[
+        str, typer.Option("--until", help="Срок действия, ГГГГ-ММ-ДД")
+    ],
+    decided: Annotated[
+        str | None, typer.Option("--decided", help="Дата решения, ГГГГ-ММ-ДД")
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
+) -> None:
+    """Вносит решение человека о корзине маршрута в журнал.
+
+    **Обстоятельство, которого машина не видит, вносит человек.** Статуса
+    наблюдения у источника нет вовсе: у Русагро АКРА объявило наблюдение
+    22.04.2026, а в карточке стоит стабильный прогноз, и вывести одно
+    из другого нельзя.
+
+    Решение называет автора, основание и срок. Срок обязателен: наблюдение
+    агентства снимается, а запись о нём без срока пережила бы своё основание.
+    «Не ниже», а не «назначить»: решение добавляется к машинным основаниям,
+    а не отменяет их.
+    """
+    _setup_logging(verbose)
+    _check_inn(inn)
+    from datetime import date as _date
+
+    from finlib.db import execute
+
+    if basket not in ("attention", "review"):
+        _fail("корзина решения — attention либо review: «не ниже», а не назначение")
+    if not reason.strip():
+        _fail("основание пустое: пустая причина — отказ, а не молчание")
+    try:
+        valid_until = _date.fromisoformat(until)
+        decided_on = _date.fromisoformat(decided) if decided else _date.today()
+    except ValueError:
+        _fail("даты задаются как ГГГГ-ММ-ДД")
+    if valid_until < decided_on:
+        _fail("срок действия раньше даты решения")
+    execute(
+        _DECISION_ADD,
+        {
+            "inn": inn,
+            "standard": Standard.IFRS.value,
+            "basket": basket,
+            "author": author,
+            "reason": reason.strip(),
+            "decided_on": decided_on,
+            "valid_until": valid_until,
+        },
+    )
+    typer.echo(
+        f"записано: {inn} не ниже «{basket}» до {valid_until:%d.%m.%Y} "
+        f"({author}, {decided_on:%d.%m.%Y}) — {reason.strip()}"
+    )
+    rows = fetch_all(_DECISION_LIST, {})
+    live = [row for row in rows if row["valid_until"] >= _date.today()]
+    typer.echo(f"\nВ журнале записей {len(rows)}, из них действует {len(live)}:")
+    for row in rows:
+        mark = " " if row in live else "истекло"
+        typer.echo(
+            f"  {row['inn']:<12} {row['basket']:<10} до "
+            f"{row['valid_until']:%d.%m.%Y} {mark:<8} {row['author']:<16} "
+            f"{row['reason'][:56]}"
+        )
+
+
 def main() -> int:
     """Запуск приложения."""
     app()

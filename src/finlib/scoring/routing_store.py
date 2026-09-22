@@ -27,6 +27,7 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.lines import load_lines
 from finlib.scoring.routing import (
+    ManualFloor,
     Refinance,
     RoutingPolicy,
     Verdict,
@@ -50,6 +51,7 @@ from finlib.sources.cbonds_events import (
 )
 from finlib.sources.cbonds_flows import refinancing
 from finlib.sources.moex_risk import risk_sectors
+from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,49 @@ WHERE a.standard = 'ifrs' AND a.class_code IS NOT NULL
 ORDER BY a.inn, a.report_date DESC
 """
 
+# **Журнал ручных решений: берётся последнее действующее на дату.** Записи
+# не переписываются, поэтому выборка называет и дату решения, и срок; истёкшие
+# отбираются отдельно и считаются — ноль сработавших решений при неизвестном
+# числе истёкших не означает ничего.
+_DECISIONS = """
+SELECT DISTINCT ON (inn, standard)
+       inn, standard, basket, author, reason, decided_on, valid_until
+FROM routing_decision
+WHERE standard = %(standard)s AND valid_until >= %(today)s
+ORDER BY inn, standard, decided_on DESC, id DESC
+"""
+
+_DECISIONS_EXPIRED = """
+SELECT count(DISTINCT inn) AS n FROM routing_decision
+WHERE standard = %(standard)s AND valid_until < %(today)s
+  AND inn NOT IN (
+      SELECT inn FROM routing_decision
+      WHERE standard = %(standard)s AND valid_until >= %(today)s
+  )
+"""
+
 SOURCE_NAMES = {"file": "PDF", "gir_bo": "ГИР БО", "cbonds": "Cbonds"}
+
+
+def decisions(conn: PgConnection, today: date) -> dict[str, ManualFloor]:
+    """Действующие решения человека о корзине: ИНН → решение.
+
+    Решение принимается командой с автором и уходит в журнал; маршрут берёт
+    последнее действующее. Истёкшее решение не применяется, но из журнала
+    не исчезает — журнал доказательная база.
+    """
+    found: dict[str, ManualFloor] = {}
+    for row in fetch_all(
+        _DECISIONS, {"standard": Standard.IFRS.value, "today": today}, conn=conn
+    ):
+        found[row["inn"]] = ManualFloor(
+            basket=row["basket"],
+            author=row["author"],
+            reason=row["reason"],
+            decided_on=row["decided_on"],
+            valid_until=row["valid_until"],
+        )
+    return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +364,25 @@ def routing_rows(
         "с раскрытым объёмом долга": len(volumes),
         "системно значимых": len(systemic),
     }
+    # **Решения человека и их истёкшие записи считаются порознь.** Ноль
+    # сработавших при неизвестном числе истёкших неотличим от журнала,
+    # который никто не ведёт.
+    decided = decisions(conn, today)
+    counts["решений человека действует"] = len(decided)
+    counts["решений человека истекло"] = int(
+        (
+            fetch_all(
+                _DECISIONS_EXPIRED,
+                {"standard": Standard.IFRS.value, "today": today},
+                conn=conn,
+            )
+            or [{"n": 0}]
+        )[0]["n"]
+    )
     rows: list[RoutingRow] = []
+    # Доводы маршрута по каждому эмитенту: второй проход добавляет к ним
+    # обстоятельство другого эмитента, а не набирает перечень заново.
+    given: dict[str, dict[str, object]] = {}
     for row in fetch_all(_LATEST, {}, conn=conn):
         inn, moment = row["inn"], row["report_date"]
         if inn in skip:
@@ -379,8 +441,13 @@ def routing_rows(
             unit=unit,
             months=routing.refinancing.months,
         )
-        verdict = route(
-            computed,
+        # **Доводы маршрута набираются один раз и переиспользуются вторым
+        # проходом.** Прежде второй проход собирал перечень доводов заново
+        # руками, и в нём недоставало четырёх: у поднятого эмитента исчезали
+        # основания рефинансирования, крупного долга, сектора повышенного
+        # риска и неподтверждённого статуса. Это тот же «второй путь к одному
+        # ответу», только незаметный — корзина при этом получалась правдоподобной.
+        inputs: dict[str, object] = dict(
             unit=unit,
             quarantined=(inn, moment.year) in quarantined,
             stop_factors=stops.triggered,
@@ -397,6 +464,7 @@ def routing_rows(
             refinance=refinance,
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
+            manual_floor=decided.get(inn),
             risk_sector=tuple(
                 replace(risky[item.isin], name=item.name)
                 for item in events.issues
@@ -405,6 +473,8 @@ def routing_rows(
             routing=routing,
             types=types,
         )
+        verdict = route(computed, **inputs)
+        given[inn] = inputs
         card = known.get(inn, {})
         counts["эмитентов"] += 1
         rows.append(
@@ -502,24 +572,10 @@ def routing_rows(
                 item,
                 verdict=route(
                     item.computed,
-                    unit=item.unit,
-                    quarantined=False,
-                    stop_factors=item.stop_factors,
-                    financing_structure=False,
-                    operating_profit=_operating_profit(
-                        item.inn, item.report_date, conn
-                    ),
-                    latest_annual=item.report_date,
-                    assessed_class=assessed.get(item.inn),
-                    branch=item.branch,
-                    group=item.group,
-                    events=item.events,
-                    refinance=item.refinance,
-                    guarantor_under_review=heaviest.name,
-                    today=today,
-                    policy=policy,
-                    routing=routing,
-                    types=types,
+                    **{
+                        **given[item.inn],
+                        "guarantor_under_review": heaviest.name,
+                    },
                 ),
             )
         )
@@ -527,14 +583,19 @@ def routing_rows(
 
     # **Групповой контур — второй проход, и иначе он невозможен.** Корзину
     # члена группы решает обстоятельство другого эмитента, а оно известно
-    # только после того, как посчитаны все. Выравнивания при этом нет:
-    # разбор не переносится, член группы поднимается до внимания.
+    # только после того, как посчитаны все.
+    #
+    # **Корзину группа больше не называет** (решение 22.09.2026): поле
+    # источника отражает бенефициара, а не финансовую связь, и ни одна
+    # из семи проверенных пар финансовой связью не оказалась. Обстоятельство
+    # при этом остаётся справочным, и второй проход по-прежнему нужен: имя
+    # эмитента в разборе известно только после того, как посчитаны все.
     in_review = {
         item.group: item
         for item in rows
         if item.group and item.verdict.basket == "review"
     }
-    counts["поднято по группе"] = 0
+    counts["названо справочно по группе"] = 0
     if in_review:
         lifted: list[RoutingRow] = []
         for item in rows:
@@ -542,32 +603,19 @@ def routing_rows(
             if leader is None or item.inn == leader.inn:
                 lifted.append(item)
                 continue
-            if item.verdict.basket in ("review", "status_unknown"):
+            if item.verdict.basket == "status_unknown":
                 lifted.append(item)
                 continue
-            counts["поднято по группе"] += 1
+            counts["названо справочно по группе"] += 1
             lifted.append(
                 replace(
                     item,
                     verdict=route(
                         item.computed,
-                        unit=item.unit,
-                        quarantined=False,
-                        stop_factors=item.stop_factors,
-                        financing_structure=item.inn in spv,
-                        operating_profit=_operating_profit(
-                            item.inn, item.report_date, conn
-                        ),
-                        latest_annual=item.report_date,
-                        assessed_class=assessed.get(item.inn),
-                        branch=item.branch,
-                        group=item.group,
-                        events=item.events,
-                        group_under_review=(item.group, leader.name),
-                        today=today,
-                        policy=policy,
-                        routing=routing,
-                        types=types,
+                        **{
+                            **given[item.inn],
+                            "group_under_review": (item.group, leader.name),
+                        },
                     ),
                 )
             )
