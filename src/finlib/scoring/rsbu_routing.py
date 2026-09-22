@@ -27,7 +27,6 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.definitions import load_metrics
 from finlib.metrics.engine import MetricStatus, compute_all
 from finlib.metrics.ifrs import MetricValue
-from finlib.normalize.facts import source_preference
 from finlib.standards import Standard
 
 logger = logging.getLogger(__name__)
@@ -43,22 +42,10 @@ WHERE f.standard = 'rsbu' AND s.is_actual AND s.status <> 'quarantine'
 GROUP BY f.inn
 """
 
-# Величина строки отчётности комплекта. Выборка называет и стандарт,
-# и предпочтение источника: за год комплектов бывает два — ГИР БО
-# и агрегатор, — и первоисточник старше.
-_LINE = f"""
-SELECT f.value, s.source FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
-WHERE f.inn = %(inn)s AND f.standard = 'rsbu' AND f.report_date = %(d)s
-  AND f.line_code = %(code)s AND s.is_actual AND s.status <> 'quarantine'
-{source_preference("s")}
-LIMIT 1
-"""
-
-_SOURCES = """
-SELECT DISTINCT source, unit_code, reporting_type FROM src_file
-WHERE inn = %(inn)s AND standard = 'rsbu' AND is_actual
-  AND status <> 'quarantine' AND report_year = %(year)s
-"""
+# **Величина строки берётся одним запросом на оба стандарта**
+# (`routing_store._LINE`): код строки у стандартов свой, а вопрос один,
+# и второй запрос к тому же ответу разошёлся бы с первым при первой же
+# правке правила выборки — предпочтения источника, например.
 
 
 def latest_annual(conn: PgConnection) -> dict[str, tuple[date, str]]:
@@ -70,49 +57,6 @@ def latest_annual(conn: PgConnection) -> dict[str, tuple[date, str]]:
         row["inn"]: (row["report_date"], (row["name"] or row["inn"]).strip())
         for row in fetch_all(_LATEST, {}, conn=conn)
     }
-
-
-def sources_of(inn: str, moment: date, conn: PgConnection) -> list[dict]:
-    """Доставки комплекта: способ получения, единица и вид отчётности."""
-    return fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
-
-
-def line_value(inn: str, moment: date, code: str, conn: PgConnection) -> Decimal | None:
-    """Величина строки отчётности; None — строка не раскрыта.
-
-    **Ноль агрегатора величиной не считается и здесь.** Правило объявлено
-    у вида отчёта (`cbonds_mapping.yaml`, `zero_reading`) и действует всюду,
-    где ноль участвует в суждении: у прибыли от продаж ноль от агрегатора
-    читался бы как отсутствие операционного результата, то есть как
-    утверждение об эмитенте, сделанное по нераскрытой величине.
-    """
-    found = fetch_all(_LINE, {"inn": inn, "d": moment, "code": code}, conn=conn)
-    if not found:
-        return None
-    value, source = Decimal(found[0]["value"]), found[0]["source"]
-    if value == 0 and _zero_is_unknown(source):
-        logger.info(
-            "%s за %s: строка %s доставлена нулём (%s) — величиной не считается",
-            inn,
-            moment,
-            code,
-            source,
-        )
-        return None
-    return value
-
-
-def _zero_is_unknown(source: str) -> bool:
-    """Означает ли ноль этого способа получения «неизвестно»."""
-    if source != "cbonds":
-        return False
-    from finlib.normalize.cbonds_mapping import load_cbonds_mapping
-
-    mapping = load_cbonds_mapping()
-    return any(
-        report.zero_reading is not None and report.zero_reading.as_not_disclosed
-        for report in mapping.reports.values()
-    )
 
 
 def computed_of(
