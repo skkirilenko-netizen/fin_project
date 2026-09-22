@@ -612,6 +612,9 @@ def routing_rows(
             # к единице комплекта тем же правилом — объём выпуска источник
             # отдаёт в рублях, а отчётность бывает в миллионах.
             offered=in_unit(plan.offered, unit_code) if plan.known else None,
+            issues=plan.issues,
+            without_schedule=plan.without_schedule,
+            without_offers=plan.without_offers,
         )
         # **Доводы маршрута набираются один раз и переиспользуются вторым
         # проходом.** Прежде второй проход собирал перечень доводов заново

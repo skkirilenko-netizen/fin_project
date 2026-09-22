@@ -235,6 +235,26 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     # Верхний десяток по объёму долга и то, у скольких из них покрытие
     # неполное: «ноль затронутых» без числа самих системно значимых
     # неотличим от невыполненного правила.
+    # **У обеих мер рефинансирования печатается знаменатель.** «Сработало
+    # у 92» без числа выпусков, по которым график вообще есть, не говорит,
+    # мерили мы рынок или ту его часть, до которой дошла доставка.
+    issues = sum(
+        item.refinance.issues for item in found if item.refinance is not None
+    )
+    summary["выпусков в обращении у списка"] = issues
+    summary["— без графика платежей"] = sum(
+        item.refinance.without_schedule
+        for item in found
+        if item.refinance is not None
+    )
+    summary["— без ответа об офертах"] = sum(
+        item.refinance.without_offers for item in found if item.refinance is not None
+    )
+    summary["— справочно: оферт больше денежных средств"] = sum(
+        1
+        for item in found
+        if any(entry.ground == "refinancing_offers" for entry in item.verdict.notes)
+    )
     summary["системно значимых"] = counts["системно значимых"]
     summary["— с неполным покрытием"] = sum(
         1
