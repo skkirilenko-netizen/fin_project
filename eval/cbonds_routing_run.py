@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.metrics.ifrs_store import compute_from_facts  # noqa: E402
 from finlib.normalize.cbonds_mapping import load_cbonds_mapping  # noqa: E402
+from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
 from finlib.scoring.ifrs_store import stop_factors_of  # noqa: E402
 from finlib.scoring.routing import load_routing, route  # noqa: E402
@@ -74,6 +75,22 @@ ORDER BY source_rank(s.source)
 LIMIT 1
 """
 
+# **Оценка из базы — только по разобранному документу.** Класс, присвоенный
+# нами, опирается на состав величин самой отчётности; комплект агрегатора
+# оценки не получает вовсе, и требование к источнику здесь не формальность,
+# а то, что делает основание сильнее признака.
+_ASSESSED = """
+SELECT a.inn, a.class_code, a.report_date
+FROM assessment a
+WHERE a.standard = 'ifrs' AND a.class_code IS NOT NULL
+  AND EXISTS (
+      SELECT 1 FROM src_file s
+      WHERE s.inn = a.inn AND s.standard = 'ifrs' AND s.source <> 'cbonds'
+        AND s.report_year = EXTRACT(YEAR FROM a.report_date)::int
+  )
+ORDER BY a.inn, a.report_date DESC
+"""
+
 _WITHOUT_SET = """
 SELECT count(DISTINCT d.inn) AS issuers
 FROM dq_log d
@@ -113,18 +130,29 @@ def main() -> int:
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
     policy = load_ifrs_metrics()
     routing = load_routing()
+    types = load_issuer_types()
     mapping = load_cbonds_mapping()
     spv, cards = spv_issuers()
     today = date.today()
+    caps = {factor.code: factor.cap for factor in types.stop_factors}
+    factor_names = {factor.code: factor.name for factor in types.stop_factors}
 
     baskets: Counter[str] = Counter()
     grounds: dict[str, Counter[str]] = defaultdict(Counter)
     examples: dict[str, list[str]] = defaultdict(list)
     known: dict[str, str] = {}
+    by_factor: Counter[str] = Counter()
+    off_scale: Counter[str] = Counter()
+    off_scale_issuers: dict[str, set[str]] = {}
+    with_nwc: set[str] = set()
+    with_factor = 0
     substituted = 0
 
     with connection() as conn:
         outside = fetch_all(_WITHOUT_SET, {}, conn=conn)
+        assessed: dict[str, str] = {}
+        for row in fetch_all(_ASSESSED, {}, conn=conn):
+            assessed.setdefault(row["inn"], row["class_code"])
         quarantined = {
             (row["inn"], row["report_year"])
             for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
@@ -135,6 +163,10 @@ def main() -> int:
             computed = compute_from_facts(inn, moment, conn, policy)
             profit = fetch_all(_OPERATING_PROFIT, {"inn": inn, "d": moment}, conn=conn)
             stops = stop_factors_of(inn, moment, computed, conn)
+            if stops.triggered:
+                with_factor += 1
+                for code in stops.triggered:
+                    by_factor[code] += 1
             verdict = route(
                 computed,
                 quarantined=(inn, moment.year) in quarantined,
@@ -142,13 +174,24 @@ def main() -> int:
                 financing_structure=inn in spv,
                 operating_profit=Decimal(profit[0]["value"]) if profit else None,
                 latest_annual=moment,
+                assessed_class=assessed.get(inn),
                 today=today,
                 policy=policy,
                 routing=routing,
+                types=types,
             )
             baskets[verdict.basket] += 1
             for ground in verdict.grounds:
                 grounds[verdict.basket][ground] += 1
+            # Предмет основания берётся у самого основания (`Finding.subject`),
+            # а не вытаскивается из прозы: второй разбор того же ответа
+            # разошёлся бы с первым и молча.
+            for item in verdict.findings:
+                if item.ground == "level_off_scale":
+                    off_scale[item.subject] += 1
+                    off_scale_issuers.setdefault(inn, set()).add(item.subject)
+            if "negative_nwc" in stops.triggered:
+                with_nwc.add(inn)
             name = (row["name"] or inn).strip()
             if len(examples[verdict.basket]) < 5:
                 examples[verdict.basket].append(
@@ -187,11 +230,32 @@ def main() -> int:
         "и комплектом не становится.\n"
     )
 
+    print(
+        f"Оценка по разобранному документу есть у **{len(assessed)}** эмитентов; "
+        "класс из неё старше любого признака агрегатора и берётся тем, "
+        "который присвоен за последний оценённый период.\n"
+    )
+
     print("| Корзина | Эмитентов | Доля |")
     print("|---|---|---|")
     for basket in routing.ordered():
         count = baskets.get(basket.code, 0)
         print(f"| {basket.name} | {count} | {count / total * 100:.0f} % |")
+
+    print("\n## Стоп-факторы по видам\n")
+    print(
+        f"Стоп-фактор сработал у **{with_factor}** эмитентов из {total}. "
+        "Градация ограничения класса объявлена у самого стоп-фактора "
+        "(`ifrs_issuer_type.yaml`, поле `cap`), и маршрут берёт её оттуда: "
+        "ограничение низшим (E) и неустойчивым (D) — разбор, ограничение "
+        "средним (C) — внимание.\n"
+    )
+    print("| Стоп-фактор | Ограничение класса | Корзина | Эмитентов |")
+    print("|---|---|---|---|")
+    for code, count in by_factor.most_common():
+        cap = caps.get(code, "—")
+        where = "разбор" if routing.severity.severe(cap) else "внимание"
+        print(f"| {factor_names.get(code, code)} | {cap} | {where} | {count} |")
 
     for basket in routing.ordered():
         found = grounds.get(basket.code)
@@ -209,6 +273,45 @@ def main() -> int:
             print("\nПримеры:\n")
             for line in examples[basket.code]:
                 print(f"- {line}")
+
+    # **Корзину держит основание, а не доля.** Доля разбора — следствие,
+    # и подгонять порог под неё значило бы мерить не эмитентов, а наше
+    # желание получить круглое число. Поэтому рядом с долей называется
+    # основание, которым корзина наполнена.
+    review = baskets.get("review", 0)
+    if review * 3 > total:
+        top = grounds["review"].most_common(1)
+        names = {item.code: item.name for item in routing.basket("review").grounds}
+        if top:
+            code, count = top[0]
+            print(
+                f"\n**Разбор больше трети ({review} из {total}), и держит его "
+                f"основание «{names.get(code, code)}» — {count} эмитентов.** "
+                "Порог под долю не подбирается: основание объявлено методикой, "
+                "и если оно срабатывает часто, это свойство универсума, "
+                "а не настройка.\n"
+            )
+    if off_scale:
+        print("\n### Чем именно кончилась шкала\n")
+        print("| Показатель | Опорная точка | Эмитентов |")
+        print("|---|---|---|")
+        scales = policy.calibration_points.metrics
+        metric_names = {item.code: item.name for item in policy.metrics}
+        for code, count in off_scale.most_common():
+            edge = scales[code].points[0][0] if code in scales else "—"
+            print(f"| {metric_names.get(code, code)} | {edge} | {count} |")
+        only_liquidity = {
+            inn for inn, codes in off_scale_issuers.items() if codes == {"cur_liq"}
+        }
+        print(
+            f"\nТолько текущей ликвидностью за концом шкалы держится "
+            f"**{len(only_liquidity)}** эмитентов, и у **{len(only_liquidity & with_nwc)}** "
+            "из них сработал отрицательный чистый оборотный капитал — тот самый "
+            "стоп-фактор, который по тяжести отправлен во внимание. Величина "
+            "и стоп-фактор здесь об одном и том же: краткосрочные обязательства "
+            "выше оборотных активов. Развилка записана в NIGHT_QUESTIONS.md; "
+            "порог не трогается.\n"
+        )
 
     print("\n## Известные случаи\n")
     print("| Эмитент | Корзина и основания |")
