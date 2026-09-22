@@ -86,13 +86,15 @@ WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
 GROUP BY f.inn
 """
 
-# **Выборка называет стандарт.** Те же коды проверок нуля пишет доставка РСБУ,
-# и без стандарта запись о комплекте РСБУ отправляла бы эмитента в разбор
-# по его комплекту МСФО.
+# **Выборка называет стандарт — графой, а не условием.** Те же коды проверок
+# нуля пишет доставка РСБУ, и запись о её комплекте отправляла бы эмитента
+# в разбор по комплекту МСФО; но и отбрасывать её нельзя — маршрут строится
+# теперь и по РСБУ. Стандарт входит в ключ, и совпадать он обязан с тем,
+# по которому маршрут построен.
 _ZERO_FAILED = """
-SELECT DISTINCT d.inn, s.report_year
+SELECT DISTINCT d.inn, s.standard, s.report_year
 FROM dq_log d JOIN src_file s ON s.id = d.src_file_id
-WHERE d.status = 'fail' AND s.standard = 'ifrs' AND d.check_code IN (
+WHERE d.status = 'fail' AND d.check_code IN (
     'cbonds_identity_mismatch', 'cbonds_sections_mismatch', 'cbonds_zero_total'
 )
 """
@@ -425,7 +427,7 @@ def routing_rows(
     for row in fetch_all(_ASSESSED, {}, conn=conn):
         assessed.setdefault(row["inn"], row["class_code"])
     quarantined = {
-        (row["inn"], row["report_year"])
+        (row["inn"], row["standard"], row["report_year"])
         for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
     }
 
@@ -619,7 +621,11 @@ def routing_rows(
         # ответу», только незаметный — корзина при этом получалась правдоподобной.
         inputs: dict[str, object] = dict(
             unit=unit,
-            quarantined=moment is not None and (inn, moment.year) in quarantined,
+            quarantined=(
+                moment is not None
+                and standard is not None
+                and (inn, standard.value, moment.year) in quarantined
+            ),
             stop_factors=triggered,
             stop_factor_values=fired,
             financing_structure=inn in spv,
