@@ -35,7 +35,9 @@ from finlib.scoring.routing import (
     route,
 )
 from finlib.sources.cbonds_events import (
+    DEFAULT_STATUSES,
     Guarantee,
+    Issue,
     IssuerEvents,
     credit_scales,
     default_records,
@@ -175,12 +177,22 @@ def value_of(computed: tuple[MetricValue, ...], code: str) -> Decimal | None:
 
 
 def routing_rows(
-    conn: PgConnection, today: date | None = None
+    conn: PgConnection,
+    today: date | None = None,
+    blind: frozenset[str] = frozenset(),
 ) -> tuple[list[RoutingRow], dict[str, int]]:
     """Собирает входы и вердикты по всем эмитентам; рядом — счётчики отбора.
 
     Счётчики возвращаются вместе со строками: «в списке 353» без числа
     исключённых не говорит, полон ли список.
+
+    **`blind` закрывает маршруту часть входов, и это нужно замеру качества.**
+    Событийное правило проверяется на тех же событиях, на которых построено,
+    и всегда выходит идеальным; чтобы спросить «видели ли эмитента отчётность,
+    рейтинги, группы и поручители **до** события», события дефолта от маршрута
+    прячутся: `blind={"defaults"}`. Рейтинги при этом остаются — их прячет
+    `blind={"ratings"}`. Ключ — довод замера, а не режим работы: боевой вызов
+    его не передаёт, и второго пути к вердикту не появляется.
     """
     from finlib.metrics.ifrs_store import compute_from_facts
     from finlib.normalize.ifrs_issuer_type import load_issuer_types
@@ -249,6 +261,19 @@ def routing_rows(
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
         events = events_of(inn, snapshot, credit, order, defaults)
+        if blind:
+            # **Прячутся признаки дефолта, а не выпуски.** Выпуск нужен
+            # и рефинансированию, и объёму долга — это не события, а срочность
+            # и размер; убрать их вместе с дефолтом значило бы ослепить
+            # маршрут сильнее, чем спрошено.
+            events = replace(
+                events,
+                issues=tuple(_without_default(item) for item in events.issues)
+                if "defaults" in blind
+                else events.issues,
+                records=() if "defaults" in blind else events.records,
+                ratings=() if "ratings" in blind else events.ratings,
+            )
         # Поручительства читаются у всех, а не только у финансирующих
         # структур: у обычного эмитента поручитель в разборе — такое же
         # обстоятельство, как эмитент своей группы. Корзина берётся вторым
@@ -456,6 +481,24 @@ def routing_rows(
             )
         rows = lifted
     return rows, counts
+
+
+def _without_default(issue: Issue) -> Issue:
+    """Выпуск без признаков дефолта: для замера маршрута без событий.
+
+    **Дефолт объявлен двумя полями и статусом, и прячутся все три.** Признак
+    неурегулированности гасится, а статус «дефолт по погашению» заменяется
+    пустым: в нём дефолт назван словом, и оставить его значило бы прятать
+    признак, оставив признание. Статус при этом не участвует ни в
+    рефинансировании, ни в объёме долга — там берутся только «в обращении»
+    и «размещается», а дефолтный выпуск в них не входит.
+    """
+    return replace(
+        issue,
+        default=False,
+        unsettled=False,
+        status="" if issue.status in DEFAULT_STATUSES else issue.status,
+    )
 
 
 def _outstanding(inn: str) -> Decimal | None:
