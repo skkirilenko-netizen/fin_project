@@ -36,6 +36,7 @@ from finlib.metrics.ifrs_store import compute_from_facts  # noqa: E402
 from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
 from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
+from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
 from finlib.scoring.ifrs_store import stop_factors_of  # noqa: E402
 from finlib.scoring.routing import ROUTING_METRICS, load_routing, route  # noqa: E402
@@ -75,10 +76,12 @@ ORDER BY source_rank(s.source)
 LIMIT 1
 """
 
-# Способ получения: документ эмитента или доставка агрегатора. Это свойство
-# комплекта, а не организации, и у одного периода их бывает два.
+# Способ получения и единица измерения: оба — свойства комплекта, а не
+# организации, и у одного периода комплектов бывает два. **Единица называется
+# на странице**: абсолютные величины в основаниях печатаются без неё, и без
+# объявления читатель прочтёт их в единице, которую предположит сам.
 _SOURCES = """
-SELECT DISTINCT source FROM src_file
+SELECT DISTINCT source, unit_code FROM src_file
 WHERE inn = %(inn)s AND standard = 'ifrs' AND is_actual
   AND status <> 'quarantine' AND report_year = %(year)s
 """
@@ -143,12 +146,20 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
         )
         basket = routing.basket(verdict.basket)
         ground_names = {item.code: item.name for item in basket.grounds}
+        delivered = fetch_all(_SOURCES, {"inn": inn, "year": moment.year}, conn=conn)
         sources = [
-            SOURCE_NAMES.get(item["source"], item["source"])
-            for item in fetch_all(
-                _SOURCES, {"inn": inn, "year": moment.year}, conn=conn
-            )
+            SOURCE_NAMES.get(item["source"], item["source"]) for item in delivered
         ]
+        units = load_lines().units
+        unit = ", ".join(
+            sorted(
+                {
+                    units.name_of(item["unit_code"])
+                    for item in delivered
+                    if item["unit_code"]
+                }
+            )
+        )
         months = months_between(moment, today)
         values = []
         for code in ROUTING_METRICS:
@@ -183,6 +194,7 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 ],
                 "values": values,
                 "sources": sorted(set(sources)),
+                "unit": unit,
                 "report_date": f"{moment:%d.%m.%Y}",
                 "months": months,
                 "stale": months > report_policy.freshness.max_months,
@@ -274,7 +286,9 @@ def _row_html(item: dict) -> str:
         + (f'<span class="act">{html.escape(action)}</span>' if action else "")
         + (f'<span class="oth">ещё: {html.escape(others)}</span>' if others else "")
         + f"</td><td class=\"gs\">{grounds}</td><td class=\"vs\">{values}</td>"
-        f'<td class="src">{html.escape(", ".join(item["sources"]))}</td>'
+        f'<td class="src">{html.escape(", ".join(item["sources"]))}'
+        + (f'<span class="act">{html.escape(item["unit"])}</span>' if item["unit"] else "")
+        + "</td>"
         f'<td class="fr">{fresh}</td></tr>'
     )
 

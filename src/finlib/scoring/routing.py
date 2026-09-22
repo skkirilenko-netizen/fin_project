@@ -445,11 +445,17 @@ def route(
             )
 
     if operating_profit is not None and operating_profit <= 0:
+        # Величина денежная, и печатается она единой точкой округления:
+        # «-7378338.000» — не число для человека, а внутреннее представление.
+        # Единица здесь не называется: она свойство комплекта, и объявляет её
+        # тот, кто печатает строку целиком.
+        from finlib.metrics.display import money
+
         attention.append(
             Finding(
                 "operating_loss",
                 "ifrs.operating_profit",
-                f"операционная прибыль {operating_profit}",
+                f"операционная прибыль {money(operating_profit)}",
             )
         )
 
