@@ -30,9 +30,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
+from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
-from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
@@ -87,7 +87,6 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     """
     routing = load_routing()
     view = IfrsMetricsView(load_ifrs_metrics())
-    units = load_lines().units
     report_policy = load_policy()
     found, counts = routing_rows(conn, today)
 
@@ -97,7 +96,9 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
         basket = routing.basket(verdict.basket)
         ground_names = {entry.code: entry.name for entry in basket.grounds}
         months = months_between(item.report_date, today)
-        unit = units.name_of(item.unit_code) if item.unit_code else ""
+        # Единица берётся у строки, а не набирается здесь: она одна на весь
+        # выход, и второй её набор однажды разошёлся с первым.
+        unit = item.unit
         # **Давность видна всегда.** Более сильное основание её не гасит:
         # признак берётся у вердикта, а не у корзины, и печатается в своей
         # графе даже тогда, когда корзину назвало другое основание.
@@ -141,7 +142,7 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 "values": [
                     (
                         view.require(code).name,
-                        view.shown(code, value, money=unit or None),
+                        view.shown(code, value, unit),
                     )
                     for code, value in item.values.items()
                 ],
@@ -168,6 +169,26 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
             }
         )
     rows.sort(key=lambda item: (item["order"], item["name"].lower()))
+    # **Единица сверяется у каждой строки, а не у документа одного.** Проверка
+    # стояла только в заключении, и список печатал мимо неё: 39 строк подписали
+    # миллионы тысячами. Сверяет её та же функция, что документ, и число
+    # сверенных строк печатается — ноль расхождений при неизвестном числе
+    # сверок не означает ничего.
+    checked = 0
+    for item in rows:
+        checked += 1
+        printed = " ".join(
+            [item["unit"], *(text for _, text in item["values"])]
+            + [text for ground in item["grounds"] for text in ground["details"]]
+            + list(item["notes"])
+        )
+        wrong = foreign_units(printed, item["unit"])
+        if wrong:
+            raise ValueError(
+                f"{item['name']} ({item['inn']}): напечатана единица "
+                f"«{', '.join(wrong)}», а комплект составлен в «{item['unit']}»"
+            )
+    logger.info("единица сверена у строк: %d, расхождений 0", checked)
     summary = Counter(item["basket_name"] for item in rows)
     for item in rows:
         for name in item["subgroups"][:1]:

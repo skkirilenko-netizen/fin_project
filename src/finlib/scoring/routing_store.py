@@ -131,6 +131,12 @@ class RoutingRow:
     stop_factors: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     unit_code: str | None = None
+    # **Наименование денежной единицы комплекта — графа строки, а не дело
+    # каждого выхода.** Прежде её набирали порознь список, выгрузка и маршрут,
+    # и третий набор разошёлся с первыми двумя: графы печатали «млн руб.»,
+    # а основания рядом с ними — «тыс. руб.». Величина одна, и набирается
+    # она один раз.
+    unit: str = ""
     assessed_class: str = ""
     branch: str = ""
     group: str = ""
@@ -357,6 +363,12 @@ def routing_rows(
             (item["unit_code"] for item in delivered if item["unit_code"]), None
         )
         cash = _cash(inn, moment, conn)
+        # **Единица комплекта набирается один раз и одна на всю строку.**
+        # Основания маршрута, графы списка и графы выгрузки печатают одни
+        # и те же величины, и вторая точка набора единицы разошлась бы
+        # с первой — ровно это и случилось: графы печатали «млн руб.»,
+        # а основания рядом с ними «тыс. руб.».
+        unit = units.name_of(unit_code) if unit_code else ""
         # **Срочность долга собирается здесь, а не в маршруте**: маршрут
         # решает по величинам, а величины берутся из одного места. Обе
         # приведены к единице комплекта — иначе ошибка в тысячу раз.
@@ -364,11 +376,12 @@ def routing_rows(
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
             cash=cash,
-            unit=units.name_of(unit_code) if unit_code else "",
+            unit=unit,
             months=routing.refinancing.months,
         )
         verdict = route(
             computed,
+            unit=unit,
             quarantined=(inn, moment.year) in quarantined,
             stop_factors=stops.triggered,
             financing_structure=inn in spv,
@@ -411,6 +424,7 @@ def routing_rows(
                     )
                 ),
                 unit_code=unit_code,
+                unit=unit,
                 assessed_class=assessed.get(inn, ""),
                 branch=str(card.get("branch_name_rus") or ""),
                 group=str(card.get("group_name_rus") or ""),
@@ -488,6 +502,7 @@ def routing_rows(
                 item,
                 verdict=route(
                     item.computed,
+                    unit=item.unit,
                     quarantined=False,
                     stop_factors=item.stop_factors,
                     financing_structure=False,
@@ -536,6 +551,7 @@ def routing_rows(
                     item,
                     verdict=route(
                         item.computed,
+                        unit=item.unit,
                         quarantined=False,
                         stop_factors=item.stop_factors,
                         financing_structure=item.inn in spv,

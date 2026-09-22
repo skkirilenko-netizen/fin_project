@@ -19,6 +19,7 @@ from finlib.metrics.derived import describe as describe_derived
 from finlib.metrics.derived import parse as parse_derived
 from finlib.metrics.derived import unit_of as derived_unit
 from finlib.metrics.display import format_metric, money, percent, ratio
+from finlib.normalize.facts import unit_name_of
 from finlib.normalize.lines import LinesCatalog, ReportingType, load_lines
 from finlib.quality.periods import limitations as period_limitations
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
@@ -208,8 +209,13 @@ def _metrics_block(
     standard: Standard,
     lines_catalog: LinesCatalog,
     reporting_type: ReportingType,
+    unit_name: str,
 ) -> str:
     """Показатели, производные величины и причины, по которым остальные не рассчитаны.
+
+    `unit_name` — единица комплекта. Довод обязательный: единая точка печати
+    без неё денежную величину не печатает вовсе, и это верно — «тыс. руб.»
+    умолчанием однажды подписало миллионы тысячами.
 
     Производные — изменения за период и доли в валюте баланса — идут отдельным
     перечнем после показателей: иначе полторы сотни строк заслонили бы два
@@ -232,7 +238,7 @@ def _metrics_block(
             if name is None:
                 continue
             unit = derived_unit(parsed, catalog.get(parsed.base))
-            rendered = _series(by_metric[code], unit)
+            rendered = _series(by_metric[code], unit, unit_name)
             if rendered is None:
                 reason = by_metric[code][0]["reason"] or "причина не указана"
                 not_calculable.append(f"{code} «{name}»: {reason}")
@@ -243,7 +249,7 @@ def _metrics_block(
         metric = catalog.get(code)
         if metric is None:
             continue
-        rendered = _series(by_metric[code], metric.unit)
+        rendered = _series(by_metric[code], metric.unit, unit_name)
         if rendered is None:
             reason = by_metric[code][0]["reason"] or "причина не указана"
             not_calculable.append(f"{code} «{metric.name}»: {reason}")
@@ -268,13 +274,14 @@ def _metrics_block(
     return "\n".join(lines)
 
 
-def _series(points: list[dict], unit: Unit) -> str | None:
+def _series(points: list[dict], unit: Unit, unit_name: str) -> str | None:
     """Ряд значений по периодам; None, если ни одно не рассчитано."""
     calculated = [item for item in points if item["status"] == "ok"]
     if not calculated:
         return None
     return "  |  ".join(
-        f"{item['report_date']:%d.%m.%Y}: {format_metric(item['value'], unit)}"
+        f"{item['report_date']:%d.%m.%Y}: "
+        f"{format_metric(item['value'], unit, money=unit_name)}"
         for item in calculated
     )
 
@@ -395,6 +402,7 @@ def _composition_block(
     reporting_type: ReportingType,
     assessment: dict | None,
     standard: Standard,
+    unit_name: str,
 ) -> str:
     """Обязательный состав фактической базы и основания вопросов.
 
@@ -429,13 +437,19 @@ def _composition_block(
         if code in disclosed:
             line = lines_catalog.get(code, reporting_type)
             name = line.name if line is not None else "—"
-            lines.append(f"  {code}  «{name}»  {money(disclosed[code])} тыс. руб.")
+            # **Единица — комплекта, а не зашитая в строку.** Прежде здесь
+            # стояло «тыс. руб.» текстом, и у комплекта в миллионах блок
+            # называл модели величину в чужой единице.
+            lines.append(f"  {code}  «{name}»  {money(disclosed[code])} {unit_name}")
             continue
         metric = catalog.require(code)
-        lines.append(
-            f"  {code}  «{metric.name}»  "
-            f"{format_metric(calculated[code], metric.unit, catalog.scale_for(code))}"
+        shown = format_metric(
+            calculated[code],
+            metric.unit,
+            catalog.scale_for(code),
+            money=unit_name,
         )
+        lines.append(f"  {code}  «{metric.name}»  {shown}")
 
     worth = _worth_naming(
         values,
@@ -768,7 +782,7 @@ WHERE inn = %(inn)s AND standard = 'ifrs' AND report_date = %(d)s
 
 
 def _range_notes(
-    inn: str, periods: list[date], conn: PgConnection | None
+    inn: str, periods: list[date], conn: PgConnection | None, unit_name: str
 ) -> list[str]:
     """Показатель, заменённый диапазоном, печатается обеими границами.
 
@@ -805,9 +819,12 @@ def _range_notes(
         if len(rows) != len(adjustment.replaced_by):
             continue
         ordered = sorted(adjustment.replaced_by, key=lambda code: rows[code])
+        # Единица комплекта называется и здесь: границы диапазона сейчас
+        # коэффициенты, но замена показателя объявляется методикой, и денежная
+        # граница объявится в ней без правки этого места.
         low, high = (
             format_metric(
-                rows[code], view.get(code).unit, view.scale_for(code)
+                rows[code], view.get(code).unit, view.scale_for(code), money=unit_name
             )
             for code in ordered
         )
@@ -905,6 +922,7 @@ def _limitations_block(
     reporting_type: ReportingType,
     assessment: dict | None,
     standard: Standard,
+    unit_name: str = "",
     meta: dict | None = None,
 ) -> str:
     """Ограничения анализа: готовые формулировки, которые нельзя сокращать."""
@@ -931,7 +949,7 @@ def _limitations_block(
     # Одна граница без другой читается как само значение показателя, а он
     # здесь именно тем и отличается, что одним числом не приводится.
     if standard is Standard.IFRS:
-        notes.extend(_range_notes(inn, periods, conn))
+        notes.extend(_range_notes(inn, periods, conn, unit_name))
 
     if assessment is not None and assessment["confidence_reasons"]:
         notes.extend(assessment["confidence_reasons"])
@@ -1012,6 +1030,11 @@ def build_context(
         conn=conn,
     )
     reporting_type = ReportingType(row["reporting_type"]) if row else ReportingType.FULL
+    # **Единица комплекта называется одним кодом на весь проект.** В блоки
+    # модели идут те же округлённые величины, что в документ, и единица
+    # у них обязана быть та же: «тыс. руб.» у комплекта в миллионах —
+    # ошибка в тысячу раз, которую не ловит ни один контроль сходимости.
+    unit_name = unit_name_of(inn, target, conn, standard.value)
 
     return ConclusionContext(
         inn=inn,
@@ -1019,7 +1042,14 @@ def build_context(
         organization=_organization_block(inn, target, conn, lines_catalog, standard),
         data=_data_block(inn, periods, conn, lines_catalog, standard, reporting_type),
         metrics=_metrics_block(
-            inn, periods, conn, metrics_catalog, standard, lines_catalog, reporting_type
+            inn,
+            periods,
+            conn,
+            metrics_catalog,
+            standard,
+            lines_catalog,
+            reporting_type,
+            unit_name,
         ),
         flags=_flags_block(assessment),
         assessment=_assessment_block(assessment, scoring, metrics_catalog),
@@ -1037,6 +1067,7 @@ def build_context(
             reporting_type,
             assessment,
             standard,
+            unit_name,
             row["meta"] if row else None,
         ),
         theses=_theses_block(inn, target, conn, standard) if with_theses else "",

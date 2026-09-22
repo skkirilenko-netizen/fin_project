@@ -35,7 +35,7 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.definitions import MetricDef, MetricsCatalog, Unit, load_metrics
 from finlib.metrics.display import format_metric, round_to
 from finlib.metrics.formula import average_codes, line_codes
-from finlib.normalize.facts import SOURCE_PREFERENCE
+from finlib.normalize.facts import SOURCE_PREFERENCE, unit_name_of
 from finlib.normalize.lines import ReportingType
 from finlib.scoring.definitions import ScoringCatalog, load_scoring
 from finlib.standards import Standard
@@ -454,16 +454,23 @@ def _period_values(
 
 def _reporting_type(
     inn: str, target: date, conn: PgConnection | None, standard: Standard
-) -> ReportingType:
-    """Набор форм комплекта, которым закрыт отчётный период."""
+) -> tuple[ReportingType, str]:
+    """Набор форм комплекта и наименование его денежной единицы.
+
+    **Единица берётся у того же комплекта, что и набор форм**, и называет её
+    один код на весь проект (`normalize.facts.unit_of`). Прежде её не брали
+    вовсе, и денежные величины тезисов печатались с умолчанием «тыс. руб.» —
+    у консолидированной отчётности это ошибка в тысячу раз.
+    """
     rows = fetch_all(
         _REPORTING_TYPE,
         {"inn": inn, "standard": standard.value, "year": target.year},
         conn=conn,
     )
+    unit = unit_name_of(inn, target, conn, standard.value)
     if not rows:
-        return ReportingType.FULL
-    return ReportingType(rows[0]["reporting_type"])
+        return ReportingType.FULL, unit
+    return ReportingType(rows[0]["reporting_type"]), unit
 
 
 def _selectors(
@@ -475,8 +482,12 @@ def _selectors(
     current: dict | None,
     previous: dict | None,
     derived: dict[str, dict],
+    unit: str,
 ) -> _MetricState:
     """Машинные признаки показателя и готовые к подстановке величины.
+
+    `unit` — наименование денежной единицы комплекта, и он обязателен:
+    единая точка печати отказывается печатать деньги без единицы.
 
     Признаки считаются по **округлённой** величине: тезис печатает её же,
     и признак, взятый по полной точности, разошёлся бы с напечатанным
@@ -502,7 +513,7 @@ def _selectors(
 
     selectors["status"] = "ok"
     value = round_to(current["value"], scale)
-    values["value"] = format_metric(current["value"], metric.unit, scale)
+    values["value"] = format_metric(current["value"], metric.unit, scale, money=unit)
 
     if metric.benchmark is not None:
         selectors["position"] = (
@@ -520,7 +531,9 @@ def _selectors(
         return _MetricState(metric.code, selectors, values)
 
     before = round_to(previous["value"], scale)
-    values["previous"] = format_metric(previous["value"], metric.unit, scale)
+    values["previous"] = format_metric(
+        previous["value"], metric.unit, scale, money=unit
+    )
     if (value > 0 and before < 0) or (value < 0 and before > 0):
         selectors["sign_change"] = "to_positive" if value > 0 else "to_negative"
         return _MetricState(metric.code, selectors, values)
@@ -529,7 +542,9 @@ def _selectors(
     if change is None or change["status"] != "ok" or change["value"] is None:
         return _MetricState(metric.code, selectors, values)
     delta = round_to(change["value"], scale)
-    values["change_abs"] = format_metric(change["value"], metric.unit, scale)
+    values["change_abs"] = format_metric(
+        change["value"], metric.unit, scale, money=unit
+    )
     values["change_code"] = f"{metric.code}_chg_abs"
     percent = derived.get(f"{metric.code}_chg_pct")
     if percent is not None and percent["status"] == "ok" and percent["value"] is not None:
@@ -732,6 +747,10 @@ def build_ifrs_theses(
     if not dates:
         raise ValueError(f"для ИНН {inn} нет комплектов МСФО вне карантина")
     target = report_date or dates[0]
+    # Единица комплекта: денежные тезисы без неё не печатаются вовсе, и это
+    # верно — «46 620 тыс. руб.» там, где отчётность в миллионах, не ловит
+    # ни один контроль сходимости.
+    unit = unit_name_of(inn, target, conn, Standard.IFRS.value)
 
     built: list[Thesis] = []
     for item in compute_from_facts(inn, target, conn, policy):
@@ -762,13 +781,17 @@ def build_ifrs_theses(
                 # Величина печатается той же функцией, что в документе:
                 # у покрытия процентов при убытке она словесная, и тезис,
                 # набравший число сам, разошёлся бы с приложением.
-                "value": _ifrs_shown(item.code, item.value, policy),
+                "value": _ifrs_shown(item.code, item.value, policy, unit),
                 "name": item.name,
             },
         )
-        unit = _ifrs_unit(item.code, policy)
+        # Единица показателя в терминах единой точки округления — не то же,
+        # что единица комплекта: первая говорит, коэффициент это или деньги,
+        # вторая — тысячи это или миллионы. Прежде обе звались `unit`,
+        # и вторая затирала первую со второго же показателя.
+        display_unit = _ifrs_unit(item.code, policy)
         picked = {
-            kind: _pick(family, state, {}, unit)
+            kind: _pick(family, state, {}, display_unit)
             for kind, family in (
                 (ThesisKind.BAND, rules.band),
                 (ThesisKind.SIGN, rules.sign),
@@ -811,16 +834,19 @@ def _ifrs_unit(code: str, policy) -> Unit:
     return Unit.THOUSAND_RUB if metric.unit == "currency" else Unit.RATIO
 
 
-def _ifrs_shown(code: str, value, policy) -> str:
+def _ifrs_shown(code: str, value, policy, unit: str) -> str:
     """Величина показателя МСФО так, как её печатает документ.
 
     Одна функция на тезис и на приложение: словесная замена отрицательной
     величины объявлена методикой, и набрать число здесь значило бы завести
     второй способ его напечатать.
+
+    `unit` — единица комплекта, и он обязателен: единая точка печати без неё
+    денежную величину не печатает вовсе.
     """
     from finlib.metrics.ifrs_view import IfrsMetricsView
 
-    return IfrsMetricsView(policy).shown(code, value)
+    return IfrsMetricsView(policy).shown(code, value, unit)
 
 
 def build_theses(
@@ -849,7 +875,7 @@ def build_theses(
     by_period = _period_values(inn, wanted, conn, standard)
     current = by_period.get(target, {})
     previous = by_period.get(previous_date, {}) if previous_date else {}
-    reporting_type = _reporting_type(inn, target, conn, standard)
+    reporting_type, unit = _reporting_type(inn, target, conn, standard)
 
     states: dict[str, _MetricState] = {}
     for metric in catalog.metrics:
@@ -862,6 +888,7 @@ def build_theses(
             current.get(metric.code),
             previous.get(metric.code),
             current,
+            unit,
         )
 
     built: list[tuple[ThesisRule, _MetricState, str, ThesisKind, str, str]] = []

@@ -16,7 +16,6 @@ from datetime import date
 from decimal import Decimal
 
 from finlib.db import PgConnection
-from finlib.normalize.facts import source_preference
 from finlib.scoring.signals import SignalHit, structure_shifts
 from finlib.standards import Standard
 
@@ -91,39 +90,18 @@ def ifrs_signals(
     return found
 
 
-# **Единица берётся у комплекта первоисточника.** У агрегатора она своя
-# построчно — у одних эмитентов тысячи, у других миллионы, — и взятая
-# произвольно, она даёт ошибку в тысячу раз, которой не ловит ни один
-# контроль сходимости.
-_UNIT = f"""
-SELECT s.unit_code FROM src_file s
-JOIN fact_report f ON f.src_file_id = s.id
-WHERE f.inn = %(inn)s AND f.standard = 'ifrs' AND f.report_date = %(d)s
-  AND s.status <> 'quarantine' AND s.is_actual
-{source_preference("s")}
-LIMIT 1
-"""
-
-
 def _unit(inn: str, report_date: date, conn: PgConnection) -> str:
     """Наименование денежной единицы комплекта; пусто — комплект не найден.
 
-    Единица берётся у комплекта, а не у стандарта: правило то же, по которому
-    документ печатает «млн руб.» там, где отчётность составлена в миллионах.
-    Неизвестный код единицы называть нельзя, и тогда единица не печатается
-    вовсе: «46 620 чего-то» хуже, чем «46 620».
+    **Считает её один код на весь проект** (`normalize.facts.unit_of`): её
+    набирают и тезисы, и список наблюдения, и выгрузка, и второй набор уже
+    расходился с первым — графы печатали «млн руб.», а основания рядом
+    «тыс. руб.». Единица берётся у комплекта, а не у стандарта: правило то же,
+    по которому документ печатает «млн руб.» там, где отчётность составлена
+    в миллионах.
     """
-    from finlib.db import fetch_one
-    from finlib.normalize.lines import load_lines
+    from finlib.normalize.facts import unit_name_of
 
-    row = fetch_one(_UNIT, {"inn": inn, "d": report_date}, conn=conn)
-    code = (row or {}).get("unit_code")
-    if not code:
-        return ""
-    try:
-        return load_lines().units.name_of(code)
-    except (KeyError, ValueError):
-        logger.warning("единица %s не объявлена в справочнике", code)
-        return ""
+    return unit_name_of(inn, report_date, conn, Standard.IFRS.value)
 
 

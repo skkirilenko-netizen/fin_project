@@ -16,6 +16,10 @@ from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics
 from finlib.scoring.routing import RoutingPolicy, load_routing, route
 
+# Единица комплекта: довод маршрута обязательный, и умолчания у него нет
+# намеренно — «тыс. руб.» по умолчанию однажды подписало тысячами миллионы.
+UNIT = "тыс. руб."
+
 
 def metric(code: str, value: str, name: str = "показатель") -> MetricValue:
     """Рассчитанный показатель для маршрута."""
@@ -38,6 +42,7 @@ def routed(**kwargs) -> tuple[str, tuple[str, ...]]:
     computed = kwargs.pop("computed", healthy())
     verdict = route(
         computed,
+        unit=kwargs.pop("unit", UNIT),
         quarantined=kwargs.pop("quarantined", False),
         today=kwargs.pop("today", date(2026, 5, 1)),
         latest_annual=kwargs.pop("latest_annual", date(2025, 12, 31)),
@@ -155,6 +160,7 @@ def test_attention_is_split_by_nature_of_the_circumstance() -> None:
     """Внимание показывается по старшей подгруппе, остальные называются."""
     verdict = route(
         (metric("equity_ratio", "0.6"),),
+        unit=UNIT,
         quarantined=False,
         latest_annual=date(2024, 12, 31),
         today=date(2026, 6, 2),
@@ -164,6 +170,7 @@ def test_attention_is_split_by_nature_of_the_circumstance() -> None:
     assert verdict.actions[0] == "добрать данные"
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_nwc",),
         latest_annual=date(2024, 12, 31),
@@ -177,6 +184,7 @@ def test_review_has_no_subgroups() -> None:
     """Корзина без подгрупп их не выдумывает: показывать было бы нечего."""
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_equity",),
         latest_annual=date(2025, 12, 31),
@@ -203,8 +211,8 @@ def test_status_and_maturity_travel_with_the_verdict() -> None:
     за проверенный.
     """
     policy = load_routing()
-    verdict = route(healthy(), quarantined=False, latest_annual=date(2025, 12, 31),
-                    today=date(2026, 5, 1))
+    verdict = route(healthy(), unit=UNIT, quarantined=False,
+                    latest_annual=date(2025, 12, 31), today=date(2026, 5, 1))
     assert verdict.status == policy.status
     assert verdict.thresholds == policy.thresholds
     if policy.status != "approved":
@@ -269,6 +277,7 @@ def test_branch_mutes_the_stop_factor_of_its_business_model() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_nwc",),
         branch="Электроэнергетика",
@@ -280,6 +289,7 @@ def test_branch_mutes_the_stop_factor_of_its_business_model() -> None:
     # Отрасль вне перечня гасителем не служит.
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_nwc",),
         branch="Производство лекарств и биотехнологии",
@@ -298,6 +308,7 @@ def test_group_member_is_not_softer_than_attention() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         group_under_review=("Мечел", "Мечел"),
         latest_annual=date(2025, 12, 31),
@@ -335,6 +346,7 @@ def test_two_cycles_without_reporting_open_their_own_queue() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_equity",),
         latest_annual=date(2022, 12, 31),
@@ -351,6 +363,7 @@ def test_one_cycle_behind_stays_in_the_severity_baskets() -> None:
     """Один пропущенный цикл очередь статуса не открывает."""
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         latest_annual=date(2024, 12, 31),
         today=date(2026, 9, 22),
@@ -388,6 +401,7 @@ def test_default_on_an_issue_is_a_review_ground() -> None:
     )
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         events=events,
         latest_annual=date(2025, 12, 31),
@@ -432,6 +446,7 @@ def test_settled_default_is_not_a_current_circumstance() -> None:
     )
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         events=events,
         latest_annual=date(2025, 12, 31),
@@ -469,6 +484,7 @@ def test_only_credit_ratings_reach_the_grades() -> None:
     )
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         events=IssuerEvents(inn="1", ratings=(esg,), ratings_known=True),
         latest_annual=date(2025, 12, 31),
@@ -477,6 +493,7 @@ def test_only_credit_ratings_reach_the_grades() -> None:
     assert verdict.basket == "clear"
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         events=IssuerEvents(inn="1", ratings=(credit,), ratings_known=True),
         latest_annual=date(2025, 12, 31),
@@ -560,6 +577,7 @@ def verdict_for(events, today: date = date(2026, 9, 22)):
     """Вердикт при здоровых величинах и названных событиях."""
     return route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         events=events,
         latest_annual=date(2025, 12, 31),
@@ -744,6 +762,7 @@ def test_payments_above_cash_are_their_own_ground() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         refinance=refinance("7552350", "223194"),
         latest_annual=date(2025, 12, 31),
@@ -759,6 +778,7 @@ def test_payments_within_cash_give_no_ground() -> None:
     """Денежных средств хватает — обстоятельства нет."""
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         refinance=refinance("100", "900"),
         latest_annual=date(2025, 12, 31),
@@ -776,6 +796,7 @@ def test_payments_without_cash_are_a_gap_and_not_a_risk() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         refinance=refinance("10424", None),
         latest_annual=date(2025, 12, 31),
@@ -799,6 +820,7 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     routing = load_routing()
     spv = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         financing_structure=True,
         guarantor="Головная компания",
@@ -810,6 +832,7 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
 
     backer = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         stop_factors=("negative_nwc",),
         latest_annual=date(2025, 12, 31),
@@ -843,6 +866,7 @@ def test_the_exchange_moving_an_issue_to_the_risk_sector_is_a_review_ground() ->
     )
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         risk_sector=(moved,),
         latest_annual=date(2025, 12, 31),
@@ -860,6 +884,7 @@ def test_an_undated_transfer_says_so_instead_of_inventing_a_date() -> None:
 
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         risk_sector=(
             RiskSector(
@@ -892,6 +917,7 @@ def test_large_debt_is_not_left_clear_on_an_upper_bound() -> None:
     )
     verdict = route(
         computed,
+        unit=UNIT,
         quarantined=False,
         systemic_volume=Decimal("3902500000000"),
         latest_annual=date(2025, 12, 31),
@@ -906,6 +932,7 @@ def test_large_debt_with_full_cover_stays_clear() -> None:
     """Величины рассчитаны — крупный долг сам обстоятельством не является."""
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         systemic_volume=Decimal("1714000000000"),
         latest_annual=date(2025, 12, 31),
@@ -923,6 +950,7 @@ def test_a_guarantor_under_review_is_not_softer_than_attention() -> None:
     """
     verdict = route(
         healthy(),
+        unit=UNIT,
         quarantined=False,
         guarantor_under_review="Головная компания",
         latest_annual=date(2025, 12, 31),

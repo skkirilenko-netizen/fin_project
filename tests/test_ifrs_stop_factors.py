@@ -156,10 +156,13 @@ def test_negative_cover_is_printed_as_a_word() -> None:
     from finlib.metrics.ifrs_view import IfrsMetricsView
 
     view = IfrsMetricsView(load_ifrs_metrics())
-    assert view.shown("interest_cover_accrued", Decimal("-2.656")) == "отрицательно"
-    assert view.shown("interest_cover_accrued", Decimal("4.378")) == "4,38"
+    unit = "млн руб."
+    assert (
+        view.shown("interest_cover_accrued", Decimal("-2.656"), unit) == "отрицательно"
+    )
+    assert view.shown("interest_cover_accrued", Decimal("4.378"), unit) == "4,38"
     # У показателя, которому замена не объявлена, печатается число.
-    assert view.shown("cur_liq", Decimal("-0.5")) == "-0,50"
+    assert view.shown("cur_liq", Decimal("-0.5"), unit) == "-0,50"
 
 
 def test_inapplicable_stop_factor_does_not_lower_the_class() -> None:

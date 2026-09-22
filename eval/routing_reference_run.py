@@ -27,6 +27,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
+from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ def main() -> int:
     for item in declared["project"]:
         expect, code = item["expect"], item["code"]
         issuers = list(item.get("issuers") or ())
+        if item.get("rule") == "every_issuer":
+            issuers = [row.inn for row in rows]
         if item.get("rule") == "every_issuer_with_non_positive_ebitda":
             issuers = [
                 row.inn
@@ -117,6 +120,20 @@ def main() -> int:
                     divergences.append(
                         f"{code}: у {row.name} ({inn}) долговая нагрузка названа "
                         "недостающей, хотя граница есть"
+                    )
+            if expect == "unit_named":
+                # Сверяет та же функция, что документ: вопрос у трёх выходов
+                # один — не напечатана ли единица чужого комплекта.
+                printed = " ".join(
+                    entry.text
+                    for entry in tuple(row.verdict.findings) + tuple(row.verdict.notes)
+                )
+                wrong = foreign_units(printed, row.unit)
+                if wrong:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) напечатана единица "
+                        f"«{', '.join(wrong)}», а комплект составлен "
+                        f"в «{row.unit}»"
                     )
             if expect == "no_ground":
                 fired = {entry.ground for entry in row.verdict.findings}

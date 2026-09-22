@@ -609,6 +609,11 @@ class Verdict:
 def route(
     computed: tuple[MetricValue, ...],
     *,
+    # Наименование денежной единицы комплекта. Довод обязательный: основания
+    # маршрута печатают денежные величины, а единая точка печати без единицы
+    # их не печатает вовсе. Прежде она подставляла «тыс. руб.» умолчанием,
+    # и 39 строк списка подписали миллионы тысячами.
+    unit: str,
     quarantined: bool,
     stop_factors: tuple[str, ...] = (),
     financing_structure: bool = False,
@@ -737,7 +742,7 @@ def route(
             if item is not None and item.calculable:
                 extra = (
                     f" ({view.require(factor.metric).name.lower()} "
-                    f"{view.shown(factor.metric, item.value)})"
+                    f"{view.shown(factor.metric, item.value, unit)})"
                 )
         return routing.say(
             "stop_factor_severe" if code in severe else "stop_factor_capped",
@@ -906,7 +911,10 @@ def route(
             Finding(
                 "negative_ebitda",
                 "ebitda",
-                routing.say("negative_ebitda", value=view.shown("ebitda", ebitda.value)),
+                routing.say(
+                    "negative_ebitda",
+                    value=view.shown("ebitda", ebitda.value, unit),
+                ),
             )
         )
         spoken_for = spoken_for | {"net_debt_ebitda"}
@@ -943,8 +951,8 @@ def route(
                         "level_off_scale",
                         code,
                         metric=item.name,
-                        value=view.shown(code, item.value),
-                        threshold=view.shown(code, scale.points[0][0]),
+                        value=view.shown(code, item.value, unit),
+                        threshold=view.shown(code, scale.points[0][0], unit),
                     ),
                 )
             )
@@ -957,7 +965,7 @@ def route(
                         "metric_in_lower_band",
                         code,
                         metric=item.name,
-                        value=view.shown(code, item.value),
+                        value=view.shown(code, item.value, unit),
                     ),
                 )
             )
@@ -977,7 +985,7 @@ def route(
                     # величина, и формулировка обязана говорить именно так.
                     routing.say(
                         "bound_above_threshold",
-                        value=view.shown("net_debt_ebitda", bound.value),
+                        value=view.shown("net_debt_ebitda", bound.value, unit),
                     ),
                 )
             )
@@ -985,13 +993,17 @@ def route(
     if operating_profit is not None and operating_profit <= 0:
         # Величина денежная, и печатается она единой точкой округления:
         # «-7378338.000» — не число для человека, а внутреннее представление.
-        # Единица здесь не называется: она свойство комплекта, и объявляет её
-        # тот, кто печатает строку целиком.
+        # **Единица называется здесь же.** Прежде основание печатало число
+        # без неё, «объявить единицу» оставалось тому, кто печатает строку
+        # целиком, и никто её не объявлял: строка списка читалась в тысячах
+        # у эмитента, отчитавшегося в миллионах.
         attention.append(
             Finding(
                 "operating_loss",
                 "ifrs.operating_profit",
-                routing.say("operating_loss", value=money(operating_profit)),
+                routing.say(
+                    "operating_loss", value=money(operating_profit), unit=unit
+                ),
             )
         )
 

@@ -48,6 +48,47 @@ def source_preference(alias: str = "") -> str:
     column = f"{alias}.source" if alias else "source"
     return f"ORDER BY source_rank({column})"
 
+
+# **Единица комплекта называется одним кодом на весь проект.** Прежде её
+# набирали порознь тезисы, сигналы, список наблюдения и выгрузка — и наборы
+# разошлись: графы списка печатали «млн руб.», а основания рядом с ними
+# «тыс. руб.», потому что единая точка печати без названной единицы
+# подставляла умолчанием тысячи. Величина одна, и код, считающий её, один.
+#
+# Комплект выбирается тем же предпочтением источника, что и величины: за год
+# их два, и у доставки агрегатора единица своя.
+_UNIT = f"""
+SELECT s.unit_code FROM src_file s
+JOIN fact_report f ON f.src_file_id = s.id
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
+  AND s.status <> 'quarantine' AND s.is_actual
+{source_preference("s")}
+LIMIT 1
+"""
+
+
+def unit_name_of(inn: str, report_date, conn, standard: str = "ifrs") -> str:
+    """Наименование денежной единицы комплекта; пусто — комплекта нет.
+
+    Пустая строка означает «единицу назвать нечем», и печатать по ней деньги
+    нельзя: единая точка печати такую величину не печатает вовсе. Это и есть
+    правильный исход — «663 888 тыс. руб.» там, где в отчётности миллионы,
+    не ловит ни один контроль сходимости.
+    """
+    from finlib.db import fetch_one
+    from finlib.normalize.lines import load_lines
+
+    row = fetch_one(
+        _UNIT, {"inn": inn, "date": report_date, "standard": standard}, conn=conn
+    )
+    code = (row or {}).get("unit_code")
+    if not code:
+        return ""
+    try:
+        return load_lines().units.name_of(code)
+    except (KeyError, ValueError):
+        return ""
+
 # Условие `ON CONFLICT ... DO UPDATE`: приоритет и признак изменения.
 # Строкой, а не запросом: его вставляют в свой `INSERT` оба загрузчика,
 # и второго определения правила быть не должно.

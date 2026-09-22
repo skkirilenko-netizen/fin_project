@@ -28,15 +28,16 @@ import csv
 import logging
 import sys
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
-from finlib.metrics.display import money, ratio  # noqa: E402
+from finlib.metrics.definitions import Unit  # noqa: E402
+from finlib.metrics.display import foreign_units, format_metric, ratio  # noqa: E402
 from finlib.metrics.ifrs_view import IfrsMetricsView  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
-from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 
@@ -77,6 +78,13 @@ HEADER = (
 )
 
 
+def _sum(value: Decimal | None, unit: str) -> str:
+    """Денежная величина графы вместе с единицей комплекта; None — пусто."""
+    if value is None:
+        return ""
+    return format_metric(value, Unit.THOUSAND_RUB, money=unit)
+
+
 def main() -> int:
     """Пишет CSV; 1 — если выгружать нечего."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
@@ -86,7 +94,6 @@ def main() -> int:
         out = Path(sys.argv[sys.argv.index("--out") + 1])
     routing = load_routing()
     view = IfrsMetricsView(load_ifrs_metrics())
-    units = load_lines().units
     with connection() as conn:
         rows, counts = routing_rows(conn, today)
     if not rows:
@@ -97,21 +104,39 @@ def main() -> int:
         return 1
 
     out.parent.mkdir(parents=True, exist_ok=True)
+    verified = 0
     with out.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle, delimiter=";", quoting=csv.QUOTE_MINIMAL)
         writer.writerow(HEADER)
         for item in sorted(rows, key=lambda entry: (entry.verdict.basket, entry.name)):
             verdict = item.verdict
-            unit = units.name_of(item.unit_code) if item.unit_code else ""
+            # Единица берётся у строки: набранная здесь во второй раз,
+            # она разошлась бы с той, которую печатают основания.
+            unit = item.unit
             # Величины печатаются той же единой точкой округления, что
             # в документе и на странице: третье представление разошлось бы
             # с первыми двумя.
             values = [
-                view.shown(code, value, money=unit or None)
+                view.shown(code, value, unit)
                 if (value := item.values.get(code)) is not None
                 else ""
                 for code in VALUES
             ]
+            # **Единица сверяется у каждой строки той же функцией, что
+            # у документа.** Выгрузка печатала мимо проверки, и контур получал
+            # миллионы, подписанные тысячами.
+            printed = " ".join(
+                [unit, *values]
+                + [entry.text for entry in verdict.findings]
+                + [entry.text for entry in verdict.notes]
+            )
+            wrong = foreign_units(printed, unit)
+            if wrong:
+                raise ValueError(
+                    f"{item.name} ({item.inn}): напечатана единица "
+                    f"«{', '.join(wrong)}», а комплект составлен в «{unit}»"
+                )
+            verified += 1
             writer.writerow(
                 (
                     # ИНН строкой: ведущий ноль у четверти организаций.
@@ -139,13 +164,21 @@ def main() -> int:
                     item.branch,
                     item.group,
                     *values,
-                    money(item.cash) if item.cash is not None else "",
-                    money(item.refinance.due)
-                    if item.refinance is not None and item.refinance.due is not None
-                    else "",
+                    # **Денежная графа называет свою единицу сама.** Графа
+                    # «единица» стоит рядом, но читатель берёт из выгрузки
+                    # столбец, а не строку, и число без единицы в нём читается
+                    # в тех единицах, которые он предположит.
+                    _sum(item.cash, unit),
+                    _sum(
+                        item.refinance.due if item.refinance is not None else None,
+                        unit,
+                    ),
                 )
             )
     print(f"{out}: строк {len(rows)}, графа {len(HEADER)}")
+    # Знаменатель проверки единицы: ноль расхождений при неизвестном числе
+    # сверенных строк не означает ничего.
+    print(f"  единица сверена у строк: {verified}, расхождений 0")
     print(
         "ИНН выгружен строкой, разделитель «;», кодировка UTF-8 с меткой: "
         "иначе редактор таблиц съедает ведущий ноль и ломает кириллицу."

@@ -39,7 +39,11 @@ def test_format_metric_by_unit() -> None:
     """Каждая единица измерения оформляется по-своему."""
     assert format_metric(Decimal("0.82"), Unit.RATIO) == "0,82"
     assert format_metric(Decimal("63.0971"), Unit.DAYS) == "63,1 дн."
-    assert "тыс. руб." in format_metric(Decimal("1000"), Unit.THOUSAND_RUB)
+    # Денежная величина печатается только с названной единицей комплекта:
+    # у консолидированной отчётности это «млн руб.», и умолчания нет.
+    assert "млн руб." in format_metric(
+        Decimal("1000"), Unit.THOUSAND_RUB, money="млн руб."
+    )
 
 
 # --- состав блоков ----------------------------------------------------------

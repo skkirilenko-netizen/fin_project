@@ -20,6 +20,7 @@ from finlib.db import fetch_all
 from finlib.llm.service import PromptScheme
 from finlib.metrics.definitions import Unit
 from finlib.metrics.display import format_metric
+from finlib.normalize.facts import unit_name_of
 from finlib.pipeline import PipelineError, StageResult, analyze, load_inbox
 from finlib.sources.inbox import InboxScan, InboxSource
 from finlib.sources.model import SourceKind
@@ -146,11 +147,16 @@ def _scheme(name: str) -> PromptScheme:
     return found
 
 
-def _render(value: Decimal | None, unit: Unit, scale: int) -> str:
-    """Значение показателя в единице и разрядности методики."""
+def _render(value: Decimal | None, unit: Unit, scale: int, unit_name: str) -> str:
+    """Значение показателя в единице и разрядности методики.
+
+    `unit_name` — денежная единица комплекта. Довод обязательный: терминал
+    печатает те же величины, что документ, и умолчание «тыс. руб.» подписало
+    бы тысячами миллионы.
+    """
     if value is None:
         return "—"
-    return format_metric(value, unit, scale)
+    return format_metric(value, unit, scale, money=unit_name)
 
 
 @app.command("analyze")
@@ -330,6 +336,9 @@ def show_command(
         by_metric.setdefault(row["metric_code"], []).append(row)
         periods.add(row["report_date"])
     ordered = sorted(periods, reverse=True)[:3]
+    # Единица комплекта отчётного периода: величины прежних периодов
+    # приведены к ней же — комплект один.
+    unit_name = unit_name_of(inn, ordered[0], None, Standard.RSBU.value)
 
     header = f"{'Показатель':<42}" + "".join(f"{p:%d.%m.%Y}".rjust(20) for p in ordered)
     typer.echo(typer.style(header, bold=True))
@@ -345,7 +354,9 @@ def show_command(
         for period in ordered:
             item = values.get(period)
             text = (
-                _render(item["value"], metric.unit, catalog.scale_for(code))
+                _render(
+                    item["value"], metric.unit, catalog.scale_for(code), unit_name
+                )
                 if item and item["status"] == "ok"
                 else "—"
             )

@@ -87,7 +87,9 @@ def test_nonzero_value_does_not_print_as_zero() -> None:
     assert format_metric(Decimal(0), Unit.RATIO) == "0,00"
     # Правило общее для всех единиц: сумма, округляющаяся в ноль, читается
     # как ноль так же ложно.
-    assert format_metric(Decimal("0.4"), Unit.THOUSAND_RUB).startswith("менее 1")
+    assert format_metric(
+        Decimal("0.4"), Unit.THOUSAND_RUB, money="тыс. руб."
+    ).startswith("менее 1")
 
 
 def test_money_keeps_group_separators() -> None:

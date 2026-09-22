@@ -106,7 +106,7 @@ def check_unit(data: ReportData, text: str) -> list[Inconsistency]:
     Поэтому контроль блокирующий и сверяет напечатанное с комплектом, а не
     предположение с предположением.
     """
-    from finlib.normalize.lines import load_lines
+    from finlib.metrics.display import foreign_units
 
     if not text.strip():
         return [
@@ -116,8 +116,9 @@ def check_unit(data: ReportData, text: str) -> list[Inconsistency]:
             )
         ]
     own = data.unit_name
-    others = sorted(set(load_lines().units.names.values()) - {own})
-    wrong = [name for name in others if name in text]
+    # Сверяет одна функция на все выходы: у документа, у списка наблюдения
+    # и у выгрузки вопрос один — не напечатана ли единица чужого комплекта.
+    wrong = foreign_units(text, own)
     if not wrong:
         return []
     return [
