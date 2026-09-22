@@ -35,9 +35,11 @@ from finlib.scoring.routing import (
 from finlib.sources.cbonds_events import (
     Guarantee,
     IssuerEvents,
+    credit_scales,
     events_of,
     guarantees_of,
     latest_snapshot,
+    point_order,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,6 +188,10 @@ def routing_rows(
         inn for inn, card in known.items() if str(card.get("emitent_spv")) == "1"
     }
     on, snapshot = latest_snapshot()
+    # Справочники шкал читаются один раз на прогон, а не на эмитента: файл
+    # один и тот же, а эмитентов триста.
+    credit = credit_scales()
+    order = point_order()
     if on is None:
         logger.warning(
             "снимка рейтингов на диске нет: событийный слой будет пуст, "
@@ -213,7 +219,7 @@ def routing_rows(
             continue
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
-        events = events_of(inn, snapshot)
+        events = events_of(inn, snapshot, credit, order)
         # Поручитель нужен уже здесь: формулировка финансирующей структуры
         # без него говорила бы о группе там, где речь о том, кто отвечает
         # по долгу. Корзина же его берётся вторым проходом.
