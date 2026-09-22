@@ -86,7 +86,7 @@ def main() -> int:
     )
 
     measured: list[tuple[str, str, Decimal, Decimal, Decimal, str]] = []
-    no_issues = no_schedule = no_cash = no_unit = 0
+    no_issues = no_schedule = no_cash = no_unit = no_offers = 0
     for item in rows:
         if item.events is None or not item.events.issues_known:
             no_issues += 1
@@ -98,6 +98,7 @@ def main() -> int:
         if not plan.known:
             no_schedule += 1
             continue
+        no_offers += plan.without_offers
         if item.unit_code is None:
             no_unit += 1
             continue
@@ -125,7 +126,9 @@ def main() -> int:
         f"Эмитентов в списке {counts['эмитентов']}. Посчитано **{len(measured)}**; "
         f"без выпусков в обращении {no_issues}, без графика платежей "
         f"{no_schedule}, без раскрытых денежных средств {no_cash}, "
-        f"без единицы измерения {no_unit}.\n"
+        f"без единицы измерения {no_unit}. Выпусков, по которым ответа "
+        f"об офертах нет, — {no_offers}: у них «оферт ноль» означает "
+        "недошедшую доставку, а не отсутствие права предъявления.\n"
     )
     if not measured:
         print(

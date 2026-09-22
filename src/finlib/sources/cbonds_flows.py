@@ -29,6 +29,14 @@
 **Оферта — не платёж графика.** Предъявление бумаги к выкупу — право
 владельца, а не обязанность, и складывать оферту с купоном значило бы
 считать возможное состоявшимся. Обе величины возвращаются порознь.
+
+**Ближайшая оферта берётся у метода оферт, а не у записи выпуска.** Поле
+`offert_date_put` выглядит достаточным, и проверка это опровергла: у
+«Русбонд-Удобрения, 001Р-СПВБ-01» запись объявляет 29.03.2027, а `get_offert`
+даёт 28.09.2026 — внутри годового окна. Контрольная выборка выпусков,
+не объявивших даты вовсе, нашла оферты ещё у четырёх. Экономия на запросах
+стоила бы потери ближайшей оферты, то есть ровно той величины, ради которой
+считается всё остальное.
 """
 
 import json
@@ -137,6 +145,26 @@ def schedule_of(emission_id: str) -> Schedule | None:
     )
 
 
+def offers_of(emission_id: str) -> tuple[date, ...] | None:
+    """Даты оферт выпуска с диска; None — ответа источника нет.
+
+    Записей на одну оферту бывает две — день предъявления и день приобретения,
+    — и различать их здесь незачем: в окно попадают обе или ни одна. `None`
+    означает, что доставка до выпуска не дошла, и это не «оферт нет».
+    """
+    path = CACHE / f"offert_{emission_id}.json"
+    if not path.exists():
+        return None
+    found: list[date] = []
+    for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
+        when = str(item.get("date") or "")[:10]
+        try:
+            found.append(date.fromisoformat(when))
+        except ValueError:
+            continue
+    return tuple(sorted(found))
+
+
 @dataclass(frozen=True, slots=True)
 class Refinancing:
     """Что эмитенту предстоит заплатить по облигациям в окне месяцев.
@@ -152,6 +180,9 @@ class Refinancing:
     issues: int
     without_schedule: int
     without_volume: int
+    # Выпуски, по которым ответа об офертах нет: «оферт ноль» у них означает
+    # недошедшую доставку, а не отсутствие права предъявления.
+    without_offers: int = 0
 
     @property
     def known(self) -> bool:
@@ -166,14 +197,16 @@ def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinan
     с купоном оно выдало бы возможное за состоявшееся.
     """
     scheduled = offered = Decimal(0)
-    counted = no_schedule = no_volume = 0
+    counted = no_schedule = no_volume = no_offers = 0
+    edge = _shift(today, months)
     for issue in issues:
         status = str(getattr(issue, "status", ""))
         if status not in ("в обращении", "размещается"):
             continue
         counted += 1
+        emission = str(getattr(issue, "emission_id", ""))
         outstanding = getattr(issue, "outstanding", None)
-        plan = schedule_of(str(getattr(issue, "emission_id", "")))
+        plan = schedule_of(emission)
         if plan is None:
             no_schedule += 1
             continue
@@ -185,8 +218,15 @@ def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinan
             no_volume += 1
             continue
         scheduled += due
-        offer = getattr(issue, "offer", None)
-        if offer is not None and today <= offer < _shift(today, months):
+        # **Ближайшая оферта — у метода оферт.** Поле записи выпуска называет
+        # не всегда ближайшую: у «Русбонд-Удобрения» оно объявляет 29.03.2027
+        # при оферте 28.09.2026. Ответа нет — это называется, а не считается
+        # отсутствием оферты.
+        offers = offers_of(emission)
+        if offers is None:
+            no_offers += 1
+            continue
+        if any(today <= item < edge for item in offers):
             offered += outstanding
     return Refinancing(
         months=months,
@@ -195,4 +235,5 @@ def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinan
         issues=counted,
         without_schedule=no_schedule,
         without_volume=no_volume,
+        without_offers=no_offers,
     )

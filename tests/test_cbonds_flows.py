@@ -121,22 +121,62 @@ def test_unknown_volume_gives_no_sum(cache: Path) -> None:
     assert not counted.known
 
 
+def offers(folder: Path, emission: str, dates: list[str]) -> None:
+    """Кладёт ответ источника об офертах на диск."""
+    (folder / f"offert_{emission}.json").write_text(
+        json.dumps({"items": [{"date": item} for item in dates]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def test_offer_is_counted_apart_from_the_schedule(cache: Path) -> None:
     """Оферта не складывается с купонами: предъявление — право владельца."""
     put(cache, "1", [coupon("2026-10-05", "10")])
+    offers(cache, "1", ["2026-12-01"])
     plan = refinancing(
-        (
-            FakeIssue(
-                emission_id="1",
-                outstanding=Decimal(1000),
-                offer=date(2026, 12, 1),
-            ),
-        ),
+        (FakeIssue(emission_id="1", outstanding=Decimal(1000)),),
         12,
         date(2026, 9, 22),
     )
     assert plan.scheduled == Decimal(10)
     assert plan.offered == Decimal(1000)
+
+
+def test_offer_is_taken_from_the_method_not_from_the_issue(cache: Path) -> None:
+    """Ближайшая оферта берётся у метода оферт, а не у записи выпуска.
+
+    У «Русбонд-Удобрения, 001Р-СПВБ-01» запись объявляет 29.03.2027, а метод
+    даёт 28.09.2026 — внутри годового окна. Поле записи ближайшую оферту
+    называет не всегда, и доверять ему значило бы терять ту величину, ради
+    которой считается всё остальное.
+    """
+    put(cache, "1", [coupon("2026-10-05", "10")])
+    offers(cache, "1", ["2026-09-28", "2027-03-29"])
+    plan = refinancing(
+        (
+            FakeIssue(
+                emission_id="1",
+                outstanding=Decimal(1000),
+                # Запись выпуска называет далёкую дату — она не в счёт.
+                offer=date(2027, 3, 29),
+            ),
+        ),
+        12,
+        date(2026, 9, 22),
+    )
+    assert plan.offered == Decimal(1000)
+
+
+def test_missing_offers_answer_is_not_absence_of_offers(cache: Path) -> None:
+    """Ответа об офертах нет — это называется, а не считается нулём."""
+    put(cache, "1", [coupon("2026-10-05", "10")])
+    plan = refinancing(
+        (FakeIssue(emission_id="1", outstanding=Decimal(1000)),),
+        12,
+        date(2026, 9, 22),
+    )
+    assert plan.offered == 0
+    assert plan.without_offers == 1
 
 
 def test_redeemed_issues_are_out_of_the_window(cache: Path) -> None:

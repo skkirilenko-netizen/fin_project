@@ -13,13 +13,15 @@
   видна **дата события**, которой в самом выпуске нет;
 - `get_offert` — оферты выпуска, отбор по выпуску.
 
-**Оферты забираются не по всем выпускам, и это правило, а не экономия.**
-Запись выпуска объявляет ближайшую оферту сама (`offert_date_put`), и для
-горизонта двенадцати месяцев нужна именно ближайшая. Оферты запрашиваются
-у выпусков, объявивших дату, **и у контрольной выборки** тех, что не
-объявили: без неё «оферт сверх объявленных нет» было бы утверждением
-о непроверенном. Найдётся хоть одна — правило отменяется, и метод
-запрашивается по всем.
+**Оферты забираются по всем выпускам в обращении, и это решила контрольная
+выборка.** Сперва они запрашивались только у выпусков, объявивших дату
+в записи (`offert_date_put`), — расчёт был на то, что запись называет
+ближайшую оферту сама. Контрольная выборка тех, что даты не объявили, нашла
+оферты у четырёх выпусков, а сверка объявленных — случай, где запись
+называет **не ближайшую**: у «Русбонд-Удобрения, 001Р-СПВБ-01» объявлено
+29.03.2027, а метод даёт 28.09.2026, то есть внутри годового окна. Экономия
+на запросах стоила бы потери ближайшей оферты — той самой величины, ради
+которой всё и считается.
 
 **Ответы кладутся на диск в исходном виде**, повторный прогон сети не дёргает.
 Источник держит 30 запросов в минуту и объявляет это сам; прогон выжидает.
@@ -45,8 +47,6 @@ CARDS = CACHE / "emitents.json"
 # Выпуски, по которым нужны платежи: в обращении и размещаемые — для
 # рефинансирования, с дефолтом — для даты события.
 WANTED_STATUSES = ("в обращении", "размещается")
-# Каждый пятнадцатый выпуск без объявленной оферты — контрольная выборка.
-CONTROL_EVERY = 15
 
 
 def ask(method: str, name: str, key: str, value: str, limit: int) -> bool:
@@ -81,14 +81,14 @@ def ask(method: str, name: str, key: str, value: str, limit: int) -> bool:
     return False
 
 
-def emissions(defaults_only: bool = False) -> list[tuple[str, str, str, bool]]:
-    """Выпуски для платежей: ИНН, идентификатор, наименование, оферта объявлена.
+def emissions(defaults_only: bool = False) -> list[tuple[str, str, str]]:
+    """Выпуски для платежей: ИНН, идентификатор, наименование.
 
     `defaults_only` оставляет выпуски с дефолтом: по ним нужна **дата
     события**, и их девять десятков против тысячи двухсот в обращении —
     правило давности проверяется, не дожидаясь всей доставки.
     """
-    found: list[tuple[str, str, str, bool]] = []
+    found: list[tuple[str, str, str]] = []
     cards = json.loads(CARDS.read_text(encoding="utf-8"))
     for inn in cards:
         path = CACHE / f"emissions_{inn}.json"
@@ -101,13 +101,12 @@ def emissions(defaults_only: bool = False) -> list[tuple[str, str, str, bool]]:
             issue = by_name.get(name)
             marked = issue is not None and (issue.defaulted or issue.settled_default)
             status = str(item.get("status_name_rus") or "").strip().lower()
-            offer = issue is not None and issue.offer is not None
             if defaults_only:
                 if marked:
-                    found.append((inn, str(item["id"]), name, offer))
+                    found.append((inn, str(item["id"]), name))
                 continue
             if status in WANTED_STATUSES or marked:
-                found.append((inn, str(item["id"]), name, offer))
+                found.append((inn, str(item["id"]), name))
     return found
 
 
@@ -134,24 +133,18 @@ def flows(limit: int, defaults_only: bool) -> None:
     """Забирает платежи выпусков и оферты там, где они нужны."""
     wanted = emissions(defaults_only=defaults_only)
     chosen = wanted[:limit] if limit else wanted
-    paid = offers = control = 0
-    for index, (_, emission, _, declared) in enumerate(chosen):
+    paid = offers = 0
+    for _, emission, _ in chosen:
         paid += ask(
             "get_flow_new", f"flow_{emission}", "emission_id", emission, 500
         )
         if defaults_only:
             # Оферта говорит о рефинансировании, а не о дате дефолта.
             continue
-        sampled = not declared and index % CONTROL_EVERY == 0
-        if not declared and not sampled:
-            continue
-        if ask("get_offert", f"offert_{emission}", "emission_id", emission, 100):
-            offers += 1
-            control += int(sampled)
-    print(
-        f"платежи: выпусков {paid} из {len(chosen)}; оферты: запрошено {offers}, "
-        f"из них контрольной выборкой {control}"
-    )
+        offers += ask(
+            "get_offert", f"offert_{emission}", "emission_id", emission, 100
+        )
+    print(f"платежи: выпусков {paid} из {len(chosen)}; оферты: запрошено {offers}")
 
 
 def main() -> int:
