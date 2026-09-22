@@ -21,12 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from finlib.db import connection, fetch_all  # noqa: E402
+from finlib.db import connection  # noqa: E402
 from finlib.normalize.cbonds_mapping import load_cbonds_mapping  # noqa: E402
-from finlib.normalize.ifrs_issuer_type import load_issuer_types  # noqa: E402
 from finlib.normalize.ifrs_metrics import load_ifrs_metrics  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
+from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +45,11 @@ KNOWN = {
 
 
 
-_WITHOUT_SET = """
-SELECT count(DISTINCT d.inn) AS issuers
-FROM dq_log d
-WHERE d.check_code = 'cbonds_set_rejected'
-  AND d.inn NOT IN (
-      SELECT s.inn FROM src_file s
-      WHERE s.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
-  )
-"""
+# **Перечень отвергнутых на приёме больше не нужен этому замеру.** Прежде
+# он считал эмитентов, которых нет в списке вовсе, — их было 111, и они
+# стояли «сверх» замера. Теперь такой эмитент в списке есть: маршрут строится
+# по РСБУ либо по событиям, а разложение причин, по которым отчётность
+# не поступила, печатает замер охвата (`watchlist_coverage_run.py`).
 
 # Признак SPV справочника эмитентов: карточки собирает `cbonds_emitents.py`
 # и складывает на диск. Наименование в признак не идёт — «…Финанс» примета,
@@ -83,12 +80,21 @@ def main() -> int:
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
     policy = load_ifrs_metrics()
     routing = load_routing()
-    types = load_issuer_types()
     mapping = load_cbonds_mapping()
     spv, cards = spv_issuers()
     today = date.today()
-    caps = {factor.code: factor.cap for factor in types.stop_factors}
-    factor_names = {factor.code: factor.name for factor in types.stop_factors}
+    # **Стоп-факторы берутся у обоих справочников.** Маршрут строится и по
+    # РСБУ, и у неё перечень свой: `weak_coverage` печатался кодом, а градация
+    # ограничения класса — прочерком, то есть графа считала не то, как
+    # называется. Перечни складываются, а не подменяют друг друга: код
+    # у стандартов бывает один и тот же (`negative_equity`), и означает он
+    # одно и то же.
+    caps: dict[str, str] = {}
+    factor_names: dict[str, str] = {}
+    for standard in Standard:
+        for factor in catalogue_for(standard).stop_factors:
+            caps.setdefault(factor.code, factor.cap)
+            factor_names.setdefault(factor.code, factor.name)
 
     baskets: Counter[str] = Counter()
     grounds: dict[str, Counter[str]] = defaultdict(Counter)
@@ -106,7 +112,6 @@ def main() -> int:
     substituted = 0
 
     with connection() as conn:
-        outside = fetch_all(_WITHOUT_SET, {}, conn=conn)
         # **Входы маршрута собирает боевой путь** (`scoring.routing_store`):
         # прежде замер и экран наблюдения собирали их порознь одними и теми же
         # запросами, и расхождение между отчётом и списком увидеть было нечем.
@@ -161,7 +166,6 @@ def main() -> int:
 
     measured = {item.inn for item in rows}
     total = sum(baskets.values())
-    aside = int(outside[0]["issuers"]) if outside else 0
     print("# Маршрутизация: распределение по корзинам\n")
     print(
         f"Правила — `methodology/routing.yaml`, версия {routing.version}, "
@@ -173,16 +177,19 @@ def main() -> int:
         f"годовой отчётности ({routing.freshness.annual_due}).\n"
     )
     print(
-        f"Эмитентов в замере: **{total}** — те, у кого есть комплект вне "
-        f"карантина. Сверх них **{aside}** комплекта не имеют вовсе: их "
-        "отчётность отклонена на приёме, и в доли они не входят.\n"
+        f"Эмитентов в замере: **{total}** — весь универсум маршрута: эмитенты "
+        "с выпусками в обращении вместе с теми, чья отчётность у нас "
+        "загружена. Маршрут построен по консолидированной отчётности "
+        f"у {selection['маршрут по МСФО']}, по отчётности юридического лица "
+        f"у {selection['маршрут по РСБУ']}, по одним событиям и рейтингам "
+        f"у {selection['маршрут по событиям и рейтингам']}: отчётности "
+        "у последних нет ни по одному стандарту, и корзина у них построена "
+        "на том, что от стандарта не зависит.\n"
     )
     print(
         f"Признак финансирующей структуры измерен по {cards} карточкам справочника "
-        f"эмитентов, помечено SPV {len(spv)}, из них с комплектом в замере "
-        f"{len(spv & measured)}. Прочие сюда не попадают не потому, что признак "
-        "редок, а потому, что их отчётность по МСФО неконсолидированная "
-        "и комплектом не становится.\n"
+        f"эмитентов, помечено SPV {len(spv)}, из них в замере "
+        f"{len(spv & measured)}.\n"
     )
 
     print(
