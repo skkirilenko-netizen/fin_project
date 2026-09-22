@@ -423,29 +423,24 @@ def test_question_about_non_disclosure_is_caught() -> None:
     assert TextRule.QUESTION_ABOUT_DISCLOSURE in {item.rule for item in issues}
 
 
-def test_questions_ask_about_non_disclosure_only_when_it_is_refuted(db_conn) -> None:
-    """О нераскрытии спрашивается только там, где оно чем-то опровергнуто.
+def test_questions_never_ask_about_non_disclosure(db_conn) -> None:
+    """Вопрос о нераскрытии строки не может быть задан вовсе.
 
-    Прежде запрет был безусловным: вопрос «почему не раскрыта строка» ответа
-    не имеет — в упрощённой форме строки нет вовсе, а в полной нераскрытие
-    правомерно. Исключение появилось 22.09.2026 и объявлено: если по той же
-    строке величина есть у информационного агентства, раскрытие где-то
-    состоялось, и ответ у вопроса появляется. Исключение одно, названо
-    по имени, и требует, чтобы формулировка называла этот источник, —
-    иначе вопрос снова оказывается о форме.
+    Прежде запрет стоял в инструкции модели, и она его нарушала. Теперь
+    вопросы собирает расчёт из предписанных формулировок, и нарушить запрет
+    нечем: формулировки о нераскрытии в справочнике нет.
+
+    **Попытка сузить запрет отвергнута 22.09.2026.** Поводом была величина
+    агрегатора там, где первоисточник поставил прочерк: казалось, что
+    нераскрытие опровергнуто. Проверка исходных выгрузок показала обратное —
+    прочерк верен, расходится агрегатор, — и спрашивать организацию об ошибке
+    третьей стороны незачем. Такие случаи идут перечнем к агрегатору.
     """
     forbidden = ("не раскрыт", "отсутствуют в расчёте", "почему не раскры")
-    allowed = {QuestionSubject.UNDISCLOSED_WITH_VALUE}
-    for subject, text in POLICY.questions.texts.items():
+    for text in POLICY.questions.texts.values():
         lowered = " ".join(text.split()).lower()
         for item in forbidden:
-            if subject in allowed:
-                continue
             assert item not in lowered, text
-    exception = " ".join(
-        POLICY.questions.texts[QuestionSubject.UNDISCLOSED_WITH_VALUE].split()
-    ).lower()
-    assert "информационного агентства" in exception
 
 
 def test_calculated_sections_are_checked_on_a_real_document(db_conn, tmp_path) -> None:

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _SELECT_SRC_FILE = """
 SELECT id, inn, report_year, reporting_type, standard, unit_code, unit_source, status,
-       correction_version
+       correction_version, source, meta
 FROM src_file WHERE id = %(id)s
 """
 
@@ -174,6 +174,7 @@ def build_context(
         )
 
     _apply_unloaded(src_file_id, periods, conn)
+    _apply_aggregator_reading(src, periods)
 
     revisions = {
         (row["report_date"], row["form_code"], row["line_code"]): (
@@ -215,6 +216,59 @@ def build_context(
         catalog=catalog if catalog is not None else load_lines(),
         thresholds=thresholds if thresholds is not None else load_thresholds(),
     )
+
+
+def _apply_aggregator_reading(
+    src: dict[str, Any], periods: dict[date, PeriodFacts]
+) -> None:
+    """Читает величины доставки агрегатора так, как объявила методика.
+
+    **Ноль у агрегатора не означает нуля**, и для контроля сходимости это
+    значит «итог не проверяем», а не «итог не сошёлся»: слагаемое, о котором
+    неизвестно, ноль это или прочерк, нельзя ни складывать, ни считать
+    раскрытым. То же с строками, которых у источника нет вовсе: их отсутствие
+    — свойство его набора полей, а не нераскрытие эмитентом, и требовать
+    сходимости по ним бессмысленно.
+
+    Правило объявлено у вида отчёта (`cbonds_mapping.yaml`, блок
+    `zero_reading`) вместе с замером; здесь оно только применяется. Комплекта
+    первоисточника это не касается: у него ноль означает раскрытый ноль.
+    """
+    if src.get("source") != "cbonds":
+        return
+    from finlib.normalize.cbonds_mapping import load_cbonds_mapping
+
+    name = ((src.get("meta") or {}).get("cbonds") or {}).get("report")
+    if not name:
+        logger.warning(
+            "комплект %s доставлен агрегатором, но вид отчёта в нём не назван: "
+            "правило чтения нулей не применено",
+            src.get("id"),
+        )
+        return
+    report = load_cbonds_mapping().report(str(name))
+    reading = report.zero_reading
+    if reading is None:
+        return
+    undelivered = set(reading.lines_not_delivered)
+    for facts in periods.values():
+        if reading.as_not_disclosed:
+            for (form_code, line_code), item in facts.values.items():
+                if item.value == 0:
+                    facts.unverifiable[(form_code, line_code)] = (
+                        "величина доставлена агрегатором как ноль, а ноль у него "
+                        "означает и нераскрытие: проверить сумму нельзя"
+                    )
+        for line_code in undelivered:
+            # Форма строки берётся у справочника: строки нет в фактах, и форму
+            # взять оттуда нельзя, а знать её контролю нужно.
+            line = load_lines().get(line_code)
+            if line is None:
+                continue
+            facts.unverifiable[(line.form, line_code)] = (
+                f"строки {line_code} нет в наборе полей источника: отсутствие "
+                "её — свойство доставки, а не нераскрытие эмитентом"
+            )
 
 
 def _apply_unloaded(

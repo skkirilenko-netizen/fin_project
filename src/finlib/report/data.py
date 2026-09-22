@@ -641,29 +641,6 @@ class ReportData:
         return [item for item in self.sources if item["status"] == "quarantine"]
 
     @property
-    def undisclosed_with_value(self) -> tuple[str, ...]:
-        """Строки отчётного периода, не раскрытые нами, но раскрытые агрегатору.
-
-        **Клетку такая величина не заполняет, а вопросом становится.**
-        Заполнение дало бы два источника в одном комплекте и превратило бы
-        «не раскрыто» в число неизвестного происхождения; молчание же прячет
-        готовый запрос к организации — раскрытие где-то состоялось.
-
-        Берутся строки **отчётного периода документа**: вопрос задаётся о том
-        комплекте, о котором документ, а не о любом периоде организации.
-        """
-        from finlib.quality.codes import CheckCode
-
-        found: set[str] = set()
-        for item in self.checks:
-            if item["check_code"] != CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED.value:
-                continue
-            if item["report_year"] != self.report_date.year:
-                continue
-            found.update(item["line_codes"] or ())
-        return tuple(sorted(found))
-
-    @property
     def blocking_failures(self) -> list[dict]:
         """Провалившиеся блокирующие контроли **комплекта этого документа**.
 

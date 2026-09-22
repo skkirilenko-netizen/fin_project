@@ -55,12 +55,6 @@ class QuestionSubject(StrEnum):
     FLAG_CONFLICT = "flag_conflict"
     ATTENTION_SIGNAL = "attention_signal"
     QUARANTINED_SET = "quarantined_set"
-    # **Строка не раскрыта в сданной отчётности, а у информационного агентства
-    # величина по ней есть.** Клетку это не заполняет — «не раскрыто» осталось
-    # бы «не раскрыто», а число неизвестного происхождения встало бы рядом
-    # с величинами отчётности, — но как вопрос к организации сведение готово:
-    # спрашивается ровно то, чего в отчётности нет.
-    UNDISCLOSED_WITH_VALUE = "undisclosed_with_value"
     MISSING_METRIC = "missing_metric"
 
 

@@ -190,3 +190,54 @@ def test_declaring_a_thing_twice_is_refused() -> None:
     neither["reports"][REPORT] = rsbu | {"unit_from": None}
     with pytest.raises(ValueError, match="единица"):
         CbondsMapping.model_validate(neither)
+
+
+def test_zero_makes_the_total_unverifiable_not_failed(db_conn) -> None:
+    """Ноль среди слагаемых даёт «не проверяем», а не провал.
+
+    Ноль у агрегатора означает и нераскрытие, и слагаемое, о котором это
+    неизвестно, нельзя ни складывать, ни считать раскрытым. Прежде такой
+    состав объявлялся расхождением: из 534 провалов по комплектам агрегатора
+    234 имели среди слагаемых нули — то есть эмитенту приписывалось то, чего
+    в его отчётности нет.
+    """
+    row = ROW | {"ln1200": "0", "ln1600": "1000"}
+    outcome = load_row(row, db_conn, report_name=REPORT)
+    assert not outcome.quarantined
+    assert any(
+        code == CheckCode.CBONDS_SECTIONS_MISMATCH.value
+        for code, _ in outcome.unchecked
+    )
+    assert not outcome.failures
+
+
+def test_zero_total_with_activity_is_still_blocking(db_conn) -> None:
+    """Ноль итога при ненулевой деятельности смягчению не подлежит.
+
+    Это и есть признак нераскрытия, и он блокирующий: стоп-фактор по такому
+    капиталу был бы утверждением об эмитенте, сделанным по нераскрытой
+    величине.
+    """
+    row = ROW | {"ln1300": "0"}
+    outcome = load_row(row, db_conn, report_name=REPORT)
+    assert outcome.quarantined
+    assert any(
+        code == CheckCode.CBONDS_ZERO_TOTAL.value for code, _ in outcome.failures
+    )
+
+
+def test_controls_read_the_aggregator_zeros_as_not_disclosed(db_conn) -> None:
+    """Контроли сходимости читают ноль доставки так же, как загрузчик.
+
+    Правило объявлено у вида отчёта, а применяется в двух местах — в проверках
+    загрузчика и в контролях качества. Второе место важнее: именно контроли
+    ставят карантин, и без правила комплект уходил в него за ноль, значение
+    которого неизвестно.
+    """
+    from finlib.quality.checks import section_sum
+    from finlib.quality.context import build_context
+
+    outcome = load_row(ROW | {"ln1240": "0"}, db_conn, report_name=REPORT)
+    context = build_context(outcome.src_file_id, db_conn)
+    found = [item for item in section_sum(context) if item.line_code == "1200"]
+    assert found and all(item.status.value != "fail" for item in found)

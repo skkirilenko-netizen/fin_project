@@ -141,6 +141,23 @@ class ZeroTotal(BaseModel):
     check: str = Field(min_length=1)
 
 
+class ZeroReading(BaseModel):
+    """Как контроли сходимости читают величины доставки агрегатора.
+
+    **Ноль у агрегатора не означает нуля**, и для контроля это значит «итог
+    не проверяем», а не «итог не сошёлся»: слагаемое, о котором неизвестно,
+    ноль это или прочерк, нельзя ни складывать, ни считать раскрытым.
+    Отдельно объявлены строки, которых у источника нет вовсе: их отсутствие —
+    свойство его набора полей, а не нераскрытие эмитентом.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    as_not_disclosed: bool
+    lines_not_delivered: tuple[str, ...] = ()
+    origin: str = Field(min_length=1)
+
+
 class Controls(BaseModel):
     """Сверки вида отчёта.
 
@@ -225,6 +242,7 @@ class ReportDef(BaseModel):
     field_rule: FieldRule | None = None
     controls: Controls
     zero_total: ZeroTotal
+    zero_reading: ZeroReading | None = None
     reported: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")

@@ -189,6 +189,11 @@ class LoadOutcome:
     rejection: Rejection | None = None
     # Сработавшие проверки нуля и сверки: перечень кодов с сообщением.
     failures: tuple[tuple[str, str], ...] = ()
+    # Проверки, выполнить которые нельзя: среди величин ноль, а у источника
+    # ноль означает и нераскрытие. Третий исход рядом с «сошлось»
+    # и «не сошлось», и молчать о нём нельзя — иначе сводка комплекта скажет
+    # «проверено», не проверив.
+    unchecked: tuple[tuple[str, str], ...] = ()
     # Расхождения с величинами первоисточника: содержательный сигнал.
     # Рядом с расхождением — его исход: величина записана либо нет. Исход
     # решает правило приоритета, и записывать его со слов правила нельзя.
@@ -386,28 +391,68 @@ def _checked_reason(
     return None
 
 
-def _zero_checks(row: dict, report: ReportDef) -> list[tuple[str, str]]:
-    """Три проверки нуля и сверка долга: что не сошлось и с какими числами.
+def _zero_checks(
+    row: dict, report: ReportDef
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Проверки нуля: что не сошлось, что проверить нельзя, и с какими числами.
 
     **Ноль у агрегатора не означает нуля.** Источник пишет ноль и там, где
     величина не раскрыта: у ГК «Автодор» за 31.03.2024 активы и капитал
-    нулевые при выручке 715. Признаков три, и каждый со своим кодом.
+    нулевые при выручке 715. Отсюда третий исход рядом с «сошлось»
+    и «не сошлось»: **не проверяем**. Слагаемое, о котором неизвестно, ноль
+    это или прочерк, нельзя ни складывать, ни считать раскрытым, и объявлять
+    расхождение по такому составу значило бы приписывать эмитенту то, чего
+    в его отчётности нет. Правило объявлено у вида отчёта (`zero_reading`).
+
+    **Ноль итога при ненулевой деятельности этим не смягчается**: он и есть
+    признак нераскрытия, и он блокирующий — стоп-фактор по такому капиталу
+    был бы утверждением об эмитенте, сделанным по нераскрытой величине.
     """
     found: list[tuple[str, str]] = []
+    unchecked: list[tuple[str, str]] = []
+    zero_is_unknown = (
+        report.zero_reading is not None and report.zero_reading.as_not_disclosed
+    )
+
+    def unknown(*values: Decimal | None) -> bool:
+        """Есть ли среди величин такая, о которой неизвестно, раскрыта ли она."""
+        return zero_is_unknown and any(value == 0 for value in values)
+
     control = report.controls.identity
     left, right = number(row.get(control.left)), number(row.get(control.right))
-    if None not in (left, right) and abs(left - right) > _tolerance(control, left):
-        found.append((control.check, f"{control.left} {left} против {control.right} {right}"))
+    if None not in (left, right):
+        if unknown(left, right):
+            unchecked.append(
+                (
+                    control.check,
+                    f"{control.left} либо {control.right} доставлены нулём: "
+                    "у источника ноль означает и нераскрытие",
+                )
+            )
+        elif abs(left - right) > _tolerance(control, left):
+            found.append(
+                (control.check, f"{control.left} {left} против {control.right} {right}")
+            )
 
     for sums in report.controls.sums:
         total = number(row.get(sums.total))
         parts = [number(row.get(name)) for name in sums.parts]
-        if total is not None and None not in parts:
-            got = sum(parts, start=Decimal(0))
-            if abs(got - total) > _tolerance(sums, total):
-                found.append(
-                    (sums.check, f"{sums.total} {total} против суммы частей {got}")
+        if total is None or None in parts:
+            continue
+        if unknown(total, *parts):
+            unchecked.append(
+                (
+                    sums.check,
+                    f"слагаемые итога {sums.total} доставлены нулём: "
+                    "у источника ноль означает и нераскрытие",
                 )
+            )
+            continue
+        got = sum(parts, start=Decimal(0))
+        if abs(got - total) > _tolerance(sums, total):
+            found.append(
+                (sums.check, f"{sums.total} {total} против суммы частей {got}")
+            )
 
     zero = report.zero_total
     activity = [number(row.get(name)) or Decimal(0) for name in zero.activity]
@@ -418,7 +463,7 @@ def _zero_checks(row: dict, report: ReportDef) -> list[tuple[str, str]]:
                     (zero.check, f"{name} равен нулю при ненулевой деятельности")
                 )
 
-    return found
+    return found, unchecked
 
 
 def _tolerance(control: object, total: Decimal) -> Decimal:
@@ -496,7 +541,7 @@ def load_row(
         return LoadOutcome(inn=inn, rejection=rejection)
 
     moment = date.fromisoformat(str(row["date"]))
-    failures = _zero_checks(row, report)
+    failures, unchecked = _zero_checks(row, report)
     quarantined = any(
         code
         in (
@@ -675,6 +720,7 @@ def load_row(
         presented=presented,
         quarantined=quarantined,
         failures=tuple(failures),
+        unchecked=tuple(unchecked),
         mismatches=tuple(mismatches),
         sign_conventions=tuple(signs),
         zeros_for_undisclosed=tuple(zeros),
@@ -714,6 +760,7 @@ def _records(
     """
     records: list[CheckRecord] = []
     failed = {code for code, _ in outcome.failures}
+    unchecked = {code for code, _ in outcome.unchecked}
     for code, message in outcome.failures:
         records.append(
             CheckRecord(
@@ -725,12 +772,24 @@ def _records(
                 message=message,
             )
         )
+    for code, message in outcome.unchecked:
+        records.append(
+            CheckRecord(
+                inn=outcome.inn,
+                check_code=CheckCode(code),
+                status=CheckStatus.INFO,
+                severity=Severity.WARNING,
+                report_date=outcome.report_date,
+                src_file_id=outcome.src_file_id,
+                message=f"не проверяем: {message}",
+            )
+        )
     for code in (
         report.controls.identity.check,
         *(item.check for item in report.controls.sums),
         report.zero_total.check,
     ):
-        if code in failed:
+        if code in failed or code in unchecked:
             continue
         records.append(
             CheckRecord(
