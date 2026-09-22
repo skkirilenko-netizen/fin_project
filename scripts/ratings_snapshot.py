@@ -34,18 +34,35 @@ CARDS = Path("data/raw/cbonds/emitents.json")
 SNAPSHOTS = Path("data/raw/cbonds/ratings")
 METHOD = "get_rating_emitent_maxdate"
 
-# Поля, которые снимок хранит. Остальное у ответа есть, но к истории рейтинга
-# отношения не имеет: адреса агентств и наименования на четырёх языках.
-KEPT = (
-    "agency_name_rus",
-    "scale_name_rus",
-    "scale_point_name",
-    "scale_point_description_rus",
-    "forecast_name_rus",
-    "rating_date",
-    "scale_id",
-    "scale_point_id",
-    "update_time",
+# **Запись хранится полностью, и это решение от 22.09.2026.** Прежде снимок
+# оставлял девять полей из сорока пяти — «остальное суть адреса агентств», —
+# и это верно ровно до первого вопроса, которого мы не задавали: статуса
+# наблюдения у рейтинга, например. Снимок единственное, что нельзя
+# пересчитать, а урезать его значит принять методическое решение доставкой.
+# Ненужные поля занимают место; потерянное поле не восстановить.
+#
+# Отсюда и резервная копия: один файл в день, полный, и достаточно копировать
+# его (`scripts/snapshots_backup.py`).
+DROPPED = (
+    "agency_name_eng",
+    "agency_name_ita",
+    "agency_name_pol",
+    "agency_site_eng",
+    "agency_site_ita",
+    "agency_site_pol",
+    "agency_site_rus",
+    "emitent_name_eng",
+    "emitent_name_ita",
+    "emitent_name_pol",
+    "forecast_name_eng",
+    "forecast_name_ita",
+    "forecast_name_pol",
+    "scale_name_eng",
+    "scale_name_ita",
+    "scale_name_pol",
+    "scale_point_description_eng",
+    "scale_point_description_ita",
+    "scale_point_description_pol",
 )
 
 
@@ -97,7 +114,8 @@ def main() -> int:
             refused[inn] = str(failure)[:120]
             continue
         snapshot[inn] = [
-            {key: item.get(key) for key in KEPT} for item in found.get("items", [])
+            {key: value for key, value in item.items() if key not in DROPPED}
+            for item in found.get("items", [])
         ]
 
     path.write_text(
