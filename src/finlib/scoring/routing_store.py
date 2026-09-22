@@ -25,8 +25,20 @@ from pathlib import Path
 
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
-from finlib.scoring.routing import RoutingPolicy, Verdict, load_routing, route
-from finlib.sources.cbonds_events import IssuerEvents, events_of, latest_snapshot
+from finlib.scoring.routing import (
+    RoutingPolicy,
+    Verdict,
+    led_by_guarantor,
+    load_routing,
+    route,
+)
+from finlib.sources.cbonds_events import (
+    Guarantee,
+    IssuerEvents,
+    events_of,
+    guarantees_of,
+    latest_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +116,9 @@ class RoutingRow:
     # События эмитента: выпуски и рейтинги. «Данных нет» и «событий нет» —
     # разные вещи, и признак их различает.
     events: IssuerEvents | None = None
+    # Поручительства финансирующей структуры: у SPV корзина берётся
+    # у того, кто отвечает по долгу, и перечень нужен второму проходу.
+    guarantees: tuple[Guarantee, ...] = ()
     # Величины, названные порознь: отрицательное отношение чистого долга
     # к EBITDA означает либо чистую денежную позицию, либо убыток, и путать
     # их нельзя.
@@ -186,11 +201,20 @@ def routing_rows(
         computed = compute_from_facts(inn, moment, conn, policy)
         stops = stop_factors_of(inn, moment, computed, conn)
         events = events_of(inn, snapshot)
+        # Поручитель нужен уже здесь: формулировка финансирующей структуры
+        # без него говорила бы о группе там, где речь о том, кто отвечает
+        # по долгу. Корзина же его берётся вторым проходом.
+        secured = (
+            guarantees_of(inn, frozenset(routing.events.guarantee_statuses))
+            if inn in spv
+            else ()
+        )
         verdict = route(
             computed,
             quarantined=(inn, moment.year) in quarantined,
             stop_factors=stops.triggered,
             financing_structure=inn in spv,
+            guarantor=", ".join(sorted({item.name for item in secured})),
             operating_profit=_operating_profit(inn, moment, conn),
             latest_annual=moment,
             assessed_class=assessed.get(inn),
@@ -228,6 +252,7 @@ def routing_rows(
                 branch=str(card.get("branch_name_rus") or ""),
                 group=str(card.get("group_name_rus") or ""),
                 events=events,
+                guarantees=secured,
                 values={
                     code: value
                     for code in ("net_debt", "ebitda", "net_debt_ebitda",
@@ -236,6 +261,44 @@ def routing_rows(
                 },
             )
         )
+
+    # **Поручитель — второй проход по той же причине, что и группа.** Корзина
+    # финансирующей структуры берётся у того, кто отвечает по её долгу,
+    # а она известна лишь после того, как посчитаны все. Счётчик печатает
+    # знаменатель: «ноль SPV с поручителем» без числа самих SPV неотличим
+    # от невыполненного правила.
+    by_inn = {item.inn: item for item in rows}
+    counts["финансирующих структур"] = sum(1 for item in rows if item.inn in spv)
+    counts["из них корзина взята у поручителя"] = 0
+    secured_rows: list[RoutingRow] = []
+    for item in rows:
+        backing = [
+            by_inn[entry.inn]
+            for entry in item.guarantees
+            if entry.inn in by_inn and entry.inn != item.inn
+        ]
+        if not backing:
+            secured_rows.append(item)
+            continue
+        # Поручителей бывает несколько — берётся тяжелейший: обязательство
+        # каждого действует само по себе, и слабейшее ничего не отменяет.
+        heaviest = min(
+            backing, key=lambda entry: routing.basket(entry.verdict.basket).order
+        )
+        counts["из них корзина взята у поручителя"] += 1
+        secured_rows.append(
+            replace(
+                item,
+                verdict=led_by_guarantor(
+                    item.verdict,
+                    heaviest.name,
+                    heaviest.verdict,
+                    item.group,
+                    routing,
+                ),
+            )
+        )
+    rows = secured_rows
 
     # **Групповой контур — второй проход, и иначе он невозможен.** Корзину
     # члена группы решает обстоятельство другого эмитента, а оно известно

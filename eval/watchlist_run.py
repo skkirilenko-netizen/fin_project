@@ -66,6 +66,18 @@ def _coverage(item) -> str:
     return "проверено: " + ", ".join(parts)
 
 
+# Четыре исхода правила давности дефолта. Считаются все четыре вместе
+# со знаменателем: у правила с четырьмя исходами ноль срабатываний одного
+# из них ничего не значит без остальных трёх.
+_DEFAULT_OUTCOME_NAMES: dict[str, str] = {
+    "emission_default": "дефолт не улажен, до 3 лет: разбор",
+    "default_unsettled_stale": "не улажен, старше: вопрос",
+    "default_settled_recent": "улажен, до 3 лет: история",
+    "default_settled_stale": "улажен, старше: справочно",
+}
+_DEFAULT_OUTCOMES = frozenset(_DEFAULT_OUTCOME_NAMES)
+
+
 def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     """Строки списка наблюдения и сводка по корзинам и подгруппам.
 
@@ -115,6 +127,11 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                     }
                     for ground in verdict.grounds
                 ],
+                # **Справочное обстоятельство корзины не называет, но строка
+                # о нём молчать не вправе.** Урегулированный дефолт
+                # десятилетней давности человек найдёт в карточке сам,
+                # и молчание маршрута прочтёт как недосмотр.
+                "notes": [entry.text for entry in verdict.notes],
                 # **Чистый долг и EBITDA называются порознь.** Отрицательное
                 # отношение означает либо чистую денежную позицию, либо убыток,
                 # и по одному отношению их не различить.
@@ -156,6 +173,34 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
         for name in item["subgroups"][:1]:
             summary[f"— {name}"] += 1
     summary["исключено поглощённых"] = counts["исключено поглощённых"]
+    # Знаменатель правила поручителя: «ноль корзин, взятых у поручителя»
+    # без числа самих финансирующих структур неотличим от невыполненного.
+    summary["финансирующих структур"] = counts["финансирующих структур"]
+    summary["— корзина взята у поручителя"] = counts[
+        "из них корзина взята у поручителя"
+    ]
+    # **Правило давности дефолта называет все четыре исхода и знаменатель.**
+    # Ноль давних дефолтов при неизвестном числе эмитентов с признаком
+    # неотличим от невыполненного правила, а исходов у правила четыре:
+    # разбор, вопрос об урегулировании, кредитная история, справочное.
+    marked = 0
+    for item in found:
+        outcomes = {entry.ground for entry in item.verdict.findings} | {
+            entry.ground for entry in item.verdict.notes
+        }
+        if not outcomes & _DEFAULT_OUTCOMES:
+            continue
+        marked += 1
+    summary["эмитентов с признаком дефолта"] = marked
+    for ground, name in _DEFAULT_OUTCOME_NAMES.items():
+        summary[f"— {name}"] = sum(
+            1
+            for item in found
+            if any(
+                entry.ground == ground
+                for entry in tuple(item.verdict.findings) + tuple(item.verdict.notes)
+            )
+        )
     return rows, dict(summary)
 
 
@@ -205,7 +250,9 @@ def _row_html(item: dict) -> str:
     """
     said = [text for entry in item["grounds"] for text in entry["details"]]
     main = said[0] if said else ""
-    rest = said[1:]
+    # Справочное стоит после оснований корзины: оно ничего не решает,
+    # но и потеряться не должно.
+    rest = said[1:] + list(item["notes"])
     grounds = (
         f'<div class="gn">{html.escape(main)}</div>'
         + (
@@ -221,6 +268,7 @@ def _row_html(item: dict) -> str:
         # как «ничего не проверяли», тогда как проверено всё, что маршрут
         # умеет: величины и события.
         else f'<div class="cover">{html.escape(item["coverage"])}</div>'
+        + "".join(f'<span class="gd">{html.escape(text)}</span>' for text in rest)
     )
     values = "".join(
         f'<div class="v"><span class="vn">{html.escape(name)}</span>'

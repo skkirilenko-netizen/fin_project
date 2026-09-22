@@ -17,10 +17,15 @@
 и прежнего значения метод `…_maxdate` не хранит: история берётся
 из последовательности снимков.
 
-**Дата события источником не приводится.** У дефолта по погашению опорой
-служит дата погашения — день, когда платёж был должен состояться; у дефолта
-по выпуску в обращении остаётся дата обновления записи. Обе названы тем,
-чем они являются: выдумывать дату события мы не будем.
+**Дата события источником не приводится, и графиком платежей она
+не восстанавливается — проверено.** `get_flow_new` отдаёт поле
+`actual_payment_date`, которое выглядит датой фактического платежа, а является
+**сроком, сдвинутым на рабочий день**: у Кириллицы купон со сроком
+07.10.2023 (суббота) стоит с «фактом» 09.10.2023, а у ЕвроТранса заполнены
+и платежи 2027 года, которых ещё не было. По 93 выпускам с признаком дефолта
+неуплаченным не оказался ни один, включая выпуск Кириллицы в статусе «Дефолт
+по погашению». Опорой служит дата погашения — день, когда платёж был должен
+состояться, — и она называется тем, чем является.
 """
 
 import json
@@ -78,6 +83,9 @@ _LETTERS = re.compile(r"^([A-Da-d]+)")
 class Issue:
     """Выпуск эмитента: то, что нужно маршруту и рефинансированию."""
 
+    # Идентификатор выпуска у источника: по нему лежит график платежей,
+    # и без него выпуск с графиком не связать.
+    emission_id: str
     name: str
     status: str
     default: bool
@@ -121,6 +129,101 @@ class Issue:
 
 
 @dataclass(frozen=True, slots=True)
+class Guarantee:
+    """Поручительство по выпуску: кто отвечает по долгу и в каком виде.
+
+    **Вид обязательства объявлен статусом записи.** Поручитель и гарант
+    отвечают по долгу, оферент обязуется выкупить бумагу по требованию —
+    это обязательство о ликвидности, а не о кредитном качестве, и брать
+    по нему чужую корзину нельзя.
+    """
+
+    inn: str
+    name: str
+    status: str
+    issue: str
+
+
+def guarantees_of(inn: str, statuses: frozenset[str]) -> tuple[Guarantee, ...]:
+    """Поручительства эмитента с диска; перечень видов объявлен методикой.
+
+    Одно и то же поручительство стоит у нескольких выпусков, и перечень
+    сводится по паре «ИНН, вид»: эмитенту важно, кто отвечает, а не по скольким
+    выпускам.
+    """
+    path = CACHE / f"guarantors_{inn}.json"
+    if not path.exists():
+        return ()
+    found: dict[tuple[str, str], Guarantee] = {}
+    for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
+        status = str(item.get("status_name_rus") or "").strip()
+        if status not in statuses:
+            continue
+        who = str(item.get("guarantor_inn") or "")
+        key = (who, status)
+        found.setdefault(
+            key,
+            Guarantee(
+                inn=who,
+                name=str(item.get("guarantor_name_rus") or "").strip(),
+                status=status,
+                issue=str(item.get("emission_document_rus") or "").strip(),
+            ),
+        )
+    return tuple(found.values())
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultEvent:
+    """Дата дефолта, чем она является и по какому выпуску получена.
+
+    **Дата может быть неизвестна, и это не то же самое, что её отсутствие
+    в природе.** У выпуска в обращении с неурегулированным дефолтом дата
+    погашения лежит в будущем и о событии не говорит ничего; молча подставить
+    её значило бы объявить событие ненаступившим.
+    """
+
+    when: date | None
+    origin: str
+    issue: str
+
+    @property
+    def known(self) -> bool:
+        """Есть ли дата, по которой считается давность."""
+        return self.when is not None
+
+
+def default_event(issues: tuple[Issue, ...], today: date) -> DefaultEvent:
+    """Дата дефолта по перечню выпусков: чем позже, тем важнее.
+
+    **Опора выбирается строением, а не близостью даты.** Статус «дефолт
+    по погашению» называет сам предмет — неисполненное погашение, — и дата
+    погашения такого выпуска и есть день, когда платёж был должен состояться.
+    У выпуска, закрытого иначе (погашен, погашен досрочно), дата погашения —
+    только **верхняя граница**: событие случилось не позже неё. Поэтому
+    выпуски со статусом дефолта старше остальных, а не просто складываются
+    с ними в общий перечень: у ДВМП дефолтные БО-01 и БО-02 дают 2018 год,
+    а еврооблигация, погашенная досрочно, — 2020-й, которого события
+    не было вовсе.
+
+    Дата в будущем опорой не служит: у выпуска в обращении она говорит
+    о сроке, а не о событии.
+    """
+    past = [item for item in issues if item.maturity and item.maturity <= today]
+    named = [item for item in past if item.status in DEFAULT_STATUSES]
+    pool = named or past
+    if not pool:
+        return DefaultEvent(None, "", "")
+    latest = max(pool, key=lambda item: item.maturity)
+    origin = (
+        "срок неисполненного погашения"
+        if any(latest is item for item in named)
+        else "дата погашения выпуска — событие не позже неё"
+    )
+    return DefaultEvent(latest.maturity, origin, latest.name)
+
+
+@dataclass(frozen=True, slots=True)
 class Rating:
     """Рейтинг эмитента: агентство, точка шкалы, категория, прогноз."""
 
@@ -130,6 +233,13 @@ class Rating:
     category: str
     outlook: str
     assigned: date | None
+    # **Место точки в своей шкале, а не наша догадка о старшинстве.** Какая
+    # из двух категорий хуже, по написанию не видно: «AA» длиннее «C»
+    # и по любому правилу сравнения строк оказывается «больше». Справочник
+    # шкал объявляет место сам (`rating_scale_point_ordnum`, 1 — высшая),
+    # и сравнение идёт им. `None` означает, что точки в справочнике нет:
+    # сравнивать нечем, и молча считать её высшей нельзя.
+    order: int | None = None
     # **Кредитный ли это рейтинг.** ESG-рейтинг о кредитоспособности не говорит,
     # и его точка «ESG-A-» в градацию кредитного риска попадать не должна.
     # Вид шкалы берётся у справочника источника, а не по вхождению «ESG»
@@ -171,11 +281,32 @@ class IssuerEvents:
         return tuple(item for item in self.issues if item.status == "в обращении")
 
     @property
+    def worst(self) -> Rating | None:
+        """Действующий рейтинг с наименьшим местом в своей шкале.
+
+        **Сравнение идёт местом точки, а не написанием.** «AA» длиннее «C»
+        и любым сравнением строк оказывается «больше» — графа «худшая
+        категория» считала бы не то, как называется. Рейтинг, места которого
+        в справочнике нет, в сравнение не идёт вовсе: молча считать его
+        высшим значило бы спрятать неполноту справочника.
+        """
+        rated = [item for item in self.live if item.order is not None]
+        return max(rated, key=lambda item: item.order) if rated else None
+
+    @property
     def live(self) -> tuple[Rating, ...]:
         """Действующие кредитные рейтинги: отозванные значением не считаются."""
         return tuple(
             item for item in self.ratings if item.credit and not item.withdrawn
         )
+
+    def unsettled_event(self, today: date) -> DefaultEvent:
+        """Дата неурегулированного дефолта: обстоятельство настоящего."""
+        return default_event(self.defaulted, today)
+
+    def settled_event(self, today: date) -> DefaultEvent:
+        """Дата урегулированного дефолта: кредитная история, а не состояние."""
+        return default_event(self.settled, today)
 
     def due(self, months: int, today: date) -> Decimal:
         """Объём к погашению и оферте в ближайшие месяцы."""
@@ -224,6 +355,22 @@ def scale_points() -> dict[str, dict]:
         return {}
     items = json.loads(SCALE_POINTS.read_text(encoding="utf-8")).get("items", [])
     return {str(item["id"]): item for item in items}
+
+
+def point_order() -> dict[tuple[str, str], int]:
+    """Место точки в шкале по паре «шкала, написание»; 1 — высшая.
+
+    Ключ — пара, а не написание: «C» стоит в нескольких шкалах, и место у него
+    своё в каждой. Сравнивать места точек разных шкал можно лишь приблизительно,
+    поэтому сравнение и делается внутри шкалы, а не между ними.
+    """
+    found: dict[tuple[str, str], int] = {}
+    for item in scale_points().values():
+        number = item.get("rating_scale_point_ordnum")
+        if number is None:
+            continue
+        found[(str(item.get("scale_id")), str(item.get("name")))] = int(number)
+    return found
 
 
 def credit_scales() -> frozenset[str]:
@@ -301,6 +448,7 @@ def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:
     return (
         tuple(
             Issue(
+                emission_id=str(item.get("id") or ""),
                 name=str(item.get("document_rus") or item.get("isin_code") or "—"),
                 status=str(item.get("status_name_rus") or "").strip().lower(),
                 default=str(item.get("has_default")) == "1",
@@ -322,12 +470,15 @@ def events_of(
     inn: str,
     snapshot: dict[str, list[dict]] | None = None,
     credit: frozenset[str] | None = None,
+    order: dict[tuple[str, str], int] | None = None,
 ) -> IssuerEvents:
     """События эмитента: выпуски с диска и рейтинги из свежего снимка."""
     if snapshot is None:
         _, snapshot = latest_snapshot()
     if credit is None:
         credit = credit_scales()
+    if order is None:
+        order = point_order()
     issues, known = issues_of(inn)
     records = snapshot.get(inn)
     ratings = tuple(
@@ -338,6 +489,9 @@ def events_of(
             category=category_of(str(item.get("scale_point_name") or "")),
             outlook=str(item.get("forecast_name_rus") or ""),
             assigned=_as_date(item.get("rating_date")),
+            order=order.get(
+                (str(item.get("scale_id")), str(item.get("scale_point_name") or ""))
+            ),
             credit=str(item.get("scale_id")) in credit,
         )
         for item in (records or ())

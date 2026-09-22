@@ -178,12 +178,34 @@ class Events(BaseModel):
 
     default_review: bool
     default_origin: str = Field(min_length=1)
+    # Давность дефолта: три года. Четыре исхода развёрнуты в `routing.yaml`,
+    # и порог предварителен — наблюдений семнадцать.
+    default_stale_years: int = Field(gt=0)
+    default_stale_origin: str = Field(min_length=1)
+    # Поручительство и оферта — разные обязательства: первое о долге, второе
+    # о ликвидности, и корзину поручителя по оферте брать нельзя.
+    guarantee_statuses: tuple[str, ...] = Field(min_length=1)
+    offer_statuses: tuple[str, ...] = Field(min_length=1)
+    guarantee_origin: str = Field(min_length=1)
     credit_scales: dict[str, str] = Field(min_length=1)
     credit_scales_origin: str = Field(min_length=1)
     review_categories: tuple[str, ...] = Field(min_length=1)
     attention_categories: tuple[str, ...] = Field(min_length=1)
     attention_outlooks: tuple[str, ...] = Field(min_length=1)
     categories_origin: str = Field(min_length=1)
+
+    def stale_before(self, today: date) -> date:
+        """Дата, раньше которой дефолт считается давним.
+
+        29 февраля сдвигается на 28-е: календарь правилу методики
+        не подчиняется, а падать на нём правило не вправе.
+        """
+        try:
+            return today.replace(year=today.year - self.default_stale_years)
+        except ValueError:
+            return today.replace(
+                year=today.year - self.default_stale_years, month=2, day=28
+            )
 
 
 class Severity(BaseModel):
@@ -318,6 +340,12 @@ class RoutingPolicy(BaseModel):
     severity: Severity
     freshness: Freshness
     baskets: tuple[Basket, ...] = Field(min_length=3)
+    # **Справочные основания корзины не называют.** Урегулированный дефолт
+    # десятилетней давности о сегодняшнем эмитенте не говорит, но и молчать
+    # о нём нельзя: человек найдёт признак в карточке сам и не поймёт, почему
+    # маршрут его не заметил. Объявлены отдельно от корзин именно потому, что
+    # корзину не назначают.
+    reference: tuple[Ground, ...] = ()
 
     @model_validator(mode="after")
     def _draft_is_not_signed(self) -> Self:
@@ -347,7 +375,7 @@ class RoutingPolicy(BaseModel):
         """
         declared = {
             ground.code for basket in self.baskets for ground in basket.grounds
-        }
+        } | {ground.code for ground in self.reference}
         missing = declared - set(self.statements.by_ground)
         if missing:
             raise ValueError(
@@ -358,6 +386,17 @@ class RoutingPolicy(BaseModel):
             raise ValueError(
                 "формулировки объявлены для оснований, которых нет: "
                 + ", ".join(sorted(stray))
+            )
+        # Справочное основание корзины не называет — и не может называть
+        # её заодно: одно основание с двумя исходами читалось бы как правило,
+        # а было бы порядком проверок.
+        both = {ground.code for ground in self.reference} & {
+            ground.code for basket in self.baskets for ground in basket.grounds
+        }
+        if both:
+            raise ValueError(
+                "основания объявлены и справочными, и основаниями корзины: "
+                + ", ".join(sorted(both))
             )
         return self
 
@@ -445,6 +484,9 @@ class Verdict:
     # Зрелость порогов справочника: утверждённая структура не делает величины
     # калиброванными, и вердикт обязан нести оба сведения.
     thresholds: str = "preliminary"
+    # Справочные обстоятельства: корзину не называют, но и не исчезают.
+    # Урегулированный дефолт десятилетней давности сюда и попадает.
+    notes: tuple[Finding, ...] = ()
 
     @property
     def details(self) -> tuple[str, ...]:
@@ -495,6 +537,10 @@ def route(
     # обоих — «оценка по группе» без имени группы ничего не значит.
     group: str = "",
     group_leader: str = "",
+    # Поручитель финансирующей структуры, названный источником. Корзина его
+    # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
+    # о группе там, где речь о том, кто отвечает по долгу.
+    guarantor: str = "",
     # Чем присвоен класс: вид отчётности и отчётная дата. Страницы у оценки
     # нет — класс присвоен комплекту, а не месту в документе.
     assessed_where: str = "",
@@ -593,17 +639,31 @@ def route(
                 routing.say("group_under_review", group=whose, leader=member),
             )
         )
+    notes: list[Finding] = []
     if events is not None:
-        review.extend(_event_findings(events, routing))
+        by_default, watched, referenced = _default_findings(
+            events, routing, today or date.today()
+        )
+        review.extend(by_default)
+        review.extend(_rating_findings(events, routing))
+        attention.extend(watched)
         attention.extend(_rating_watch(events, routing))
+        notes.extend(referenced)
     if financing_structure:
+        # **Поручитель вне списка — не то же самое, что поручителя нет.**
+        # Первое называет того, кто отвечает по долгу, и говорит, что корзины
+        # у него взять негде; второе оставляет только группу. Корзина
+        # поручителя, стоящего в списке, берётся вторым проходом
+        # (`led_by_guarantor`): она известна лишь после того, как посчитаны все.
         review.append(
             Finding(
                 "financing_structure",
-                group,
+                guarantor or group,
                 routing.say(
                     "financing_structure",
+                    "guarantor_unlisted" if guarantor else "",
                     group=group or "не названа в справочнике",
+                    guarantor=guarantor,
                     leader=group_leader or "головной компании в списке нет",
                 ),
             )
@@ -752,25 +812,117 @@ def route(
     if status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
         # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
-        return _verdict(routing, "status_unknown", found, tuple(silenced), muted)
-    if review:
-        return _verdict(routing, "review", found, tuple(silenced), muted)
+        code = "status_unknown"
+    elif review:
+        code = "review"
+    else:
+        code = "attention" if attention else "clear"
     return _verdict(
-        routing, "attention" if attention else "clear", found, tuple(silenced), muted
+        routing, code, found, tuple(silenced), muted, notes=tuple(notes)
     )
 
 
-def _event_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
-    """Основания разбора из событий: дефолт по выпуску и рейтинг категории.
+def led_by_guarantor(
+    verdict: Verdict,
+    guarantor: str,
+    guaranteed: Verdict,
+    group: str,
+    routing: RoutingPolicy,
+) -> Verdict:
+    """Вердикт финансирующей структуры, взятый у её поручителя.
 
-    **Дата события источником не приводится.** У дефолта по погашению опорой
-    служит дата погашения — день, когда платёж был должен состояться;
-    у дефолта по выпуску в обращении остаётся дата обновления записи. Каждая
-    называется тем, чем является: выдумывать дату события мы не будем.
+    **Финансирующая структура собой не оценивается, и это не смягчение.**
+    У SPV «прочие» — внутригрупповые займы, а отрицательный капитал бывает
+    устройством: величины её описывают договор, а не деятельность. Отвечает
+    по долгу поручитель, и корзина берётся у него — вместе с его основаниями,
+    потому что человеку, открывшему строку, нужны они, а не наши.
+
+    **Корзина поручителя бывает любой, в том числе «Без внимания».** Тогда
+    и SPV в ней, а объяснение остаётся справочным: без него строка выглядит
+    как решение, принятое по её собственным величинам.
+
+    Второй проход здесь неизбежен по той же причине, что у группового контура:
+    корзину решает обстоятельство другого эмитента, известное только после
+    того, как посчитаны все.
     """
-    found: list[Finding] = []
-    if routing.events.default_review:
-        for issue in getattr(events, "defaulted", ()):
+    text = routing.say(
+        "financing_structure",
+        "by_guarantor",
+        group=group or "не названа в справочнике",
+        guarantor=guarantor,
+    )
+    told = Finding("financing_structure", guarantor, text)
+    # Свои основания финансирующей структуры остаются в перечне: они
+    # не называют корзину, но человек, разбирающий строку, видит и их.
+    own = tuple(
+        item for item in verdict.findings if item.ground != "financing_structure"
+    )
+    return Verdict(
+        basket=guaranteed.basket,
+        basket_name=guaranteed.basket_name,
+        grounds=guaranteed.grounds,
+        status=guaranteed.status,
+        findings=guaranteed.findings + own,
+        subgroups=guaranteed.subgroups,
+        subgroup_names=guaranteed.subgroup_names,
+        actions=guaranteed.actions,
+        muted=verdict.muted,
+        spoken_for=verdict.spoken_for,
+        thresholds=guaranteed.thresholds,
+        notes=(told,) + verdict.notes,
+    )
+
+
+def _default_findings(
+    events: object, routing: RoutingPolicy, today: date
+) -> tuple[list[Finding], list[Finding], list[Finding]]:
+    """Дефолты выпусков: разбор, внимание и справочное — порознь.
+
+    **Давность разводит четыре исхода, и разводит по двум признакам.** Улажен
+    ли дефолт — говорит карточка выпуска; давно ли — дата, которой источник
+    не приводит вовсе и которая не восстанавливается графиком платежей
+    (`cbonds_events.default_event`). Отсюда:
+
+    | улажен | давность | исход |
+    |---|---|---|
+    | нет | до трёх лет либо неизвестна | разбор |
+    | нет | старше | внимание: проверить статус урегулирования |
+    | да | до трёх лет | внимание: кредитная история |
+    | да | старше | справочно |
+
+    **Неизвестная давность корзину не понижает.** У ЕвроТранса и Антерры
+    выпуски в обращении, и дата погашения лежит в будущем: она говорит
+    о сроке, а не о событии. Понизить корзину по ней значило бы принять
+    решение по отсутствию данных.
+    """
+    review: list[Finding] = []
+    attention: list[Finding] = []
+    notes: list[Finding] = []
+    if not routing.events.default_review:
+        return review, attention, notes
+    edge = routing.events.stale_before(today)
+    years = routing.events.default_stale_years
+
+    unsettled = tuple(getattr(events, "defaulted", ()))
+    event = (
+        events.unsettled_event(today)
+        if unsettled and hasattr(events, "unsettled_event")
+        else None
+    )
+    if unsettled and event is not None and event.known and event.when < edge:
+        attention.append(
+            Finding(
+                "default_unsettled_stale",
+                event.issue,
+                routing.say(
+                    "default_unsettled_stale",
+                    year=f"{event.when:%Y} года",
+                    where=event.origin,
+                ),
+            )
+        )
+    else:
+        for issue in unsettled:
             where = (
                 f"погашение {issue.maturity:%d.%m.%Y}"
                 if issue.maturity is not None
@@ -789,7 +941,7 @@ def _event_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
                 if issue.status in DEFAULT_STATUSES
                 else f"Неурегулированный дефолт (выпуск {issue.status})"
             )
-            found.append(
+            review.append(
                 Finding(
                     "emission_default",
                     issue.name,
@@ -798,6 +950,61 @@ def _event_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
                     ),
                 )
             )
+
+    settled = tuple(getattr(events, "settled", ()))
+    past = (
+        events.settled_event(today)
+        if settled and hasattr(events, "settled_event")
+        else None
+    )
+    if settled and past is not None:
+        # Неизвестная давность здесь так же не понижает: урегулированный
+        # дефолт без даты остаётся обстоятельством внимания, а не сведением.
+        stale = past.known and past.when < edge
+        # Выпуск называется и тогда, когда даты нет: «выпуск » с пустым
+        # наименованием — графа, считающая не то, как называется.
+        named = past.issue or _issues_named(settled)
+        if stale:
+            notes.append(
+                Finding(
+                    "default_settled_stale",
+                    named,
+                    routing.say(
+                        "default_settled_stale",
+                        year=f"{past.when:%Y}",
+                        years=years,
+                        issue=named,
+                    ),
+                )
+            )
+        else:
+            attention.append(
+                Finding(
+                    "default_settled_recent",
+                    named,
+                    routing.say(
+                        "default_settled_recent",
+                        "" if past.known else "no_year",
+                        year=f"{past.when:%Y}" if past.known else "",
+                        issue=named,
+                    ),
+                )
+            )
+    return review, attention, notes
+
+
+def _issues_named(issues: tuple[object, ...]) -> str:
+    """Выпуски словами: один называется, у нескольких назван первый и число."""
+    names = [str(getattr(item, "name", "")) for item in issues]
+    names = [item for item in names if item and item != "—"]
+    if not names:
+        return "наименование источник не приводит"
+    return names[0] if len(names) == 1 else f"{names[0]} и ещё {len(names) - 1}"
+
+
+def _rating_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
+    """Основание разбора из рейтинга: категория дефолта либо преддефолтная."""
+    found: list[Finding] = []
     # **Одно агентство — одно основание.** У агентства бывает две шкалы
     # (национальная и собственной кредитоспособности), и обе дают одну и ту же
     # категорию: два основания об одном читались бы как два события.
@@ -890,6 +1097,7 @@ def _verdict(
     findings: list[Finding],
     spoken_for: tuple[str, ...] = (),
     muted: tuple[str, ...] = (),
+    notes: tuple[Finding, ...] = (),
 ) -> Verdict:
     """Собирает вердикт, упорядочивая основания по объявлению в справочнике.
 
@@ -936,6 +1144,7 @@ def _verdict(
         muted=muted,
         spoken_for=spoken_for,
         thresholds=routing.thresholds,
+        notes=notes,
     )
 
 

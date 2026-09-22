@@ -1,0 +1,188 @@
+"""Платежи по выпускам: график с диска. **Читает диск, не сеть.**
+
+Отвечает на один вопрос: сколько эмитенту предстоит заплатить по облигациям
+в ближайшие месяцы. Годовая отчётность этого не говорит — в ней остаток долга,
+а не его срочность, — и «долг 40 млрд» у эмитента с погашением через восемь
+лет и у эмитента с погашением в марте означает разное.
+
+**Величина платежа приведена к одной облигации, а не к выпуску.** Источник
+даёт купон и погашение на номинал (`cupon_sum` 17,26 при номинале 1 000),
+и сумма выпуска получается умножением на число бумаг в обращении —
+`outstanding_volume / nominal_price`. Без этого «платёж 17 рублей» стоял бы
+рядом с балансом в миллионах.
+
+**График платежей факта платежа не содержит.** Поле `actual_payment_date`
+выглядит датой уплаты, а является сроком, сдвинутым на рабочий день: оно
+заполнено и у платежей будущих лет. Поэтому здесь по нему не судят ни о чём,
+а дефолт определяется статусом выпуска (`cbonds_events`).
+
+**Оферта — не платёж графика.** Предъявление бумаги к выкупу — право
+владельца, а не обязанность, и складывать оферту с купоном значило бы
+считать возможное состоявшимся. Обе величины возвращаются порознь.
+"""
+
+import json
+import logging
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+CACHE = Path("data/raw/cbonds")
+
+
+@dataclass(frozen=True, slots=True)
+class Payment:
+    """Платёж графика: срок и величина на одну облигацию."""
+
+    due: date
+    coupon: Decimal
+    redemption: Decimal
+
+    @property
+    def total(self) -> Decimal:
+        """Купон и погашение вместе: в один день бывают оба."""
+        return self.coupon + self.redemption
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """График выпуска: платежи и номинал, к которому они приведены."""
+
+    emission_id: str
+    payments: tuple[Payment, ...]
+    nominal: Decimal | None
+
+    def due_within(self, months: int, today: date, outstanding: Decimal | None) -> Decimal | None:
+        """Платежи ближайших месяцев в валюте выпуска; None — считать нечем.
+
+        **`None` и ноль различаются.** Ноль означает, что в окне платежей нет;
+        `None` — что номинал либо объём в обращении неизвестны, и умножать
+        не на что. Ноль вместо этого читался бы как отсутствие обязательств.
+        """
+        if not self.nominal or self.nominal <= 0 or outstanding is None:
+            return None
+        bonds = outstanding / self.nominal
+        edge = _shift(today, months)
+        return sum(
+            (item.total * bonds for item in self.payments if today <= item.due < edge),
+            start=Decimal(0),
+        )
+
+
+def _shift(today: date, months: int) -> date:
+    """Первое число месяца, наступающего через `months` месяцев."""
+    return date(
+        today.year + (today.month - 1 + months) // 12,
+        (today.month - 1 + months) % 12 + 1,
+        1,
+    )
+
+
+def _number(value: object) -> Decimal:
+    """Величина источника; пустое и мусор считаются нулём платежа."""
+    if value in (None, ""):
+        return Decimal(0)
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001 — мусор источника величиной не становится
+        return Decimal(0)
+
+
+def schedule_of(emission_id: str) -> Schedule | None:
+    """График выпуска с диска; None — ответа источника нет.
+
+    **«Графика нет» и «платежей нет» — разные вещи.** Первое означает, что
+    доставка до выпуска не дошла, и молчать об этом нельзя: сумма к погашению
+    окажется занижена ровно на его платежи.
+    """
+    path = CACHE / f"flow_{emission_id}.json"
+    if not path.exists():
+        return None
+    items = json.loads(path.read_text(encoding="utf-8")).get("items", [])
+    payments: list[Payment] = []
+    nominal: Decimal | None = None
+    for item in items:
+        when = str(item.get("date") or "")[:10]
+        try:
+            due = date.fromisoformat(when)
+        except ValueError:
+            continue
+        if nominal is None:
+            value = _number(item.get("emission_nominal_price"))
+            nominal = value if value > 0 else None
+        payments.append(
+            Payment(
+                due=due,
+                coupon=_number(item.get("cupon_sum")),
+                redemption=_number(item.get("redemtion")),
+            )
+        )
+    return Schedule(
+        emission_id=str(emission_id),
+        payments=tuple(sorted(payments, key=lambda item: item.due)),
+        nominal=nominal,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Refinancing:
+    """Что эмитенту предстоит заплатить по облигациям в окне месяцев.
+
+    **Знаменатель стоит рядом с величиной.** «К погашению 0» у эмитента,
+    графиков которого нет на диске, и у эмитента без платежей — разные
+    сведения, и различает их `without_schedule`.
+    """
+
+    months: int
+    scheduled: Decimal
+    offered: Decimal
+    issues: int
+    without_schedule: int
+    without_volume: int
+
+    @property
+    def known(self) -> bool:
+        """Есть ли у чего считать: хоть один выпуск с графиком и объёмом."""
+        return self.issues > self.without_schedule + self.without_volume
+
+
+def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinancing:
+    """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
+
+    Оферты считаются порознь: предъявление — право владельца, и сложенное
+    с купоном оно выдало бы возможное за состоявшееся.
+    """
+    scheduled = offered = Decimal(0)
+    counted = no_schedule = no_volume = 0
+    for issue in issues:
+        status = str(getattr(issue, "status", ""))
+        if status not in ("в обращении", "размещается"):
+            continue
+        counted += 1
+        outstanding = getattr(issue, "outstanding", None)
+        plan = schedule_of(str(getattr(issue, "emission_id", "")))
+        if plan is None:
+            no_schedule += 1
+            continue
+        if outstanding is None:
+            no_volume += 1
+            continue
+        due = plan.due_within(months, today, outstanding)
+        if due is None:
+            no_volume += 1
+            continue
+        scheduled += due
+        offer = getattr(issue, "offer", None)
+        if offer is not None and today <= offer < _shift(today, months):
+            offered += outstanding
+    return Refinancing(
+        months=months,
+        scheduled=scheduled,
+        offered=offered,
+        issues=counted,
+        without_schedule=no_schedule,
+        without_volume=no_volume,
+    )

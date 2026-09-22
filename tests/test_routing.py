@@ -372,6 +372,7 @@ def test_default_on_an_issue_is_a_review_ground() -> None:
         inn="5029169023",
         issues=(
             Issue(
+                emission_id="1505283",
                 name="БО-03",
                 status="дефолт по погашению",
                 default=True,
@@ -409,6 +410,7 @@ def test_settled_default_is_not_a_current_circumstance() -> None:
         inn="2540047110",
         issues=(
             Issue(
+                emission_id="9",
                 name="еврооблигации",
                 status="погашена",
                 default=True,
@@ -474,3 +476,233 @@ def test_only_credit_ratings_reach_the_grades() -> None:
         today=date(2026, 5, 1),
     )
     assert verdict.grounds == ("rating_default",)
+
+
+def issue(name: str, status: str, maturity: date, *, unsettled: bool):
+    """Выпуск с признаком дефолта: улаженным либо нет."""
+    from finlib.sources.cbonds_events import Issue
+
+    return Issue(
+        emission_id=name,
+        name=name,
+        status=status,
+        default=True,
+        unsettled=unsettled,
+        maturity=maturity,
+        offer=None,
+        outstanding=None,
+        updated=date(2026, 9, 1),
+    )
+
+
+def with_issues(*issues):
+    """События эмитента из одних выпусков."""
+    from finlib.sources.cbonds_events import IssuerEvents
+
+    return IssuerEvents(inn="1", issues=issues, issues_known=True)
+
+
+def verdict_for(events, today: date = date(2026, 9, 22)):
+    """Вердикт при здоровых величинах и названных событиях."""
+    return route(
+        healthy(),
+        quarantined=False,
+        events=events,
+        latest_annual=date(2025, 12, 31),
+        today=today,
+    )
+
+
+def test_stale_unsettled_default_asks_about_settlement() -> None:
+    """Неурегулированный дефолт старше трёх лет — вопрос, а не разбор.
+
+    У ДВМП погашение БО-01 было должно состояться 27.02.2018: признак стоит,
+    но обстоятельством настоящего он не является — с тех пор сменились и долг,
+    и собственник. Разбор по такому признаку разбирал бы прошлое.
+    """
+    verdict = verdict_for(
+        with_issues(
+            issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
+            issue("БО-02", "дефолт по погашению", date(2017, 11, 28), unsettled=True),
+        )
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("default_unsettled_stale",)
+    assert "2018" in verdict.details[0]
+    assert "урегулирования" in verdict.details[0]
+
+
+def test_unsettled_default_without_a_date_stays_in_review() -> None:
+    """Неизвестная давность корзину не понижает.
+
+    У ЕвроТранса и Антерры выпуски в обращении, и дата погашения лежит
+    в будущем: она говорит о сроке, а не о событии. Понизить корзину по ней
+    значило бы принять решение по отсутствию данных.
+    """
+    verdict = verdict_for(
+        with_issues(issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True))
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("emission_default",)
+
+
+def test_recently_settled_default_is_credit_history() -> None:
+    """Улаженный недавно дефолт — кредитная история, то есть внимание."""
+    verdict = verdict_for(
+        with_issues(issue("001P-02", "погашена", date(2025, 11, 25), unsettled=False))
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("default_settled_recent",)
+    assert "2025" in verdict.details[0]
+
+
+def test_stale_settled_default_is_a_note_and_not_a_silence() -> None:
+    """Улаженный давно дефолт корзины не называет, но и не исчезает.
+
+    Человек, открывший строку, найдёт признак в карточке источника сам,
+    и молчание маршрута он прочтёт как недосмотр.
+    """
+    verdict = verdict_for(
+        with_issues(issue("еврооблигации", "погашена", date(2016, 5, 2), unsettled=False))
+    )
+    assert verdict.basket == "clear"
+    assert verdict.grounds == ()
+    assert len(verdict.notes) == 1
+    assert verdict.notes[0].ground == "default_settled_stale"
+    assert "2016" in verdict.notes[0].text
+
+
+def test_reference_ground_is_not_a_basket_ground() -> None:
+    """Справочное основание корзину не называет — ни одну.
+
+    Основание, объявленное и справочным, и основанием корзины, читалось бы
+    как правило, а было бы порядком проверок.
+    """
+    routing = load_routing()
+    in_baskets = {
+        ground.code for basket in routing.baskets for ground in basket.grounds
+    }
+    assert {ground.code for ground in routing.reference} & in_baskets == set()
+    for ground in routing.reference:
+        assert routing.say(ground.code, year="2016", years=3, issue="выпуск")
+
+
+def test_default_date_prefers_the_issue_whose_status_names_it() -> None:
+    """Дата берётся у выпуска, статус которого называет неисполненное погашение.
+
+    У ДВМП еврооблигация, погашенная досрочно, имеет срок 02.05.2020 —
+    события в тот день не было вовсе, а дефолтные БО-01 и БО-02 дают 2018 год.
+    Близость даты опорой не служит: опора — строение записи.
+    """
+    from finlib.sources.cbonds_events import default_event
+
+    found = default_event(
+        (
+            issue("еврооблигации", "досрочно погашена", date(2020, 5, 2), unsettled=True),
+            issue("БО-01", "дефолт по погашению", date(2018, 2, 27), unsettled=True),
+            issue("БО-02", "дефолт по погашению", date(2017, 11, 28), unsettled=True),
+        ),
+        date(2026, 9, 22),
+    )
+    assert found.when == date(2018, 2, 27)
+    assert found.issue == "БО-01"
+    assert "неисполненного погашения" in found.origin
+
+
+def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
+    """SPV оценивается не собой, а тем, кто отвечает по её долгу.
+
+    У финансирующей структуры «прочие» — внутригрупповые займы, а отрицательный
+    капитал бывает устройством: её величины описывают договор, а не
+    деятельность. Основания при этом берутся у поручителя — человеку нужны
+    они, — а объяснение остаётся справочным.
+    """
+    from finlib.scoring.routing import led_by_guarantor
+
+    routing = load_routing()
+    spv = route(
+        healthy(),
+        quarantined=False,
+        financing_structure=True,
+        guarantor="Головная компания",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert spv.basket == "review"
+    assert "поручитель" in spv.details[0].lower()
+
+    backer = route(
+        healthy(),
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert backer.basket == "attention"
+
+    led = led_by_guarantor(spv, "Головная компания", backer, "Группа", routing)
+    assert led.basket == backer.basket
+    assert led.grounds == backer.grounds
+    assert led.subgroup_names == backer.subgroup_names
+    assert led.notes[0].text == "SPV группы Группа: корзина поручителя Головная компания"
+
+
+def test_an_offeror_is_not_a_guarantor() -> None:
+    """Оферент отвечает за выкуп бумаги, а не за долг.
+
+    Обязательство о ликвидности кредитным качеством не является, и брать
+    по нему чужую корзину нельзя. Единственная финансирующая структура списка
+    имеет ровно одну такую запись — и физическим лицом.
+    """
+    import json
+
+    from finlib.sources import cbonds_events
+
+    routing = load_routing()
+    assert set(routing.events.guarantee_statuses) & set(
+        routing.events.offer_statuses
+    ) == set()
+    records = {
+        "items": [
+            {
+                "guarantor_inn": "7700000001",
+                "guarantor_name_rus": "Поручитель",
+                "status_name_rus": "Поручитель",
+                "emission_document_rus": "БО-01",
+            },
+            {
+                "guarantor_inn": "770400325504",
+                "guarantor_name_rus": "Панфилов Алексей Юрьевич",
+                "status_name_rus": "Оферент",
+                "emission_document_rus": "БО-02",
+            },
+        ]
+    }
+    where = cbonds_events.CACHE
+    try:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as folder:
+            cbonds_events.CACHE = Path(folder)
+            (cbonds_events.CACHE / "guarantors_1.json").write_text(
+                json.dumps(records, ensure_ascii=False), encoding="utf-8"
+            )
+            found = cbonds_events.guarantees_of(
+                "1", frozenset(routing.events.guarantee_statuses)
+            )
+    finally:
+        cbonds_events.CACHE = where
+    assert [item.name for item in found] == ["Поручитель"]
+
+
+def test_default_date_in_the_future_is_not_an_event_date() -> None:
+    """Дата погашения в будущем датой события не становится."""
+    from finlib.sources.cbonds_events import default_event
+
+    found = default_event(
+        (issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True),),
+        date(2026, 9, 22),
+    )
+    assert not found.known
+    assert found.origin == ""
