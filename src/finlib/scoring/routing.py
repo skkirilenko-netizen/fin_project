@@ -576,6 +576,12 @@ class Refinance:
     cash: Decimal | None
     unit: str
     months: int
+    # **Вторая мера: те же платежи при предъявлении оферт.** Предъявление —
+    # право владельца, и в отсечку корзины оно не входит; но величина
+    # считалась и не доходила ни до одного выхода, то есть была неотличима
+    # от невыполненного правила. `None` — ответа об офертах по выпускам нет
+    # на диске, и это не «оферт нет».
+    offered: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -976,6 +982,31 @@ def route(
                     ),
                 )
             )
+    # **Вторая мера рефинансирования — справочная.** Предъявление оферты
+    # к выкупу есть право владельца, а не обязанность эмитента, и корзину
+    # по чужому праву назначать нельзя: она означала бы «человек нужен»
+    # у всякого эмитента с офертой в окне. Но и молчать нельзя — величина
+    # считалась и не доходила ни до одного выхода, то есть была неотличима
+    # от невыполненного правила. Отсечка та же, своего числа здесь нет.
+    if (
+        refinance is not None
+        and refinance.offered
+        and refinance.cash is not None
+        and refinance.cash * routing.refinancing.cover_ratio < refinance.offered
+    ):
+        notes.append(
+            Finding(
+                "refinancing_offers",
+                "refinancing",
+                routing.say(
+                    "refinancing_offers",
+                    months=refinance.months,
+                    offered=money(refinance.offered),
+                    cash=money(refinance.cash),
+                    unit=refinance.unit,
+                ),
+            )
+        )
     # **Крупному долгу «Без внимания» даётся строже.** Оценка сверху
     # прохождение критерия доказывает, а величину не заменяет, и у эмитента
     # верхнего десятка цена этой замены выше всех прочих. Обстоятельство

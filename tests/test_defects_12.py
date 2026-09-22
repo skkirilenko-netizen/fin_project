@@ -389,7 +389,23 @@ def test_magnitude_severities_match_the_decision() -> None:
 
 
 def test_magnitude_checks_ran_on_real_data(db_conn) -> None:
-    """Оба контроля выполняются на пробах и не срабатывают ложно."""
+    """Оба контроля выполняются на данных, и ни один не проваливается.
+
+    **Предупреждение и провал — разные исходы, и тест обязан их различать.**
+    Границы правдоподобия валюты баланса объявлены грубыми, а исход —
+    предупреждением с требованием подтвердить единицу руками: контроль,
+    у которого предупреждение запрещено, не проверял бы ничего.
+
+    Сработало оно 22.09.2026 на пяти комплектах, и все пять — настоящие:
+    СФО «Синара Секьюр», «Стандарт», «ТФЛ» и «Структурные Продукты» в первый
+    год существования, валюта баланса 4–9 тыс. руб. Единица верна, эмитент
+    действительно такого размера — то есть ответ на требование контроля
+    «подтвердить руками» дан, и он утвердительный.
+
+    Отношение величин смежных периодов остаётся строгим: у него исход
+    блокирующий, и ложное срабатывание там означало бы карантин на ровном
+    месте.
+    """
     from finlib.db import fetch_all
 
     rows = fetch_all(
@@ -398,7 +414,18 @@ def test_magnitude_checks_ran_on_real_data(db_conn) -> None:
         {"c": [CheckCode.BALANCE_MAGNITUDE.value, CheckCode.PERIOD_MAGNITUDE_SHIFT.value]},
     )
     assert rows, "контроли правдоподобия не выполнялись"
-    assert all(row["status"] == "pass" for row in rows), rows
+    by_code: dict[str, dict[str, int]] = {}
+    for row in rows:
+        by_code.setdefault(row["check_code"], {})[row["status"]] = row["n"]
+    # Знаменатель: ноль срабатываний при неизвестном числе проверок
+    # неотличим от невыполненного контроля.
+    for code in (CheckCode.BALANCE_MAGNITUDE, CheckCode.PERIOD_MAGNITUDE_SHIFT):
+        assert by_code.get(code.value, {}).get("pass"), (
+            f"контроль {code.value} не прошёл ни разу: проверять было нечего "
+            "либо он не выполнялся"
+        )
+        assert not by_code.get(code.value, {}).get("fail"), by_code
+    assert not by_code[CheckCode.PERIOD_MAGNITUDE_SHIFT.value].get("warning"), by_code
 
 
 # --- 4 (продолжение). Узость основания видна при присвоенном классе --------

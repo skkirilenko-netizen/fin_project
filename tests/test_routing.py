@@ -736,6 +736,10 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
             issue="выпуск",
             group="Мечел",
             leader="Мечел",
+            months=12,
+            offered="1 000",
+            cash="100",
+            unit="тыс. руб.",
         )
 
 

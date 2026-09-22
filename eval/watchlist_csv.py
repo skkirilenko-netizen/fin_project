@@ -79,6 +79,10 @@ HEADER = (
     *VALUES,
     "денежные средства",
     "платежи 12 месяцев",
+    # **Вторая мера рефинансирования.** Оферты в отсечку корзины не входят —
+    # предъявление право владельца, — и графа объявлена своей: сложенная
+    # с платежами, она выдала бы возможное за состоявшееся.
+    "оферты 12 месяцев",
 )
 
 
@@ -182,6 +186,10 @@ def main() -> int:
                     _sum(item.cash, unit),
                     _sum(
                         item.refinance.due if item.refinance is not None else None,
+                        unit,
+                    ),
+                    _sum(
+                        item.refinance.offered if item.refinance is not None else None,
                         unit,
                     ),
                 )
