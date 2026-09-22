@@ -75,21 +75,79 @@ def fetch(path: str, name: str, params: dict[str, Any] | None = None) -> dict:
     if where.exists():
         pace.from_cache += 1
         return json.loads(where.read_text(encoding="utf-8"), parse_float=Decimal)
-    pace.wait()
-    pace.requested += 1
-    logger.info("ISS %s (%s)", path, name)
-    response = httpx.get(
-        f"{BASE}/{path.lstrip('/')}",
-        params=params or {},
-        timeout=30.0,
-        headers={"User-Agent": AGENT},
-    )
-    if response.status_code != 200:
-        raise MoexError(f"ISS {path}: {response.status_code} — {response.text[:200]}")
+    # **Обрыв связи ответом не является, и повтор здесь не роскошь.** Прогон
+    # срезов — тысяча обращений, и падение на середине оставляет диск
+    # с половиной дней: то же основание, по которому повтор заведён
+    # у доставки Cbonds.
+    response = None
+    for attempt in (1, 2, 3):
+        pace.wait()
+        pace.requested += 1
+        logger.info("ISS %s (%s)", path, name)
+        try:
+            response = httpx.get(
+                f"{BASE}/{path.lstrip('/')}",
+                params=params or {},
+                timeout=30.0,
+                headers={"User-Agent": AGENT},
+            )
+            break
+        except httpx.HTTPError as failure:
+            logger.error(
+                "ISS %s: обрыв связи (%s), попытка %d",
+                path,
+                type(failure).__name__,
+                attempt,
+            )
+            if attempt == 3:
+                raise MoexError(f"ISS {path}: связь обрывается третий раз") from failure
+            time.sleep(5.0 * attempt)
+    if response is None or response.status_code != 200:
+        code = response.status_code if response is not None else "нет ответа"
+        text = response.text[:200] if response is not None else ""
+        raise MoexError(f"ISS {path}: {code} — {text}")
     found = json.loads(response.text, parse_float=Decimal)
     CACHE.mkdir(parents=True, exist_ok=True)
     where.write_text(response.text, encoding="utf-8")
     return found
+
+
+def paged(
+    path: str, name: str, block: str, params: dict[str, Any] | None = None
+) -> list[dict]:
+    """Все строки блока, страница за страницей; ответ собирается на диск один.
+
+    **ISS отдаёт срез рынка страницами по сотне**, а число строк говорит
+    в курсоре. Собранный ответ кладётся одним файлом: иначе перечитанный
+    с диска окажется короче полученного из сети, и повторный прогон тихо
+    потеряет выпуски — та же ошибка, что уже была у клиента Cbonds.
+    """
+    where = CACHE / f"{name}.json"
+    if where.exists():
+        pace.from_cache += 1
+        found = json.loads(where.read_text(encoding="utf-8"), parse_float=Decimal)
+        return found.get(block) or []
+    collected: list[dict] = []
+    start = 0
+    while True:
+        answer = fetch(path, f"{name}_p{start}", {**(params or {}), "start": start})
+        page = rows(answer, block)
+        collected.extend(page)
+        cursor = rows(answer, f"{block}.cursor")
+        total = int(cursor[0].get("TOTAL", len(collected))) if cursor else len(collected)
+        if not page or len(collected) >= total:
+            break
+        start += len(page)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    where.write_text(
+        json.dumps({block: collected}, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    # Страницы больше не нужны: собранный ответ полон, и держать обе копии
+    # значило бы хранить одно и то же дважды.
+    for item in CACHE.glob(f"{name}_p*.json"):
+        item.unlink()
+    return collected
 
 
 def rows(answer: dict, block: str) -> list[dict]:
