@@ -853,7 +853,20 @@ def _questions_are_sound(
             break
         seen[key] = question
 
-    about_disclosure = [item for item in questions if _NOT_DISCLOSED.search(item)]
+    # **Запрет сужен, а не обойдён перефразировкой.** Вопрос о нераскрытии
+    # содержательного ответа не имеет, пока нераскрытие ничем не опровергнуто:
+    # в упрощённой форме строки нет вовсе, а в полной нераскрытие правомерно.
+    # Но если по той же строке величина есть у информационного агентства,
+    # раскрытие где-то состоялось, и ответ у вопроса появляется. Такая
+    # формулировка предписана методикой, и узнаётся она по своему шаблону,
+    # а не по словам: слова обходятся перефразировкой, шаблон — нет.
+    prescribed = _prescribed_starts(policy)
+    about_disclosure = [
+        item
+        for item in questions
+        if _NOT_DISCLOSED.search(item)
+        and not any(item.startswith(start) for start in prescribed)
+    ]
     if about_disclosure:
         found.append(
             TextIssue(
@@ -864,6 +877,22 @@ def _questions_are_sound(
             )
         )
     return found
+
+
+def _prescribed_starts(policy: object) -> tuple[str, ...]:
+    """Начала предписанных формулировок вопросов — до первой подстановки.
+
+    Сравнивать целиком нельзя: в формулировке стоят величины, которые расчёт
+    подставляет. Начало же не зависит от подстановки и опознаёт формулировку
+    однозначно, тогда как сравнение по словам обходится перефразировкой —
+    ровно тем, чем словарь запрещённых формулировок обходит модель.
+    """
+    starts: list[str] = []
+    for text in getattr(policy, "texts", {}).values():
+        head = " ".join(text.split()).split("{")[0].strip()
+        if len(head) >= 20:
+            starts.append(head)
+    return tuple(starts)
 
 
 def _risks_name_values(sections: dict[int, str]) -> list[TextIssue]:

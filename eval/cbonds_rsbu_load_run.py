@@ -10,7 +10,16 @@
 **По умолчанию прогон не ходит в сеть.** Ответ, которого нет на диске,
 не запрашивается, а организация называется пропущенной: обращение к источнику
 тратит суточную норму запросов, и решать об этом должен человек. `--fetch`
-включает запросы, `--inn` сужает перечень.
+включает запросы, `--inn` сужает перечень, `--budget N` ограничивает их число.
+
+**Бюджет проверяется перед каждой организацией, а не после прогона.** Запрос,
+сделанный сверх бюджета, вернуть нельзя, и «уложились» задним числом — не
+ответ. Остаток бюджета печатается вместе с числом сделанных запросов.
+
+**Ошибка источника останавливает прогон.** Отказ доступа и сбой ответа
+не пропускаются молча: продолжать значило бы тратить бюджет на запросы,
+которые не работают, а отчёт вышел бы неотличим от прогона, где данных
+просто нет.
 
 **Замер не считает сам.** Комплекты пишет цикл, проверки выполняют контроли,
 а прогон считает исходы: комплектов, фактов, кодов вне справочника, расхождений
@@ -30,7 +39,12 @@ from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.normalize.cbonds_mapping import load_cbonds_mapping  # noqa: E402
 from finlib.pipeline import accept_cbonds_report  # noqa: E402
 from finlib.quality.codes import check_name  # noqa: E402
-from finlib.sources.cbonds import CACHE, CbondsUnavailableError  # noqa: E402
+from finlib.sources.cbonds import (  # noqa: E402
+    CACHE,
+    CbondsError,
+    CbondsUnavailableError,
+    pace,
+)
 from finlib.version import code_version  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -88,10 +102,16 @@ def main() -> int:
     """Печатает итог загрузки; 1 — если не загружено ни одного комплекта."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
     fetch = "--fetch" in sys.argv
+    budget = 0
+    if "--budget" in sys.argv:
+        budget = int(sys.argv[sys.argv.index("--budget") + 1])
     only = {
-        item for index, item in enumerate(sys.argv) if index and item.isdigit()
+        item
+        for index, item in enumerate(sys.argv)
+        if index and item.isdigit() and len(item) >= 10
     }
     report = load_cbonds_mapping().report(REPORT)
+    stopped = ""
 
     counts: Counter[str] = Counter()
     rows_out: list[str] = []
@@ -109,6 +129,19 @@ def main() -> int:
             if not fetch and not cached(inn, report):
                 skipped.append(f"{(item['name'] or inn)[:30]} ({inn})")
                 continue
+            # Бюджет проверяется до запроса: сделанный запрос не вернёшь,
+            # и оставшихся доставок у организации три.
+            if (
+                budget
+                and not cached(inn, report)
+                and pace.requested + len(report.deliveries) > budget
+            ):
+                stopped = (
+                    f"бюджет запросов исчерпан: сделано {pace.requested} "
+                    f"из {budget}"
+                )
+                skipped.append(f"{(item['name'] or inn)[:30]} ({inn}): бюджет")
+                continue
             try:
                 outcomes = accept_cbonds_report(
                     inn, report=REPORT, conn=conn, refresh=False
@@ -116,6 +149,17 @@ def main() -> int:
             except CbondsUnavailableError as failure:
                 skipped.append(f"{(item['name'] or inn)[:30]} ({inn}): {failure}")
                 continue
+            except CbondsError as failure:
+                # Ошибка источника прогон останавливает: продолжать значило бы
+                # тратить бюджет на запросы, которые не работают.
+                stopped = f"ошибка источника на {inn}: {failure}"
+                break
+            # **Организация закрепляется сразу.** Прогон по сотням организаций
+            # идёт десятки минут, и одна транзакция на всё означала бы, что
+            # сбой в конце отменяет сделанное в начале — при том, что запросы
+            # к источнику уже потрачены. Загрузка идемпотентна, и повторный
+            # прогон ничего не задваивает.
+            conn.commit()
             accepted = [entry for entry in outcomes if entry.accepted]
             if not accepted:
                 counts["без годовых строк"] += 1
@@ -140,20 +184,11 @@ def main() -> int:
             # агрегатора не пишется никогда, ненулевая величина решается
             # правилом приоритета — и одно число на оба случая скрывало бы,
             # чего именно мы не берём.
-            counts["нераскрыто у нас, есть у агрегатора"] += sum(
-                len(entry.undisclosed) for entry in accepted
+            counts["нераскрыто у нас, у агрегатора ноль"] += sum(
+                len(entry.zeros_for_undisclosed) for entry in accepted
             )
-            counts["из них ноль не записан"] += sum(
-                1
-                for entry in accepted
-                for _, note in entry.undisclosed
-                if "ноль не записан" in note
-            )
-            counts["из них величина записана"] += sum(
-                1
-                for entry in accepted
-                for _, note in entry.undisclosed
-                if "величина записана" in note
+            counts["нераскрыто у нас, у агрегатора величина"] += sum(
+                len(entry.values_for_undisclosed) for entry in accepted
             )
             counts["не сошлось сверок"] += sum(
                 len(entry.failures) for entry in accepted
@@ -167,9 +202,10 @@ def main() -> int:
                     )
             rows_out.append(
                 f"| {(item['name'] or inn)[:30]} | {inn} | {len(accepted)} | "
-                f"{facts} | {item['rsbu_facts']} | "
+                f"{sum(entry.presented for entry in accepted)} | {facts} "
+                f"| {item['rsbu_facts']} | "
                 f"{sum(len(entry.mismatches) for entry in accepted)} | "
-                f"{sum(len(entry.undisclosed) for entry in accepted)} |"
+                f"{sum(len(entry.values_for_undisclosed) for entry in accepted)} |"
             )
 
     with connection() as conn:
@@ -208,13 +244,20 @@ def main() -> int:
         "числами либо уступили правилу приоритета). "
         f"Пропущено без ответа на диске **{len(skipped)}**"
         + (" (запросы разрешены)" if fetch else " (запросы не разрешены)")
-        + f". Сеть: запросов {0 if not fetch else 'по необходимости'}, "
+        + f". Сеть: запросов сделано {pace.requested}"
+        + (f" из бюджета {budget}" if budget else "")
+        + f", ответов с диска {pace.from_cache}, "
         f"логин задан: {'да' if settings.cbonds_ready else 'нет'}.\n"
     )
+    if stopped:
+        print(f"**Прогон остановлен:** {stopped}.\n")
 
-    print("| Организация | ИНН | Комплектов | Фактов | Фактов РСБУ у нас "
-          "| Расхождений | Нераскрыто у нас |")
-    print("|---|---|---|---|---|---|---|")
+    # **Предъявлено и записано — разные графы.** Ноль записанных при
+    # неизвестном числе предъявленных читается как «ничего не загрузилось»,
+    # тогда как означает «всё уже стоит в базе теми же числами».
+    print("| Организация | ИНН | Комплектов | Предъявлено | Записано "
+          "| Фактов РСБУ у нас | Расхождений | Величина против прочерка |")
+    print("|---|---|---|---|---|---|---|---|")
     for line in rows_out:
         print(line)
 

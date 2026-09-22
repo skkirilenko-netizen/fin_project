@@ -173,6 +173,13 @@ class CheckCode(StrEnum):
     # то есть косвенные; здесь первоисточник говорит о той же клетке прямо,
     # и путать это с пересмотром нельзя.
     CBONDS_ZERO_FOR_UNDISCLOSED = "cbonds_zero_for_undisclosed"
+    # **Величина агрегатора против прочерка первоисточника — вопрос
+    # к организации, а не пробел расчёта.** Клетку это не заполняет:
+    # «не раскрыто» осталось бы «не раскрыто», а число неизвестного
+    # происхождения встало бы рядом с величинами отчётности. Но сведение
+    # содержательно ровно настолько, чтобы стать запросом: у агрегатора
+    # по этой строке величина есть, у сданной отчётности прочерк.
+    CBONDS_VALUE_FOR_UNDISCLOSED = "cbonds_value_for_undisclosed"
 
 
 # Уровень служебных записей получения и загрузки. Строка, не опознанная
@@ -257,6 +264,7 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.CBONDS_SET_REJECTED: Severity.BLOCKING,
     CheckCode.CBONDS_VALUE_MISMATCH: Severity.INFO,
     CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: Severity.INFO,
+    CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED: Severity.INFO,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -319,6 +327,7 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.CBONDS_SET_REJECTED: "приём комплекта агрегатора",
     CheckCode.CBONDS_VALUE_MISMATCH: "расхождение агрегатора с первоисточником",
     CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: "ноль агрегатора против нераскрытой строки",
+    CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED: "величина агрегатора против нераскрытой строки",
 }
 
 

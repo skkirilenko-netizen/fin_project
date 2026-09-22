@@ -480,6 +480,19 @@ def questions(
             policy.questions.question(QuestionSubject.QUARANTINED_SET, year=str(year))
         )
 
+    # **Строка, не раскрытая нами и раскрытая агрегатору, — готовый вопрос.**
+    # Величина агрегатора в клетку не идёт: это два источника в одном комплекте.
+    # Но спрашивать есть о чём, и спрашивается раскрытие, а не подтверждение
+    # чужого числа — его происхождение нам неизвестно.
+    undisclosed = data.undisclosed_with_value
+    if undisclosed:
+        by_subject.setdefault(QuestionSubject.UNDISCLOSED_WITH_VALUE, []).append(
+            policy.questions.question(
+                QuestionSubject.UNDISCLOSED_WITH_VALUE,
+                lines=", ".join(undisclosed),
+            )
+        )
+
     for row in data.metrics:
         # Нехватка данных и исключение решением методики — разные вещи:
         # о втором спрашивать нечего, это наш выбор, а не пробел отчётности.

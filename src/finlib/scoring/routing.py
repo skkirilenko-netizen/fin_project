@@ -357,13 +357,17 @@ def route(
         code for code in stop_factors if routing.severity.severe(caps.get(code))
     )
     capped = tuple(code for code in stop_factors if code not in severe)
+    # **Стоп-фактор называется наименованием, а не кодом.** Основание читает
+    # человек — на экране наблюдения и в сводке, — и `negative_nwc` ему
+    # не говорит ничего; код остаётся предметом основания, по нему считают.
+    names = {factor.code: factor.name for factor in types.stop_factors}
     for code in severe:
         review.append(
-            Finding("stop_factor_severe", code, f"стоп-фактор разбора: {code}")
+            Finding("stop_factor_severe", code, names.get(code, code))
         )
     for code in capped:
         attention.append(
-            Finding("stop_factor_capped", code, f"стоп-фактор внимания: {code}")
+            Finding("stop_factor_capped", code, names.get(code, code))
         )
     if financing_structure:
         review.append(
@@ -412,7 +416,7 @@ def route(
                     "level_off_scale",
                     code,
                     f"{item.name}: {view.shown(code, item.value)} за опорной "
-                    f"точкой {scale.points[0][0]} своей шкалы",
+                    f"точкой {view.shown(code, scale.points[0][0])} своей шкалы",
                 )
             )
         elif score < lower:

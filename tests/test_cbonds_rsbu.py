@@ -171,7 +171,7 @@ def test_zero_does_not_overwrite_a_non_disclosure(db_conn) -> None:
     outcome = load_row(ROW | {"ln1300": "0", "ln1700": "700"}, db_conn, report_name=REPORT)
     facts = facts_of(db_conn)
     assert facts["1300"]["value"] is None
-    assert any("ноль не записан" in note for _, note in outcome.undisclosed)
+    assert "1300" in outcome.zeros_for_undisclosed
 
 
 def test_declaring_a_thing_twice_is_refused() -> None:

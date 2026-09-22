@@ -89,6 +89,7 @@ EMITTED: tuple[CheckCode, ...] = (
     # расхождению данных значило бы мерить нас, а не эмитента.
     CheckCode.SIGN_CONVENTION_MISMATCH,
     CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED,
+    CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED,
 )
 
 
@@ -195,9 +196,12 @@ class LoadOutcome:
     # Расхождения, в которых величина совпала, а знак обратен: это способ
     # печати расходной статьи, и пересмотром он не является.
     sign_conventions: tuple[str, ...] = ()
-    # Величины агрегатора там, где первоисточник строку не раскрыл: прямая
-    # улика о том, что ноль агрегатора означает нераскрытие.
-    undisclosed: tuple[tuple[str, str], ...] = ()
+    # Ноль агрегатора против нераскрытой строки: прямая улика о том, что
+    # ноль у него означает нераскрытие. Такой ноль не пишется.
+    zeros_for_undisclosed: tuple[str, ...] = ()
+    # Величина агрегатора против нераскрытой строки: клетку она не заполняет,
+    # а сведение становится вопросом к организации.
+    values_for_undisclosed: tuple[tuple[str, Decimal], ...] = ()
     # Величин предъявлено — знаменатель к числу записанных: ноль записанных
     # при неизвестном числе предъявленных ничего не означает.
     presented: int = 0
@@ -579,7 +583,8 @@ def load_row(
     written = 0
     mismatches: list[tuple[str, str]] = []
     signs: list[str] = []
-    undisclosed: list[tuple[str, str]] = []
+    zeros: list[str] = []
+    with_value: list[tuple[str, Decimal]] = []
     for name, item in fields.items():
         value = number(row.get(name))
         if value is None:
@@ -604,15 +609,16 @@ def load_row(
                 # нераскрытие. Ненулевая величина предъявляется: она сведение,
                 # которого у нас не было, а решает о ней правило приоритета.
                 if value == 0:
-                    undisclosed.append(
-                        (
-                            f"{item.code}: первоисточник не раскрыл, агрегатор 0",
-                            "ноль не записан: у агрегатора он означает нераскрытие",
-                        )
-                    )
+                    zeros.append(item.code)
                     continue
-                clash = (f"{item.code}: первоисточник не раскрыл, агрегатор {value}", "")
-                kind = "undisclosed"
+                # **Величина против прочерка — вопрос к организации.** Клетку
+                # она не заполняет, но сведение содержательно: у агрегатора
+                # по этой строке величина есть, у сданной отчётности прочерк.
+                # Предмет и величина идут полями записи, а не прозой: считать
+                # и спрашивать по ним будет документ.
+                with_value.append((item.code, value))
+                clash = None
+                kind = ""
             elif sign_only_difference(stored, value):
                 # **Соглашение о знаке — не пересмотр.** Величина совпадает
                 # до копейки, обратен только знак: так печатается расходная
@@ -648,17 +654,18 @@ def load_row(
         )
         presented += 1
         written += 1 if changed else 0
-        if clash is not None:
-            outcome_word = (
-                "величина записана: комплект первоисточника в карантине "
-                "либо величина его слабее"
-                if changed
-                else "величина не записана: первоисточник старше агрегатора"
+        if clash is not None and kind == "mismatch":
+            # Исход берётся из самой записи, а не из того, что правило обещает:
+            # у карантинного комплекта первоисточника величина как раз пишется.
+            mismatches.append(
+                (
+                    clash[0],
+                    "величина записана: комплект первоисточника в карантине "
+                    "либо величина его слабее"
+                    if changed
+                    else "величина не записана: первоисточник старше агрегатора",
+                )
             )
-            if kind == "mismatch":
-                mismatches.append((clash[0], outcome_word))
-            else:
-                undisclosed.append((clash[0], outcome_word))
 
     outcome = LoadOutcome(
         inn=inn,
@@ -670,7 +677,8 @@ def load_row(
         failures=tuple(failures),
         mismatches=tuple(mismatches),
         sign_conventions=tuple(signs),
-        undisclosed=tuple(undisclosed),
+        zeros_for_undisclosed=tuple(zeros),
+        values_for_undisclosed=tuple(with_value),
         outside_catalog=outside,
         checked=report.controls_declared(),
     )
@@ -751,7 +759,7 @@ def _records(
             ),
         )
     )
-    for message, outcome_word in outcome.undisclosed:
+    for code in outcome.zeros_for_undisclosed:
         records.append(
             CheckRecord(
                 inn=outcome.inn,
@@ -759,9 +767,28 @@ def _records(
                 status=CheckStatus.INFO,
                 report_date=outcome.report_date,
                 src_file_id=outcome.src_file_id,
+                line_code=code,
+                message=(
+                    "первоисточник строку не раскрыл, у агрегатора ноль: "
+                    "не записан, потому что ноль у него означает нераскрытие"
+                ),
+            )
+        )
+    for code, value in outcome.values_for_undisclosed:
+        records.append(
+            CheckRecord(
+                inn=outcome.inn,
+                check_code=CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED,
+                status=CheckStatus.INFO,
+                report_date=outcome.report_date,
+                src_file_id=outcome.src_file_id,
+                line_code=code,
+                new_value=value,
                 message=(
                     "первоисточник строку не раскрыл, а у агрегатора величина "
-                    f"есть: {message}; {outcome_word}"
+                    f"есть: {value}. Клетка не заполняется — это два источника "
+                    "в одном комплекте, — но сведение становится вопросом "
+                    "к организации"
                 ),
             )
         )
