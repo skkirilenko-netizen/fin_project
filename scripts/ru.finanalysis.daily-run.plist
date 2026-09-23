@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ежедневный прогон целиком: доставка, маршрут, история корзин, список,
+  отчёт изменений. Один агент, а не пять: расход запросов живёт в процессе,
+  и разнесённые по скриптам доставки о нём друг друга не знают.
+
+  Установка (агент пользователя, не системный демон):
+
+      cp scripts/ru.finanalysis.daily-run.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ru.finanalysis.daily-run.plist
+      launchctl kickstart -p gui/$(id -u)/ru.finanalysis.daily-run   # проверка
+
+  Снятие:
+
+      launchctl bootout gui/$(id -u)/ru.finanalysis.daily-run
+
+  **Время выбрано после снимка рейтингов, а не вместо него.** Снимок делается
+  в 19:30 и остаётся отдельным агентом: он — единственный путь к истории
+  рейтингов, и пропущенный день не восстанавливается ничем. Прогон в 20:00
+  застаёт его готовым; если снимок почему-то не сделан, прогон делает его сам
+  первой доставкой — и тогда файл дня один, а не два.
+
+  **Если машина спала, launchd выполняет пропущенный календарный запуск при
+  пробуждении.** Прогон от этого не портится: история корзин пишется с датой
+  прогона, а повторный прогон того же дня переписывает свою точку, а не
+  добавляет вторую.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ru.finanalysis.daily-run</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>scripts/daily_run.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/sk/Work/fin-analysis</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>20</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <!-- Журнал прогона: без него «отчёта за день нет» не отличить
+       от «прогон не запускался». Сам прогон пишет журнал и в базу
+       (`routing_run`), а этот файл — то, что сказал процесс. -->
+  <key>StandardOutPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/daily_run.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/daily_run.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
