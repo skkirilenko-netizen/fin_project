@@ -150,7 +150,7 @@ def returns_of(series: list[int], dates: list[date], window: int) -> int:
     return found
 
 
-def with_gap(cover: list[str | None], fired: list[int], clear: Decimal) -> list[int]:
+def with_gap(cover: list[str | None], clear: Decimal) -> list[int]:
     """Состояние с зазором: ставится ниже единицы, снимается выше порога.
 
     **Точка без покрытия состояния не меняет.** Величины может не быть —
@@ -159,12 +159,15 @@ def with_gap(cover: list[str | None], fired: list[int], clear: Decimal) -> list[
     """
     state = 0
     found: list[int] = []
-    for number, value in enumerate(cover):
+    for value in cover:
         if value is None:
-            # Без величины остаётся то, что сказал сам маршрут: пробел
-            # не переключает.
-            state = fired[number] if state == 0 else state
-            found.append(state)
+            # **Пробел не срабатывание и не снятие.** Маршрут при отсутствии
+            # величины основания не ставит вовсе — это «данных недостаточно»,
+            # другое обстоятельство, — поэтому в точке печатается ноль,
+            # а запомненное состояние ждёт возвращения величины. Иначе зазор
+            # держал бы основание там, где его не поставил бы и маршрут,
+            # и разница мерила бы пробелы, а не границу.
+            found.append(0)
             continue
         ratio = Decimal(value)
         if state == 0 and ratio < 1:
@@ -237,6 +240,45 @@ def _basket_moves(
     return found
 
 
+def baskets_with(
+    state: list[int], basket: list[str], others: list[int]
+) -> list[str]:
+    """Корзина каждой точки при названном состоянии основания.
+
+    **Выводится она из записанного вердикта, а не считается заново.** Корзину
+    меняет только то основание, которое её называет: где есть другое основание
+    той же тяжести либо корзина тяжелее внимания, состояние рефинансирования
+    ничего не решает. Проверяется вывод на самом себе: при состоянии, которое
+    дал маршрут, выведенный ряд обязан совпасть с записанным.
+    """
+    found: list[str] = []
+    for number, value in enumerate(state):
+        current = basket[number]
+        if others[number] or current not in ("attention", "clear"):
+            found.append(current)
+            continue
+        found.append("attention" if value else "clear")
+    return found
+
+
+def basket_returns(series: list[str], dates: list[date], window: int) -> int:
+    """Смены корзины, отменённые обратно внутри окна.
+
+    Определение то же, что у возвратов в замере истории: пара соседних смен,
+    вторая из которых возвращает прежнюю корзину не позже окна.
+    """
+    moves = [
+        (number, series[number - 1], series[number])
+        for number in range(1, len(series))
+        if series[number] != series[number - 1]
+    ]
+    found = 0
+    for first, second in zip(moves, moves[1:], strict=False):
+        if second[2] == first[1] and (dates[second[0]] - dates[first[0]]).days <= window:
+            found += 1
+    return found
+
+
 def main() -> int:
     """Печатает цену двух способов унять дребезг меры рефинансирования."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -244,8 +286,24 @@ def main() -> int:
     window = routing.history.window_days
     found = collect()
     dates = [date.fromisoformat(item) for item in found["dates"]]
-    cover, fired = found["cover"], found["fired"]
+    fired = found["fired"]
     basket, others, offers = found["basket"], found["others"], found["offers"]
+    # **Эмитент без единой измеренной точки в ряду покрытия отсутствует, а не
+    # стоит нулями.** Разница существенна: нуль означал бы «покрытие ноль»,
+    # то есть срабатывание, тогда как это пробел — графика на диске нет либо
+    # денежные средства не раскрыты.
+    cover = {
+        inn: found["cover"].get(inn) or [None] * len(dates) for inn in fired
+    }
+    # **Вторая мера — чужое основание, и корзину она держит сама.** Варианты
+    # трогают только «платежи года»; оферты остаются как есть, и считать их
+    # снятыми вместе с первой мерой значило бы приписать зазору чужую работу.
+    # Сверка вывода на самом себе это и поймала: 1 576 точек расхождения
+    # были ровно эмитентами, у которых внимание держат оферты.
+    others = {
+        inn: [own + offers[inn][number] for number, own in enumerate(series)]
+        for inn, series in others.items()
+    }
     events = _defaulted()
 
     print("# Зазор у границы: цена двух способов унять дребезг\n")
@@ -261,13 +319,35 @@ def main() -> int:
     measured = sum(
         1 for inn in fired if any(value is not None for value in cover[inn])
     )
+    # **Вывод корзины проверяется на самом себе.** При состоянии, которое дал
+    # маршрут, выведенный ряд обязан совпасть с записанным вердиктом: иначе
+    # сравнивать с ним варианты нельзя — расхождение мерило бы вывод, а не
+    # зазор.
+    wrong = sum(
+        1
+        for inn, series in fired.items()
+        for was, now in zip(
+            baskets_with(series, basket[inn], others[inn]), basket[inn], strict=False
+        )
+        if was != now
+    )
+    base_basket_returns = sum(
+        basket_returns(baskets_with(series, basket[inn], others[inn]), dates, window)
+        for inn, series in fired.items()
+    )
     print("## Как дребезжит мера сейчас\n")
     print(
         f"Переключений основания «платежи года» **{base_switches}**, из них "
         f"отменённых внутри окна **{base_returns}**; дребезжащих эмитентов "
-        f"{blinking}. Покрытие удалось измерить хотя бы в одной точке "
-        f"у {measured} эмитентов из {len(fired)} — у остальных нет либо "
+        f"{blinking}. Возвратов **корзины**, которые они дают, "
+        f"**{base_basket_returns}**. Покрытие удалось измерить хотя бы в одной "
+        f"точке у {measured} эмитентов из {len(fired)} — у остальных нет либо "
         "графика на диске, либо раскрытых денежных средств.\n"
+    )
+    print(
+        f"Вывод корзины из состояния основания сверен с записанным вердиктом: "
+        f"расхождений {wrong} из {len(dates) * len(fired)} точек. "
+        "Без этой сверки сравнение вариантов мерило бы вывод, а не зазор.\n"
     )
     offer_switches = sum(switches(series) for series in offers.values())
     offer_returns = sum(returns_of(series, dates, window) for series in offers.values())
@@ -283,28 +363,29 @@ def main() -> int:
         "когда покрытие поднялось выше порога снятия.\n"
     )
     print(
-        "| Порог снятия | Возвратов осталось | Переключений | Точек со сменой "
-        "корзины | Эмитентов со сменой | Запаздывание у дефолтных |"
+        "**Запаздывание здесь равно нулю по устройству, а не по замеру**: "
+        "порог постановки тот же, зазор относится только к снятию. В таблице "
+        "оно оставлено, чтобы разница с вариантом Б была видна числом, "
+        "а не выводилась читателем из устройства правила.\n"
+    )
+    print(
+        "| Порог снятия | Возвратов корзины | Возвратов основания | "
+        "Точек со сменой корзины | Эмитентов со сменой | Запаздывание "
+        "у дефолтных |"
     )
     print("|---|---|---|---|---|---|")
     for clear in CLEARS:
-        rest = moves = touched = 0
-        delays: list[int] = []
-        switched = 0
-        for inn, series in fired.items():
-            other = with_gap(cover[inn], series, clear)
-            rest += returns_of(other, dates, window)
-            switched += switches(other)
-            count = _basket_moves(series, other, basket[inn], others[inn])
-            moves += count
-            touched += int(bool(count))
-            if inn in events:
-                was, now = _first_fire(series, dates), _first_fire(other, dates)
-                if was is not None and now is not None:
-                    delays.append((now - was).days)
         print(
-            f"| {clear} | {rest} | {switched} | {moves} | {touched} "
-            f"| {_said(delays)} |"
+            f"| {clear} "
+            + _cost(
+                {inn: with_gap(cover[inn], clear) for inn in fired},
+                fired,
+                basket,
+                others,
+                dates,
+                window,
+                events,
+            )
         )
 
     print("\n## Вариант Б: подтверждение устойчивости «K из N»\n")
@@ -314,27 +395,32 @@ def main() -> int:
         "недельная, поэтому N точек — это N недель.\n"
     )
     print(
-        "| K из N | Возвратов осталось | Переключений | Точек со сменой корзины "
-        "| Эмитентов со сменой | Запаздывание у дефолтных |"
+        "**Здесь запаздывание настоящее, и оно в опасную сторону**: "
+        "подтверждение откладывает саму постановку основания, то есть тот "
+        "случай, ради которого мера и заведена. Зазор по величине откладывает "
+        "снятие — ошибку в сторону лишнего внимания.\n"
+    )
+    print(
+        "| K из N | Возвратов корзины | Возвратов основания | "
+        "Точек со сменой корзины | Эмитентов со сменой | Запаздывание "
+        "у дефолтных |"
     )
     print("|---|---|---|---|---|---|")
     for need, span in CONFIRMATIONS:
-        rest = moves = touched = switched = 0
-        delays = []
-        for inn, series in fired.items():
-            other = with_confirmation(series, need, span)
-            rest += returns_of(other, dates, window)
-            switched += switches(other)
-            count = _basket_moves(series, other, basket[inn], others[inn])
-            moves += count
-            touched += int(bool(count))
-            if inn in events:
-                was, now = _first_fire(series, dates), _first_fire(other, dates)
-                if was is not None and now is not None:
-                    delays.append((now - was).days)
         print(
-            f"| {need} из {span} | {rest} | {switched} | {moves} | {touched} "
-            f"| {_said(delays)} |"
+            f"| {need} из {span} "
+            + _cost(
+                {
+                    inn: with_confirmation(series, need, span)
+                    for inn, series in fired.items()
+                },
+                fired,
+                basket,
+                others,
+                dates,
+                window,
+                events,
+            )
         )
 
     print(
@@ -345,6 +431,40 @@ def main() -> int:
         "и ноль в графе означал бы обратное.\n"
     )
     return 0
+
+
+def _cost(
+    variant: dict[str, list[int]],
+    fired: dict[str, list[int]],
+    basket: dict[str, list[str]],
+    others: dict[str, list[int]],
+    dates: list[date],
+    window: int,
+    events: dict[str, date],
+) -> str:
+    """Строка таблицы: чем обходится вариант — пользой и ценой.
+
+    **Пять чисел, а не одно.** Возвраты корзины — то, ради чего всё затеяно;
+    возвраты основания — тот же дребезг ниже уровнем, он остаётся, даже когда
+    корзина его больше не показывает; точки и эмитенты со сменой корзины —
+    цена сегодня; запаздывание у тех, кто потом допустил дефолт, — цена в том
+    случае, ради которого мера и заведена.
+    """
+    rest = moves = touched = ground = 0
+    delays: list[int] = []
+    for inn, other in variant.items():
+        rest += basket_returns(
+            baskets_with(other, basket[inn], others[inn]), dates, window
+        )
+        ground += returns_of(other, dates, window)
+        count = _basket_moves(fired[inn], other, basket[inn], others[inn])
+        moves += count
+        touched += int(bool(count))
+        if inn in events:
+            was, now = _first_fire(fired[inn], dates), _first_fire(other, dates)
+            if was is not None and now is not None:
+                delays.append((now - was).days)
+    return f"| {rest} | {ground} | {moves} | {touched} | {_said(delays)} |"
 
 
 def _said(delays: list[int]) -> str:
