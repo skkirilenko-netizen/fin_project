@@ -57,8 +57,10 @@ def main() -> int:
         return 1
 
     series: dict[str, list[tuple[date, str]]] = defaultdict(list)
+    grounds: dict[tuple[str, date], tuple[str, ...]] = {}
     for row in rows:
         series[row["inn"]].append((row["as_of"], row["basket"]))
+        grounds[(row["inn"], row["as_of"])] = tuple(row["grounds"])
     dates = sorted({row["as_of"] for row in rows})
     bonds = set(bond_issuers())
 
@@ -118,13 +120,39 @@ def main() -> int:
         f"из {len(moves)} — это "
         f"{len(returns) / len(moves) * 100:.1f} % всех смен.\n"
     )
+    # **Дребезг называется вместе с тем, чем он вызван.** «Вернулся» без
+    # основания — наблюдение без предмета: гасить его или оставить, решается
+    # по тому, какое правило мигает, а не по числу миганий.
+    ground_names = {
+        ground.code: ground.name
+        for basket in routing.baskets
+        for ground in basket.grounds
+    }
+    flapping: Counter[str] = Counter()
+    for inn, when, _, first in returns:
+        moved = set(grounds.get((inn, first), ())) ^ set(grounds.get((inn, when), ()))
+        for code in moved:
+            flapping[code] += 1
     for inn, when, basket, first in returns[:10]:
+        moved = set(grounds.get((inn, first), ())) ^ set(grounds.get((inn, when), ()))
+        said = ", ".join(ground_names.get(code, code) for code in sorted(moved))
         print(
             f"- {inn}: {when:%d.%m.%Y} вернулся, был "
             f"«{names.get(basket, basket)}» {first:%d.%m.%Y}"
+            + (f" — мигает основание: {said}" if said else "")
         )
     if not returns:
         print("ни одного — дребезга в пересчитанной истории нет.\n")
+    elif flapping:
+        print("\n**Чем вызван дребезг:**\n")
+        for code, count in flapping.most_common():
+            print(f"- {ground_names.get(code, code)}: {count}")
+        print(
+            "\nОкно двенадцати месяцев едет вместе с днём, и эмитент, "
+            "у которого покрытие на самой границе, мигает от одного платежа, "
+            "стоящего почти в году от сегодня. Это дребезг данных, "
+            "а не наших правок: код и методика в пересчёте одни.\n"
+        )
 
     print("\n## Кто двигался, а кто нет\n")
     moved = {item[0] for item in moves}
