@@ -563,6 +563,142 @@ def test_every_event_ground_is_named_in_every_type() -> None:
         assert not missing, f"{kind.code}: не названы основания событий {missing}"
 
 
+def _issue(name: str, *, subkind: str, reg_number: str, emission_id: str = "1"):
+    """Выпуск с неурегулированным дефолтом: вид инструмента и номер реестра."""
+    from finlib.sources.cbonds_events import Issue
+
+    return Issue(
+        emission_id=emission_id,
+        name=name,
+        isin="",
+        status="в обращении",
+        default=True,
+        unsettled=True,
+        maturity=date(2028, 5, 14),
+        offer=None,
+        outstanding=None,
+        updated=ANNUAL,
+        subkind=subkind,
+        reg_number=reg_number,
+    )
+
+
+def _events(issue):  # noqa: ANN001
+    """События эмитента с одним датированным неисполненным событием.
+
+    Признак без неисполненного датированного события основанием не считается,
+    поэтому событие здесь обязательно: без него проверялась бы другая ветвь.
+    """
+    from finlib.sources.cbonds_events import DefaultRecord, IssuerEvents
+
+    return IssuerEvents(
+        inn="1",
+        issues=(issue,),
+        issues_known=True,
+        records=(
+            DefaultRecord(
+                emission_id=issue.emission_id,
+                kind="Купон",
+                status="Дефолт",
+                due=date(2026, 3, 1),
+                when=date(2026, 3, 1),
+                announced=None,
+                met=None,
+                amount=None,
+            ),
+        ),
+        records_known=True,
+    )
+
+
+def test_the_dead_band_at_the_edge_of_the_scale_softens_the_basket() -> None:
+    """Величина у самой конечной точки даёт внимание, а не разбор.
+
+    Решение человека 23.09.2026: у АО ТКХ чистый долг / EBITDA 5,02 при
+    конечной точке 5,00 — величина отличается от неё на округление
+    составителя, а корзину меняла.
+    """
+    edge = catalogue_for(Standard.IFRS).threshold_of("net_debt_ebitda")
+    near = route(
+        (
+            metric("net_debt_ebitda", str(edge + Decimal("0.02"))),
+            metric("equity_ratio", "0.6"),
+            metric("cur_liq", "2.5"),
+        ),
+        unit=UNIT,
+        quarantined=False,
+        latest_annual=ANNUAL,
+        today=TODAY,
+    )
+    assert near.basket == "attention"
+    assert "metric_at_edge" in near.grounds
+    far = route(
+        (
+            metric("net_debt_ebitda", str(edge * Decimal("1.2"))),
+            metric("equity_ratio", "0.6"),
+            metric("cur_liq", "2.5"),
+        ),
+        unit=UNIT,
+        quarantined=False,
+        latest_annual=ANNUAL,
+        today=TODAY,
+    )
+    assert far.basket == "review"
+    assert "level_off_scale" in far.grounds
+
+
+def test_a_token_is_not_called_a_bond() -> None:
+    """Токен и биржевая облигация приходят одним перечнем, а зовутся порознь.
+
+    У Главснаба и Роял Капитала в дефолте стоят и те и другие, и строка
+    «дефолт по выпуску» говорила о них одинаково. Государственного
+    регистрационного номера у токена нет по природе: поле источника
+    содержит у него собственный идентификатор.
+    """
+    token = _issue(
+        "Главснаб, 25% 14may2028, BYN",
+        subkind="Токены",
+        reg_number="GLAVSNAB_(BYN_752)",
+    )
+    verdict = route(
+        (),
+        unit=UNIT,
+        quarantined=False,
+        events=_events(token),
+        latest_annual=ANNUAL,
+        today=TODAY,
+    )
+    said = " ".join(verdict.details)
+    assert "по токену" in said
+    assert "токен в статусе" in said
+    assert "рег. номер" not in said
+
+
+def test_a_bond_is_named_by_its_state_registration_number() -> None:
+    """Выпуск называется наименованием и реестровым номером.
+
+    «По выпуску 2076637» человеку не говорит ничего: номер источника —
+    не реестровый, и найти по нему бумагу нельзя.
+    """
+    bond = _issue(
+        "ПК Фабрикс, 001Р-01",
+        subkind="Биржевые облигации",
+        reg_number="4B02-01-00262-L-001P",
+        emission_id="2076637",
+    )
+    verdict = route(
+        (),
+        unit=UNIT,
+        quarantined=False,
+        events=_events(bond),
+        latest_annual=ANNUAL,
+        today=TODAY,
+    )
+    said = " ".join(verdict.details)
+    assert "4B02-01-00262-L-001P" in said
+    assert "2076637" not in said
+
+
 def test_every_type_names_a_queue_that_exists() -> None:
     """Очередь типа — объявленная корзина, а не выдуманный код."""
     routing = load_routing()

@@ -201,6 +201,64 @@ def _years_back(today: date, years: int) -> date:
         return today.replace(year=today.year - years, month=2, day=28)
 
 
+class InstrumentWord(BaseModel):
+    """Как вид инструмента зовётся в формулировке, в двух падежах.
+
+    Падежи объявлены, а не выведены: вывод падежа — морфология, а не методика,
+    и правило, угадывающее его, ошибётся на первом же новом виде.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    dative: str = Field(min_length=1)
+    nominative: str = Field(min_length=1)
+
+
+class Instruments(BaseModel):
+    """Виды инструмента, которые называются отдельно от биржевой облигации.
+
+    **Токен и облигация приходят одним перечнем, а обязательства у них
+    разные.** У Главснаба и Роял Капитала в дефолте стоят и те и другие,
+    и строка «дефолт по выпуску» говорила о них одинаково. Биржевая облигация
+    здесь норма: называть её видом значило бы писать «облигация» в каждой
+    строке.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    default: "InstrumentWord"
+    named_apart: dict[str, "InstrumentWord"] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    def apart(self, subkind: str) -> bool:
+        """Называется ли вид инструмента отдельно от биржевой облигации."""
+        return subkind.strip() in self.named_apart
+
+    def word(self, subkind: str) -> "InstrumentWord":
+        """Слова для формулировки: «выпуску» либо вид, названный отдельно."""
+        return self.named_apart.get(subkind.strip(), self.default)
+
+
+class Tolerance(BaseModel):
+    """Зона нечувствительности у конечной точки калибровочной шкалы.
+
+    **Ступень у границы неустранима, но смягчаема.** Величина 5,02 при
+    конечной точке 5,00 отличается от неё на округление составителя,
+    а корзину меняла с «Внимания» на «Разбор». Полоса объявлена долей:
+    шкалы разные — 5,00x у долговой нагрузки, 0,80 у ликвидности, — и одно
+    абсолютное число означало бы у них разное.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    band: Decimal = Field(gt=0, lt=1)
+    origin: str = Field(min_length=1)
+
+    def at_edge(self, value: Decimal, edge: Decimal) -> bool:
+        """Лежит ли величина в полосе вокруг конечной точки шкалы."""
+        return abs(value - edge) <= abs(edge) * self.band
+
+
 class TypeMarkers(BaseModel):
     """Признаки, по которым тип эмитента опознаётся в данных.
 
@@ -599,6 +657,11 @@ class RoutingPolicy(BaseModel):
     # а не написано в коде страницы: текст, который читатель принимает
     # за оговорку методики, правится диффом, как всякая формулировка.
     limitations: tuple[str, ...] = Field(min_length=1)
+    # Полоса вокруг конечной точки шкалы, в которой основание даёт внимание,
+    # а не разбор: ступень у границы неустранима, но смягчаема.
+    tolerance: Tolerance
+    # Виды инструмента, называемые отдельно от биржевой облигации.
+    instruments: Instruments
     # Типы эмитента в порядке предпочтения: первый опознавший и определяет.
     # Порядок — часть правила: структурный эмитент бывает помечен и признаком
     # финансирующей структуры, и очередь у них разная.
@@ -1214,16 +1277,29 @@ def route(
         and refinance.cash is not None
         and refinance.cash * routing.refinancing.cover_ratio < refinance.offered
     ):
+        # **Доля оферт в долге — часть обстоятельства, а не украшение.**
+        # «Не хватит» у эмитента, у которого к выкупу предъявляется десятая
+        # часть долга, и у того, у кого вся, — разные обстоятельства. Долг
+        # берётся величиной своего стандарта; не раскрыт — доля не считается
+        # и об этом говорится словами, а не нулём.
+        debt = by_code.get("debt_total")
+        share = (
+            refinance.offered / debt.value
+            if debt is not None and debt.calculable and debt.value > 0
+            else None
+        )
         attention.append(
             Finding(
                 "refinancing_offers",
                 "refinancing",
                 routing.say(
                     "refinancing_offers",
+                    "" if share is not None else "unknown_debt",
                     months=refinance.months,
                     offered=money(refinance.offered),
                     cash=money(refinance.cash),
                     unit=refinance.unit,
+                    share=percent(share * 100) if share is not None else "",
                 ),
             )
         )
@@ -1309,16 +1385,23 @@ def route(
             # и ничего не значит для того, кому эмитента передают. Величина
             # печатается единой точкой округления: «−0,000» читается как ноль,
             # которым она не является.
-            review.append(
+            #
+            # **У самой конечной точки обстоятельство слабее.** Величина 5,02
+            # при точке 5,00 отличается от неё на округление составителя,
+            # а корзину меняла с «Внимания» на «Разбор»: в объявленной полосе
+            # основание даёт внимание.
+            edge = scale.points[0][0]
+            near = routing.tolerance.at_edge(item.value, edge)
+            (attention if near else review).append(
                 Finding(
-                    "level_off_scale",
+                    "metric_at_edge" if near else "level_off_scale",
                     code,
                     routing.say(
-                        "level_off_scale",
+                        "metric_at_edge" if near else "level_off_scale",
                         code,
                         metric=item.name,
                         value=catalogue.shown(code, item.value, unit),
-                        threshold=catalogue.shown(code, scale.points[0][0], unit),
+                        threshold=catalogue.shown(code, edge, unit),
                     ),
                 )
             )
@@ -1663,7 +1746,11 @@ def _default_findings(
                         "default_on_repaid_issue",
                         issue.name,
                         routing.say(
-                            "default_on_repaid_issue", issue=issue.name, where=where
+                            "default_on_repaid_issue",
+                            issue=_named(issue, routing),
+                            kind=_kind(issue, routing).dative,
+                            reg=_reg(issue, routing),
+                            where=where,
                         ),
                     )
                 )
@@ -1690,17 +1777,26 @@ def _default_findings(
             # сведения.** «Дефолт по погашению» говорит, что случилось;
             # признак у выпуска в обращении — что случившееся не улажено,
             # и называть это «в обращении» значило бы сказать обратное.
+            word = _kind(issue, routing)
             what = (
                 issue.status.capitalize()
                 if issue.status in DEFAULT_STATUSES
-                else f"Неурегулированный дефолт (выпуск в статусе «{issue.status}»)"
+                else (
+                    "Неурегулированный дефолт "
+                    f"({word.nominative} в статусе «{issue.status}»)"
+                )
             )
             review.append(
                 Finding(
                     "emission_default",
                     issue.name,
                     routing.say(
-                        "emission_default", what=what, issue=issue.name, where=where
+                        "emission_default",
+                        what=what,
+                        issue=_named(issue, routing),
+                        kind=word.dative,
+                        reg=_reg(issue, routing),
+                        where=where,
                     ),
                 )
             )
@@ -1718,7 +1814,9 @@ def _default_findings(
                         routing.say(
                             "emission_default",
                             what="Неурегулированный дефолт",
-                            issue=named or "выпуск источник не называет",
+                            issue=named or "источник не называет",
+                            kind=routing.instruments.default.dative,
+                            reg="",
                             where=event.origin,
                         ),
                     )
@@ -1769,6 +1867,35 @@ def _default_findings(
                 )
             )
     return review, attention, notes
+
+
+def _named(issue: object, routing: RoutingPolicy) -> str:
+    """Выпуск словами: вид инструмента назван, когда он не биржевая облигация.
+
+    Токен и облигация приходят одним перечнем, а обязательства у них разные:
+    строка «дефолт по выпуску» говорила о них одинаково.
+    """
+    return str(getattr(issue, "name", "")) or "источник не называет"
+
+
+def _kind(issue: object, routing: RoutingPolicy) -> "InstrumentWord":
+    """Слова, которыми выпуск назван в формулировке: «выпуску» либо «токену»."""
+    return routing.instruments.word(str(getattr(issue, "subkind", "")))
+
+
+def _reg(issue: object, routing: RoutingPolicy) -> str:
+    """Государственный регистрационный номер выпуска в скобках; пусто — нет.
+
+    **У инструмента, названного отдельно, его нет по природе.** Цифровой
+    финансовый актив эмиссионной ценной бумагой не является, государственный
+    регистрационный номер ему не присваивается, и поле источника содержит
+    у него собственный идентификатор: печатать его как реестровый значило бы
+    выдать одно за другое.
+    """
+    if routing.instruments.apart(str(getattr(issue, "subkind", ""))):
+        return ""
+    number = str(getattr(issue, "reg_number", "")).strip()
+    return f" (рег. номер {number})" if number else ""
 
 
 def _issue_name(events: object, emission_id: str) -> str:

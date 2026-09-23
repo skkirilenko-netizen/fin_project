@@ -268,6 +268,14 @@ class RoutingRow:
     # Поручительства финансирующей структуры: у SPV корзина берётся
     # у того, кто отвечает по долгу, и перечень нужен второму проходу.
     guarantees: tuple[Guarantee, ...] = ()
+    # Есть ли хоть один поручитель в самом списке: «поручителя нет» и «его
+    # отчётности у нас нет» — разные сведения, и графа обязана их различать.
+    guarantor_listed: bool = False
+    # Тип эмитента и признак, которым он опознан. По корзине тип
+    # не восстановить: структурный эмитент с дефолтом стоит в «Разборе»
+    # наравне с обычным.
+    issuer_type: str = ""
+    type_marker: str = ""
     # Денежные средства комплекта: знаменатель рефинансирования. Лежат здесь,
     # а не в каждом замере своим запросом: один вопрос — один запрос.
     cash: Decimal | None = None
@@ -774,6 +782,9 @@ def routing_rows(
                 group=str(card.get("group_name_rus") or ""),
                 events=events,
                 guarantees=secured,
+                guarantor_listed=bool(inputs.get("guarantor_listed")),
+                issuer_type=kind.name if kind is not None else "",
+                type_marker=marker,
                 cash=cash,
                 refinance=refinance,
                 # **Состав величин строки объявлен стандартом, а не кодом.**

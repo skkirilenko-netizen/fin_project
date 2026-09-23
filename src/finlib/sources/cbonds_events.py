@@ -114,6 +114,15 @@ class Issue:
     offer: date | None
     outstanding: Decimal | None
     updated: date | None
+    # **Вид инструмента — не то же, что вид бумаги.** Токен и биржевая
+    # облигация приходят одним методом и одним перечнем, а обязательства
+    # у них разные: смешав их, строка говорит о дефолте по облигации там,
+    # где дефолт по токену. Вид объявлен источником (`subkind_name_rus`),
+    # пусто — вид не назван.
+    subkind: str = ""
+    # Государственный регистрационный номер выпуска: им бумага опознаётся
+    # в реестре, и наименование его не заменяет.
+    reg_number: str = ""
 
     @property
     def defaulted(self) -> bool:
@@ -632,6 +641,8 @@ def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:
                 ),
                 outstanding=_as_number(item.get("outstanding_volume")),
                 updated=_as_date(item.get("updating_date")),
+                subkind=str(item.get("subkind_name_rus") or "").strip(),
+                reg_number=str(item.get("state_reg_number") or "").strip(),
             )
             for item in items
         ),

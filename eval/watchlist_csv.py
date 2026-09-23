@@ -74,8 +74,21 @@ HEADER = (
     "способ получения",
     "единица",
     "класс по документу",
+    # **Тип эмитента — графа, а не вывод из корзины.** По корзине его
+    # не восстановить: структурный эмитент с дефолтом стоит в «Разборе»
+    # наравне с обычным, и отличить их можно только типом.
+    "тип эмитента",
+    "признак типа",
     "отрасль",
     "группа",
+    # **ИНН поручителя — то, чем поручителя добирают.** Наименование для
+    # показа, а сопоставляется он по ИНН, и графа обязана нести именно его.
+    "инн поручителя",
+    "поручитель",
+    "поручитель в списке",
+    # **Даты событий дефолта — отдельной графой.** Из прозы основания их
+    # приходится вынимать глазами, а по ним считают давность.
+    "даты событий дефолта",
     *VALUES,
     "денежные средства",
     "платежи 12 месяцев",
@@ -84,6 +97,33 @@ HEADER = (
     # с платежами, она выдала бы возможное за состоявшееся.
     "оферты 12 месяцев",
 )
+
+
+def _event_dates(item) -> str:  # noqa: ANN001
+    """Даты событий дефолта отдельной графой: выпуск, вид события и дата.
+
+    **Из прозы основания их приходится вынимать глазами**, а по ним считают
+    давность. Исполненное событие названо вместе с датой исполнения: «улажен»
+    и «не улажен» — разные сведения, и графа обязана их различать.
+    """
+    events = getattr(item, "events", None)
+    if events is None:
+        return ""
+    said: list[str] = []
+    for record in getattr(events, "records", ()):
+        if record.moment is None:
+            continue
+        name = next(
+            (
+                issue.name
+                for issue in getattr(events, "issues", ())
+                if issue.emission_id == record.emission_id
+            ),
+            record.emission_id,
+        )
+        met = f", исполнено {record.met:%Y-%m-%d}" if record.met else ", не исполнено"
+        said.append(f"{name}: {record.kind.lower()} {record.moment:%Y-%m-%d}{met}")
+    return " | ".join(said)
 
 
 def _sum(value: Decimal | None, unit: str) -> str:
@@ -177,8 +217,22 @@ def main() -> int:
                     "; ".join(item.sources),
                     unit,
                     item.assessed_class,
+                    item.issuer_type,
+                    item.type_marker,
                     item.branch,
                     item.group,
+                    # ИНН поручителя — то, чем его добирают; наименование
+                    # рядом, для показа.
+                    ", ".join(
+                        entry.inn for entry in item.guarantees if entry.inn
+                    ),
+                    ", ".join(
+                        dict.fromkeys(
+                            entry.name for entry in item.guarantees if entry.name
+                        )
+                    ),
+                    "да" if item.guarantor_listed else "",
+                    _event_dates(item),
                     *values,
                     # **Денежная графа называет свою единицу сама.** Графа
                     # «единица» стоит рядом, но читатель берёт из выгрузки
