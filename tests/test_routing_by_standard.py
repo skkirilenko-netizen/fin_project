@@ -419,6 +419,35 @@ def test_an_absent_debt_line_is_not_the_sign() -> None:
     assert not debt_undisclosed({}, has_bonds=True)
 
 
+def test_a_human_decision_is_found_by_the_standard_of_its_row() -> None:
+    """Решение человека ищется по стандарту своей строки, а не всегда по МСФО.
+
+    Универсум задан долгом, и у 439 эмитентов маршрут строится по отчётности
+    юридического лица. Выборка, называвшая `ifrs` наглухо, решения о любом
+    из них не нашла бы вовсе: правило не срабатывало бы никогда, а по журналу
+    выглядело бы записанным.
+    """
+    from finlib.scoring.routing import ManualFloor
+    from finlib.scoring.routing_store import floor_for
+
+    floor = ManualFloor(
+        basket="review",
+        author="имя",
+        reason="группа: связанный эмитент в разборе",
+        decided_on=date(2026, 9, 23),
+        valid_until=date(2027, 3, 31),
+    )
+    decided = {"1": {Standard.RSBU.value: floor}}
+    assert floor_for(decided, "1", Standard.RSBU) is floor
+    # Стандарт назван у всякой выборки по ИНН: решение по отчётности
+    # юридического лица о консолидированной не говорит.
+    assert floor_for(decided, "1", Standard.IFRS) is None
+    # У эмитента без отчётности стандарта нет вовсе, и спутать решение
+    # не с чем: комплекта, о котором оно сказало бы другое, не существует.
+    assert floor_for(decided, "1", None) is floor
+    assert floor_for(decided, "2", Standard.RSBU) is None
+
+
 def test_every_standard_names_its_debt_lines_and_metrics() -> None:
     """У каждого стандарта объявлены строки долга и величины из них.
 
