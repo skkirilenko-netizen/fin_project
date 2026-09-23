@@ -1250,7 +1250,11 @@ def test_ratings_withdrawn_by_everyone_ask_for_attention() -> None:
     assert verdict.grounds == ("rating_withdrawn",)
     # Нераскрытость причины названа прямо: без неё отзыв читается как
     # суждение агентства об эмитенте, а им он не является.
-    assert "причина отзыва источником не раскрыта" in verdict.details[0]
+    # **Формулировка говорит о нашем знании, а не о риске эмитента**
+    # (решение человека 23.09.2026 по замеру календаря: событие после отзыва
+    # случилось у пяти эмитентов из 158).
+    assert "внешнего мнения о качестве эмитента нет" in verdict.details[0]
+    assert "причина отзыва источником не раскрывается" in verdict.details[0]
 
 
 def test_a_stale_withdrawal_is_no_longer_a_change() -> None:
