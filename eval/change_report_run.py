@@ -202,7 +202,16 @@ def main() -> int:
             if until not in dates:
                 print(f"# Отчёт изменений\n\nТочки {until} в истории нет.\n")
                 return 1
-        since = max(item for item in dates if item < until)
+        # **Сравнивается предыдущая точка, а не «вчера»**; `--since` называет
+        # другую, когда надо посмотреть отчёт за неделю целиком: обычный день
+        # чаще всего пуст, и по нему не видно, как отчёт выглядит с делом.
+        if "--since" in sys.argv:
+            since = date.fromisoformat(sys.argv[sys.argv.index("--since") + 1])
+            if since not in dates:
+                print(f"# Отчёт изменений\n\nТочки {since} в истории нет.\n")
+                return 1
+        else:
+            since = max(item for item in dates if item < until)
         was, now = _read(conn, kind, since), _read(conn, kind, until)
         bonds = set(bond_issuers())
         _report(routing, kind, since, until, was, now, bonds)
