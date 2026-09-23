@@ -72,6 +72,7 @@ from finlib.sources.cbonds_events import (
 )
 from finlib.sources.cbonds_flows import refinancing
 from finlib.sources.moex_risk import RiskSector, risk_sectors
+from finlib.sources.ratings_calendar import Transition, transitions
 from finlib.standards import Standard, load_standards
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,12 @@ _DECISIONS = """
 SELECT DISTINCT ON (inn, standard)
        inn, standard, basket, author, reason, decided_on, valid_until
 FROM routing_decision
-WHERE valid_until >= %(today)s
+-- **Решение действует со дня, когда принято, а не раньше.** Прежде отбор
+-- спрашивал только срок, и в пересчёте истории решение человека от сентября
+-- 2026 года стояло у эмитента весь предыдущий год: маршрут задним числом
+-- знал то, чего тогда никто не решал. У Кириллицы это давало «Разбор»
+-- без единого основания за год до события.
+WHERE decided_on <= %(today)s AND valid_until >= %(today)s
 ORDER BY inn, standard, decided_on DESC, id DESC
 """
 
@@ -517,6 +523,12 @@ def routing_rows(
     # Пустой словарь означает, что доставки не было, — и это не «переводов
     # нет»: `scripts/moex_fetch.py`.
     risky = risk_sectors()
+    # Даты перехода в нынешнюю рейтинговую категорию: выгрузка ручная,
+    # и пустой словарь означает «календаря на диске нет», а не «переходов
+    # не было». Корзину он не двигает — только датирует основание.
+    moves: dict[str, dict[tuple[str, str, str], Transition]] = {}
+    for (holder, agency, scale, category), moved in transitions().items():
+        moves.setdefault(holder, {})[(agency, scale, category)] = moved
     if not risky:
         logger.warning(
             "перечня сектора риска на диске нет: событие биржи в маршрут "
@@ -839,6 +851,16 @@ def routing_rows(
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
             manual_floor=floor_for(decided, inn, standard),
+            # **Календарь рейтинговых действий даёт одно — дату перехода.**
+            # Категорию по-прежнему называет ежедневный снимок, и корзина
+            # от этого довода не зависит: он попадает только в формулировку.
+            # В пересчёте переход виден с его собственной даты — иначе
+            # сегодняшнее знание выдавалось бы за прошлогоднее наблюдение.
+            rating_since={
+                key: moved
+                for key, moved in moves.get(inn, {}).items()
+                if as_of is None or moved.since <= as_of
+            },
             # **Перевод биржи датирован, и в пересчёте он виден с даты
             # перевода.** Недатированный перевод в историю не идёт вовсе:
             # поставить его на произвольный день значило бы выдумать событие.
@@ -1057,8 +1079,11 @@ def _rendered(value: object) -> str:
     if value is None or isinstance(value, str | int | float | bool | Decimal | date):
         return str(value)
     if isinstance(value, Mapping):
+        # Ключ бывает не строкой — «агентство, шкала, категория» приходит
+        # тройкой, — и приводить его к строке надо вместе с его значением:
+        # приведённый отдельно, он в словаре уже не находится.
         return "{" + ";".join(
-            f"{key}={_rendered(value[key])}" for key in sorted(map(str, value))
+            sorted(f"{key}={_rendered(item)}" for key, item in value.items())
         ) + "}"
     if isinstance(value, tuple | list | set | frozenset):
         items = sorted(_rendered(item) for item in value)
@@ -1092,6 +1117,8 @@ def _rendered(value: object) -> str:
         return value.code
     if isinstance(value, RiskSector):
         return f"{value.isin}:{value.board}:{value.since}"
+    if isinstance(value, Transition):
+        return f"{value.agency}:{value.since}:{value.was_level}:{value.direction}"
     raise UnknownInputError(
         f"довод маршрута {type(value).__name__} в отпечаток не входит: "
         "пропущенный довод даёт изменение, которое не объяснится ничем"

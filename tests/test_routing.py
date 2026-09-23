@@ -790,20 +790,27 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
         ground.code for basket in routing.baskets for ground in basket.grounds
     }
     assert {ground.code for ground in routing.reference} & in_baskets == set()
+    # Формулировка проверяется у каждого объявленного ключа, а не только
+    # у умолчания: у основания бывает своя формулировка на каждый случай —
+    # «приведены справочно» об эмитенте вне периметра и об SPV говорит разное, —
+    # и умолчание там было бы правилом, которое не срабатывает никогда.
     for ground in routing.reference:
-        assert routing.say(
-            ground.code,
-            year="2016",
-            years=3,
-            issue="выпуск",
-            group="Мечел",
-            leader="Мечел",
-            offered="1 000",
-            cash="100",
-            unit="тыс. руб.",
-            date="02.10.2026",
-            where="купон 03.08.2026",
-        )
+        for key in routing.statements.by_ground[ground.code]:
+            assert routing.say(
+                ground.code,
+                key,
+                year="2016",
+                years=3,
+                issue="выпуск",
+                group="Мечел",
+                leader="Мечел",
+                offered="1 000",
+                cash="100",
+                unit="тыс. руб.",
+                date="02.10.2026",
+                where="купон 03.08.2026",
+                said="автономия 0,03",
+            )
 
 
 def test_unsettled_event_outweighs_a_later_settled_one() -> None:
@@ -1226,6 +1233,52 @@ def rated(*ratings) -> object:
     from finlib.sources.cbonds_events import IssuerEvents
 
     return IssuerEvents(inn="1", ratings=tuple(ratings), ratings_known=True)
+
+
+def test_the_calendar_does_not_move_a_basket() -> None:
+    """Календарь рейтинговых действий датирует основание и только.
+
+    **Корзину называет снимок, а не история.** Из календаря берётся одно —
+    с какого дня эмитент в нынешней категории: снимок датирует последнее
+    подтверждение, и «Рейтинг ruC (НРА, 28.08.2026)» читается как день
+    перевода, тогда как в категории C эмитент с 14.05.2026. Если бы от этого
+    довода зависела корзина, слой проверки стал бы слоем решения — а измерено
+    у него ровно обратное: перевод в категорию дефолта опережает событие
+    на 42 дня по медиане, то есть признаёт случившееся.
+    """
+    from finlib.sources.ratings_calendar import Transition
+
+    inputs = dict(
+        unit=UNIT,
+        quarantined=False,
+        events=rated(rating("ruC", date(2026, 8, 28))),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    plain = route(healthy(), **inputs)
+    dated = route(
+        healthy(),
+        **inputs,
+        rating_since={
+            (
+                "НРА",
+                "Национальная кредитная рейтинговая шкала для РФ",
+                "C",
+            ): Transition(
+                since=date(2026, 5, 14),
+                agency="НРА",
+                was_level="B-|ru|",
+                direction=-1,
+            )
+        },
+    )
+    assert plain.basket == dated.basket == "review"
+    assert plain.grounds == dated.grounds == ("rating_default",)
+    # Различается ровно формулировка, и различается она датой перехода
+    # и тем, чем переход был.
+    assert "с 14.05.2026" in dated.findings[0].text
+    assert "понижение с B-|ru|" in dated.findings[0].text
+    assert "14.05.2026" not in plain.findings[0].text
 
 
 def test_ratings_withdrawn_by_everyone_ask_for_attention() -> None:

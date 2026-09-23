@@ -1124,6 +1124,12 @@ def route(
     # величинам, — «по какому проверяется» и «каким сработал» это разные
     # сведения, и второе знает расчёт, а не справочник.
     stop_factor_values: dict[str, str] | None = None,
+    # Даты перехода в нынешнюю рейтинговую категорию: «агентство, шкала,
+    # категория» → запись календаря. **Корзину довод не двигает** — категорию даёт
+    # ежедневный снимок, а календарь добавляет к ней, с какого дня она стоит:
+    # снимок датирует последнее подтверждение, и у Кириллицы «28.08.2026»
+    # читалось как день перевода, тогда как в категории C она с 14.05.2026.
+    rating_since: dict[tuple[str, str, str], object] | None = None,
 ) -> Verdict:
     """Определяет корзину эмитента по посчитанным величинам и обстоятельствам.
 
@@ -1281,7 +1287,7 @@ def route(
             events, routing, today or date.today()
         )
         review.extend(by_default)
-        review.extend(_rating_findings(events, routing))
+        review.extend(_rating_findings(events, routing, rating_since))
         attention.extend(watched)
         attention.extend(_rating_outlook_adverse(events, routing))
         attention.extend(_rating_withdrawn(events, routing, today or date.today()))
@@ -1600,23 +1606,51 @@ def route(
     inapplicable: tuple[str, ...] = ()
     if issuer_type is not None:
         keep = set(issuer_type.grounds_apply)
-        inapplicable = tuple(
-            item.ground
-            for item in review + attention
-            if item.ground not in keep
-        )
+        dropped = [item for item in review + attention if item.ground not in keep]
+        inapplicable = tuple(item.ground for item in dropped)
         review = [item for item in review if item.ground in keep]
         attention = [item for item in attention if item.ground in keep]
+        # **Отброшенное типом основание корзины не называет, но и не исчезает.**
+        # У Газпром Капитала карточка говорила «оснований нет» и тут же
+        # показывала чистый долг к прибыли от продаж 7,49 при конце шкалы 5,0:
+        # корзина от поручителя верна, молчание о собственных величинах — нет.
+        # Формулировка своя у каждого типа: «приведены справочно» об эмитенте
+        # вне периметра и об SPV говорит разное.
+        # Единица при этом остаётся при своей величине: платежи года названы
+        # в рублях, а показатели — в единице комплекта, и сведённые в одну
+        # строку они прошли бы проверку печати чужой единицей.
+        by_unit: dict[str, list[Finding]] = {}
+        for item in dropped:
+            by_unit.setdefault(item.unit, []).append(item)
+        for where, items in by_unit.items():
+            notes.append(
+                Finding(
+                    "inapplicable_here",
+                    issuer_type.code,
+                    routing.say(
+                        "inapplicable_here",
+                        issuer_type.code,
+                        said="; ".join(entry.text for entry in items),
+                    ),
+                    unit=where,
+                )
+            )
 
     found = status + review + attention
+    # **Корзину называют основания той тяжести, по которой она выбрана.**
+    # Прежде перечень собирался из всех сработавших по одному признаку —
+    # объявлено ли основание у корзины, — и решение человека о внимании,
+    # объявленное и в разборе, вышло бы основанием разбора у эмитента,
+    # которого в разбор отправил стоп-фактор.
+    named: list[Finding] = []
     if status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
         # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
-        code = "status_unknown"
+        code, named = "status_unknown", status
     elif review:
-        code = "review"
+        code, named = "review", review
     elif attention:
-        code = "attention"
+        code, named = "attention", attention
     elif issuer_type is not None:
         # **Очередь типа — не «Без внимания», а другой вопрос.** Применимых
         # обстоятельств не нашлось, но сказать «человек не нужен» о таком
@@ -1639,6 +1673,7 @@ def route(
                 ),
             ),
         )
+        named = list(found)
     else:
         code = "clear"
     return _verdict(
@@ -1649,6 +1684,7 @@ def route(
         muted,
         notes=tuple(notes),
         inapplicable=inapplicable,
+        named=named,
     )
 
 
@@ -2029,9 +2065,19 @@ def _issues_named(issues: tuple[object, ...]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} и ещё {len(names) - 1}"
 
 
-def _rating_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
+def _rating_findings(
+    events: object,
+    routing: RoutingPolicy,
+    # Даты перехода по ключу «агентство, шкала, категория»: у одного агентства
+    # шкал бывает две, и категория у них разная.
+    # Пусто — календаря на диске нет, и формулировка называет только снимок.
+    # **Корзину этот довод не двигает**: категорию даёт снимок, а календарь
+    # добавляет к ней, с какого дня она стоит.
+    since: dict[tuple[str, str, str], object] | None = None,
+) -> list[Finding]:
     """Основание разбора из рейтинга: категория дефолта либо преддефолтная."""
     found: list[Finding] = []
+    since = since or {}
     # **Одно агентство — одно основание.** У агентства бывает две шкалы
     # (национальная и собственной кредитоспособности), и обе дают одну и ту же
     # категорию: два основания об одном читались бы как два события.
@@ -2041,12 +2087,14 @@ def _rating_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
             continue
         seen.add((rating.agency, rating.category))
         if rating.category in routing.events.review_categories:
+            moved = since.get((rating.agency, rating.scale, rating.category))
             found.append(
                 Finding(
                     "rating_default",
                     rating.category,
                     routing.say(
                         "rating_default",
+                        "since" if moved is not None else "",
                         point=rating.point,
                         agency=rating.agency,
                         date=(
@@ -2055,10 +2103,31 @@ def _rating_findings(events: object, routing: RoutingPolicy) -> list[Finding]:
                             else "дата не указана"
                         ),
                         category=rating.category,
+                        since=(
+                            f"{moved.since:%d.%m.%Y}" if moved is not None else ""
+                        ),
+                        move=_moved(moved, routing),
                     ),
                 )
             )
     return found
+
+
+def _moved(moved: object, routing: RoutingPolicy) -> str:
+    """Чем был переход: понижением, повышением или движением внутри категории.
+
+    Прежний уровень бывает не назван — первая запись эмитента в календаре
+    предыдущего рейтинга не несёт, — и тогда это говорится словами: пустая
+    скобка читалась бы как отсутствие движения.
+    """
+    if moved is None:
+        return ""
+    level = str(getattr(moved, "was_level", "") or "")
+    if not level:
+        return routing.say("rating_default", "move_unknown")
+    way = int(getattr(moved, "direction", 0) or 0)
+    key = "move_down" if way < 0 else ("move_up" if way > 0 else "move_same")
+    return routing.say("rating_default", key, level=level)
 
 
 def _rating_outlook_adverse(events: object, routing: RoutingPolicy) -> list[Finding]:
@@ -2200,6 +2269,10 @@ def _verdict(
     muted: tuple[str, ...] = (),
     notes: tuple[Finding, ...] = (),
     inapplicable: tuple[str, ...] = (),
+    # Основания той тяжести, по которой корзина выбрана. Пусто — корзину
+    # называют все сработавшие: так зовут `_verdict` замеры и `led_by_guarantor`,
+    # где перечень уже отобран вызывающим.
+    named: list[Finding] | None = None,
 ) -> Verdict:
     """Собирает вердикт, упорядочивая основания по объявлению в справочнике.
 
@@ -2215,8 +2288,14 @@ def _verdict(
     basket = routing.basket(code)
     declared = [item.code for item in basket.grounds]
     ordered = tuple(
-        sorted({item.ground for item in findings if item.ground in declared},
-               key=declared.index)
+        sorted(
+            {
+                item.ground
+                for item in (findings if named is None else named)
+                if item.ground in declared
+            },
+            key=declared.index,
+        )
     )
     # Подгруппы — в порядке старшинства, объявленном справочником: эмитент
     # показывается по старшей, остальные называются рядом.

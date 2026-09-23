@@ -17,7 +17,7 @@
 
 **Замер не считает сам**: события дефолта берутся тем же перечнем, которым
 их берёт маршрут (`cbonds_events.default_records`), корзины — из истории,
-а календарь читается одним модулем (`eval/ratings_calendar.py`).
+а календарь читается одним модулем (`sources/ratings_calendar.py`).
 """
 
 import logging
@@ -29,7 +29,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ratings_calendar import (  # noqa: E402
+from finlib.db import connection, fetch_all  # noqa: E402
+from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.sources.cbonds import bond_issuers  # noqa: E402
+from finlib.sources.cbonds_events import default_records, issues_of  # noqa: E402
+from finlib.sources.ratings_calendar import (  # noqa: E402
     NOT_CREDIT,
     TRANCHE_SCALES,
     Action,
@@ -39,11 +43,6 @@ from ratings_calendar import (  # noqa: E402
     read_actions,
     scale_ids,
 )
-
-from finlib.db import connection, fetch_all  # noqa: E402
-from finlib.scoring.routing import load_routing  # noqa: E402
-from finlib.sources.cbonds import bond_issuers  # noqa: E402
-from finlib.sources.cbonds_events import default_records, issues_of  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
