@@ -1,6 +1,6 @@
 """Доставка рыночных срезов ISS: торги дня и кривая ОФЗ того же дня.
 
-    uv run python scripts/moex_market_fetch.py [--weeks 28] [--step 7]
+    uv run python scripts/moex_market_fetch.py [--depth-days 196] [--step 7]
 
 **Срез дня и кривая того же дня берутся парой.** Спред считается как
 доходность выпуска минус кривая в точке его дюрации, и кривая другого дня
@@ -11,10 +11,24 @@
 Первое собирается целиком (`moex.paged`), у второго берётся последняя запись
 дня: кривая внутри дня меняется, и «кривая на дату» — это её закрытие.
 
-Сетка недельная намеренно. Ежедневная — это 35 запросов на дату против 28
-дат, то есть в семь раз больше обращений к публичному источнику без ключа;
-для первого замера порогов недельной сетки достаточно, а день события
-берётся отдельно и по выпуску.
+**Глубина и шаг — доводы прогона, а не свойство доставки.** Недельная сетка
+за полгода отвечала на вопрос первого замера — есть ли у биржи история
+вообще; дневная за два года есть доставка данных фазы 3, где ориентир
+считается перцентилем по дню, и неделя такой ряд не даёт. Оба довода стоят
+в отчёте прогона: «дней со срезом 500» без объявленной сетки не говорит,
+мерили мы два года или полгода.
+
+**Срез берётся по рынку целиком, а не по нашим выпускам.** Так дешевле —
+38 страниц на день против шести на выпуск при пяти тысячах выпусков, — но
+дело не в цене: ориентир фазы 3 есть перцентиль ликвидного ядра рынка,
+и, собрав только своих, мы посчитали бы перцентиль по перечню, который сами
+и задали. Это тот же дефект универсума, что был у списка наблюдения.
+
+**Отказ источника прекращает доставку, а не пропускается.** Публичный
+источник без ключа отвечает отказом тогда, когда мы ему надоели, и прогон,
+идущий дальше сквозь отказы, дотягивает до конца сетки с дырами вместо дней.
+День записывается целиком, поэтому оборванный прогон продолжается следующим
+запуском с диска.
 """
 
 import json
@@ -44,30 +58,60 @@ def curve_of(day: date) -> dict | None:
     return max(got, key=lambda item: str(item.get("tradetime") or ""))
 
 
+def _arg(name: str, fallback: int) -> int:
+    """Целый довод командной строки; не названный берётся из умолчания."""
+    return int(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else fallback
+
+
+def _applied(rows: list[dict], day: date) -> None:
+    """Сверяет, что источник применил отбор по дате.
+
+    **Неподдерживаемое поле отбора ISS пропускает молча** — то же, что у Cbonds
+    и с той же ценой: у истории кривой `from`/`till` не применяются вовсе,
+    и ответ приходит за сегодня. Строка чужого дня, попавшая в срез, выглядит
+    как настоящая, и заметить её нечем, поэтому сверяется каждый день.
+    """
+    wrong = {str(item.get("TRADEDATE")) for item in rows} - {f"{day}"}
+    if wrong:
+        raise moex.MoexError(
+            f"срез {day}: источник вернул дни {sorted(wrong)[:3]} — "
+            "отбор по дате не применён"
+        )
+
+
 def main() -> int:
-    """Забирает срезы и кривые; 1 — если не удалось ни одного дня."""
+    """Забирает срезы и кривые; 1 — если источник отказал либо дней нет."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    weeks = int(sys.argv[sys.argv.index("--weeks") + 1]) if "--weeks" in sys.argv else 28
-    step = int(sys.argv[sys.argv.index("--step") + 1]) if "--step" in sys.argv else 7
+    step = _arg("--step", 7)
+    depth = _arg("--depth-days", 196)
     today = date.today()
-    days = [today - timedelta(days=step * item) for item in range(weeks)]
+    days = [today - timedelta(days=shift) for shift in range(0, depth + 1, step)]
 
     curves: dict[str, dict] = {}
     if CURVES.exists():
         curves = json.loads(CURVES.read_text(encoding="utf-8"))
     done = empty = 0
+    stopped = ""
     for day in days:
         key = f"{day}"
         try:
-            rows = moex.paged(XSEC, f"xsec_{day}", "history", {"date": key, "iss.meta": "off"})
+            rows = moex.paged(
+                XSEC, f"xsec_{day}", "history", {"date": key, "iss.meta": "off"}
+            )
+            _applied(rows, day)
+            found = curve_of(day) if key not in curves else curves[key]
         except moex.MoexError as failure:
-            logger.error("срез %s: %s", day, str(failure)[:100])
-            continue
+            # **Ранняя остановка, а не пропуск дня.** Прогон, идущий дальше
+            # сквозь отказы, кончается сеткой с дырами, и по числу дней этого
+            # не видно: «дней со срезом 400» одинаково выглядит у полной сетки
+            # в 400 дней и у дырявой в 500.
+            stopped = f"{day}: {failure}"
+            logger.error("доставка остановлена — %s", stopped)
+            break
         if not rows:
             empty += 1
             continue
         if key not in curves:
-            found = curve_of(day)
             if found is None:
                 logger.warning("кривой на %s нет: спред этого дня не посчитать", day)
             else:
@@ -85,10 +129,14 @@ def main() -> int:
         json.dumps(curves, ensure_ascii=False, default=str), encoding="utf-8"
     )
     print(
-        f"дней со срезом {done}, без торгов {empty}, кривых на диске "
+        f"сетка: глубина {depth} дней, шаг {step}, точек {len(days)}. "
+        f"Дней со срезом {done}, без торгов {empty}, кривых на диске "
         f"{len(curves)}; запросов к источнику {moex.pace.requested}, "
         f"ответов с диска {moex.pace.from_cache}"
     )
+    if stopped:
+        print(f"**Доставка остановлена отказом источника** — {stopped}")
+        return 1
     return 0 if done else 1
 
 
