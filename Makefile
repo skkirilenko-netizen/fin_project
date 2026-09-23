@@ -73,6 +73,9 @@ changes:  ## Отчёт «что изменилось»: последняя па
 history-measure:  ## Движение корзин по пересчитанной истории и его дребезг
 	uv run python eval/history_measure_run.py $(ARGS)
 
+ratings-history:  ## Календарь рейтинговых действий: упреждение, тревоги, понижения
+	uv run python eval/ratings_history_run.py $(ARGS)
+
 lsr-debt:  ## Долговая нагрузка ЛСР: документ против агрегатора, построчно
 	uv run python eval/lsr_debt_run.py $(ARGS)
 
