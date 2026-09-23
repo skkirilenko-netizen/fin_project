@@ -93,6 +93,19 @@ def parse_organization(payload: dict[str, Any]) -> Organization:
     )
 
 
+def _as_date(value: object) -> date | None:
+    """Дата источника; пустое и мусор остаются `None`.
+
+    `None` означает «источник не сообщил», а не «не опубликовано»: пересчёт
+    истории берёт тогда срок закона и помечает точку.
+    """
+    text = str(value or "")[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def parse_report_sets(payload: list[dict[str, Any]], inn: str) -> list[ReportSet]:
     """Разбирает список комплектов отчётности организации."""
     result: list[ReportSet] = []
@@ -125,6 +138,16 @@ def parse_report_sets(payload: list[dict[str, Any]], inn: str) -> list[ReportSet
                     correction_version=version,
                     is_actual=version == actual_correction,
                     forms=forms,
+                    # **Дата публикации у ГИР БО настоящая, и брать её надо
+                    # у него, а не моделировать сроком закона.** Отчётность
+                    # за 2025 год у пробы опубликована 27.03.2026 при сроке
+                    # 31 марта: разница в дни, но это наблюдение, а не наше
+                    # правило. Берётся дата публикации корректировки, а при
+                    # её отсутствии — дата самой отчётности.
+                    disclosed_on=_as_date(
+                        entry.get("publishedCorrectionDate")
+                        or entry.get("actualBfoDate")
+                    ),
                 )
             )
     return sorted(result, key=lambda r: (r.report_year, r.correction_version), reverse=True)

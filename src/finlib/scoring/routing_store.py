@@ -94,9 +94,16 @@ LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
   AND (
       %(as_of)s::date IS NULL
-      OR f.report_date <= %(as_of)s::date - (
-          CASE WHEN s.reporting_kind = 'interim' THEN %(interim)s ELSE %(annual)s END
-      )
+      -- **Настоящая дата раскрытия старше смоделированной.** ГИР БО её
+      -- сообщает, и там, где она есть, срок закона не спрашивается вовсе:
+      -- правило берётся только там, где источник о дате молчит.
+      OR COALESCE(
+          (s.meta->>'disclosed_on')::date,
+          f.report_date + (
+              CASE WHEN s.reporting_kind = 'interim'
+                   THEN %(interim)s ELSE %(annual)s END
+          )
+      ) <= %(as_of)s::date
   )
 GROUP BY f.inn
 """
@@ -761,7 +768,13 @@ def routing_rows(
         # **Срочность долга собирается здесь, а не в маршруте**: маршрут
         # решает по величинам, а величины берутся из одного места. Обе
         # приведены к единице комплекта — иначе ошибка в тысячу раз.
-        plan = refinancing(events.issues, routing.refinancing.months, today)
+        # **Окно отсчитывается от отчётной даты комплекта.** Денежные средства
+        # взяты на неё, и платежи, отсчитанные от другого дня, сравнивались бы
+        # с ними по разным моментам; заодно исчезает дребезг — окно, едущее
+        # вместе с днём, вносило платёж в перечень и выносило от смены месяца.
+        # Отчётности нет вовсе — считать не от чего и нечем: денежных средств
+        # тогда нет тоже, и мера отвечает пробелом данных.
+        plan = refinancing(events.issues, routing.refinancing.months, moment or today)
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
             cash=cash,

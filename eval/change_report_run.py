@@ -28,7 +28,7 @@
 import logging
 import sys
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -173,6 +173,81 @@ def _calendar(routing, row: dict, when: date) -> tuple:  # noqa: ANN001
     )
 
 
+def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
+    """Срочное: дефолт и рейтинговое действие в тот же день, когда пришли.
+
+    **Недельный отчёт не должен задерживать событие на неделю.** Корзину
+    такой эмитент чаще всего меняет, и он есть в основном перечне, — но там
+    он стоит наравне с изменившимся семь дней назад, а событие вчерашнего дня
+    старше по сроку вмешательства. Поэтому оно печатается первым и за сутки,
+    а не за неделю.
+
+    Раздел показывается и тогда, когда корзина не изменилась: дефолт
+    у эмитента, уже стоящего в «Разборе», — сведение, которое нельзя терять.
+    """
+    said: list[str] = []
+    for inn in now:
+        events = events_of(inn)
+        for item in events.records:
+            if item.moment is not None and previous < item.moment <= until:
+                what = "не исполнено" if not item.settled else "исполнено"
+                said.append(
+                    f"- {_named(inn)}: {item.kind.lower()} "
+                    f"{item.moment:%d.%m.%Y}, {what}"
+                )
+        # **Срочно не всякое рейтинговое действие, а то, по которому
+        # действуют.** Подтверждение AAA не событие: агентство сказало
+        # то же, что и раньше. Отбираются категории, которые методика
+        # объявила основанием, и отзыв — исчезновение мнения. Остальные
+        # видны в карточке эмитента, и место им там.
+        watched = set(routing.events.review_categories) | set(
+            routing.events.attention_categories
+        )
+        seen: set[tuple[str, str]] = set()
+        for item in events.ratings:
+            if item.assigned is None or not (previous < item.assigned <= until):
+                continue
+            # ESG-рейтинг о кредитоспособности не говорит, и в срочное
+            # он не идёт: вид шкалы объявлен справочником источника.
+            if not item.credit:
+                continue
+            if item.point.strip().lower() != "withdrawn" and (
+                item.category not in watched
+            ):
+                continue
+            # У агентства две шкалы — национальная и собственной
+            # кредитоспособности, — и обе дают одно действие: две строки
+            # об одном читались бы как два события.
+            key = (item.agency, f"{item.assigned}")
+            if key in seen:
+                continue
+            seen.add(key)
+            said.append(
+                f"- {_named(inn)}: {item.agency} — {item.point} "
+                f"{item.assigned:%d.%m.%Y}"
+            )
+    # Счётчик считает то, что напечатано: перечень с повторами назвал бы
+    # одно событие двумя.
+    said = list(dict.fromkeys(said))
+    print(f"## Срочное за сутки ({previous:%d.%m.%Y} → {until:%d.%m.%Y}): {len(said)}\n")
+    if not said:
+        print(
+            "ни одного события. Это сведение, а не пустая строка: сутки "
+            "без дефолтов и рейтинговых действий — обычное состояние рынка.\n"
+        )
+        return
+    # Неисполненное обязательство старше рейтингового действия, а исполненное
+    # младше обоих: порядок здесь — очередь вмешательства, а не алфавит.
+    def weight(line: str) -> int:
+        if "не исполнено" in line:
+            return 0
+        return 2 if "исполнено" in line else 1
+
+    for line in sorted(said, key=weight):
+        print(line)
+    print()
+
+
 def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
     """Точки истории на дату: ИНН → вердикт."""
     return {
@@ -211,24 +286,37 @@ def main() -> int:
                 print(f"# Отчёт изменений\n\nТочки {since} в истории нет.\n")
                 return 1
         else:
-            since = max(item for item in dates if item < until)
+            # **По умолчанию неделя, а не день** (решение человека 23.09.2026):
+            # медиана обычного дня — ноль, и пустой отчёт каждый день приучает
+            # не открывать. Берётся ближайшая точка не позже недели назад;
+            # если такой нет, берётся самая ранняя — сравнивать всё равно
+            # с чем-то надо, и разрыв назван в заголовке.
+            week = until - timedelta(days=7)
+            earlier = [item for item in dates if item <= week] or [
+                item for item in dates if item < until
+            ]
+            since = max(earlier)
+        # Срочное смотрится за сутки, а не за неделю: дефолт и рейтинговое
+        # действие показываются в тот же день, когда пришли.
+        previous = max((item for item in dates if item < until), default=since)
         was, now = _read(conn, kind, since), _read(conn, kind, until)
         bonds = set(bond_issuers())
-        _report(routing, kind, since, until, was, now, bonds)
+        _report(routing, kind, since, until, was, now, bonds, previous)
     return 0
 
 
-def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN001
+def _report(routing, kind, since, until, was, now, bonds, previous) -> None:  # noqa: ANN001
     """Собирает и печатает сам отчёт."""
     names = _ground_names(routing)
     order = {basket.code: basket.order for basket in routing.baskets}
     print(f"# Что изменилось: {until:%d.%m.%Y}\n")
     print(
-        f"Сравнение с {since:%d.%m.%Y} — это **предыдущая точка истории**, "
-        f"а не «вчера»: заголовок, обещающий сутки, при разрыве врёт. "
+        f"Сравнение с {since:%d.%m.%Y} — **неделя, а не сутки**: медиана "
+        "обычного дня ноль, и пустой отчёт каждый день приучает не открывать. "
         f"Род точек — {'пересчёт' if kind == 'backfill' else 'наблюдение'}; "
         "наблюдение с пересчётом не сравнивается вовсе.\n"
     )
+    _urgent(routing, now, previous, until)
     # **Беспричинное изменение — остановка, а не строка.** Считается первым:
     # отчёт, начавшийся с перечня изменений, о нём умолчал бы.
     same_data = [

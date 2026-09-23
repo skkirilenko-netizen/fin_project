@@ -100,6 +100,13 @@ class ReportSet:
     is_actual: bool
     girbo_bfo_id: int | None = None
     forms: dict[str, FormData] = field(default_factory=dict)
+    # **Дата, с которой отчётность стала публичной.** ГИР БО её сообщает
+    # (`publishedCorrectionDate`: отчётность за 2025 год опубликована
+    # 27.03.2026), и она настоящая — в отличие от срока закона, которым
+    # эта дата моделируется там, где источник о ней молчит. `None` означает
+    # «источник не сообщил», а не «не опубликовано»: пересчёт истории
+    # берёт тогда срок и помечает точку.
+    disclosed_on: date | None = None
 
     @property
     def form_codes(self) -> tuple[str, ...]:

@@ -190,15 +190,25 @@ class Refinancing:
         return self.issues > self.without_schedule + self.without_volume
 
 
-def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinancing:
+def refinancing(issues: tuple[object, ...], months: int, since: date) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
     Оферты считаются порознь: предъявление — право владельца, и сложенное
     с купоном оно выдало бы возможное за состоявшееся.
+
+    **Окно отсчитывается от отчётной даты комплекта, а не от сегодняшнего
+    дня** (решение человека 23.09.2026). Причина двойная. Во-первых,
+    связность: денежные средства взяты на отчётную дату, и сравнивать с ними
+    платежи, отсчитанные от другого дня, — сравнивать разные моменты.
+    Во-вторых, дребезг: окно, едущее вместе с днём, вносило платёж
+    в перечень и выносило обратно от смены месяца. На пересчитанной истории
+    все двенадцать возвратов внутри окна отмены оказались этим — у одного
+    эмитента трижды, каждый раз на переходе месяца. Это свойство меры,
+    а не движение данных.
     """
     scheduled = offered = Decimal(0)
     counted = no_schedule = no_volume = no_offers = 0
-    edge = _shift(today, months)
+    edge = _shift(since, months)
     for issue in issues:
         status = str(getattr(issue, "status", ""))
         if status not in ("в обращении", "размещается"):
@@ -213,7 +223,7 @@ def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinan
         if outstanding is None:
             no_volume += 1
             continue
-        due = plan.due_within(months, today, outstanding)
+        due = plan.due_within(months, since, outstanding)
         if due is None:
             no_volume += 1
             continue
@@ -226,7 +236,7 @@ def refinancing(issues: tuple[object, ...], months: int, today: date) -> Refinan
         if offers is None:
             no_offers += 1
             continue
-        if any(today <= item < edge for item in offers):
+        if any(since <= item < edge for item in offers):
             offered += outstanding
     return Refinancing(
         months=months,

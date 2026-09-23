@@ -546,6 +546,17 @@ def _upsert_src_file(
         "meta": json.dumps(
             {
                 "period_depth": {f: len(d.values) for f, d in report.forms.items()},
+                # **Дата раскрытия хранится, когда источник её сообщил.**
+                # ГИР БО сообщает, агрегатор не сообщает ничем, и пересчёт
+                # истории берёт тогда срок закона — но берёт его там, где
+                # настоящей даты нет, а не везде. Ключ появляется только
+                # с настоящей датой: пустое значение читалось бы как «не
+                # опубликовано».
+                **(
+                    {"disclosed_on": f"{report.disclosed_on:%Y-%m-%d}"}
+                    if getattr(report, "disclosed_on", None) is not None
+                    else {}
+                ),
                 **(meta_extra or {}),
             },
             ensure_ascii=False,

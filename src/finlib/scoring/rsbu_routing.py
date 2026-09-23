@@ -44,9 +44,15 @@ LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'rsbu' AND s.is_actual AND s.status <> 'quarantine'
   AND (
       %(as_of)s::date IS NULL
-      OR f.report_date <= %(as_of)s::date - (
-          CASE WHEN s.reporting_kind = 'interim' THEN %(interim)s ELSE %(annual)s END
-      )
+      -- Настоящая дата раскрытия старше смоделированной: правило берётся
+      -- только там, где источник о дате молчит.
+      OR COALESCE(
+          (s.meta->>'disclosed_on')::date,
+          f.report_date + (
+              CASE WHEN s.reporting_kind = 'interim'
+                   THEN %(interim)s ELSE %(annual)s END
+          )
+      ) <= %(as_of)s::date
   )
 GROUP BY f.inn
 """
