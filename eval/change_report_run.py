@@ -73,7 +73,9 @@ def _ground_names(routing) -> dict[str, str]:  # noqa: ANN001
     return _NAMES
 
 
-def _why(routing, inn: str, since: date, until: date, appeared: set[str]) -> str:  # noqa: ANN001
+def _why(  # noqa: ANN001
+    routing, inn: str, since: date, until: date, appeared: set[str], before, after
+) -> str:
     """Чем изменились данные: слой, в котором нашлась датированная запись.
 
     **Слой называется существующим перечнем** `routing.ground_sources` —
@@ -81,6 +83,21 @@ def _why(routing, inn: str, since: date, until: date, appeared: set[str]) -> str
     изменение с неназванной причиной читалось бы как объяснённое.
     """
     said: list[str] = []
+    # **Раскрытие отчётности датированной записи не имеет**, и видно оно
+    # по тому, что сменился отчётный период строки: это и есть причина,
+    # а не следствие, и называть её основанием значило бы назвать следствие.
+    if before["report_date"] != after["report_date"]:
+        was = (
+            f"{before['report_date']:%d.%m.%Y}"
+            if before["report_date"]
+            else "отчётности не было"
+        )
+        now = (
+            f"{after['report_date']:%d.%m.%Y}"
+            if after["report_date"]
+            else "отчётность исчезла"
+        )
+        said.append(f"отчётный период: {was} → {now}")
     events = events_of(inn)
     for item in events.records:
         if item.moment is not None and since < item.moment <= until:
@@ -108,6 +125,24 @@ def _why(routing, inn: str, since: date, until: date, appeared: set[str]) -> str
             names.get(code, code) for code in sorted(appeared)
         )
     return "данные изменились, слой не назван"
+
+
+_NAMED: dict[str, str] = {}
+
+
+def _named(inn: str) -> str:
+    """Эмитент наименованием, а не ИНН: читает отчёт человек.
+
+    Наименование берётся у справочника эмитентов; ИНН остаётся рядом — им
+    строка и ищется в списке.
+    """
+    if not _NAMED:
+        from finlib.scoring.routing_store import cards
+
+        for key, card in cards().items():
+            _NAMED[key] = str(card.get("name_rus") or "").strip()
+    name = _NAMED.get(inn) or ""
+    return f"{name} ({inn})" if name else inn
 
 
 def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
@@ -201,9 +236,9 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
             before, after = was[inn], now[inn]
             appeared = set(after["grounds"]) - set(before["grounds"])
             print(
-                f"| {inn} | {_basket_name(routing, before['basket'])} "
+                f"| {_named(inn)} | {_basket_name(routing, before['basket'])} "
                 f"| {_basket_name(routing, after['basket'])} "
-                f"| {_why(routing, inn, since, until, appeared)} |"
+                f"| {_why(routing, inn, since, until, appeared, before, after)} |"
             )
     print()
 
@@ -229,15 +264,15 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
     print(f"## Новое основание без смены корзины: {len(events_added)}\n")
     for inn, appeared in events_added[:20]:
         said = ", ".join(names.get(code, code) for code in sorted(appeared))
-        print(f"- {inn}: {said}")
+        print(f"- {_named(inn)}: {said}")
     print(f"\nПрочих изменений оснований {other_added} — показаны числом.\n")
 
     print(f"## Вошли в периметр: {len(entered)}   Вышли: {len(left)}\n")
     for inn in entered[:10]:
         mark = " (с выпусками в обращении)" if inn in bonds else ""
-        print(f"- вошёл {inn}{mark}: {_basket_name(routing, now[inn]['basket'])}")
+        print(f"- вошёл {_named(inn)}{mark}: {_basket_name(routing, now[inn]['basket'])}")
     for inn in left[:10]:
-        print(f"- вышел {inn}: было {_basket_name(routing, was[inn]['basket'])}")
+        print(f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}")
     print()
 
     print(f"## Наши правки: {len(ours)}\n")

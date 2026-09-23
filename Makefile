@@ -61,6 +61,18 @@ routing-reference:  ## Эталон списка наблюдения, уров�
 watchlist:  ## Собрать список наблюдения в data/output/watchlist_<дата>.html
 	uv run python eval/watchlist_run.py $(ARGS)
 
+daily:  ## Ежедневный прогон целиком: доставка, маршрут, список, отчёт изменений
+	uv run python scripts/daily_run.py $(ARGS)
+
+backfill:  ## История корзин: пересчёт маршрута назад за год (--write — с записью)
+	uv run python eval/routing_backfill_run.py $(ARGS)
+
+changes:  ## Отчёт «что изменилось»: последняя пара точек истории
+	uv run python eval/change_report_run.py $(ARGS)
+
+history-measure:  ## Движение корзин по пересчитанной истории и его дребезг
+	uv run python eval/history_measure_run.py $(ARGS)
+
 lsr-debt:  ## Долговая нагрузка ЛСР: документ против агрегатора, построчно
 	uv run python eval/lsr_debt_run.py $(ARGS)
 
