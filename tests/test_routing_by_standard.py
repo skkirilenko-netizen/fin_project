@@ -448,6 +448,132 @@ def test_a_human_decision_is_found_by_the_standard_of_its_row() -> None:
     assert floor_for(decided, "2", Standard.RSBU) is None
 
 
+def _type(code: str):
+    """Тип эмитента по коду из справочника маршрутизации."""
+    return next(
+        kind for kind in load_routing().issuer_types if kind.code == code
+    )
+
+
+def test_a_structural_issuer_is_not_judged_by_its_balance() -> None:
+    """У СФО отрицательный капитал — устройство сделки, а не риск.
+
+    Решение человека 23.09.2026: из 186 позиций «Разбора» 59 занимали СФО
+    и ипотечные агенты, 44 из них по отрицательному капиталу. Однотипные
+    эмитенты стояли при этом в трёх разных корзинах по знаку строки 1300 —
+    корзина мерила устройство сделки.
+    """
+    verdict = route(
+        (metric("equity_ratio", "-0.4"),),
+        unit=UNIT,
+        quarantined=False,
+        stop_factors=("negative_equity",),
+        issuer_type=_type("structural"),
+        type_marker="фирменное наименование: «сфо»",
+        latest_annual=ANNUAL,
+        today=TODAY,
+        catalogue=catalogue_for(Standard.RSBU),
+    )
+    assert verdict.basket == "structural_pool"
+    assert verdict.grounds == ("structural_issuer",)
+    # Отброшенное считается: правило, гасящее молча, неотличимо
+    # от невыполненного.
+    assert "stop_factor_severe" in verdict.inapplicable
+    # Признак назван: «структурный» без него читался бы как наше суждение.
+    assert "сфо" in verdict.details[0]
+
+
+def test_an_event_still_routes_a_structural_issuer() -> None:
+    """Тип не отменяет маршрут: дефолт у СФО — дефолт.
+
+    Неприменимы к нему корпоративные коэффициенты, а не события.
+    """
+    from finlib.sources.cbonds_events import Issue, IssuerEvents
+
+    issue = Issue(
+        emission_id="1",
+        name="СФО, 01",
+        isin="RU1",
+        status="дефолт по погашению",
+        default=True,
+        unsettled=True,
+        maturity=date(2026, 3, 1),
+        offer=None,
+        outstanding=None,
+        updated=ANNUAL,
+    )
+    verdict = route(
+        (metric("equity_ratio", "-0.4"),),
+        unit=UNIT,
+        quarantined=False,
+        stop_factors=("negative_equity",),
+        issuer_type=_type("structural"),
+        events=IssuerEvents(inn="1", issues=(issue,), issues_known=True),
+        latest_annual=ANNUAL,
+        today=TODAY,
+        catalogue=catalogue_for(Standard.RSBU),
+    )
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("emission_default",)
+
+
+def test_a_bank_is_not_asked_about_disclosure_we_do_not_collect() -> None:
+    """Банк — вне периметра методики, и срок раскрытия у него не спрашивается.
+
+    Банк сдаёт отчётность в Банк России по формам 0409, а мы её не собираем
+    вовсе: «нарушение срока раскрытия» мерило бы наш охват, а не эмитента.
+    Прежде по этому основанию во «Внимании» стояли 51 банк и МФО.
+    """
+    verdict = route(
+        (),
+        unit=UNIT,
+        quarantined=False,
+        issuer_type=_type("out_of_scope"),
+        type_marker="отрасль источника: Банки",
+        reporting_unavailable="нормализованной отчётности у источника нет",
+        latest_annual=date(2024, 12, 31),
+        # После срока сдачи годовой отчётности: до него признак не срабатывает
+        # вовсе, и проверять было бы нечего.
+        today=date(2026, 9, 23),
+        catalogue=catalogue_for(Standard.RSBU),
+    )
+    assert verdict.basket == "out_of_scope"
+    assert "disclosure_overdue" in verdict.inapplicable
+    assert "reporting_unavailable" in verdict.inapplicable
+
+
+def test_every_event_ground_is_named_in_every_type() -> None:
+    """Событийное основание обязано быть названо у каждого типа.
+
+    Белый список безопаснее чёрного: новое основание по величинам само
+    к банку не применится. Но новое **событийное** при этом молча выпало бы
+    из маршрута такого эмитента, и заметить это было бы нечем — поэтому
+    перечень сверяется с подгруппой «события и рейтинги» справочника.
+    """
+    routing = load_routing()
+    attention = routing.basket("attention")
+    events = {
+        ground.code
+        for ground in attention.grounds
+        if attention.group_of(ground.code) == "event_risk"
+    }
+    review = {"emission_default", "rating_default", "risk_sector"}
+    for kind in routing.issuer_types:
+        missing = (events | review) - set(kind.grounds_apply)
+        assert not missing, f"{kind.code}: не названы основания событий {missing}"
+
+
+def test_every_type_names_a_queue_that_exists() -> None:
+    """Очередь типа — объявленная корзина, а не выдуманный код."""
+    routing = load_routing()
+    codes = {basket.code for basket in routing.baskets}
+    for kind in routing.issuer_types:
+        assert kind.queue in codes
+        assert kind.ground in {
+            ground.code for ground in routing.basket(kind.queue).grounds
+        }
+
+
 def test_every_standard_names_its_debt_lines_and_metrics() -> None:
     """У каждого стандарта объявлены строки долга и величины из них.
 

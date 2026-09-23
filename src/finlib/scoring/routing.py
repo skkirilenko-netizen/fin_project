@@ -71,6 +71,7 @@ from finlib.scoring.routing_catalogue import (
 from finlib.scoring.theses import load_theses
 from finlib.sources.cbonds_events import DEFAULT_STATUSES, DefaultEvent
 from finlib.standards import Standard
+from finlib.utils import markers_found
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,69 @@ def _years_back(today: date, years: int) -> date:
         return today.replace(year=today.year - years)
     except ValueError:
         return today.replace(year=today.year - years, month=2, day=28)
+
+
+class TypeMarkers(BaseModel):
+    """Признаки, по которым тип эмитента опознаётся в данных.
+
+    **Признак — данные, а не наименование.** Исключение одно и объявлено:
+    фирменное наименование специализированного финансового общества
+    и ипотечного агента предписано законом (ФЗ № 39-ФЗ, статья 15.1;
+    ФЗ № 152-ФЗ, статья 8), то есть это форма, а не примета.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    branch: tuple[str, ...] = ()
+    legal_name: tuple[str, ...] = ()
+    bik: bool = False
+    spv_flag: bool = False
+
+    def matched(self, card: Mapping[str, object]) -> str:
+        """Чем тип опознан у этой карточки; пусто — не опознан.
+
+        Возвращается **название признака вместе со значением**: «структурный»
+        без признака читается как наше суждение, а это признак данных.
+        """
+        branch = str(card.get("branch_name_rus") or "")
+        if branch and branch in self.branch:
+            return f"отрасль источника: {branch}"
+        if self.bik and str(card.get("bik") or "").strip():
+            return "БИК присвоен Банком России"
+        if self.spv_flag and str(card.get("emitent_spv") or "") == "1":
+            return "признак финансирующей структуры у источника"
+        # **Вхождение проверяется единой точкой.** Пустой маркер там ошибка,
+        # а не совпадение: дважды за две недели проверка отвечала «да» на любой
+        # текст, потому что маркер после приведения обращался в пустую строку.
+        found = markers_found(
+            str(card.get("full_name_rus") or ""),
+            self.legal_name,
+            prepare=str.lower,
+        )
+        return f"фирменное наименование: «{found[0]}»" if found else ""
+
+
+class IssuerType(BaseModel):
+    """Тип эмитента и то, какие основания маршрута к нему применимы.
+
+    **Тип не отменяет маршрут, а объявляет предмет.** Дефолт у банка — дефолт,
+    и он ведёт в «Разбор»; неприменимы к нему корпоративные коэффициенты,
+    а не события. Перечень применимых оснований — белый список: новое
+    основание по величинам само к такому эмитенту не применится.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    # Корзина, в которую эмитент попадает, если применимых оснований
+    # не нашлось: очередь типа, а не «Без внимания».
+    queue: str = Field(min_length=1)
+    # Основание, которым очередь объясняется.
+    ground: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+    markers: TypeMarkers
+    grounds_apply: tuple[str, ...] = Field(min_length=1)
 
 
 class Events(BaseModel):
@@ -535,6 +599,10 @@ class RoutingPolicy(BaseModel):
     # а не написано в коде страницы: текст, который читатель принимает
     # за оговорку методики, правится диффом, как всякая формулировка.
     limitations: tuple[str, ...] = Field(min_length=1)
+    # Типы эмитента в порядке предпочтения: первый опознавший и определяет.
+    # Порядок — часть правила: структурный эмитент бывает помечен и признаком
+    # финансирующей структуры, и очередь у них разная.
+    issuer_types: tuple[IssuerType, ...] = Field(min_length=1)
     baskets: tuple[Basket, ...] = Field(min_length=3)
     # **Справочные основания корзины не называют.** Урегулированный дефолт
     # десятилетней давности о сегодняшнем эмитенте не говорит, но и молчать
@@ -626,6 +694,21 @@ class RoutingPolicy(BaseModel):
             for item in self.stop_factor_muted
             if branch in item.branches
         )
+
+    def type_of(self, card: Mapping[str, object]) -> tuple[IssuerType | None, str]:
+        """Тип эмитента по карточке источника и признак, которым он опознан.
+
+        **Порядок объявления — часть правила.** Структурный эмитент бывает
+        помечен и признаком финансирующей структуры источника (у 29 СФО
+        из 146), а очередь у этих типов разная: у одного «оценка по пулу»,
+        у другого «добрать поручителя». Поэтому тип берётся первый
+        опознавший, а не любой подошедший.
+        """
+        for kind in self.issuer_types:
+            marker = kind.markers.matched(card)
+            if marker:
+                return kind, marker
+        return None, ""
 
     def basket(self, code: str) -> Basket:
         """Корзина по коду."""
@@ -761,6 +844,11 @@ class Verdict:
     # Справочные обстоятельства: корзину не называют, но и не исчезают.
     # Урегулированный дефолт десятилетней давности сюда и попадает.
     notes: tuple[Finding, ...] = ()
+    # Основания, отброшенные типом эмитента: корпоративные коэффициенты
+    # у банка, балансовые стоп-факторы у СФО. Считаются наравне
+    # со сработавшими — правило, гасящее молча, неотличимо
+    # от невыполненного.
+    inapplicable: tuple[str, ...] = ()
 
     @property
     def details(self) -> tuple[str, ...]:
@@ -862,6 +950,12 @@ def route(
     # и это говорилось у Газпром Капитала, чей поручитель в списке и в «Без
     # внимания».
     guarantor_listed: bool = False,
+    # Тип эмитента и признак, которым он опознан. Тип объявляет, какие
+    # основания к эмитенту применимы, и очередь, в которую он попадает,
+    # когда применимых не нашлось: корпоративная методика к банку неприменима
+    # вовсе, а к СФО применима не к тем величинам.
+    issuer_type: "IssuerType | None" = None,
+    type_marker: str = "",
     # Чем присвоен класс: вид отчётности и отчётная дата. Страницы у оценки
     # нет — класс присвоен комплекту, а не месту в документе.
     assessed_where: str = "",
@@ -1050,29 +1144,12 @@ def route(
         attention.extend(_rating_outlook_adverse(events, routing))
         attention.extend(_rating_withdrawn(events, routing, today or date.today()))
         notes.extend(referenced)
-    if financing_structure and not guarantor_listed:
-        # **Поручитель вне списка — не то же самое, что поручителя нет.**
-        # Первое называет того, кто отвечает по долгу, и говорит, что корзины
-        # у него взять негде; второе оставляет только группу. Корзина
-        # поручителя, **стоящего в списке**, берётся вторым проходом
-        # (`led_by_guarantor`), и здесь о нём не говорится ничего: прежде
-        # формулировка объявляла его отсутствующим всякий раз, когда имя было
-        # известно, и у Газпром Капитала стояло «поручитель Газпром в списке
-        # отсутствует» при Газпроме в списке и в «Без внимания».
-        review.append(
-            Finding(
-                "financing_structure",
-                guarantor or group,
-                routing.say(
-                    "financing_structure",
-                    "guarantor_unlisted" if guarantor else "",
-                    group=group or "не названа в справочнике",
-                    guarantor=guarantor,
-                    inns=guarantor_inns or "источник не называет",
-                    leader=group_leader or "головной компании в списке нет",
-                ),
-            )
-        )
+    # **Финансирующая структура в «Разбор» больше не ведёт.** Разбор сказан
+    # о том, у кого обстоятельство найдено, а здесь обстоятельства нет вовсе —
+    # есть недостающий источник: отвечает по долгу поручитель, и без его
+    # отчётности оценивать нечего. Очередь у этого своя, и объявлена она
+    # типом эмитента (`issuer_types`, код `financing`); корзина поручителя,
+    # стоящего в списке, берётся вторым проходом (`led_by_guarantor`).
     if assessed_class and assessed_class in routing.severity.review_caps:
         review.append(
             Finding(
@@ -1356,6 +1433,21 @@ def route(
         )
         (review if manual_floor.basket == "review" else attention).append(told)
 
+    # **Тип эмитента объявляет, какие основания к нему применимы.** Отброшенные
+    # считаются и называются кодами: правило, гасящее молча, неотличимо
+    # от невыполненного, — и «Разбор» наполовину состоял из эмитентов,
+    # у которых корпоративные коэффициенты не мерят ничего.
+    inapplicable: tuple[str, ...] = ()
+    if issuer_type is not None:
+        keep = set(issuer_type.grounds_apply)
+        inapplicable = tuple(
+            item.ground
+            for item in review + attention
+            if item.ground not in keep
+        )
+        review = [item for item in review if item.ground in keep]
+        attention = [item for item in attention if item.ground in keep]
+
     found = status + review + attention
     if status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
@@ -1363,10 +1455,40 @@ def route(
         code = "status_unknown"
     elif review:
         code = "review"
+    elif attention:
+        code = "attention"
+    elif issuer_type is not None:
+        # **Очередь типа — не «Без внимания», а другой вопрос.** Применимых
+        # обстоятельств не нашлось, но сказать «человек не нужен» о таком
+        # эмитенте нельзя: его не спрашивали о том, что его описывает.
+        code = issuer_type.queue
+        found = (
+            Finding(
+                issuer_type.ground,
+                issuer_type.code,
+                routing.say(
+                    issuer_type.ground,
+                    "guarantor_unlisted"
+                    if issuer_type.ground == "financing_structure"
+                    else "",
+                    marker=type_marker or "признак источника",
+                    group=group or "не названа в справочнике",
+                    guarantor=guarantor or "источник не называет",
+                    inns=guarantor_inns or "источник не называет",
+                    leader=group_leader or "головной компании в списке нет",
+                ),
+            ),
+        )
     else:
-        code = "attention" if attention else "clear"
+        code = "clear"
     return _verdict(
-        routing, code, found, tuple(silenced), muted, notes=tuple(notes)
+        routing,
+        code,
+        found,
+        tuple(silenced),
+        muted,
+        notes=tuple(notes),
+        inapplicable=inapplicable,
     )
 
 
@@ -1873,6 +1995,7 @@ def _verdict(
     spoken_for: tuple[str, ...] = (),
     muted: tuple[str, ...] = (),
     notes: tuple[Finding, ...] = (),
+    inapplicable: tuple[str, ...] = (),
 ) -> Verdict:
     """Собирает вердикт, упорядочивая основания по объявлению в справочнике.
 
@@ -1920,6 +2043,7 @@ def _verdict(
         spoken_for=spoken_for,
         thresholds=routing.thresholds,
         notes=notes,
+        inapplicable=inapplicable,
     )
 
 

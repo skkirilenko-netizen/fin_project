@@ -317,6 +317,11 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
         "холдингов на одной РСБУ",
     ):
         summary[key] = counts[key]
+    # **Тип эмитента объявляется вместе с числом распознанных.** «Структурный
+    # эмитент» без знаменателя читался бы как перечень, а это признак данных,
+    # и сколько он распознаёт — часть правила.
+    for key in sorted(key for key in counts if key.startswith("тип: ")):
+        summary[key] = counts[key]
     summary["эмитентов"] = counts["эмитентов"]
     summary["эмитентов с признаком дефолта"] = marked
     for ground, name in _DEFAULT_OUTCOME_NAMES.items():

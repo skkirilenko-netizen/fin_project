@@ -902,17 +902,24 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     from finlib.scoring.routing import led_by_guarantor
 
     routing = load_routing()
+    financing = next(
+        kind for kind in routing.issuer_types if kind.code == "financing"
+    )
     spv = route(
         healthy(),
         unit=UNIT,
         quarantined=False,
         financing_structure=True,
+        issuer_type=financing,
+        type_marker="признак финансирующей структуры у источника",
         guarantor="Головная компания",
         guarantor_inns="7700000000",
         latest_annual=date(2025, 12, 31),
         today=date(2026, 5, 1),
     )
-    assert spv.basket == "review"
+    # **В «Разбор» финансирующая структура не ведёт** (решение 23.09.2026):
+    # обстоятельства здесь нет, есть недостающий источник.
+    assert spv.basket == "guarantor_missing"
     # Поручителя в списке нет, и формулировка называет ИНН: им его и добирают.
     assert "поручител" in spv.details[0].lower()
     assert "7700000000" in spv.details[0]

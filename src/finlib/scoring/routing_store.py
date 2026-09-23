@@ -584,6 +584,12 @@ def routing_rows(
             else None
         )
         card = known.get(inn, {})
+        # **Тип эмитента берётся у данных карточки, а не у наименования.**
+        # Признак, которым он опознан, идёт вместе с ним: «структурный»
+        # без признака читался бы как наше суждение.
+        kind, marker = routing.type_of(card)
+        if kind is not None:
+            counts[f"тип: {kind.name}"] = counts.get(f"тип: {kind.name}", 0) + 1
         name = (
             (ifrs_latest.get(inn) or rsbu_latest.get(inn) or (None, ""))[1]
             or bonds.get(inn)
@@ -704,6 +710,8 @@ def routing_rows(
             guarantor_listed=any(
                 item.inn in listed and item.inn != inn for item in secured
             ),
+            issuer_type=kind,
+            type_marker=marker,
             operating_profit=(
                 _operating_profit(inn, moment, conn, standard)
                 if standard is not None
