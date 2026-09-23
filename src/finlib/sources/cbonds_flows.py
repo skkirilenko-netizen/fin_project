@@ -42,7 +42,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -94,15 +94,6 @@ class Schedule:
             (item.total * bonds for item in self.payments if start <= item.due < edge),
             start=Decimal(0),
         )
-
-
-def _shift(today: date, months: int) -> date:
-    """Первое число месяца, наступающего через `months` месяцев."""
-    return date(
-        today.year + (today.month - 1 + months) // 12,
-        (today.month - 1 + months) % 12 + 1,
-        1,
-    )
 
 
 def _number(value: object) -> Decimal:
@@ -180,7 +171,9 @@ class Refinancing:
     сведения, и различает их `without_schedule`.
     """
 
-    months: int
+    # Горизонт окна днями — тот же, что объявлен методикой: строка списка
+    # называет его словом, а замер числом, и второго его выражения нет.
+    days: int
     scheduled: Decimal
     offered: Decimal
     issues: int
@@ -196,34 +189,31 @@ class Refinancing:
         return self.issues > self.without_schedule + self.without_volume
 
 
-def refinancing(
-    issues: tuple[object, ...], months: int, since: date, today: date | None = None
-) -> Refinancing:
+def refinancing(issues: tuple[object, ...], days: int, today: date) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
     Оферты считаются порознь: предъявление — право владельца, и сложенное
     с купоном оно выдало бы возможное за состоявшееся.
 
-    **Край окна закреплён на отчётной дате плюс год, а платежи считаются
-    от сегодня** (решение человека 23.09.2026). Три свойства сразу:
+    **Окно скользящее: от сегодня на объявленное число дней вперёд**
+    (решение человека 23.09.2026). Край едет посуточно, и это не порок,
+    а устройство: мера отвечает на вопрос «хватит ли денег на то, что
+    впереди», и горизонт впереди всегда одинаков.
 
-    - **край не едет** — платёж, попавший в год от отчётной даты, не выходит
-      из окна от смены месяца. Дребезг был именно этим: на пересчитанной
-      истории все двенадцать возвратов внутри окна отмены оказались
-      движением края, у одного эмитента трижды подряд;
-    - **прошедшее не считается** — мера отвечает на вопрос «хватит ли денег
-      на то, что впереди», а не «хватило ли на то, что уже заплачено»;
-    - **моменты расходятся намеренно**: денежные средства всегда на отчётную
-      дату, платежи всегда будущие. Это не порок меры, а её предмет.
+    **Дребезг вносила ступень, а не движение края.** Прежде край вставал
+    на первое число месяца, и платёж входил в окно не тогда, когда до него
+    оставался год, а первого числа вместе с целым месяцем платежей — и так же
+    выходил. На пересчитанной истории все двенадцать возвратов внутри окна
+    отмены оказались этим, у одного эмитента трижды подряд. **В скользящем
+    окне платёж входит однажды и не выходит**, пока не будет заплачен.
 
-    `today` пусто — считается от самой отчётной даты: так строится история
-    назад, где «сегодня» и есть та дата, на которую маршрут пересчитан.
+    Денежные средства при этом остаются на отчётную дату, а платежи всегда
+    будущие: моменты расходятся намеренно — это предмет меры, а не её изъян.
     """
     scheduled = offered = Decimal(0)
     counted = no_schedule = no_volume = no_offers = 0
-    edge = _shift(since, months)
-    # Платежи — от сегодня, но не раньше отчётной даты: до неё их и не было.
-    start = max(today or since, since)
+    start = today
+    edge = today + timedelta(days=days)
     for issue in issues:
         status = str(getattr(issue, "status", ""))
         if status not in ("в обращении", "размещается"):
@@ -254,7 +244,7 @@ def refinancing(
         if any(start <= item < edge for item in offers):
             offered += outstanding
     return Refinancing(
-        months=months,
+        days=days,
         scheduled=scheduled,
         offered=offered,
         issues=counted,

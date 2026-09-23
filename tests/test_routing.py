@@ -798,7 +798,6 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
             issue="выпуск",
             group="Мечел",
             leader="Мечел",
-            months=12,
             offered="1 000",
             cash="100",
             unit="тыс. руб.",
@@ -834,7 +833,7 @@ def refinance(due: str | None, cash: str | None):
         due=Decimal(due) if due is not None else None,
         cash=Decimal(cash) if cash is not None else None,
         unit="тыс. руб.",
-        months=12,
+        days=365,
     )
 
 

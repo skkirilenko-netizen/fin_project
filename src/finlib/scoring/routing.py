@@ -428,7 +428,11 @@ class Refinancing(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    months: int = Field(gt=0)
+    # **Горизонт объявлен днями и ровно одним числом.** Прежде он стоял
+    # месяцами, а край окна двигался ступенью на первое число месяца: платёж
+    # входил в окно вместе с целым месяцем платежей и так же выходил.
+    # В скользящем окне платёж входит однажды и не выходит.
+    days: int = Field(gt=0)
     cover_ratio: Decimal = Field(gt=0)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
@@ -888,7 +892,10 @@ class Refinance:
     due: Decimal | None
     cash: Decimal | None
     unit: str
-    months: int
+    # Горизонт окна днями — тот же, что объявлен методикой. Вторым числом
+    # он здесь не заводится: «двенадцать месяцев» и «365 дней» разошлись бы
+    # при первой же правке, а формулировка называет горизонт словом.
+    days: int
     # **Вторая мера: те же платежи при предъявлении оферт.** Предъявление —
     # право владельца, и в отсечку корзины оно не входит; но величина
     # считалась и не доходила ни до одного выхода, то есть была неотличима
@@ -1329,7 +1336,6 @@ def route(
                     "refinancing",
                     routing.say(
                         "refinancing_gap",
-                        months=refinance.months,
                         due=money(refinance.due),
                         cash=money(refinance.cash),
                         unit=refinance.unit,
@@ -1367,7 +1373,6 @@ def route(
                 routing.say(
                     "refinancing_offers",
                     "" if share is not None else "unknown_debt",
-                    months=refinance.months,
                     offered=money(refinance.offered),
                     cash=money(refinance.cash),
                     unit=refinance.unit,

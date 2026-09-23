@@ -289,6 +289,9 @@ def main() -> int:
         "которой в справочнике нет, в сравнение не идёт вовсе.\n"
     )
 
+    # --- 3-бис. понижение как кандидат в основание ---------------------------
+    _downgrade_alarms(actions, names, scales, order, events)
+
     # --- 4. рейтинг транша ---------------------------------------------------
     print("## 4. Рейтинг транша у структурных эмитентов\n")
     tranche: set[str] = set()
@@ -325,6 +328,115 @@ def main() -> int:
         "Упреждение, посчитанное по такой истории, — верхняя оценка.\n"
     )
     return 0
+
+
+def _notches(action: Action, order: dict[tuple[str, str], int], scale: str) -> int:
+    """На сколько ступеней шкалы понизили; 0 — сравнить нечем.
+
+    Ступень берётся у справочника точек: расстояние между местами. Шкалы
+    у агентств разные по длине, и сравнивать ступени между шкалами можно лишь
+    приблизительно — поэтому считается внутри одной.
+    """
+    now = order.get((scale, action.level))
+    was = order.get((scale, action.was_level))
+    if now is None or was is None:
+        return 0
+    return now - was
+
+
+def _in_c(action: Action, order: dict[tuple[str, str], int], scale: str) -> bool:
+    """Перешёл ли уровень в категорию C и ниже.
+
+    Категория — буква уровня, и перечень её значений объявлен методикой
+    (`routing.events.review_categories`): C, CC, CCC, D, RD, SD. Переходом
+    считается движение **в** них из категории выше: эмитент, уже стоявший
+    в C, никуда не перешёл.
+    """
+    from finlib.scoring.routing import load_routing
+    from finlib.sources.cbonds_events import category_of
+
+    deep = set(load_routing().events.review_categories)
+    now, was = category_of(action.level), category_of(action.was_level)
+    return now in deep and was not in deep
+
+
+def _downgrade_alarms(  # noqa: ANN001
+    actions, names, scales, order, events
+) -> None:
+    """Ложные тревоги у понижений: по ступеням и по переходу в категорию C.
+
+    **Понижение похоже на сигнал там, где отзыв не похож**: медиана упреждения
+    у него та же, но событие после него случается чаще. Пороги здесь
+    не ставятся — замер печатает исходы, решение за человеком.
+    """
+    print("## 3-бис. Понижение уровня как кандидат в основание\n")
+    buckets: dict[str, list[tuple[str, date]]] = {
+        "на одну ступень": [],
+        "на две и более": [],
+        "переход в C и ниже": [],
+    }
+    for item in actions:
+        if item.about != "issuer" or not item.level_changed or not _credit(item):
+            continue
+        inn = names.get(prepared(item.name.split(",")[0]))
+        if inn is None:
+            continue
+        scale = scales.get(item.scale, "")
+        steps = _notches(item, order, scale)
+        if steps <= 0:
+            continue
+        label = "на одну ступень" if steps == 1 else "на две и более"
+        buckets[label].append((inn, item.when))
+        if _in_c(item, order, scale):
+            buckets["переход в C и ниже"].append((inn, item.when))
+    # **Глубина понижения и категория, в которую понизили, — разные сведения**,
+    # и разделить их надо прямо: иначе «две ступени и более» выглядит сигналом
+    # за счёт тех случаев, где понижали до категории C.
+    deep_not_c = [
+        (inn, when)
+        for inn, when in buckets["на две и более"]
+        if (inn, when) not in set(buckets["переход в C и ниже"])
+    ]
+    buckets["на две и более, но не в C"] = deep_not_c
+    print("| Понижение | Наблюдений | Событие за год | Ложных тревог | Упреждение |")
+    print("|---|---|---|---|---|")
+    for label, found in buckets.items():
+        # Считается эмитент, а не действие: два понижения одного эмитента
+        # перед одним дефолтом — одно наблюдение, а не два.
+        first: dict[str, date] = {}
+        for inn, when in found:
+            if inn not in first or when < first[inn]:
+                first[inn] = when
+        lead = [
+            (events[inn] - when).days
+            for inn, when in first.items()
+            if inn in events and 0 <= (events[inn] - when).days <= YEAR
+        ]
+        total = len(first)
+        share = f"{(total - len(lead)) / total * 100:.0f} %" if total else "—"
+        ahead = (
+            f"медиана {statistics.median(lead):.0f} дн." if lead else "наблюдений нет"
+        )
+        print(f"| {label} | {total} | {len(lead)} | {share} | {ahead} |")
+    print(
+        "\n**Ложной тревогой здесь названо отсутствие события за год**, "
+        "и это та же мерка, что у отзыва: у отзыва 153 из 158. Понижение "
+        "при этом действие агентства о самом эмитенте, а отзыв — об "
+        "отношениях с ним, и потому сравнивать доли осмысленно.\n"
+    )
+    print(
+        "**Глубина понижения не говорит почти ничего, а категория говорит "
+        "всё.** Понижение на две ступени и более, не доходящее до C, даёт те "
+        "же 95 % ложных, что и понижение на одну: сигнал в строке «на две "
+        "и более» держится целиком теми случаями, где понизили **до** C. "
+        "Отсюда и упреждение: у перехода в C оно короче (медиана 42 дня), "
+        "потому что это уже не предупреждение, а признание.\n"
+    )
+    print(
+        "**Порогов здесь нет намеренно.** Замер печатает исходы; какая "
+        "глубина понижения и какая категория становятся основанием — решение "
+        "человека, и принимается оно по этим числам, а не по нашему выбору.\n"
+    )
 
 
 def _structural(conn, routing) -> set[str]:  # noqa: ANN001

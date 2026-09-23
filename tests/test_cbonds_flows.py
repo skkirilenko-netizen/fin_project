@@ -106,7 +106,7 @@ def test_redemption_and_coupon_of_one_day_are_added(cache: Path) -> None:
 def test_missing_schedule_is_not_zero(cache: Path) -> None:
     """«Графика нет» и «платежей нет» — разные сведения, и счётчик их делит."""
     assert schedule_of("нет такого") is None
-    plan = refinancing((FakeIssue(emission_id="нет такого"),), 12, date(2026, 9, 22))
+    plan = refinancing((FakeIssue(emission_id="нет такого"),), 365, date(2026, 9, 22))
     assert plan.scheduled == 0
     assert plan.without_schedule == 1
     assert not plan.known
@@ -119,7 +119,7 @@ def test_unknown_volume_gives_no_sum(cache: Path) -> None:
     assert plan is not None
     assert plan.due_between(date(2026, 9, 22), date(2027, 10, 1), None) is None
     counted = refinancing(
-        (FakeIssue(emission_id="1", outstanding=None),), 12, date(2026, 9, 22)
+        (FakeIssue(emission_id="1", outstanding=None),), 365, date(2026, 9, 22)
     )
     assert counted.without_volume == 1
     assert not counted.known
@@ -139,7 +139,7 @@ def test_offer_is_counted_apart_from_the_schedule(cache: Path) -> None:
     offers(cache, "1", ["2026-12-01"])
     plan = refinancing(
         (FakeIssue(emission_id="1", outstanding=Decimal(1000)),),
-        12,
+        365,
         date(2026, 9, 22),
     )
     assert plan.scheduled == Decimal(10)
@@ -165,7 +165,7 @@ def test_offer_is_taken_from_the_method_not_from_the_issue(cache: Path) -> None:
                 offer=date(2027, 3, 29),
             ),
         ),
-        12,
+        365,
         date(2026, 9, 22),
     )
     assert plan.offered == Decimal(1000)
@@ -176,7 +176,7 @@ def test_missing_offers_answer_is_not_absence_of_offers(cache: Path) -> None:
     put(cache, "1", [coupon("2026-10-05", "10")])
     plan = refinancing(
         (FakeIssue(emission_id="1", outstanding=Decimal(1000)),),
-        12,
+        365,
         date(2026, 9, 22),
     )
     assert plan.offered == 0
@@ -187,7 +187,7 @@ def test_redeemed_issues_are_out_of_the_window(cache: Path) -> None:
     """Погашенный выпуск платежей не несёт и в знаменатель не идёт."""
     put(cache, "1", [coupon("2026-10-05", "10")])
     plan = refinancing(
-        (FakeIssue(emission_id="1", status="погашена"),), 12, date(2026, 9, 22)
+        (FakeIssue(emission_id="1", status="погашена"),), 365, date(2026, 9, 22)
     )
     assert plan.issues == 0
     assert plan.scheduled == 0
