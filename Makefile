@@ -73,6 +73,9 @@ changes:  ## Отчёт «что изменилось»: последняя па
 history-measure:  ## Движение корзин по пересчитанной истории и его дребезг
 	uv run python eval/history_measure_run.py $(ARGS)
 
+card:  ## Карточка эмитента: make card ARGS="9703024202 4004021785"
+	uv run python eval/issuer_card_run.py $(ARGS)
+
 ratings-history:  ## Календарь рейтинговых действий: упреждение, тревоги, понижения
 	uv run python eval/ratings_history_run.py $(ARGS)
 
