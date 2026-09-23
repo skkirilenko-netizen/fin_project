@@ -25,6 +25,9 @@
 отчётной и затёрла бы пересмотренную сравнительную.
 """
 
+from collections.abc import Mapping
+from decimal import Decimal
+
 # **Выборка одного комплекта периода обязана называть предпочтение источника.**
 # За один год у организации теперь два актуальных комплекта: доставка документом
 # и доставка агрегатором. Оба актуальны намеренно — величины, которых нет
@@ -88,6 +91,51 @@ def unit_name_of(inn: str, report_date, conn, standard: str = "ifrs") -> str:
         return load_lines().units.name_of(code)
     except (KeyError, ValueError):
         return ""
+
+def debt_undisclosed(
+    lines: Mapping[str, tuple[Decimal | None, str]], has_bonds: bool
+) -> bool:
+    """Нераскрыт ли долг: ноль по всем строкам заёмных средств при выпусках.
+
+    **Четвёртый признак «ноль не означает нуля», и он единственный внешний.**
+    Три прежних арифметические — ноль ломает тождество отчётности, ноль
+    у итога при ненулевом составе, ноль постоянный у эмитента, — и ни один
+    из них на строках заёмных средств не срабатывает: ноль там согласован
+    со всем остальным. Этот опирается на перечень выпусков: **выпуск
+    в обращении и есть заём**, и нуля по заёмным средствам у такого эмитента
+    не бывает.
+
+    `lines` — величина и способ получения по каждой строке долга. Признак
+    относится к нулю **агрегатора**: у первоисточника ноль означает ноль,
+    и правило чтения нулей объявлено у вида отчёта, а не у нас.
+
+    Строка, которой нет вовсе, признака не даёт сама по себе: отсутствие
+    величины уже означает «не раскрыто», и показатель по ней не считается.
+    Признак нужен ровно для обратного случая — величина есть, равна нулю
+    и выглядит раскрытой.
+    """
+    from finlib.normalize.cbonds_mapping import load_cbonds_mapping
+
+    if not has_bonds or not lines:
+        return False
+    rule = any(
+        report.zero_reading is not None and report.zero_reading.debt_zero_with_bonds
+        for report in load_cbonds_mapping().reports.values()
+    )
+    if not rule:
+        return False
+    known = [(value, source) for value, source in lines.values() if value is not None]
+    if not known:
+        return False
+    return all(
+        value == 0 and source == AGGREGATOR for value, source in known
+    )
+
+
+# Способ получения, у которого ноль означает и нераскрытие. Правило объявлено
+# у вида отчёта (`cbonds_mapping.yaml`, `zero_reading`), а здесь названо имя
+# источника: у первоисточника ноль означает ноль.
+AGGREGATOR = "cbonds"
 
 # Условие `ON CONFLICT ... DO UPDATE`: приоритет и признак изменения.
 # Строкой, а не запросом: его вставляют в свой `INSERT` оба загрузчика,

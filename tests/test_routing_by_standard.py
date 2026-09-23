@@ -294,3 +294,70 @@ def test_subtypes_of_the_holding_activity_count(okved: str) -> None:
 def test_a_foreign_activity_is_not_a_holding(okved: str) -> None:
     """Сравнение по началу кода не должно захватывать соседние виды."""
     assert not load_routing().holdings.holds(okved)
+
+
+# --- четвёртый признак «ноль не означает нуля» ------------------------------
+
+
+def test_zero_debt_with_outstanding_bonds_is_not_disclosure() -> None:
+    """Выпуск в обращении и есть заём: нуля по заёмным средствам не бывает."""
+    from finlib.normalize.facts import debt_undisclosed
+
+    zeros = {
+        "1410": (Decimal(0), "cbonds"),
+        "1510": (Decimal(0), "cbonds"),
+    }
+    assert debt_undisclosed(zeros, has_bonds=True)
+    # Без выпусков ноль остаётся нулём: заёмных средств у организации
+    # действительно может не быть.
+    assert not debt_undisclosed(zeros, has_bonds=False)
+
+
+def test_a_zero_from_the_primary_source_stays_a_zero() -> None:
+    """Признак относится к нулю агрегатора: у первоисточника ноль означает ноль.
+
+    Правило чтения нулей объявлено у вида отчёта агрегатора, а выгрузка
+    ГИР БО различает прочерк и ноль сама.
+    """
+    from finlib.normalize.facts import debt_undisclosed
+
+    assert not debt_undisclosed(
+        {"1410": (Decimal(0), "gir_bo"), "1510": (Decimal(0), "gir_bo")},
+        has_bonds=True,
+    )
+
+
+def test_one_disclosed_debt_line_is_enough() -> None:
+    """Ненулевая строка долга снимает признак: долг раскрыт."""
+    from finlib.normalize.facts import debt_undisclosed
+
+    assert not debt_undisclosed(
+        {"1410": (Decimal(0), "cbonds"), "1510": (Decimal("500"), "cbonds")},
+        has_bonds=True,
+    )
+
+
+def test_an_absent_debt_line_is_not_the_sign() -> None:
+    """Строки нет вовсе — показатель и так не считается, признак не нужен.
+
+    Признак заведён для обратного случая: величина есть, равна нулю
+    и выглядит раскрытой.
+    """
+    from finlib.normalize.facts import debt_undisclosed
+
+    assert not debt_undisclosed({"1410": (None, "cbonds")}, has_bonds=True)
+    assert not debt_undisclosed({}, has_bonds=True)
+
+
+def test_every_standard_names_its_debt_lines_and_metrics() -> None:
+    """У каждого стандарта объявлены строки долга и величины из них.
+
+    Признак внешний, и применить его без перечня нечем; а величина долга,
+    оставленная при неизвестном долге, печаталась бы как чистая денежная
+    позиция — то есть как довод в пользу эмитента.
+    """
+    for standard in Standard:
+        rule = catalogue_for(standard).rule
+        assert rule.debt_lines
+        assert rule.debt_metrics
+        assert rule.bound in rule.debt_metrics

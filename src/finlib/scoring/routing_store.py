@@ -113,6 +113,16 @@ ORDER BY source_rank(s.source)
 LIMIT 1
 """
 
+# Строки заёмных средств комплекта вместе со способом получения: ноль
+# по всем у эмитента с выпусками в обращении означает нераскрытие.
+_DEBT_LINES = """
+SELECT DISTINCT ON (f.line_code) f.line_code, f.value, s.source
+FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
+  AND f.line_code = ANY(%(codes)s) AND s.is_actual AND s.status <> 'quarantine'
+ORDER BY f.line_code, source_rank(s.source)
+"""
+
 _SOURCES = """
 SELECT DISTINCT source, unit_code, reporting_type FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
@@ -484,6 +494,10 @@ def routing_rows(
         "маршрут по РСБУ": 0,
         "маршрут по событиям и рейтингам": 0,
         "холдингов на одной РСБУ": 0,
+        # Четвёртый признак «ноль не означает нуля»: считается вместе
+        # со знаменателем, как всякое правило — иначе ноль срабатываний
+        # неотличим от невыполненного.
+        "долг не раскрыт при выпусках в обращении": 0,
     }
     # **Решения человека и их истёкшие записи считаются порознь.** Ноль
     # сработавших при неизвестном числе истёкших неотличим от журнала,
@@ -559,6 +573,15 @@ def routing_rows(
         else:
             counts["маршрут по событиям и рейтингам"] += 1
         events = events_of(inn, snapshot, credit, order, defaults)
+        # **Ноль по всем строкам заёмных средств у эмитента с выпусками
+        # в обращении — нераскрытие, а не отсутствие долга.** Признак внешний:
+        # он опирается на перечень выпусков, которого загрузчик не знает,
+        # и применяется здесь — там, где известно и то и другое.
+        if standard is not None and _has_outstanding(events):
+            computed, hidden = _without_undisclosed_debt(
+                computed, catalogue, inn, moment, standard, conn
+            )
+            counts["долг не раскрыт при выпусках в обращении"] += int(bool(hidden))
         if blind:
             # **Прячутся признаки дефолта, а не выпуски.** Выпуск нужен
             # и рефинансированию, и объёму долга — это не события, а срочность
@@ -928,6 +951,80 @@ def _operating_profit(
         )
         return None
     return value
+
+
+def _has_outstanding(events: IssuerEvents | None) -> bool:
+    """Есть ли у эмитента выпуски в обращении либо размещаемые."""
+    if events is None:
+        return False
+    return any(
+        item.status in ("в обращении", "размещается") for item in events.issues
+    )
+
+
+def _without_undisclosed_debt(
+    computed: tuple[MetricValue, ...],
+    catalogue: RoutingCatalogue,
+    inn: str,
+    moment: date,
+    standard: Standard,
+    conn: PgConnection,
+) -> tuple[tuple[MetricValue, ...], tuple[str, ...]]:
+    """Убирает величины долга, если долг у агрегатора не раскрыт.
+
+    **Отрицательный чистый долг читается как чистая денежная позиция**, то есть
+    как довод в пользу эмитента, — и получен он вычитанием денежных средств
+    из долга, которого источник не раскрыл. Поэтому убирается не отношение,
+    а все величины, считающиеся из долга: оставить сам долг и убрать отношение
+    значило бы напечатать «чистый долг −42 882» рядом с «нагрузка неизвестна».
+
+    Величина не подменяется нулём и не занижается — она объявляется
+    нерассчитанной, и маршрут называет недостающее основанием «данных
+    недостаточно». Возвращается вместе с перечнем убранного: правило,
+    сработавшее молча, неотличимо от невыполненного.
+    """
+    from dataclasses import replace
+
+    from finlib.normalize.facts import debt_undisclosed
+
+    rule = catalogue.rule
+    rows = fetch_all(
+        _DEBT_LINES,
+        {
+            "inn": inn,
+            "d": moment,
+            "codes": list(rule.debt_lines),
+            "standard": standard.value,
+        },
+        conn=conn,
+    )
+    lines = {row["line_code"]: (row["value"], row["source"]) for row in rows}
+    if not debt_undisclosed(lines, has_bonds=True):
+        return computed, ()
+    hidden = tuple(
+        item.code
+        for item in computed
+        if item.code in rule.debt_metrics and item.calculable
+    )
+    if not hidden:
+        return computed, ()
+    logger.info(
+        "%s за %s: долг не раскрыт (ноль по %s при выпусках в обращении) — "
+        "величины %s не считаются",
+        inn,
+        moment,
+        ", ".join(sorted(lines)),
+        ", ".join(hidden),
+    )
+    return (
+        tuple(
+            replace(item, value=None, reason=None)
+            if item.code in hidden
+            else item
+            for item in computed
+        ),
+        hidden,
+    )
 
 
 def _rsbu_inputs(

@@ -250,11 +250,18 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     summary["— без ответа об офертах"] = sum(
         item.refinance.without_offers for item in found if item.refinance is not None
     )
-    summary["— справочно: оферт больше денежных средств"] = sum(
-        1
-        for item in found
-        if any(entry.ground == "refinancing_offers" for entry in item.verdict.notes)
-    )
+    # **Обе меры печатаются порознь.** Первая считает то, что эмитент обязан
+    # заплатить, вторая — то, что он заплатит, если владельцы предъявят
+    # оферты. Одно число на две меры скрыло бы, какая из них сработала.
+    for code, name in (
+        ("refinancing_gap", "— не хватает на платежи года"),
+        ("refinancing_offers", "— не хватает при предъявлении оферт"),
+    ):
+        summary[name] = sum(
+            1
+            for item in found
+            if any(entry.ground == code for entry in item.verdict.findings)
+        )
     summary["системно значимых"] = counts["системно значимых"]
     summary["— с неполным покрытием"] = sum(
         1
