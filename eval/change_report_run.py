@@ -276,7 +276,12 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
             before, after = order[was[inn]["basket"]], order[now[inn]["basket"]]
             return (0 if after < before else 1, after)
 
-        for inn in sorted(moved, key=weight):
+        # **Отчёт читается за пять минут, и это требование, а не пожелание.**
+        # Двадцать строк — предел, за которым перечень перестают читать
+        # целиком; остальные называются числом, а не прячутся: «и ещё N»
+        # говорит, что они есть, и по истории их видно полностью.
+        shown = sorted(moved, key=weight)
+        for inn in shown[:20]:
             before, after = was[inn], now[inn]
             appeared = set(after["grounds"]) - set(before["grounds"])
             print(
@@ -284,6 +289,8 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
                 f"| {_basket_name(routing, after['basket'])} "
                 f"| {_why(routing, inn, since, until, appeared, before, after)} |"
             )
+        if len(shown) > 20:
+            print(f"\nи ещё {len(shown) - 20} — в истории видны полностью.")
     print()
 
     # **Новое основание без смены корзины — только старшей подгруппы.**
