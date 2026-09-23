@@ -48,6 +48,7 @@ approved`); величины остаются непроверенными (`thr
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -59,7 +60,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finlib.config import settings
-from finlib.metrics.display import money
+from finlib.metrics.display import money, percent
 from finlib.metrics.ifrs import MetricValue
 from finlib.scoring.ifrs import level
 from finlib.scoring.routing_catalogue import (
@@ -246,17 +247,70 @@ class Refinancing(BaseModel):
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
 
 
+class HoldingFallback(BaseModel):
+    """Запасной признак холдинга — по отчётности, а не по виду деятельности.
+
+    **Признак, работающий только при доступном источнике, неотличим
+    от невыполненного в тот день, когда источник недоступен.** Вид
+    деятельности приносит ГИР БО, а он молчал всю ночь на 23.09.2026,
+    и правило не срабатывало у 773 организаций из 807.
+
+    Существо то же: организация, у которой активы — вложения в другие
+    организации, а собственной выручки почти нет, ведёт не свою деятельность,
+    а владеет чужой.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    financial_investments: tuple[str, ...] = Field(min_length=1)
+    assets: str = Field(min_length=1)
+    revenue: str = Field(min_length=1)
+    investments_share: Decimal = Field(gt=0, le=1)
+    revenue_share: Decimal = Field(gt=0, le=1)
+    origin: str = Field(min_length=1)
+    calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+
+    def share(self, lines: Mapping[str, Decimal | None]) -> Decimal | None:
+        """Доля финансовых вложений в активах; None — признак не сработал.
+
+        **Нераскрытая величина признака не даёт.** Ни вложения, ни активы,
+        ни выручка нулём не подменяются: признак утверждает об эмитенте,
+        и утверждать его по величине, которой нет, нельзя. Выручка обязана
+        быть раскрытой: «выручки почти нет» и «выручка не раскрыта» —
+        разные сведения, и второе о холдинге не говорит.
+        """
+        assets = lines.get(self.assets)
+        revenue = lines.get(self.revenue)
+        if assets is None or assets <= 0 or revenue is None:
+            return None
+        parts = [lines.get(code) for code in self.financial_investments]
+        if any(item is None for item in parts):
+            return None
+        invested = sum(parts, start=Decimal(0))
+        if invested <= assets * self.investments_share:
+            return None
+        if revenue >= assets * self.revenue_share:
+            return None
+        return invested / assets
+
+
 class Holdings(BaseModel):
     """Виды деятельности, при которых отчётность РСБУ описывает не группу.
 
     Коды сравниваются началом: подвид 64.20.1 означает то же, что 64.20,
     а сравнивать по наименованию нельзя — оно пишется свободно, и слово
     «холдинг» встречается у видов деятельности, к холдингам не относящихся.
+
+    **Признаков два, и второй запасной.** Вид деятельности точнее — он
+    объявлен реестром, — но приходит из источника, который бывает недоступен;
+    отчётность при этом у нас уже есть. Порядок объявлен: при известном виде
+    решает он.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     okved: dict[str, str] = Field(min_length=1)
+    fallback: HoldingFallback
     origin: str = Field(min_length=1)
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
 
@@ -759,6 +813,9 @@ def route(
     # Основной вид деятельности из ЕГРЮЛ: у холдинга отчётность РСБУ описывает
     # управляющую компанию, а не группу, и это обстоятельство маршрута.
     okved: str = "",
+    # Строки, по которым холдинг опознаётся запасным признаком, когда вида
+    # деятельности у нас нет: финансовые вложения, активы, выручка.
+    holding_lines: Mapping[str, Decimal | None] | None = None,
     # Почему отчётности нет вовсе: пусто — она есть. Обстоятельство одно,
     # а не три недостающие величины, и называется оно причиной.
     reporting_unavailable: str = "",
@@ -1176,22 +1233,36 @@ def route(
     # только там, где маршрут построен по РСБУ: у эмитента с консолидированной
     # отчётностью группа видна, и холдинговый вид деятельности ничего
     # не скрывает.
-    if (
-        catalogue.standard is Standard.RSBU
-        and not reporting_unavailable
-        and routing.holdings.holds(okved)
-    ):
-        attention.append(
-            Finding(
-                "holding_rsbu_only",
-                okved,
-                routing.say(
+    # **Признаков два, и порядок между ними объявлен**: вид деятельности
+    # точнее — он объявлен реестром, — но приходит из источника, который
+    # бывает недоступен. Запасной признак читает ту же отчётность, по которой
+    # построен маршрут, и работает, когда вида деятельности у нас нет.
+    if catalogue.standard is Standard.RSBU and not reporting_unavailable:
+        invested = routing.holdings.fallback.share(holding_lines or {})
+        if routing.holdings.holds(okved):
+            attention.append(
+                Finding(
                     "holding_rsbu_only",
-                    okved=okved,
-                    activity=routing.holdings.activity(okved),
-                ),
+                    okved,
+                    routing.say(
+                        "holding_rsbu_only",
+                        okved=okved,
+                        activity=routing.holdings.activity(okved),
+                    ),
+                )
             )
-        )
+        elif invested is not None:
+            attention.append(
+                Finding(
+                    "holding_rsbu_only",
+                    "financial_investments",
+                    routing.say(
+                        "holding_rsbu_only",
+                        "by_values",
+                        share=percent(invested * 100),
+                    ),
+                )
+            )
 
     if routing.freshness.stale(latest_annual, today or date.today()):
         attention.append(

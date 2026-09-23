@@ -296,6 +296,76 @@ def test_a_foreign_activity_is_not_a_holding(okved: str) -> None:
     assert not load_routing().holdings.holds(okved)
 
 
+def lines(invested: str, assets: str, revenue: str) -> dict[str, Decimal]:
+    """Строки запасного признака холдинга."""
+    return {
+        "1170": Decimal(invested),
+        "1240": Decimal(0),
+        "1600": Decimal(assets),
+        "2110": Decimal(revenue),
+    }
+
+
+def test_the_fallback_holding_sign_works_without_okved() -> None:
+    """Признак, работающий только при доступном источнике, неотличим от мёртвого.
+
+    Вид деятельности приносит ГИР БО, а он молчал шесть часов подряд: правило
+    не срабатывало у 773 организаций из 807. Запасной признак читает ту же
+    отчётность, по которой построен маршрут.
+    """
+    fallback = load_routing().holdings.fallback
+    assert fallback.share(lines("800", "1000", "10")) == Decimal("0.8")
+
+
+def test_revenue_at_the_materiality_cutoff_is_not_a_holding() -> None:
+    """Своя выручка есть — организация ведёт деятельность, а не владеет чужой."""
+    fallback = load_routing().holdings.fallback
+    assert fallback.share(lines("800", "1000", "200")) is None
+
+
+def test_investments_at_half_of_assets_are_not_enough() -> None:
+    """Отсечка строгая: ровно половина — ещё не «активы суть вложения»."""
+    fallback = load_routing().holdings.fallback
+    assert fallback.share(lines("500", "1000", "10")) is None
+
+
+def test_an_undisclosed_line_gives_no_holding_sign() -> None:
+    """Нераскрытая величина признака не даёт и нулём не подменяется.
+
+    «Выручки почти нет» и «выручка не раскрыта» — разные сведения, и второе
+    о холдинге не говорит ничего.
+    """
+    fallback = load_routing().holdings.fallback
+    without_revenue = lines("800", "1000", "10") | {"2110": None}
+    assert fallback.share(without_revenue) is None
+    assert fallback.share({"1600": Decimal("1000"), "2110": Decimal("10")}) is None
+    assert fallback.share({}) is None
+
+
+def test_the_okved_sign_wins_when_the_activity_is_known() -> None:
+    """При известном виде деятельности решает он: он объявлен реестром.
+
+    Запасной признак — наше чтение отчётности, и ставить его выше факта
+    о регистрации значило бы предпочесть догадку заявлению.
+    """
+    computed = (
+        metric("debt_to_op_profit", "1.0", denominator=Decimal("100")),
+        metric("equity_ratio", "0.6"),
+        metric("cur_liq", "2.5"),
+    )
+    verdict = rsbu(
+        computed=computed,
+        operating_profit=Decimal("100"),
+        okved="64.20",
+        holding_lines=lines("800", "1000", "10"),
+    )
+    said = " ".join(
+        entry.text for entry in verdict.findings if entry.ground == "holding_rsbu_only"
+    )
+    assert "64.20" in said
+    assert "финансовые вложения" not in said
+
+
 # --- четвёртый признак «ноль не означает нуля» ------------------------------
 
 

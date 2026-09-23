@@ -113,9 +113,12 @@ ORDER BY source_rank(s.source)
 LIMIT 1
 """
 
-# Строки заёмных средств комплекта вместе со способом получения: ноль
-# по всем у эмитента с выпусками в обращении означает нераскрытие.
-_DEBT_LINES = """
+# Несколько строк комплекта разом, каждая — с предпочтением источника.
+# Спрашивают этим запросом двое: признак нераскрытого долга (ноль по всем
+# строкам заёмных средств у эмитента с выпусками) и запасной признак
+# холдинга (вложения, активы, выручка). Вопрос у них один — «какие
+# величины стоят в этих строках», — и второго запроса к нему не заводится.
+_LINES = """
 SELECT DISTINCT ON (f.line_code) f.line_code, f.value, s.source
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
@@ -672,6 +675,11 @@ def routing_rows(
             branch=str(card.get("branch_name_rus") or ""),
             group=str(card.get("group_name_rus") or ""),
             okved=okved,
+            holding_lines=(
+                _holding_lines(inn, moment, conn, standard, routing)
+                if standard is Standard.RSBU
+                else None
+            ),
             reporting_unavailable=_why_no_reporting(inn, has_sets)
             if standard is None
             else "",
@@ -953,6 +961,28 @@ def _operating_profit(
     return value
 
 
+def _holding_lines(
+    inn: str,
+    moment: date,
+    conn: PgConnection,
+    standard: Standard,
+    routing: RoutingPolicy,
+) -> dict[str, Decimal | None]:
+    """Строки запасного признака холдинга: вложения, активы, выручка.
+
+    Перечень берётся у методики, а не пишется здесь: строка, названная
+    в коде, разошлась бы со справочником при первой же правке признака.
+    """
+    rule = routing.holdings.fallback
+    codes = [*rule.financial_investments, rule.assets, rule.revenue]
+    rows = fetch_all(
+        _LINES,
+        {"inn": inn, "d": moment, "codes": codes, "standard": standard.value},
+        conn=conn,
+    )
+    return {row["line_code"]: row["value"] for row in rows}
+
+
 def _has_outstanding(events: IssuerEvents | None) -> bool:
     """Есть ли у эмитента выпуски в обращении либо размещаемые."""
     if events is None:
@@ -989,7 +1019,7 @@ def _without_undisclosed_debt(
 
     rule = catalogue.rule
     rows = fetch_all(
-        _DEBT_LINES,
+        _LINES,
         {
             "inn": inn,
             "d": moment,
