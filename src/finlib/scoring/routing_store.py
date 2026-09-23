@@ -32,8 +32,10 @@
 по событиям и рейтингам: они от стандарта не зависят вовсе.
 """
 
+import hashlib
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
@@ -43,6 +45,7 @@ from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.lines import load_lines
 from finlib.scoring.routing import (
+    IssuerType,
     ManualFloor,
     Refinance,
     RoutingPolicy,
@@ -68,7 +71,7 @@ from finlib.sources.cbonds_events import (
     point_order,
 )
 from finlib.sources.cbonds_flows import refinancing
-from finlib.sources.moex_risk import risk_sectors
+from finlib.sources.moex_risk import RiskSector, risk_sectors
 from finlib.standards import Standard, load_standards
 
 logger = logging.getLogger(__name__)
@@ -77,12 +80,24 @@ logger = logging.getLogger(__name__)
 # `eval/cbonds_emitents.py` и складывает на диск; в сеть отсюда не ходим.
 CARDS = Path("data/raw/cbonds/emitents.json")
 
+# **Комплект виден не с отчётной даты, а с даты раскрытия.** При пересчёте
+# истории назад это решает всё: отчётность за 2025 год 15 февраля 2026-го
+# ещё не существовала, и маршрут, построенный по ней на ту дату, был бы
+# предсказанием, а не наблюдением. Настоящей даты раскрытия у массовых
+# данных нет — отсрочка берётся сроком закона (`routing.history.known_from`),
+# и это помечается у каждой точки истории.
 _LATEST = """
 SELECT f.inn, max(f.report_date) AS report_date, max(o.name) AS name
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
+  AND (
+      %(as_of)s::date IS NULL
+      OR f.report_date <= %(as_of)s::date - (
+          CASE WHEN s.reporting_kind = 'interim' THEN %(interim)s ELSE %(annual)s END
+      )
+  )
 GROUP BY f.inn
 """
 
@@ -276,6 +291,8 @@ class RoutingRow:
     # наравне с обычным.
     issuer_type: str = ""
     type_marker: str = ""
+    # Отпечаток доводов маршрута: им разводятся три причины изменения вердикта.
+    fingerprint: str = ""
     # Денежные средства комплекта: знаменатель рефинансирования. Лежат здесь,
     # а не в каждом замере своим запросом: один вопрос — один запрос.
     cash: Decimal | None = None
@@ -436,6 +453,8 @@ def routing_rows(
     conn: PgConnection,
     today: date | None = None,
     blind: frozenset[str] = frozenset(),
+    as_of: date | None = None,
+    memo: dict | None = None,
 ) -> tuple[list[RoutingRow], dict[str, int]]:
     """Собирает входы и вердикты по всем эмитентам; рядом — счётчики отбора.
 
@@ -449,7 +468,22 @@ def routing_rows(
     прячутся: `blind={"defaults"}`. Рейтинги при этом остаются — их прячет
     `blind={"ratings"}`. Ключ — довод замера, а не режим работы: боевой вызов
     его не передаёт, и второго пути к вердикту не появляется.
+
+    **`as_of` строит маршрут на прошлую дату по тому, что было известно
+    на неё.** Отчётность видна с даты раскрытия, а не с отчётной; события
+    и рейтинговые действия — с даты события; признаки карточки истории
+    не имеют вовсе и потому в пересчёте **не участвуют**: сегодняшний признак
+    дефолта, применённый к прошлому году, объявил бы эмитента дефолтным весь
+    год. Пусто — сегодня, и видно всё загруженное.
+
+    **`memo` — память пересчёта, а не кэш расчёта.** Показатели зависят
+    от пары «эмитент, отчётная дата», а не от дня маршрута: при обходе года
+    по неделям один и тот же комплект считался бы пятьдесят раз подряд.
+    Словарь живёт один проход и передаётся снаружи: боевой прогон его
+    не передаёт вовсе, и второго пути к величинам не появляется — путь тот же,
+    просто ответ не спрашивается дважды об одном.
     """
+    memo = memo if memo is not None else {}
     from finlib.metrics.ifrs_store import compute_from_facts
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
     from finlib.scoring.ifrs_store import stop_factors_of
@@ -499,11 +533,20 @@ def routing_rows(
     # уже есть что сказать: эмитент, погасивший долг, из списка молча
     # не исчезает, но в сводные доли не идёт.
     bonds = bond_issuers()
+    disclosed = routing.history.known_from
     ifrs_latest = {
         row["inn"]: (row["report_date"], (row["name"] or row["inn"]).strip())
-        for row in fetch_all(_LATEST, {}, conn=conn)
+        for row in fetch_all(
+            _LATEST,
+            {
+                "as_of": as_of,
+                "annual": disclosed.days(Standard.IFRS, interim=False),
+                "interim": disclosed.days(Standard.IFRS, interim=True),
+            },
+            conn=conn,
+        )
     }
-    rsbu_latest = latest_annual(conn)
+    rsbu_latest = latest_annual(conn, as_of)
     universe = sorted(set(bonds) | set(ifrs_latest) | set(rsbu_latest))
     preference = load_standards().base_standard
     # Комплекты, которые до нас дошли, — независимо от их состояния.
@@ -619,19 +662,42 @@ def routing_rows(
         fired: dict[str, str] = {}
         triggered: tuple[str, ...] = ()
         okved = ""
+        # Показатели зависят от пары «эмитент, отчётная дата», а не от дня
+        # маршрута: при обходе года по неделям один и тот же комплект
+        # считался бы полсотни раз подряд.
+        counted = memo.setdefault("metrics", {})
+        key = (inn, standard.value if standard else "", moment)
         if standard is Standard.IFRS:
-            computed = compute_from_facts(inn, moment, conn, policy)
-            stops = stop_factors_of(inn, moment, computed, conn)
-            triggered = stops.triggered
+            if key not in counted:
+                found = compute_from_facts(inn, moment, conn, policy)
+                counted[key] = (
+                    found,
+                    {},
+                    "",
+                    stop_factors_of(inn, moment, found, conn).triggered,
+                )
+            computed, fired, okved, triggered = counted[key]
             counts["маршрут по МСФО"] += 1
         elif standard is Standard.RSBU:
-            computed, fired, okved = _rsbu_inputs(inn, moment, conn)
-            triggered = tuple(dict.fromkeys(fired))
+            if key not in counted:
+                found, values, activity = _rsbu_inputs(inn, moment, conn)
+                counted[key] = (
+                    found,
+                    values,
+                    activity,
+                    tuple(dict.fromkeys(values)),
+                )
+            computed, fired, okved, triggered = counted[key]
             counts["маршрут по РСБУ"] += 1
             counts["холдингов на одной РСБУ"] += int(routing.holdings.holds(okved))
         else:
             counts["маршрут по событиям и рейтингам"] += 1
-        events = events_of(inn, snapshot, credit, order, defaults)
+        # Выпуски и рейтинги эмитента читаются с диска: перечень один и тот же
+        # на весь проход, а дата маршрута отсекает их уже после чтения.
+        known_events = memo.setdefault("events", {})
+        if inn not in known_events:
+            known_events[inn] = events_of(inn, snapshot, credit, order, defaults)
+        events = known_events[inn]
         # **Ноль по всем строкам заёмных средств у эмитента с выпусками
         # в обращении — нераскрытие, а не отсутствие долга.** Признак внешний:
         # он опирается на перечень выпусков, которого загрузчик не знает,
@@ -654,14 +720,19 @@ def routing_rows(
                 records=() if "defaults" in blind else events.records,
                 ratings=() if "ratings" in blind else events.ratings,
             )
+        if as_of is not None:
+            events = _known_at(events, as_of)
         # Поручительства читаются у всех, а не только у финансирующих
         # структур: у обычного эмитента поручитель в разборе — такое же
         # обстоятельство, как эмитент своей группы. Корзина берётся вторым
         # проходом, а имя нужно уже здесь: формулировка SPV без него говорила
         # бы о группе там, где речь о том, кто отвечает по долгу.
-        secured = guarantees_of(
-            inn, frozenset(routing.events.guarantee_statuses)
-        )
+        backing = memo.setdefault("guarantees", {})
+        if inn not in backing:
+            backing[inn] = guarantees_of(
+                inn, frozenset(routing.events.guarantee_statuses)
+            )
+        secured = backing[inn]
         delivered = (
             fetch_all(
                 _SOURCES,
@@ -755,10 +826,21 @@ def routing_rows(
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
             manual_floor=floor_for(decided, inn, standard),
+            # **Перевод биржи датирован, и в пересчёте он виден с даты
+            # перевода.** Недатированный перевод в историю не идёт вовсе:
+            # поставить его на произвольный день значило бы выдумать событие.
             risk_sector=tuple(
                 replace(risky[item.isin], name=item.name)
                 for item in events.issues
-                if item.isin and item.isin in risky
+                if item.isin
+                and item.isin in risky
+                and (
+                    as_of is None
+                    or (
+                        risky[item.isin].since is not None
+                        and risky[item.isin].since <= as_of
+                    )
+                )
             ),
             routing=routing,
         )
@@ -795,6 +877,7 @@ def routing_rows(
                 guarantor_listed=bool(inputs.get("guarantor_listed")),
                 issuer_type=kind.name if kind is not None else "",
                 type_marker=marker,
+                fingerprint=fingerprint(inputs),
                 cash=cash,
                 refinance=refinance,
                 # **Состав величин строки объявлен стандартом, а не кодом.**
@@ -936,6 +1019,118 @@ def routing_rows(
     return rows, counts
 
 
+# **Доводы, которые не данные, а устройство.** Справочники и день расчёта
+# в отпечаток не входят: первые два — наша методика (их изменение и есть
+# «причина у нас», и она называется версией), третий меняется у каждой точки
+# по построению, и отпечаток от него отличался бы всегда.
+_NOT_DATA = frozenset({"routing", "catalogue", "today"})
+
+
+class UnknownInputError(TypeError):
+    """Довод маршрута, который отпечаток не умеет назвать.
+
+    **Умолчание здесь запрещено.** Пропущенный довод — это изменение, которое
+    произошло и не объяснилось ничем: оно попадёт в беспричинные, то есть
+    в остановку. Лучше упасть на новом доводе, чем молча его не заметить.
+    """
+
+
+def _rendered(value: object) -> str:
+    """Довод маршрута строкой — для отпечатка входов.
+
+    Разбирается только то, что маршруту действительно передаётся; всё
+    остальное — ошибка, а не пропуск.
+    """
+    if value is None or isinstance(value, str | int | float | bool | Decimal | date):
+        return str(value)
+    if isinstance(value, Mapping):
+        return "{" + ";".join(
+            f"{key}={_rendered(value[key])}" for key in sorted(map(str, value))
+        ) + "}"
+    if isinstance(value, tuple | list | set | frozenset):
+        items = sorted(_rendered(item) for item in value)
+        return "[" + ";".join(items) + "]"
+    if isinstance(value, MetricValue):
+        return f"{value.code}={value.value}"
+    if isinstance(value, IssuerEvents):
+        return _rendered(
+            (
+                tuple(
+                    f"{item.emission_id}:{item.status}:{item.defaulted}"
+                    for item in value.issues
+                ),
+                tuple(
+                    f"{item.emission_id}:{item.moment}:{item.met}"
+                    for item in value.records
+                ),
+                tuple(
+                    f"{item.agency}:{item.point}:{item.assigned}"
+                    for item in value.ratings
+                ),
+            )
+        )
+    if isinstance(value, Guarantee):
+        return f"{value.inn}:{value.status}"
+    if isinstance(value, ManualFloor):
+        return f"{value.author}:{value.basket}:{value.decided_on}:{value.valid_until}"
+    if isinstance(value, Refinance):
+        return f"{value.due}:{value.offered}:{value.cash}:{value.unit}"
+    if isinstance(value, IssuerType):
+        return value.code
+    if isinstance(value, RiskSector):
+        return f"{value.isin}:{value.board}:{value.since}"
+    raise UnknownInputError(
+        f"довод маршрута {type(value).__name__} в отпечаток не входит: "
+        "пропущенный довод даёт изменение, которое не объяснится ничем"
+    )
+
+
+def fingerprint(inputs: Mapping[str, object]) -> str:
+    """Отпечаток доводов маршрута: им разводятся три причины изменения.
+
+    **Изменился отпечаток — причина у эмитента; тот же при изменившихся
+    версиях кода и методики — причина у нас; тот же при тех же версиях —
+    беспричинное изменение**, то есть дефект недетерминированности, и это
+    остановка, а не строка отчёта.
+
+    Берётся он в одном месте — там, где доводы и собираются, — и второго
+    пути к нему нет: отпечаток, набранный вторым перечнем, разошёлся бы
+    с первым ровно тогда, когда появился бы новый довод.
+    """
+    said = ";".join(
+        f"{key}={_rendered(inputs[key])}"
+        for key in sorted(inputs)
+        if key not in _NOT_DATA
+    )
+    return hashlib.sha256(said.encode("utf-8")).hexdigest()[:32]
+
+
+def _known_at(events: IssuerEvents, as_of: date) -> IssuerEvents:
+    """События эмитента так, как они были известны на названную дату.
+
+    **Признак карточки истории не имеет, и потому в пересчёт не идёт вовсе.**
+    Сегодняшний признак дефолта, применённый к прошлому году, объявил бы
+    эмитента дефолтным весь год — то есть выдал бы нынешнее знание
+    за наблюдение. Остаются датированные события и рейтинговые действия,
+    случившиеся не позже названного дня; статус выпуска гасится тем же
+    правилом, которым он гасится у замера без событий.
+
+    **Рейтинг восстанавливается на один шаг назад, и не больше.** До даты
+    последнего действия известно лишь то, что нынешнего рейтинга не было;
+    какой был — неизвестно, и оснований по рейтингу на ту дату не ставится.
+    Это не «рейтинга нет», а «рейтинг неизвестен», и разница объявлена здесь.
+    """
+    return replace(
+        events.as_of(as_of),
+        issues=tuple(_without_default(item) for item in events.issues),
+        ratings=tuple(
+            item
+            for item in events.ratings
+            if item.assigned is not None and item.assigned <= as_of
+        ),
+    )
+
+
 def _without_default(issue: Issue) -> Issue:
     """Выпуск без признаков дефолта: для замера маршрута без событий.
 
@@ -1028,7 +1223,13 @@ def _operating_profit(
         {"inn": inn, "d": moment, "code": code, "standard": standard.value},
         conn=conn,
     )
-    if not found:
+    # **Нераскрытая строка величиной не является.** В базе она стоит `NULL`,
+    # и различие это инвариант проекта: подстановка нуля запрещена, а ноль
+    # здесь означал бы операционный убыток — утверждение об эмитенте,
+    # сделанное по величине, которой он не раскрыл. Прежде запрос отдавал
+    # такую строку наравне с раскрытой, и пересчёт истории спотыкался о неё
+    # на первом же периоде, где строка не раскрыта.
+    if not found or found[0]["value"] is None:
         return None
     value, source = Decimal(found[0]["value"]), found[0]["source"]
     if value == 0 and _zero_is_unknown(source):

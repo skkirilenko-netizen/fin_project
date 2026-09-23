@@ -33,12 +33,21 @@ logger = logging.getLogger(__name__)
 
 # Последний отчётный период РСБУ вне карантина. Выборка называет стандарт:
 # запись о комплекте МСФО неотличима на вид от своей.
+# **Комплект виден не с отчётной даты, а с даты раскрытия** — то же правило,
+# что у МСФО (`routing_store._LATEST`), и оно нужно при пересчёте истории
+# назад: отчётность за 2025 год 15 февраля 2026-го ещё не существовала.
 _LATEST = """
 SELECT f.inn, max(f.report_date) AS report_date, max(o.name) AS name
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'rsbu' AND s.is_actual AND s.status <> 'quarantine'
+  AND (
+      %(as_of)s::date IS NULL
+      OR f.report_date <= %(as_of)s::date - (
+          CASE WHEN s.reporting_kind = 'interim' THEN %(interim)s ELSE %(annual)s END
+      )
+  )
 GROUP BY f.inn
 """
 
@@ -48,14 +57,30 @@ GROUP BY f.inn
 # правке правила выборки — предпочтения источника, например.
 
 
-def latest_annual(conn: PgConnection) -> dict[str, tuple[date, str]]:
+def latest_annual(
+    conn: PgConnection, as_of: date | None = None
+) -> dict[str, tuple[date, str]]:
     """ИНН → отчётная дата свежего комплекта РСБУ и наименование организации.
 
     Один запрос на прогон, а не на эмитента: эмитентов сотни, а вопрос один.
+
+    `as_of` называет день, на который строится маршрут: комплект виден с даты
+    раскрытия, а не с отчётной. `None` — сегодня, и видно всё загруженное.
     """
+    from finlib.scoring.routing import load_routing
+
+    known = load_routing().history.known_from
     return {
         row["inn"]: (row["report_date"], (row["name"] or row["inn"]).strip())
-        for row in fetch_all(_LATEST, {}, conn=conn)
+        for row in fetch_all(
+            _LATEST,
+            {
+                "as_of": as_of,
+                "annual": known.days(Standard.RSBU, interim=False),
+                "interim": known.days(Standard.RSBU, interim=True),
+            },
+            conn=conn,
+        )
     }
 
 

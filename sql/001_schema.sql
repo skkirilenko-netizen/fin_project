@@ -916,4 +916,65 @@ GROUP BY f.inn, f.standard, f.report_date;
 COMMENT ON VIEW period_quality IS
     'Доверие к периоду: проверялся ли он блокирующими контролями в собственном комплекте';
 
+-- История корзин и журнал прогонов ------------------------------------------
+
+-- **Отказ источника виден до перечня изменений, а не молчит.** «Изменений нет»
+-- при недошедшей доставке и «изменений нет» при полной — разные сведения,
+-- а выглядят одинаково. Поэтому прогон записывает не только то, что вышло,
+-- но и то, что не дошло, и сколько запросов на это потрачено.
+CREATE TABLE IF NOT EXISTS routing_run (
+    id           bigserial PRIMARY KEY,
+    -- Наблюдение и пересчёт — разные роды точек, и сравнивать их между собой
+    -- нельзя: пересчёт знает меньше по устройству (признаки карточки истории
+    -- не имеют и в него не идут), и разница читалась бы как изменение
+    -- у эмитента.
+    kind         text NOT NULL CHECK (kind IN ('run', 'backfill')),
+    as_of        date NOT NULL,
+    started_at   timestamptz NOT NULL DEFAULT now(),
+    finished_at  timestamptz,
+    status       text NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running', 'done', 'failed')),
+    code_version text,
+    -- Версии справочников: без них расхождение двух прогонов с одинаковой
+    -- вероятностью означает и правку методики, и изменение данных.
+    methodology  jsonb,
+    -- Здоровье источников и потраченные запросы: что прошло, что отказало.
+    sources      jsonb,
+    note         text
+);
+
+COMMENT ON TABLE routing_run IS
+    'Журнал прогонов маршрута: когда, чем, что дошло от источников и сколько это стоило';
+
+-- Вердикт эмитента на дату. Записи не переписываются: история — доказательная
+-- база, и «вчера было иначе» объясняется только ею.
+CREATE TABLE IF NOT EXISTS routing_history (
+    id           bigserial PRIMARY KEY,
+    run_id       bigint REFERENCES routing_run(id),
+    inn          text NOT NULL,
+    as_of        date NOT NULL,
+    kind         text NOT NULL CHECK (kind IN ('run', 'backfill')),
+    -- Стандарт бывает не назван вовсе: маршрут строится и по одним событиям.
+    standard     text CHECK (standard IN ('rsbu', 'ifrs')),
+    basket       text NOT NULL,
+    subgroup     text NOT NULL DEFAULT '',
+    grounds      text[] NOT NULL DEFAULT '{}',
+    -- **Отпечаток доводов маршрута** — им и разводятся три причины изменения:
+    -- изменился отпечаток — причина у эмитента; тот же при изменившихся
+    -- версиях — причина у нас; тот же при тех же версиях — беспричинное
+    -- изменение, то есть дефект недетерминированности.
+    fingerprint  text NOT NULL,
+    report_date  date,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT routing_history_uniq UNIQUE (inn, as_of, kind)
+);
+
+CREATE INDEX IF NOT EXISTS routing_history_inn_idx
+    ON routing_history (inn, as_of);
+
+COMMENT ON TABLE routing_history IS
+    'Вердикт эмитента на дату: корзина, подгруппа, основания и отпечаток входов';
+COMMENT ON COLUMN routing_history.kind IS
+    'run — наблюдение прогоном, backfill — пересчёт назад; сравнивать между собой нельзя';
+
 COMMIT;

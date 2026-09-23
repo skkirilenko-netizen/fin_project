@@ -183,10 +183,13 @@ def test_enum_matches_schema_check() -> None:
     schema = (Path(__file__).resolve().parents[1] / "sql" / "001_schema.sql").read_text(
         encoding="utf-8"
     )
-    # src_file, fact_report, metric_value, assessment и журнал ручных решений
-    # о маршруте: всякая выборка по ИНН называет стандарт, и решение человека
-    # о группе по МСФО о комплекте РСБУ не говорит.
-    assert schema.count("standard IN ('rsbu', 'ifrs')") == 5
+    # src_file, fact_report, metric_value, assessment, журнал ручных решений
+    # о маршруте и история корзин: всякая выборка по ИНН называет стандарт,
+    # и решение человека о группе по МСФО о комплекте РСБУ не говорит.
+    # В истории стандарт бывает не назван вовсе — маршрут строится и по одним
+    # событиям, — и потому колонка допускает `NULL`, а перечень значений
+    # остаётся тем же.
+    assert schema.count("standard IN ('rsbu', 'ifrs')") == 6
     assert {item.value for item in Standard} == {"rsbu", "ifrs"}
 
 

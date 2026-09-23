@@ -239,6 +239,49 @@ class Instruments(BaseModel):
         return self.named_apart.get(subkind.strip(), self.default)
 
 
+class KnownFrom(BaseModel):
+    """С какого дня отчётность считается известной при пересчёте назад.
+
+    **Настоящей даты раскрытия у массовых данных нет вовсе**, и это назван­ное
+    предположение: ГИР БО дату публикации отдаёт, документ МСФО несёт дату
+    аудиторского заключения, а агрегатор не сообщает её ничем. Сроки взяты
+    у закона — ФЗ № 402-ФЗ статья 18 и ФЗ № 208-ФЗ статья 4.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rsbu_annual_days: int = Field(gt=0)
+    rsbu_interim_days: int = Field(gt=0)
+    ifrs_annual_days: int = Field(gt=0)
+    ifrs_interim_days: int = Field(gt=0)
+    status: str = Field(pattern="^(preliminary|calibrated)$")
+    origin: str = Field(min_length=1)
+
+    def days(self, standard: Standard, interim: bool) -> int:
+        """Отсрочка в днях: своя у стандарта и своя у промежуточной."""
+        if standard is Standard.RSBU:
+            return self.rsbu_interim_days if interim else self.rsbu_annual_days
+        return self.ifrs_interim_days if interim else self.ifrs_annual_days
+
+
+class History(BaseModel):
+    """Правила пересчёта истории корзин назад.
+
+    **Шаг — неделя плюс точка на каждую дату события.** Дневное разрешение
+    есть только у дефолтов и переводов биржи, и там оно и нужно; у отчётности
+    четыре точки в год, у рейтингов — единицы действий.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    known_from: KnownFrom
+    step_days: int = Field(gt=0)
+    depth_days: int = Field(gt=0)
+    window_days: int = Field(gt=0)
+    window_status: str = Field(pattern="^(preliminary|calibrated)$")
+    origin: str = Field(min_length=1)
+
+
 class Tolerance(BaseModel):
     """Зона нечувствительности у конечной точки калибровочной шкалы.
 
@@ -662,6 +705,9 @@ class RoutingPolicy(BaseModel):
     tolerance: Tolerance
     # Виды инструмента, называемые отдельно от биржевой облигации.
     instruments: Instruments
+    # Правила пересчёта истории корзин назад: дата известности, шаг, глубина,
+    # окно отмены.
+    history: History
     # Типы эмитента в порядке предпочтения: первый опознавший и определяет.
     # Порядок — часть правила: структурный эмитент бывает помечен и признаком
     # финансирующей структуры, и очередь у них разная.
