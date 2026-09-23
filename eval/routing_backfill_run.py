@@ -121,6 +121,10 @@ def main() -> int:
     seen: dict[str, str] = {}
     moves = Counter()
     by_date: list[tuple[date, int, int]] = []
+    # **Пересчёт, не сказавший о своей неполноте, выдаёт её за наблюдение.**
+    # Основание, построенное на признаке без истории, говорит о сегодняшнем
+    # знании, а не о наблюдении того дня, и доля таких печатается.
+    restored = Counter()
     run_id = None
     with connection() as conn:
         if write:
@@ -152,6 +156,8 @@ def main() -> int:
                     changed += 1
                     moves[row.inn] += 1
                 seen[row.inn] = key
+                for ground in row.verdict.grounds:
+                    restored[routing.restored(ground)] += 1
                 if write:
                     execute(
                         _POINT,
@@ -204,6 +210,21 @@ def main() -> int:
     print(
         f"\n**Сменили корзину хотя бы раз {len(moves)} из {len(seen)}**, "
         f"не менялись ни разу {never}.\n"
+    )
+    dated, current = restored["dated"], restored["current"]
+    whole = dated + current
+    print("## Чем восстановлена история\n")
+    print(
+        f"Оснований за весь пересчёт **{whole}**, из них восстановлено "
+        f"своими датами **{dated}** ({dated / whole * 100:.1f} %), взято "
+        f"нынешними данными **{current}** ({current / whole * 100:.1f} %).\n"
+    )
+    print(
+        "**Второе — не наблюдение, а сегодняшнее знание.** Признак карточки, "
+        "статус выпуска, наш карантин и наша оценка истории не имеют вовсе, "
+        "и основание, на них построенное, говорит о том, что известно "
+        "сегодня. Пересчёт, не сказавший об этом, выдал бы свою неполноту "
+        "за наблюдение.\n"
     )
     return 0
 

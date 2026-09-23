@@ -694,6 +694,12 @@ class RoutingPolicy(BaseModel):
     # поручитель. Перечень один на замер и на выгрузку — второй экземпляр
     # разошёлся бы при первом же новом основании.
     ground_sources: dict[str, str] = Field(min_length=1)
+    # **Есть ли у источника история.** `dated` — состояние на прошлую дату
+    # восстанавливается его же датами; `current` — истории нет вовсе,
+    # и в пересчёте он берётся нынешним. Доля вторых печатается: пересчёт,
+    # не сказавший о своей неполноте, выдаёт её за наблюдение.
+    source_history: dict[str, str] = Field(min_length=1)
+    source_history_origin: str = Field(min_length=1)
     universe: Universe
     severity: Severity
     systemic: Systemic
@@ -807,6 +813,22 @@ class RoutingPolicy(BaseModel):
             for item in self.stop_factor_muted
             if branch in item.branches
         )
+
+    def restored(self, ground: str) -> str:
+        """Восстанавливается ли основание на прошлую дату: `dated` либо `current`.
+
+        **Пересчёт, не сказавший о своей неполноте, выдаёт её за наблюдение.**
+        Признак карточки, статус выпуска, наш карантин и наша оценка истории
+        не имеют вовсе: основание, на них построенное, говорит о сегодняшнем
+        знании, а не о наблюдении того дня.
+        """
+        source = self.ground_sources.get(ground)
+        if source is None:
+            raise KeyError(
+                f"у основания {ground} не объявлен источник: без него "
+                "нельзя сказать, восстанавливается ли оно на прошлую дату"
+            )
+        return self.source_history[source]
 
     def type_of(self, card: Mapping[str, object]) -> tuple[IssuerType | None, str]:
         """Тип эмитента по карточке источника и признак, которым он опознан.
