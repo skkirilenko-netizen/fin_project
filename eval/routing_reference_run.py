@@ -85,7 +85,8 @@ def main() -> int:
     # разошёлся бы с первым, и увидеть это было бы нечем.
     known = cards()
     bonds = bond_issuers()
-    left, unconfirmed = exclusions(known, load_routing())
+    routing = load_routing()
+    left, unconfirmed = exclusions(known, routing)
 
     print("# Эталон списка наблюдения: уровень проекта\n")
     print(
@@ -95,6 +96,15 @@ def main() -> int:
     )
     divergences: list[str] = []
     checked = 0
+    # **Код ожидания — имя, и двух одинаковых быть не должно.** Отчёт печатает
+    # их построчно, и два ожидания под одним кодом читались бы как одно
+    # проверенное дважды: первое из них при этом можно удалить, не заметив.
+    codes = [item["code"] for item in declared["project"]]
+    duplicated = sorted({code for code in codes if codes.count(code) > 1})
+    if duplicated:
+        divergences.append(
+            f"эталон: код ожидания повторяется — {', '.join(duplicated)}"
+        )
     for item in declared["project"]:
         expect, code = item["expect"], item["code"]
         issuers = list(item.get("issuers") or ())
@@ -193,6 +203,23 @@ def main() -> int:
                         f"{code}: у {row.name} ({inn}) основание "
                         f"{item['ground']} не сработало"
                     )
+            # **«Не ниже разбора» и «не разбор» — два края одного ожидания.**
+            # Первое ловит пропажу обстоятельства, второе — разрастание
+            # правила: «Разбор», выросший до половины списка, первым
+            # не ловится вовсе.
+            if expect == "not_below_review":
+                order = routing.basket(row.verdict.basket).order
+                if order > routing.basket("review").order:
+                    divergences.append(
+                        f"{code}: {row.name} ({inn}) в "
+                        f"«{row.verdict.basket_name}», а ожидалось не ниже "
+                        "разбора"
+                    )
+            if expect == "not_review" and row.verdict.basket == "review":
+                divergences.append(
+                    f"{code}: {row.name} ({inn}) в «Разборе», "
+                    "а разбор о нём сказан быть не мог"
+                )
             if expect == "not_clear" and row.verdict.basket == "clear":
                 divergences.append(
                     f"{code}: {row.name} ({inn}) в «Без внимания», "
