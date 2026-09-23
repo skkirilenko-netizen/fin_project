@@ -79,6 +79,13 @@ def fetch(path: str, name: str, params: dict[str, Any] | None = None) -> dict:
     # срезов — тысяча обращений, и падение на середине оставляет диск
     # с половиной дней: то же основание, по которому повтор заведён
     # у доставки Cbonds.
+    #
+    # **Сбой на стороне источника — тот же обрыв, а не отказ.** Ответ 5xx
+    # означает, что источнику сейчас плохо, и через несколько секунд он
+    # отвечает как ни в чём не бывало: проверено в ночь на 24.09.2026, когда
+    # одиночный 502 остановил доставку на 2 946-м запросе, а тот же день
+    # тремя пробами подряд отдался за секунду. Ответ 4xx повторять незачем:
+    # он о нашем запросе, и вторая попытка даст то же самое.
     response = None
     for attempt in (1, 2, 3):
         pace.wait()
@@ -91,7 +98,18 @@ def fetch(path: str, name: str, params: dict[str, Any] | None = None) -> dict:
                 timeout=30.0,
                 headers={"User-Agent": AGENT},
             )
-            break
+            if response.status_code < 500:
+                break
+            logger.error(
+                "ISS %s: источник ответил %d, попытка %d",
+                path,
+                response.status_code,
+                attempt,
+            )
+            if attempt == 3:
+                raise MoexError(
+                    f"ISS {path}: {response.status_code} третий раз подряд"
+                )
         except httpx.HTTPError as failure:
             logger.error(
                 "ISS %s: обрыв связи (%s), попытка %d",
@@ -101,7 +119,7 @@ def fetch(path: str, name: str, params: dict[str, Any] | None = None) -> dict:
             )
             if attempt == 3:
                 raise MoexError(f"ISS {path}: связь обрывается третий раз") from failure
-            time.sleep(5.0 * attempt)
+        time.sleep(5.0 * attempt)
     if response is None or response.status_code != 200:
         code = response.status_code if response is not None else "нет ответа"
         text = response.text[:200] if response is not None else ""
