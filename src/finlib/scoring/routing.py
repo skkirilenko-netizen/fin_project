@@ -186,6 +186,20 @@ class MutedStopFactor(BaseModel):
     origin: str = Field(min_length=1)
 
 
+def _years_back(today: date, years: int) -> date:
+    """Та же дата N лет назад; 29 февраля сдвигается на 28-е.
+
+    Календарь правилу методики не подчиняется, а падать на нём правило
+    не вправе. Одна реализация на оба порога давности — дефолта и отзыва
+    рейтинга: второе выражение того же расходится с первым раз в четыре года
+    и молча.
+    """
+    try:
+        return today.replace(year=today.year - years)
+    except ValueError:
+        return today.replace(year=today.year - years, month=2, day=28)
+
+
 class Events(BaseModel):
     """Событийный слой: как дефолт и рейтинг входят в маршрут.
 
@@ -204,6 +218,11 @@ class Events(BaseModel):
     # и порог предварителен — наблюдений семнадцать.
     default_stale_years: int = Field(gt=0)
     default_stale_origin: str = Field(min_length=1)
+    # Давность отзыва рейтинга — год, и она короче дефолтной намеренно:
+    # дефолт есть событие с последствиями, отзыв — исчезновение мнения,
+    # и через год это данность, а не перемена.
+    rating_withdrawn_stale_years: int = Field(gt=0)
+    rating_withdrawn_origin: str = Field(min_length=1)
     # Поручительство и оферта — разные обязательства: первое о долге, второе
     # о ликвидности, и корзину поручителя по оферте брать нельзя.
     guarantee_statuses: tuple[str, ...] = Field(min_length=1)
@@ -222,12 +241,11 @@ class Events(BaseModel):
         29 февраля сдвигается на 28-е: календарь правилу методики
         не подчиняется, а падать на нём правило не вправе.
         """
-        try:
-            return today.replace(year=today.year - self.default_stale_years)
-        except ValueError:
-            return today.replace(
-                year=today.year - self.default_stale_years, month=2, day=28
-            )
+        return _years_back(today, self.default_stale_years)
+
+    def rating_stale_before(self, today: date) -> date:
+        """Дата, раньше которой отзыв рейтинга считается давним."""
+        return _years_back(today, self.rating_withdrawn_stale_years)
 
 
 class Refinancing(BaseModel):
@@ -994,6 +1012,7 @@ def route(
         review.extend(_rating_findings(events, routing))
         attention.extend(watched)
         attention.extend(_rating_outlook_adverse(events, routing))
+        attention.extend(_rating_withdrawn(events, routing, today or date.today()))
         notes.extend(referenced)
     if financing_structure:
         # **Поручитель вне списка — не то же самое, что поручителя нет.**
@@ -1608,6 +1627,46 @@ def _rating_outlook_adverse(events: object, routing: RoutingPolicy) -> list[Find
                 )
             )
     return found
+
+
+def _rating_withdrawn(
+    events: object, routing: RoutingPolicy, today: date
+) -> list[Finding]:
+    """Основание внимания: кредитные рейтинги отозваны всеми агентствами.
+
+    **Отзыв — исчезновение мнения, а не суждение о риске.** Агентство,
+    снимая рейтинг, об эмитенте не говорит ничего: причину источник
+    не раскрывает, а причин две и они противоположны — инициатива агентства,
+    у которого не стало сведений, и окончание договора с эмитентом. Поэтому
+    корзина «Внимание», а не «Разбор», и формулировка называет нераскрытость
+    причины прямо: без неё читатель достроит её сам.
+
+    **Обстоятельство — перемена, и потому отсутствие рейтинга сюда не входит.**
+    У эмитента, которого не оценивали никогда, мнение не исчезало.
+
+    **Неизвестная дата корзину не понижает** — то же правило, что у дефолта:
+    решение по отсутствию данных было бы решением ни о чём.
+    """
+    unrated = getattr(events, "left_unrated", None)
+    left, moment = unrated() if unrated is not None else (False, None)
+    if not left:
+        return []
+    if moment is not None and moment < routing.events.rating_stale_before(today):
+        return []
+    agencies = sorted({item.agency for item in getattr(events, "revoked", ())})
+    named = ", ".join(agencies) if agencies else "агентство источник не называет"
+    return [
+        Finding(
+            "rating_withdrawn",
+            "rating",
+            routing.say(
+                "rating_withdrawn",
+                "" if moment is not None else "undated",
+                agencies=named,
+                date=f"{moment:%d.%m.%Y}" if moment is not None else "",
+            ),
+        )
+    ]
 
 
 def _spoken_for(

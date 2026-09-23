@@ -75,6 +75,84 @@ def spv_issuers() -> tuple[set[str], int]:
     )
 
 
+def _ratings_section(rows: tuple, routing) -> None:  # noqa: ANN001
+    """Рейтинг: отозван, не было вовсе, есть — три разных сведения.
+
+    **Отсутствие рейтинга и отзыв рейтинга — разные обстоятельства, и здесь
+    они разведены.** Отзыв означает, что мнение было и исчезло; отсутствие —
+    что его не было. Первое стало основанием корзины, второе не стало ничем
+    и печатается замером: решение о нём за человеком, а молчание читалось бы
+    как «таких нет».
+
+    Считается только по эмитентам с выпусками в обращении: маршрут
+    спрашивает, нужен ли человек, а нужен он там, где есть долг.
+    """
+    with_bonds = [item for item in rows if item.has_bonds]
+    known = [
+        item
+        for item in with_bonds
+        if item.events is not None and item.events.ratings_known
+    ]
+    revoked: Counter[str] = Counter()
+    never: Counter[str] = Counter()
+    rated: Counter[str] = Counter()
+    stale = 0
+    edge = routing.events.rating_stale_before(date.today())
+    for item in known:
+        left, moment = item.events.left_unrated()
+        if left:
+            revoked[item.verdict.basket] += 1
+            if moment is not None and moment < edge:
+                stale += 1
+        elif item.events.never_rated:
+            never[item.verdict.basket] += 1
+        else:
+            rated[item.verdict.basket] += 1
+
+    print("\n## Рейтинг: отозван, не было вовсе, действует\n")
+    print(
+        f"Снимок рейтингов есть у **{len(known)}** эмитентов с выпусками "
+        f"в обращении из {len(with_bonds)}; у остальных снимка нет на диске, "
+        "и о них здесь не говорится ничего — «рейтинга нет» и «мы не спросили» "
+        "разные сведения.\n"
+    )
+    print(
+        "**Отзыв и отсутствие — разные обстоятельства.** Отзыв означает, что "
+        "мнение было и исчезло, и он стал основанием «Внимания» "
+        f"(`rating_withdrawn`, давность {routing.events.rating_withdrawn_stale_years} "
+        "год). Отсутствие означает, что мнения не было: у эмитента, которого "
+        "не оценивали никогда, ничего не переменилось, и основанием это "
+        "не объявлено. Ниже — сколько их и где они стоят.\n"
+    )
+    print("| Что с рейтингом | Эмитентов | " + " | ".join(
+        basket.name for basket in routing.ordered()
+    ) + " |")
+    print("|---|---|" + "---|" * len(routing.ordered()))
+    for title, counts in (
+        ("отозваны всеми агентствами", revoked),
+        ("не было вовсе (насколько видно источнику)", never),
+        ("действует хотя бы один", rated),
+    ):
+        cells = " | ".join(
+            str(counts.get(basket.code, 0)) for basket in routing.ordered()
+        )
+        print(f"| {title} | {sum(counts.values())} | {cells} |")
+    print(
+        f"\nИз отозванных давность старше порога у **{stale}** — основания "
+        "они не дают: через год отсутствие рейтинга уже не перемена, "
+        "а данность.\n"
+    )
+    print(
+        "**Чего замер не говорит.** Почему рейтинг отозван, источник "
+        "не сообщает вовсе: отзыв по инициативе агентства и отзыв "
+        "по окончании договора с эмитентом — разные вещи, и различить их "
+        "этим источником нельзя. Поэтому формулировка основания называет "
+        "нераскрытость причины прямо. Упреждение правила измерить пока "
+        "нечем: история отзывов начинается с ежедневных снимков "
+        "от 22.09.2026, а даты берутся из карточки.\n"
+    )
+
+
 def main() -> int:
     """Печатает распределение по корзинам."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
@@ -237,6 +315,8 @@ def main() -> int:
         cap = caps.get(code, "—")
         where = "разбор" if routing.severity.severe(cap) else "внимание"
         print(f"| {factor_names.get(code, code)} | {cap} | {where} | {count} |")
+
+    _ratings_section(rows, routing)
 
     for basket in routing.ordered():
         found = grounds.get(basket.code)

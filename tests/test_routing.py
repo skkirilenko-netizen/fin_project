@@ -1130,3 +1130,126 @@ def test_a_human_decision_can_ask_for_review() -> None:
         today=date(2026, 5, 1),
     )
     assert verdict.basket == "review"
+
+
+def rating(point: str, assigned: date, agency: str = "НРА"):
+    """Кредитный рейтинг агентства; «Withdrawn» — отозванный."""
+    from finlib.sources.cbonds_events import Rating
+
+    return Rating(
+        agency=agency,
+        scale="Национальная кредитная рейтинговая шкала для РФ",
+        point=point,
+        category=point.replace("ru", ""),
+        outlook="Стабильный",
+        assigned=assigned,
+        order=5,
+        credit=True,
+    )
+
+
+def rated(*ratings) -> object:
+    """Эмитент со снимком рейтингов: «снимка нет» отличается от «рейтинга нет»."""
+    from finlib.sources.cbonds_events import IssuerEvents
+
+    return IssuerEvents(inn="1", ratings=tuple(ratings), ratings_known=True)
+
+
+def test_ratings_withdrawn_by_everyone_ask_for_attention() -> None:
+    """Отзыв всеми агентствами — «Внимание», а не «Разбор».
+
+    Причину отзыва источник не раскрывает вовсе, а причин две
+    и они противоположны: инициатива агентства и окончание договора
+    с эмитентом. Разбор объявил бы риском то, что риском не объявлено.
+    """
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        events=rated(
+            rating("Withdrawn", date(2026, 6, 2)),
+            rating("Withdrawn", date(2026, 7, 1), agency="Эксперт РА"),
+        ),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("rating_withdrawn",)
+    # Нераскрытость причины названа прямо: без неё отзыв читается как
+    # суждение агентства об эмитенте, а им он не является.
+    assert "причина отзыва источником не раскрыта" in verdict.details[0]
+
+
+def test_a_stale_withdrawal_is_no_longer_a_change() -> None:
+    """Отзыв старше года — данность, а не перемена.
+
+    У «Вертолётов России» рейтинги сняты 23.12.2022, и обстоятельством
+    это быть перестало: отзыв последствий не имеет, и через год отсутствие
+    рейтинга ничем не отличается от отсутствия у того, кого не оценивали.
+    """
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        events=rated(rating("Withdrawn", date(2022, 12, 23))),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.basket == "clear"
+
+
+def test_one_live_rating_is_not_a_withdrawal() -> None:
+    """Пока хоть один рейтинг действует, мнение не исчезло."""
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        events=rated(
+            rating("Withdrawn", date(2026, 6, 2)),
+            rating("ruA", date(2026, 7, 1), agency="Эксперт РА"),
+        ),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.basket == "clear"
+
+
+def test_never_rated_is_not_the_same_as_withdrawn() -> None:
+    """Отсутствие рейтинга обстоятельством не объявлено, и это решение.
+
+    Отзыв означает, что мнение было и исчезло; отсутствие — что его
+    не было, и у малого эмитента это обычное положение дел. Смешав их,
+    основание объявило бы обстоятельством свойство половины рынка.
+    """
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        events=rated(),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.basket == "clear"
+
+
+def test_an_undated_withdrawal_still_asks() -> None:
+    """Неизвестная давность корзину не понижает — как и у дефолта."""
+    verdict = route(
+        healthy(),
+        unit=UNIT,
+        quarantined=False,
+        events=rated(rating("Withdrawn", None)),
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.grounds == ("rating_withdrawn",)
+    assert "даты отзыва и причины источник не приводит" in verdict.details[0]
+
+
+def test_a_snapshot_we_do_not_have_says_nothing() -> None:
+    """«Снимка нет» и «рейтинга нет» — разные сведения, и путать их нельзя."""
+    from finlib.sources.cbonds_events import IssuerEvents
+
+    events = IssuerEvents(inn="1", ratings=(), ratings_known=False)
+    assert not events.never_rated
+    assert events.left_unrated() == (False, None)
