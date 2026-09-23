@@ -432,6 +432,10 @@ class Refinancing(BaseModel):
     cover_ratio: Decimal = Field(gt=0)
     origin: str = Field(min_length=1)
     calibration_status: str = Field(pattern="^(preliminary|calibrated)$")
+    # Основания, которые срабатывают от движения окна, а не от новых данных:
+    # платёж, до которого оставалось тринадцать месяцев, через неделю в окно
+    # попадает. Отчёт изменений называет это причиной, а не следствием.
+    window_driven: tuple[str, ...] = Field(min_length=1)
 
 
 class HoldingFallback(BaseModel):
