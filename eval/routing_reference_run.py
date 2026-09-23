@@ -220,11 +220,15 @@ def main() -> int:
             if expect == "unit_named":
                 # Сверяет та же функция, что документ: вопрос у трёх выходов
                 # один — не напечатана ли единица чужого комплекта.
-                printed = " ".join(
-                    entry.text
-                    for entry in tuple(row.verdict.findings) + tuple(row.verdict.notes)
-                )
-                wrong = foreign_units(printed, row.unit)
+                # Основание, перенесённое от поручителя, названо в его
+                # единице: сверяется каждое со своей, а не все с единицей
+                # строки. Свалить их в одну строку значило бы объявить
+                # расхождением верную печать.
+                wrong = [
+                    name
+                    for unit, text in row.verdict.by_unit(row.unit)
+                    for name in foreign_units(text, unit)
+                ]
                 if wrong:
                     divergences.append(
                         f"{code}: у {row.name} ({inn}) напечатана единица "

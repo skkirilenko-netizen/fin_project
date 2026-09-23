@@ -131,12 +131,13 @@ def main() -> int:
             # **Единица сверяется у каждой строки той же функцией, что
             # у документа.** Выгрузка печатала мимо проверки, и контур получал
             # миллионы, подписанные тысячами.
-            printed = " ".join(
-                [unit, *values]
-                + [entry.text for entry in verdict.findings]
-                + [entry.text for entry in verdict.notes]
-            )
-            wrong = foreign_units(printed, unit)
+            # Основание, перенесённое от поручителя, названо в его единице,
+            # и сверяется оно со своей: величина чужая, и единица у неё чужая.
+            wrong = foreign_units(" ".join([unit, *values]), unit) + [
+                name
+                for group, text in verdict.by_unit(unit)
+                for name in foreign_units(text, group)
+            ]
             if wrong:
                 raise ValueError(
                     f"{item.name} ({item.inn}): напечатана единица "

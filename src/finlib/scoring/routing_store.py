@@ -547,6 +547,12 @@ def routing_rows(
     # Доводы маршрута по каждому эмитенту: второй проход добавляет к ним
     # обстоятельство другого эмитента, а не набирает перечень заново.
     given: dict[str, dict[str, object]] = {}
+    # **Кто в списке — известно до маршрута, и сверяется это по ИНН.**
+    # Корзина поручителя берётся вторым проходом, а вопрос «есть ли он
+    # в списке вообще» решается перечнем и не требует его вердикта. Прежде
+    # ответа на него не было вовсе, и формулировка объявляла поручителя
+    # отсутствующим по одному тому, что имя известно.
+    listed = {inn for inn in universe if inn not in skip}
     for inn in universe:
         if inn in skip:
             counts["вышло из списка"] += 1
@@ -691,6 +697,13 @@ def routing_rows(
             stop_factor_values=fired,
             financing_structure=inn in spv,
             guarantor=", ".join(sorted({item.name for item in secured})),
+            guarantor_inns=", ".join(
+                sorted({item.inn for item in secured if item.inn})
+            )
+            or "",
+            guarantor_listed=any(
+                item.inn in listed and item.inn != inn for item in secured
+            ),
             operating_profit=(
                 _operating_profit(inn, moment, conn, standard)
                 if standard is not None
@@ -779,6 +792,13 @@ def routing_rows(
     # у которых поручитель вообще есть в списке, ничего не значит.
     counts["пар с поручителем в списке"] = 0
     counts["поднято по поручителю"] = 0
+    # **Корзина, взятая у поручителя, обязана пережить третий проход.** Групповой
+    # контур маршрутизирует строку заново от исходных доводов, и вердикт SPV,
+    # полученный у поручителя, при этом терялся: у Газпром Капитала возвращался
+    # разбор с формулировкой «поручитель в списке отсутствует». Поэтому
+    # поручитель запоминается, и после повторной маршрутизации корзина берётся
+    # у него снова.
+    led: dict[str, RoutingRow] = {}
     secured_rows: list[RoutingRow] = []
     for item in rows:
         backing = [
@@ -799,6 +819,7 @@ def routing_rows(
             # Финансирующая структура собой не оценивается: её корзина —
             # корзина того, кто отвечает по её долгу.
             counts["из них корзина взята у поручителя"] += 1
+            led[item.inn] = heaviest
             secured_rows.append(
                 replace(
                     item,
@@ -808,6 +829,7 @@ def routing_rows(
                         heaviest.verdict,
                         item.group,
                         routing,
+                        heaviest.unit,
                     ),
                 )
             )
@@ -863,18 +885,24 @@ def routing_rows(
                 lifted.append(item)
                 continue
             counts["названо справочно по группе"] += 1
-            lifted.append(
-                replace(
-                    item,
-                    verdict=route(
-                        item.computed,
-                        **{
-                            **given[item.inn],
-                            "group_under_review": (item.group, leader.name),
-                        },
-                    ),
-                )
+            again = route(
+                item.computed,
+                **{
+                    **given[item.inn],
+                    "group_under_review": (item.group, leader.name),
+                },
             )
+            backing = led.get(item.inn)
+            if backing is not None:
+                again = led_by_guarantor(
+                    again,
+                    backing.name,
+                    backing.verdict,
+                    item.group,
+                    routing,
+                    backing.unit,
+                )
+            lifted.append(replace(item, verdict=again))
         rows = lifted
     return rows, counts
 

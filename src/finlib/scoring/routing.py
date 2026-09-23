@@ -49,7 +49,7 @@ approved`); величины остаются непроверенными (`thr
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
@@ -228,6 +228,10 @@ class Events(BaseModel):
     guarantee_statuses: tuple[str, ...] = Field(min_length=1)
     offer_statuses: tuple[str, ...] = Field(min_length=1)
     guarantee_origin: str = Field(min_length=1)
+    # Статусы выпуска, при которых признак дефолта — кредитная история:
+    # бумаги больше нет, и обстоятельством настоящего он не является.
+    repaid_statuses: tuple[str, ...] = Field(min_length=1)
+    repaid_origin: str = Field(min_length=1)
     credit_scales: dict[str, str] = Field(min_length=1)
     credit_scales_origin: str = Field(min_length=1)
     review_categories: tuple[str, ...] = Field(min_length=1)
@@ -717,6 +721,14 @@ class Finding:
     ground: str
     subject: str
     text: str
+    # **Единица того комплекта, о котором говорит величина.** Пусто — величина
+    # своя, и единица у неё единица строки. Непустой она бывает у оснований,
+    # перенесённых от другого эмитента: корзина финансирующей структуры
+    # берётся у поручителя вместе с его основаниями, а отчётность его
+    # составлена в своей единице. Без этого поля проверка печати читала бы
+    # миллионы поручителя как единицу строки — то есть ровно как ошибку
+    # в тысячу раз, против которой она и заведена.
+    unit: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,6 +766,21 @@ class Verdict:
     def details(self) -> tuple[str, ...]:
         """Основания словами — в порядке, в каком сработали."""
         return tuple(item.text for item in self.findings)
+
+    def by_unit(self, own: str) -> tuple[tuple[str, str], ...]:
+        """Тексты вердикта, разложенные по единице своего комплекта.
+
+        **Проверять печать деньгами обязан каждый выход, и проверять её надо
+        у той единицы, о которой величина говорит.** Основание, перенесённое
+        от поручителя, названо в его единице, и сверять его с единицей строки
+        значило бы объявить расхождением верную печать. Обратное опаснее:
+        свалив всё в одну строку, проверка молчала бы там, где миллионы
+        подписаны тысячами.
+        """
+        found: dict[str, list[str]] = {}
+        for item in self.findings + self.notes:
+            found.setdefault(item.unit or own, []).append(item.text)
+        return tuple((unit, " ".join(texts)) for unit, texts in found.items())
 
     @property
     def subgroup(self) -> str:
@@ -826,6 +853,15 @@ def route(
     # берётся вторым проходом; здесь он нужен, чтобы формулировка не говорила
     # о группе там, где речь о том, кто отвечает по долгу.
     guarantor: str = "",
+    # **Сопоставляется поручитель по ИНН, наименование — только для показа.**
+    # ИНН называется в формулировке: он и есть то, чем поручителя добирают.
+    guarantor_inns: str = "",
+    # Есть ли хоть один поручитель в самом списке. Если есть, корзина берётся
+    # у него вторым проходом, и здесь о нём не говорится вовсе: утверждать
+    # «в списке отсутствует», не сверив перечень, значило бы говорить наугад —
+    # и это говорилось у Газпром Капитала, чей поручитель в списке и в «Без
+    # внимания».
+    guarantor_listed: bool = False,
     # Чем присвоен класс: вид отчётности и отчётная дата. Страницы у оценки
     # нет — класс присвоен комплекту, а не месту в документе.
     assessed_where: str = "",
@@ -1014,12 +1050,15 @@ def route(
         attention.extend(_rating_outlook_adverse(events, routing))
         attention.extend(_rating_withdrawn(events, routing, today or date.today()))
         notes.extend(referenced)
-    if financing_structure:
+    if financing_structure and not guarantor_listed:
         # **Поручитель вне списка — не то же самое, что поручителя нет.**
         # Первое называет того, кто отвечает по долгу, и говорит, что корзины
         # у него взять негде; второе оставляет только группу. Корзина
-        # поручителя, стоящего в списке, берётся вторым проходом
-        # (`led_by_guarantor`): она известна лишь после того, как посчитаны все.
+        # поручителя, **стоящего в списке**, берётся вторым проходом
+        # (`led_by_guarantor`), и здесь о нём не говорится ничего: прежде
+        # формулировка объявляла его отсутствующим всякий раз, когда имя было
+        # известно, и у Газпром Капитала стояло «поручитель Газпром в списке
+        # отсутствует» при Газпроме в списке и в «Без внимания».
         review.append(
             Finding(
                 "financing_structure",
@@ -1029,6 +1068,7 @@ def route(
                     "guarantor_unlisted" if guarantor else "",
                     group=group or "не названа в справочнике",
                     guarantor=guarantor,
+                    inns=guarantor_inns or "источник не называет",
                     leader=group_leader or "головной компании в списке нет",
                 ),
             )
@@ -1336,6 +1376,7 @@ def led_by_guarantor(
     guaranteed: Verdict,
     group: str,
     routing: RoutingPolicy,
+    unit: str = "",
 ) -> Verdict:
     """Вердикт финансирующей структуры, взятый у её поручителя.
 
@@ -1365,12 +1406,21 @@ def led_by_guarantor(
     own = tuple(
         item for item in verdict.findings if item.ground != "financing_structure"
     )
+    # **Основание поручителя говорит о поручителе, и это сказано словами.**
+    # Иначе «чистый долг 1 234» на строке SPV читается как её величина,
+    # а величина эта чужая — и в чужой единице. Единица переносится вместе
+    # с текстом: у поручителя отчётность бывает в миллионах там, где строка
+    # печатает тысячи.
+    borrowed = tuple(
+        replace(item, text=f"Поручитель {guarantor}: {item.text}", unit=unit)
+        for item in guaranteed.findings
+    )
     return Verdict(
         basket=guaranteed.basket,
         basket_name=guaranteed.basket_name,
         grounds=guaranteed.grounds,
         status=guaranteed.status,
-        findings=guaranteed.findings + own,
+        findings=borrowed + own,
         subgroups=guaranteed.subgroups,
         subgroup_names=guaranteed.subgroup_names,
         actions=guaranteed.actions,
@@ -1398,10 +1448,16 @@ def _default_findings(
     | да | до трёх лет | внимание: кредитная история |
     | да | старше | справочно |
 
-    **Неизвестная давность корзину не понижает.** У ЕвроТранса и Антерры
-    выпуски в обращении, и дата погашения лежит в будущем: она говорит
-    о сроке, а не о событии. Понизить корзину по ней значило бы принять
-    решение по отсутствию данных.
+    **Неизвестная давность корзину не понижает там, где событие есть.**
+    Правило остаётся для датированных событий и снято для признака выпуска,
+    за которым события нет вовсе: «погашение 20.01.2028, события источник
+    не датирует» — это срок будущего платежа, а не дефолт (решение человека
+    23.09.2026). Такой признак идёт справочным основанием и считается.
+
+    **Событие, которое не наступило, основанием быть не может.** События
+    позже дня сбора отсекаются до всего остального (`IssuerEvents.as_of`)
+    и называются справочно: у «Открытие Холдинг, 03» технический дефолт
+    датирован на девять дней позже дня сбора списка.
     """
     review: list[Finding] = []
     attention: list[Finding] = []
@@ -1410,6 +1466,25 @@ def _default_findings(
         return review, attention, notes
     edge = routing.events.stale_before(today)
     years = routing.events.default_stale_years
+
+    # Ненаступившее событие называется прежде, чем отсекается: молчание о нём
+    # читалось бы как его отсутствие, а до срока остаются дни.
+    for record in getattr(events, "ahead", lambda _: ())(today):
+        notes.append(
+            Finding(
+                "default_event_ahead",
+                record.emission_id,
+                routing.say(
+                    "default_event_ahead",
+                    issue=_issue_name(events, record.emission_id)
+                    or record.emission_id
+                    or "источник не называет",
+                    date=f"{record.moment:%d.%m.%Y}",
+                ),
+            )
+        )
+    if hasattr(events, "as_of"):
+        events = events.as_of(today)
 
     unsettled = bool(getattr(events, "unsettled_default", False))
     settled_only = bool(getattr(events, "settled_only", False))
@@ -1438,8 +1513,57 @@ def _default_findings(
         # и он называется по выпускам.** Перечня дефолтов может не быть
         # на диске вовсе, и тогда давность неизвестна: понизить корзину
         # по неизвестной давности значило бы решить по отсутствию данных.
-        for issue in getattr(events, "defaulted", ()):
+        # **Основание следует за наблюдением, а не за признаком карточки.**
+        # У ЛКХ признак неурегулированности стоит у БО-02, все события
+        # которого исполнены, а неоплаченный купон — у БО-01, где признака
+        # нет вовсе: перечень по одному признаку называл не тот выпуск.
+        # Поэтому берутся оба — выпуски с признаком и выпуски с неисполненным
+        # датированным событием.
+        open_ones = {
+            record.emission_id
+            for record in getattr(events, "open_records", ())
+            if record.moment is not None
+        }
+        flagged = {
+            getattr(issue, "emission_id", "")
+            for issue in getattr(events, "defaulted", ())
+        }
+        for issue in getattr(events, "issues", ()):
+            if issue.emission_id not in flagged and issue.emission_id not in open_ones:
+                continue
             where = _where_of(events, issue)
+            # **Признак дефолта по погашенному выпуску — кредитная история.**
+            # Бумаги больше нет, обязательство по ней исполнено, и вопрос
+            # остаётся один: как эмитент вёл себя в прошлом.
+            if issue.status in routing.events.repaid_statuses:
+                attention.append(
+                    Finding(
+                        "default_on_repaid_issue",
+                        issue.name,
+                        routing.say(
+                            "default_on_repaid_issue", issue=issue.name, where=where
+                        ),
+                    )
+                )
+                continue
+            # **Признак без неисполненного датированного события наблюдением
+            # не подкреплён.** Статус «дефолт по погашению» сам называет
+            # случившееся, и он остаётся; голый признак у выпуска, все события
+            # которого исполнены либо не датированы, — нет.
+            if (
+                issue.status not in DEFAULT_STATUSES
+                and issue.emission_id not in open_ones
+            ):
+                notes.append(
+                    Finding(
+                        "default_flag_undated",
+                        issue.name,
+                        routing.say(
+                            "default_flag_undated", issue=issue.name, where=where
+                        ),
+                    )
+                )
+                continue
             # **Статус выпуска и признак неурегулированности — разные
             # сведения.** «Дефолт по погашению» говорит, что случилось;
             # признак у выпуска в обращении — что случившееся не улажено,
@@ -1458,21 +1582,37 @@ def _default_findings(
                     ),
                 )
             )
-        if not review:
-            # Признак стоит у событий, а не у выпуска: обстоятельство
-            # называется им, иначе оно исчезнет вместе с корзиной.
-            review.append(
-                Finding(
-                    "emission_default",
-                    event.issue,
-                    routing.say(
+        if not getattr(events, "defaulted", ()):
+            # **Признак стоит у событий, а не у выпуска**: обстоятельство
+            # называется ими, иначе оно исчезнет вместе с корзиной. Датировано
+            # событие — это разбор; не датировано — справочное основание,
+            # потому что наблюдения за ним нет.
+            named = _issue_name(events, event.issue) or event.issue
+            if event.known:
+                review.append(
+                    Finding(
                         "emission_default",
-                        what="Неурегулированный дефолт",
-                        issue=event.issue or "выпуск источник не называет",
-                        where=event.origin or "даты события источник не приводит",
-                    ),
+                        event.issue,
+                        routing.say(
+                            "emission_default",
+                            what="Неурегулированный дефолт",
+                            issue=named or "выпуск источник не называет",
+                            where=event.origin,
+                        ),
+                    )
                 )
-            )
+            else:
+                notes.append(
+                    Finding(
+                        "default_flag_undated",
+                        event.issue,
+                        routing.say(
+                            "default_flag_undated",
+                            issue=named or "выпуск источник не называет",
+                            where="даты события источник не приводит",
+                        ),
+                    )
+                )
     elif settled_only:
         # **Выпуск называется наименованием, а не своим номером у источника.**
         # «Выпуск 525165» человеку не говорит ничего, а событие приходит

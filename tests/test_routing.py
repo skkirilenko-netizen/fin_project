@@ -617,18 +617,80 @@ def test_stale_unsettled_default_asks_about_settlement() -> None:
     assert "урегулирования" in verdict.details[0]
 
 
-def test_unsettled_default_without_a_date_stays_in_review() -> None:
-    """Неизвестная давность корзину не понижает.
+def test_an_undated_default_flag_is_a_reference_ground() -> None:
+    """Признак дефолта без датированного события корзины не называет.
 
-    Перечня событий может не быть на диске вовсе, и тогда дата неизвестна:
-    понизить корзину по неизвестной давности значило бы принять решение
-    по отсутствию данных.
+    Решение человека 23.09.2026. За таким признаком не стоит наблюдения
+    вовсе: «погашение 20.01.2028, события источник не датирует» — это срок
+    будущего платежа, а не дефолт. Прежде он давал разбор по правилу
+    «неизвестная давность корзину не понижает»; правило оставлено там, где
+    событие есть, и снято там, где его нет.
+
+    Исчезнуть признак при этом не вправе: он называется справочным
+    основанием, и человек, открывший строку, найдёт его в карточке сам.
     """
     verdict = verdict_for(
-        with_issues(issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True))
+        with_issues(
+            issue("БО-001Р-03", "в обращении", date(2032, 3, 14), unsettled=True)
+        )
+    )
+    assert verdict.basket == "clear"
+    assert verdict.grounds == ()
+    assert "default_flag_undated" in {entry.ground for entry in verdict.notes}
+
+
+def test_an_event_that_has_not_happened_is_not_a_ground() -> None:
+    """Событие позже дня сбора корзины не называет и не молчит.
+
+    У «Открытие Холдинг, 03» технический дефолт датирован на девять дней
+    позже дня сбора списка. Дата будущего говорит о сроке, а не о том, что
+    случилось, и держать по ней разбор значило бы предсказывать. Исчезнуть
+    событие при этом не вправе: до срока остаются дни.
+    """
+    verdict = verdict_for(
+        with_issues(
+            issue("03", "в обращении", date(2027, 3, 14), unsettled=True),
+            records=(record("03", "2026-10-02"),),
+        ),
+        today=date(2026, 9, 23),
+    )
+    assert verdict.basket == "clear"
+    named = {entry.ground for entry in verdict.notes}
+    assert "default_event_ahead" in named
+    ahead = next(
+        entry for entry in verdict.notes if entry.ground == "default_event_ahead"
+    )
+    assert "02.10.2026" in ahead.text
+
+
+def test_the_same_event_once_it_has_happened_is_a_ground() -> None:
+    """То же событие днём позже — разбор: правило о дате, а не о событии."""
+    verdict = verdict_for(
+        with_issues(
+            issue("03", "в обращении", date(2027, 3, 14), unsettled=True),
+            records=(record("03", "2026-10-02"),),
+        ),
+        today=date(2026, 10, 2),
     )
     assert verdict.basket == "review"
     assert verdict.grounds == ("emission_default",)
+
+
+def test_a_default_on_a_repaid_issue_is_credit_history() -> None:
+    """Признак дефолта у погашенного выпуска — внимание, а не разбор.
+
+    Бумаги больше нет, обязательство по ней исполнено — иначе статус был бы
+    другим, — и вопрос остаётся один: как эмитент вёл себя в прошлом.
+    """
+    verdict = verdict_for(
+        with_issues(
+            issue("001P-03", "погашена", date(2026, 3, 14), unsettled=True),
+            records=(record("001P-03", "2026-02-10"),),
+        )
+    )
+    assert verdict.basket == "attention"
+    assert verdict.grounds == ("default_on_repaid_issue",)
+    assert "кредитная история" in verdict.details[0]
 
 
 def test_fresh_unsettled_default_names_the_amount() -> None:
@@ -740,6 +802,8 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
             offered="1 000",
             cash="100",
             unit="тыс. руб.",
+            date="02.10.2026",
+            where="купон 03.08.2026",
         )
 
 
@@ -844,11 +908,14 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
         quarantined=False,
         financing_structure=True,
         guarantor="Головная компания",
+        guarantor_inns="7700000000",
         latest_annual=date(2025, 12, 31),
         today=date(2026, 5, 1),
     )
     assert spv.basket == "review"
-    assert "поручитель" in spv.details[0].lower()
+    # Поручителя в списке нет, и формулировка называет ИНН: им его и добирают.
+    assert "поручител" in spv.details[0].lower()
+    assert "7700000000" in spv.details[0]
 
     backer = route(
         healthy(),

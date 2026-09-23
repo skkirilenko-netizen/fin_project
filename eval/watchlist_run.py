@@ -203,18 +203,24 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     # сверенных строк печатается — ноль расхождений при неизвестном числе
     # сверок не означает ничего.
     checked = 0
-    for item in rows:
+    for item in found:
         checked += 1
-        printed = " ".join(
-            [item["unit"], *(text for _, text in item["values"])]
-            + [text for ground in item["grounds"] for text in ground["details"]]
-            + list(item["notes"])
-        )
-        wrong = foreign_units(printed, item["unit"])
+        # **У каждой величины сверяется её единица.** Основание, перенесённое
+        # от поручителя, названо в его единице — и сверяется с ней: величина
+        # чужая, и единица у неё чужая. Свалив их в одну строку, проверка
+        # объявила бы расхождением верную печать.
+        wrong = foreign_units(
+            " ".join([item.unit, *(shown for _, _, shown in item.shown_values)]),
+            item.unit,
+        ) + [
+            name
+            for unit, text in item.verdict.by_unit(item.unit)
+            for name in foreign_units(text, unit)
+        ]
         if wrong:
             raise ValueError(
-                f"{item['name']} ({item['inn']}): напечатана единица "
-                f"«{', '.join(wrong)}», а комплект составлен в «{item['unit']}»"
+                f"{item.name} ({item.inn}): напечатана единица "
+                f"«{', '.join(wrong)}», а комплект составлен в «{item.unit}»"
             )
     logger.info("единица сверена у строк: %d, расхождений 0", checked)
     # **Сводные доли считаются по эмитентам с долгом в обращении.** Маршрут

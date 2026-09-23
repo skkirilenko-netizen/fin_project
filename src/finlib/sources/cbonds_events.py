@@ -45,7 +45,7 @@
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -327,6 +327,34 @@ class IssuerEvents:
     def open_records(self) -> tuple[DefaultRecord, ...]:
         """События, обязательство по которым не исполнено до сих пор."""
         return tuple(item for item in self.records if not item.settled)
+
+    def as_of(self, today: date) -> "IssuerEvents":
+        """Тот же эмитент без событий, которые ещё не наступили.
+
+        **Событие, которое не наступило, основанием быть не может.**
+        У «Открытие Холдинг, 03» технический дефолт датирован 02.10.2026 —
+        позже дня сбора, — и держать по нему корзину значило бы предсказывать,
+        а не наблюдать. Событие не исчезает: оно называется справочным
+        основанием, и `ahead` отдаёт его отдельно.
+        """
+        if not self.records:
+            return self
+        return replace(
+            self,
+            records=tuple(
+                item
+                for item in self.records
+                if item.moment is None or item.moment <= today
+            ),
+        )
+
+    def ahead(self, today: date) -> tuple[DefaultRecord, ...]:
+        """События, дата которых позже дня сбора: назвать, но не считать."""
+        return tuple(
+            item
+            for item in self.records
+            if item.moment is not None and item.moment > today
+        )
 
     @property
     def unsettled_default(self) -> bool:
