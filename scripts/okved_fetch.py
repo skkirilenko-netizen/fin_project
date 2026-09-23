@@ -49,6 +49,11 @@ UPDATE organization SET okved = %(okved)s, updated_at = now()
 WHERE inn = %(inn)s
 """
 
+# Сколько отказов подряд считать отказом источника, а не организаций. Каждая
+# попытка стоит трёх повторов по тридцать секунд: на семистах организациях
+# это девятнадцать часов ожидания ответа, которого нет.
+GIVE_UP_AFTER = 5
+
 
 def main() -> int:
     """Доносит вид деятельности до полного набора; 1 — спрашивать некого."""
@@ -62,7 +67,8 @@ def main() -> int:
             return 1
         chosen = wanted[:limit] if limit else wanted
         print(f"организаций без вида деятельности {len(wanted)}, спрошено будет {len(chosen)}")
-        done = unknown = failed = 0
+        done = unknown = failed = in_a_row = 0
+        stopped = ""
         with GirboSource(journal=False) as source:
             for item in chosen:
                 inn = item["inn"]
@@ -73,8 +79,22 @@ def main() -> int:
                     continue
                 except SourceError as failure:
                     failed += 1
+                    in_a_row += 1
                     logger.error("%s: %s", inn, str(failure)[:120])
+                    # **Недоступный источник прогон останавливает.** Каждая
+                    # попытка стоит трёх повторов по тридцать секунд, и семьсот
+                    # организаций подряд — это девятнадцать часов ожидания
+                    # ответа, которого нет. Ошибка одной организации прогон
+                    # не прекращает: подряд идущие отказы означают источник,
+                    # одиночный — организацию.
+                    if in_a_row >= GIVE_UP_AFTER:
+                        stopped = (
+                            f"источник не отвечает: {in_a_row} отказов подряд. "
+                            "Прогон остановлен, спрошенное записано"
+                        )
+                        break
                     continue
+                in_a_row = 0
                 if not organization.okved:
                     unknown += 1
                     continue
@@ -90,7 +110,9 @@ def main() -> int:
         f"вид деятельности записан у {done}, источник не знает организацию "
         f"либо вида {unknown}, отказов связи {failed}"
     )
-    return 0
+    if stopped:
+        print(stopped)
+    return 1 if stopped and not done else 0
 
 
 if __name__ == "__main__":
