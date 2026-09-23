@@ -381,7 +381,17 @@ def _row_metrics(catalogue: "RoutingCatalogue") -> tuple[str, ...]:
     убыток, и по одному отношению их не различить.
     """
     rule = catalogue.rule
-    named = ("net_debt", rule.earnings, rule.burden, rule.bound, *rule.metrics)
+    # **Совокупный долг — знаменатель доли оферт**, и печатается он порознь
+    # от чистого: мера рефинансирования называет долю словами, а строка даёт
+    # её пересчитать. Без знаменателя доля остаётся утверждением без опоры.
+    named = (
+        "debt_total",
+        "net_debt",
+        rule.earnings,
+        rule.burden,
+        rule.bound,
+        *rule.metrics,
+    )
     return tuple(dict.fromkeys(code for code in named if code))
 
 
