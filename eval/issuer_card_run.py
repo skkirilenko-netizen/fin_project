@@ -105,6 +105,18 @@ def _changed(row: dict, before: dict | None, names: dict[str, str]) -> str:
     return "; ".join(said) or "без изменений"
 
 
+def _newest_list() -> Path | None:
+    """Свежайший собранный список наблюдения; None — списка на диске нет.
+
+    Карточки лежат в подкаталоге списка, поэтому ссылка ведёт на уровень
+    выше — `../watchlist_<дата>.html`.
+    """
+    found = sorted(OUT.parent.glob("watchlist_*.html"))
+    if not found:
+        return None
+    return Path("..") / found[-1].name
+
+
 def _cell(text: object) -> str:
     """Ячейка таблицы: вертикальная черта в величине ломает строку.
 
@@ -351,6 +363,11 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
     )
     if verdict.actions:
         add(f"Действие: {verdict.actions[0]}\n")
+    # **Ссылка на список ставится только на собранный.** Карточку открывают
+    # из списка и возвращаются в него; обещать страницу, которой на диске нет,
+    # хуже, чем не обещать ничего.
+    if (found := _newest_list()) is not None:
+        add(f"[← Список наблюдения]({found.as_posix()})\n")
 
     add("\n## Основания корзины\n")
     if not verdict.findings:

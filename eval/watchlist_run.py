@@ -408,6 +408,20 @@ def _coverage_line(summary: dict[str, int]) -> str:
     )
 
 
+# Карточки эмитентов лежат рядом со списком, и ссылка на них ставится
+# **только у собранных**: мёртвая ссылка обещает страницу, которой нет,
+# а её отсутствие само говорит, что карточка не собрана.
+CARDS = Path("data/output/cards")
+
+
+def _card_link(inn: str) -> str:
+    """ИНН строки со ссылкой на карточку, если она собрана."""
+    safe = html.escape(inn)
+    if not (CARDS / f"{inn}.md").exists():
+        return safe
+    return f'<a class="card" href="cards/{safe}.md" title="карточка эмитента">{safe}</a>'
+
+
 def _row_html(item: dict) -> str:
     """Одна строка таблицы: главное основание, остальные свёрнуто.
 
@@ -475,7 +489,7 @@ def _row_html(item: dict) -> str:
         f'data-bonds="{"1" if item["bonds"] else "0"}" '
         f'data-name="{html.escape(item["name"].lower())}">'
         f'<td class="nm">{html.escape(item["name"])} {assessed} {idle}</td>'
-        f'<td class="inn">{html.escape(item["inn"])}</td>'
+        f'<td class="inn">{_card_link(item["inn"])}</td>'
         f'<td class="bk b-{html.escape(item["basket"])}">'
         f'{html.escape(item["basket_name"])}</td>'
         f'<td class="sg">{html.escape(subgroup)}'
@@ -540,6 +554,8 @@ _PAGE = """<!DOCTYPE html>
   }}
   .nm {{ font-weight: 600; min-width: 200px; }}
   .inn {{ font-variant-numeric: tabular-nums; color: var(--mut); }}
+  .card {{ color: var(--mut); text-decoration: underline dotted; }}
+  .card:hover {{ color: var(--fg); }}
   .bk {{ font-weight: 600; white-space: nowrap; }}
   .b-review {{ color: var(--review); }}
   .b-attention {{ color: var(--attention); }}
