@@ -540,8 +540,16 @@ def load_row(
     forms = sorted({item.form_code for item in fields.values()})
     rejection = _checked_reason(row, report, forms)
     if rejection is not None:
-        _log_rejection(inn, rejection, conn)
-        return LoadOutcome(inn=inn, rejection=rejection)
+        # **Отказ приёма записывается не здесь, а одной записью на доставку**
+        # (решение человека 23.09.2026). Строка — не событие, а состояние
+        # доставки: та же строка источника будет отвергнута тем же прогоном
+        # завтра, и запись по строке копила бы наши запуски, а не сведения
+        # об источнике. За один прогон таких записей выходило 2 920.
+        # Отчётная дата отдаётся наружу: перечень периодов — подробность
+        # той единственной записи.
+        return LoadOutcome(
+            inn=inn, report_date=_moment_of(row), rejection=rejection
+        )
 
     moment = date.fromisoformat(str(row["date"]))
     failures, unchecked = _zero_checks(row, report)
@@ -736,20 +744,66 @@ def load_row(
     return outcome
 
 
-def _log_rejection(inn: str, rejection: Rejection, conn: PgConnection) -> None:
-    """Отказ приёма — запись журнала: строка без комплекта не молчит."""
-    log_records(
-        [
+def _moment_of(row: dict) -> date | None:
+    """Отчётная дата строки источника; None — даты в ней нет."""
+    try:
+        return date.fromisoformat(str(row.get("date")))
+    except ValueError:
+        return None
+
+
+def log_rejections(
+    inn: str, rejected: Sequence[LoadOutcome], conn: PgConnection
+) -> int:
+    """Одна запись журнала на доставку: сколько строк отвергнуто и за какие периоды.
+
+    **Строка, не ставшая комплектом, не молчит — но и не повторяется.** Отказ
+    приёма описывает **состояние доставки**, а не событие: та же строка
+    источника будет отвергнута тем же прогоном и завтра, и послезавтра.
+    Запись по строке копила наши запуски — 2 920 записей за один прогон
+    по 794 организациям, — и сводка причин считала бы прогоны, а не строки.
+
+    **Вид причины остаётся отдельной записью.** Доставка, в которой отвергнуты
+    строки по двум разным причинам, даёт две записи: запись, называющая две
+    причины разом, не отвечает ни на одну — а по виду причины и группируется
+    сводка охвата.
+    """
+    by_reason: dict[tuple[str, str], list[date]] = {}
+    for item in rejected:
+        if item.rejection is None:
+            continue
+        key = (item.rejection.check_code.value, _reason_kind(item.rejection.reason))
+        by_reason.setdefault(key, [])
+        if item.report_date is not None:
+            by_reason[key].append(item.report_date)
+    records = []
+    for (code, kind), periods in by_reason.items():
+        told = sorted({f"{item:%Y-%m-%d}" for item in periods})
+        records.append(
             CheckRecord(
                 inn=inn,
-                check_code=rejection.check_code,
+                check_code=CheckCode(code),
                 status=CheckStatus.FAIL,
                 severity=Severity.BLOCKING,
-                message=rejection.reason,
+                message=(
+                    f"{kind}: отвергнуто строк источника "
+                    f"{len(by_reason[(code, kind)])}"
+                ),
+                details={"periods": told, "rows": len(periods)},
             )
-        ],
-        conn=conn,
-    )
+        )
+    return log_records(records, conn=conn)
+
+
+def _reason_kind(reason: str) -> str:
+    """Вид причины: то, что стоит до двоеточия.
+
+    Причина пишется полной — с датой строки и объяснением, — а сводка
+    группирует по виду. Вид объявлен строением сообщения: у всех причин
+    загрузчика он стоит перед двоеточием.
+    """
+    head = reason.split(":")[0].strip()
+    return head or reason.strip()
 
 
 def _records(

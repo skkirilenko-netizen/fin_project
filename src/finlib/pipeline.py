@@ -457,7 +457,7 @@ def accept_cbonds_report(
     разобрать строку без записи значило бы завести второй путь к тому же
     ответу. Пробный прогон откатывает транзакцию, а не обходит загрузку.
     """
-    from finlib.normalize.cbonds_loader import load_row
+    from finlib.normalize.cbonds_loader import load_row, log_rejections
     from finlib.sources import cbonds
 
     def say(stage: Stage, message: str, ok: bool = True) -> None:
@@ -501,9 +501,14 @@ def accept_cbonds_report(
     from finlib.quality.runner import run_checks
 
     outcomes: list[object] = []
+    # Отвергнутые строки — не события, а состояние доставки, и записываются
+    # они одной записью на доставку, а не по строке: `log_rejections`.
+    rejected: list[object] = []
     with connection() if conn is None else _kept(conn) as active:
         for item in rows:
             outcome = load_row(item, active, report_name=report)
+            if outcome.rejection is not None:
+                rejected.append(outcome)
             outcomes.append(outcome)
             # **Контроли качества прогоняются и по комплекту агрегатора.**
             # У отчётности РСБУ они применимы целиком — равенство 1600 = 1700,
@@ -513,11 +518,13 @@ def accept_cbonds_report(
             # от проверенного и чистого.
             if outcome.src_file_id is not None:
                 run_checks(outcome.src_file_id, active)
+        if rejected:
+            log_rejections(inn, rejected, active)
     accepted = [item for item in outcomes if item.accepted]
     say(
         Stage.LOAD,
         f"комплектов принято {len(accepted)} из {len(rows)} строк источника "
-        f"({len(annual)} годовых), "
+        f"({len(annual)} годовых), отвергнуто {len(rejected)}, "
         f"в карантине {sum(1 for item in accepted if item.quarantined)}",
         ok=bool(accepted),
     )
