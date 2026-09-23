@@ -37,7 +37,7 @@ from finlib.sources.cbonds import bond_issuers  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _HISTORY = """
-SELECT inn, as_of, basket, grounds FROM routing_history
+SELECT inn, as_of, basket, grounds, report_date FROM routing_history
 WHERE kind = %(kind)s ORDER BY inn, as_of
 """
 
@@ -58,18 +58,28 @@ def main() -> int:
 
     series: dict[str, list[tuple[date, str]]] = defaultdict(list)
     grounds: dict[tuple[str, date], tuple[str, ...]] = {}
+    periods: dict[tuple[str, date], date | None] = {}
     for row in rows:
         series[row["inn"]].append((row["as_of"], row["basket"]))
         grounds[(row["inn"], row["as_of"])] = tuple(row["grounds"])
+        periods[(row["inn"], row["as_of"])] = row["report_date"]
     dates = sorted({row["as_of"] for row in rows})
     bonds = set(bond_issuers())
 
     # Смены корзины: пара соседних точек, у которых корзина разная.
     moves: list[tuple[str, date, str, str]] = []
+    # **Появление отчётности и событие — разные роды смен**, и мерить их одним
+    # числом нельзя: первое приходит в пересчёте одним днём, потому что дату
+    # раскрытия мы моделируем сроком закона, а на деле оно растянуто
+    # на недели. Среднее за неделю без этого различия мерит наше правило,
+    # а не рынок.
+    disclosures = 0
     for inn, points in series.items():
-        for (_, before), (when, after) in zip(points, points[1:], strict=False):
+        for (was_on, before), (when, after) in zip(points, points[1:], strict=False):
             if before != after:
                 moves.append((inn, when, before, after))
+                if periods.get((inn, was_on)) != periods.get((inn, when)):
+                    disclosures += 1
 
     # **Возврат — смена, отменённая обратно внутри окна.** Он не гасится:
     # печатается отдельной строкой вместе с прежней корзиной и датой.
@@ -113,6 +123,20 @@ def main() -> int:
             + ". Разброс здесь и есть ответ: среднее без него сказало бы,"
             " что каждую неделю происходит одно и то же.\n"
         )
+    print(
+        f"**Из {len(moves)} смен {disclosures} — от появления отчётности**, "
+        f"остальные {len(moves) - disclosures} — от событий, рейтинговых "
+        "действий и движения окна.\n"
+    )
+    print(
+        "**Первые в пересчёте приходят одним днём, а на деле растянуты "
+        "на недели**: даты раскрытия у массовых данных нет вовсе, и мы "
+        "моделируем её сроком закона — годовая консолидированная отчётность "
+        "становится «известной» на сто двадцатый день, то есть у всех сразу. "
+        "Поэтому среднее за неделю мерит здесь наше правило, а не рынок, "
+        f"и честная величина обычной недели — медиана: "
+        f"{statistics.median(counts):.0f}.\n"
+    )
 
     print(f"## Возвраты внутри окна ({window} дней)\n")
     print(
