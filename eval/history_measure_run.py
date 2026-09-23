@@ -37,7 +37,7 @@ from finlib.sources.cbonds import bond_issuers  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _HISTORY = """
-SELECT inn, as_of, basket FROM routing_history
+SELECT inn, as_of, basket, grounds FROM routing_history
 WHERE kind = %(kind)s ORDER BY inn, as_of
 """
 
@@ -146,6 +146,29 @@ def main() -> int:
         "\n**Это и есть предмет наблюдения.** Если подавляющее большинство "
         "не двигалось ни разу, ежедневный отчёт говорит о узком круге, "
         "и знать это надо до того, как его начнут читать каждый день.\n"
+    )
+
+    # **Пересчёт, не сказавший о своей неполноте, выдаёт её за наблюдение.**
+    # Основание, построенное на признаке без истории, говорит о сегодняшнем
+    # знании, а не о наблюдении того дня.
+    restored = Counter()
+    for row in rows:
+        for ground in row["grounds"]:
+            restored[routing.restored(ground)] += 1
+    dated, current = restored["dated"], restored["current"]
+    whole = dated + current or 1
+    print("## Чем восстановлена история\n")
+    print(
+        f"Оснований за весь пересчёт **{dated + current}**, из них "
+        f"восстановлено своими датами **{dated}** "
+        f"({dated / whole * 100:.1f} %), взято нынешними данными "
+        f"**{current}** ({current / whole * 100:.1f} %).\n"
+    )
+    print(
+        "**Второе — не наблюдение, а сегодняшнее знание.** Признак карточки, "
+        "статус выпуска, наш карантин и наша оценка истории не имеют вовсе, "
+        "и основание, на них построенное, говорит о том, что известно "
+        "сегодня.\n"
     )
 
     print("## Куда двигались\n")
