@@ -28,11 +28,14 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import issuer_card_run as issuer_card  # noqa: E402
+
 from finlib.db import connection  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import cards, exclusions, routing_rows  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
+from finlib.sources.ratings_calendar import bound, read_actions, transitions  # noqa: E402
 from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,91 @@ REFERENCE = Path(__file__).resolve().parent / "routing_reference.yaml"
 # по коду ОКЕИ берёт справочник строк; здесь — только перевод множителя
 # источника в то же наименование, и второй таблицы единиц не заводится.
 _SCALE_NAMES = {"1000": "384", "1000000": "385", "1000000000": "386"}
+
+# Корзины, которые вправе стоять у эмитента с рейтингом категории дефолта:
+# сама корзина разбора и очереди, которые старше её по порядку показа.
+# Календарь на этот выбор не влияет вовсе — он датирует основание.
+_SNAPSHOT_BASKETS = frozenset(
+    {"review", "status_unknown", "structural_pool", "out_of_scope", "guarantor_missing"}
+)
+
+_GROUND_CHANGES = """
+SELECT inn, as_of, basket, grounds
+FROM routing_history WHERE kind = 'backfill' ORDER BY inn, as_of
+"""
+
+
+@lru_cache(maxsize=1)
+def ground_only_changes() -> dict[str, tuple[date, ...]]:
+    """Точки истории, где корзина та же, а перечень оснований другой.
+
+    **Это и есть предмет ожидания об истории карточки.** Смена корзины видна
+    и по списку; смена основания при той же корзине не видна нигде, кроме
+    карточки, — и прежде она не была видна и там.
+    """
+    from finlib.db import connection as _connection
+    from finlib.db import fetch_all as _fetch_all
+
+    found: dict[str, list[date]] = {}
+    with _connection() as conn:
+        rows = _fetch_all(_GROUND_CHANGES, {}, conn=conn)
+    before: dict[str, tuple[str, frozenset[str]]] = {}
+    for row in rows:
+        key = (str(row["basket"]), frozenset(row["grounds"] or ()))
+        was = before.get(row["inn"])
+        if was is not None and was[0] == key[0] and was[1] != key[1]:
+            found.setdefault(row["inn"], []).append(row["as_of"])
+        before[row["inn"]] = key
+    return {inn: tuple(dates) for inn, dates in found.items()}
+
+
+def built(row: object) -> str | None:
+    """Текст карточки строки списка; None — не собралась.
+
+    Карточка собирается тем же кодом, которым её собирает команда: второй
+    её сборщик разошёлся бы с первым, и эталон проверял бы не то, что читают.
+    Собранное запоминается: одна и та же карточка проверяется несколькими
+    ожиданиями, а сборка идёт двумя запросами к базе.
+    """
+    inn = str(getattr(row, "inn", ""))
+    if inn in _CARDS:
+        return _CARDS[inn]
+    try:
+        with connection() as conn:
+            text = issuer_card.card(row, _policy(), conn, _actions(), _bound())
+    except Exception as failure:  # noqa: BLE001 — эталон называет отказ, а не падает
+        logger.error("карточка %s: %s", inn, failure)
+        _CARDS[inn] = None
+        return None
+    _CARDS[inn] = text
+    return text
+
+
+_CARDS: dict[str, str | None] = {}
+
+
+@lru_cache(maxsize=1)
+def _policy() -> object:
+    """Справочник маршрутизации: один на прогон."""
+    return load_routing()
+
+
+@lru_cache(maxsize=1)
+def _actions() -> tuple:
+    """Календарь рейтинговых действий: читается один раз."""
+    try:
+        return read_actions()
+    except FileNotFoundError:
+        return ()
+
+
+@lru_cache(maxsize=1)
+def _bound() -> dict[str, str]:
+    """Привязка наименований календаря к ИНН: один раз на прогон."""
+    if not _actions():
+        return {}
+    names, _, _ = bound(_actions())
+    return names
 
 
 @lru_cache(maxsize=1)
@@ -150,6 +238,26 @@ def main() -> int:
             )
         if item.get("rule") == "every_excluded_issuer":
             issuers = sorted(left)
+        # --- фаза 2-бис: круги ожиданий карточки ----------------------------
+        # Основания, отброшенные типом эмитента: у них и проверяется, что
+        # собственные величины не исчезли, а стали сведениями.
+        if item.get("rule") == "every_issuer_with_inapplicable":
+            issuers = [row.inn for row in rows if row.verdict.inapplicable]
+        # **Круг может оказаться пустым, и это объявляется, а не молчит.**
+        # Точка, в которой корзина та же, а основания другие, берётся
+        # из записанной истории: выдумывать её нельзя, а нулевой круг
+        # означает «проверять нечего», а не «проверено».
+        if item.get("rule") == "every_issuer_with_ground_only_change":
+            issuers = sorted(ground_only_changes())
+        if item.get("rule") == "every_issuer_with_ratings":
+            issuers = [
+                row.inn
+                for row in rows
+                if row.events is not None and row.events.ratings
+            ]
+        if item.get("rule") == "every_issuer_with_transition":
+            moved = {holder for holder, _, _, _ in transitions()}
+            issuers = [row.inn for row in rows if row.inn in moved]
         for inn in issuers:
             checked += 1
             row = by_inn.get(inn)
@@ -286,6 +394,72 @@ def main() -> int:
                     divergences.append(
                         f"{code}: у {row.name} ({inn}) сработало основание "
                         f"{item['ground']}, а его быть не должно"
+                    )
+            # --- фаза 2-бис: ожидания карточки ------------------------------
+            if expect == "card_builds":
+                text = built(row)
+                if text is None:
+                    divergences.append(
+                        f"{code}: карточка {row.name} ({inn}) не собирается"
+                    )
+                elif inn not in text:
+                    divergences.append(
+                        f"{code}: в карточке {inn} нет его же ИНН — "
+                        "собралась чужая"
+                    )
+            if expect == "own_grounds_kept":
+                said = [
+                    entry
+                    for entry in row.verdict.notes
+                    if entry.ground == "inapplicable_here"
+                ]
+                if not said:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) тип отбросил основания "
+                        f"{', '.join(row.verdict.inapplicable)}, а сведения "
+                        "о них исчезли"
+                    )
+            if expect == "history_shows_ground_change":
+                text = built(row) or ""
+                missing = [
+                    f"{when:%d.%m.%Y}"
+                    for when in ground_only_changes().get(inn, ())
+                    if f"{when:%d.%m.%Y}" not in text
+                ]
+                if missing:
+                    divergences.append(
+                        f"{code}: в истории {row.name} ({inn}) нет точек "
+                        f"смены оснований {', '.join(missing)}"
+                    )
+            if expect == "ratings_split_by_object":
+                text = built(row) or ""
+                if "Рейтинги эмитента (снимок)" not in text:
+                    divergences.append(
+                        f"{code}: в карточке {row.name} ({inn}) рейтинги есть, "
+                        "а раздела снимка нет"
+                    )
+                other = [item for item in row.events.ratings if not item.credit]
+                if other and "Некредитных рейтингов" not in text:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) {len(other)} некредитных "
+                        "рейтингов, и карточка о них молчит"
+                    )
+                if "Рейтингов **выпусков**" not in text:
+                    divergences.append(
+                        f"{code}: карточка {row.name} ({inn}) не называет, "
+                        "что рейтингов выпусков у нас нет"
+                    )
+            if expect == "calendar_dates_only":
+                dated = [
+                    entry
+                    for entry in row.verdict.findings
+                    if entry.ground == "rating_default" and " с " in entry.text
+                ]
+                if dated and row.verdict.basket not in _SNAPSHOT_BASKETS:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) основание датировано "
+                        f"календарём, а корзина «{row.verdict.basket}» — "
+                        "не та, что даёт категория снимка"
                     )
         print(f"- {code}: проверено эмитентов {len(issuers)} — {item['where'].strip()}")
 

@@ -451,7 +451,11 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             )
             when = f"{record.moment:%d.%m.%Y}" if record.moment else "дата не названа"
             add(f"- {issue}: {record.kind.lower()} {when}, не исполнено")
-        _ratings(item, routing, said)
+    # **Рейтинги печатаются независимо от выпусков.** Прежде раздел стоял
+    # внутри ветки «перечень выпусков есть», и у эмитента, чьих выпусков нет
+    # на диске, рейтинги исчезали вместе с ними — хотя снимок рейтингов
+    # приходит другим методом и о выпусках ничего не знает.
+    _ratings(item, routing, said)
 
     _calendar(item, said, actions, bound_names)
 
