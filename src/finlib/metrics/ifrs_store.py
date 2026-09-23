@@ -40,6 +40,11 @@ SELECT f.line_code, f.form_code, f.value, f.recognition, f.note_source_name,
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
   AND s.status <> 'quarantine' AND s.is_actual
+  -- **Способ получения — довод, а не умолчание.** Пусто означает «все»,
+  -- то есть обычный расчёт: первоисточник старше агрегатора. Названный
+  -- способ отвечает на другой вопрос — что говорит **одна** доставка,
+  -- и без него сравнить их между собой нечем.
+  AND (%(source)s = '' OR s.source = %(source)s)
 -- **Порядок нужен не величинам, а сведениям комплекта.** Тип эмитента и вид
 -- отчётности берутся из `meta` первой строки, и при двух доставках периода
 -- первой оказывалась то одна, то другая: у комплекта агрегатора типа
@@ -102,6 +107,7 @@ def inputs_of(
     report_date: date,
     conn: PgConnection | None = None,
     policy: IfrsMetricsPolicy | None = None,
+    source: str = "",
 ) -> Inputs:
     """Собирает вход расчёта из фактов комплекта: величины, примечания, обстановка.
 
@@ -112,16 +118,28 @@ def inputs_of(
     Число месяцев берётся из вида отчётности комплекта правилом методики,
     а не задаётся снаружи: величина, которую можно передать, однажды
     передаётся неверной и об этом не сообщает.
+
+    `source` называет способ получения, когда нужно спросить **одну**
+    доставку: пусто — обычный расчёт по всем, и первоисточник там старше
+    агрегатора. Довод нужен, чтобы сравнить доставки между собой: «величина
+    разошлась» и «величина одна и та же» — разные ответы, и без него
+    их не различить.
     """
     policy = policy or load_ifrs_metrics()
     rows = fetch_all(
         _FACTS,
-        {"inn": inn, "standard": Standard.IFRS.value, "date": report_date},
+        {
+            "inn": inn,
+            "standard": Standard.IFRS.value,
+            "date": report_date,
+            "source": source,
+        },
         conn=conn,
     )
     if not rows:
+        where = f" способом получения «{source}»" if source else ""
         raise IfrsPeriodMissingError(
-            f"по МСФО за {report_date:%d.%m.%Y} нет фактов вне карантина: "
+            f"по МСФО за {report_date:%d.%m.%Y} нет фактов вне карантина{where}: "
             "комплект либо не загружен, либо отбракован экраном сверки"
         )
 
@@ -186,10 +204,15 @@ def compute_from_facts(
     report_date: date,
     conn: PgConnection | None = None,
     policy: IfrsMetricsPolicy | None = None,
+    source: str = "",
 ) -> tuple[MetricValue, ...]:
-    """Показатели МСФО за период по фактам базы — той же арифметикой, что замер."""
+    """Показатели МСФО за период по фактам базы — той же арифметикой, что замер.
+
+    `source` называет способ получения, когда спрашивают одну доставку;
+    пусто — обычный расчёт по всем, где первоисточник старше агрегатора.
+    """
     policy = policy or load_ifrs_metrics()
-    found = compute_all(inputs_of(inn, report_date, conn, policy), policy)
+    found = compute_all(inputs_of(inn, report_date, conn, policy, source), policy)
     logger.info(
         "%s за %s: показателей рассчитано %d из %d",
         inn,
