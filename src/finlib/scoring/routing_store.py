@@ -774,7 +774,9 @@ def routing_rows(
         # вместе с днём, вносило платёж в перечень и выносило от смены месяца.
         # Отчётности нет вовсе — считать не от чего и нечем: денежных средств
         # тогда нет тоже, и мера отвечает пробелом данных.
-        plan = refinancing(events.issues, routing.refinancing.months, moment or today)
+        plan = refinancing(
+            events.issues, routing.refinancing.months, moment or today, today
+        )
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
             cash=cash,

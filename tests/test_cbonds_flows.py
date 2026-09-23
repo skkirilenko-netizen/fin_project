@@ -71,7 +71,7 @@ def test_payment_is_scaled_to_the_number_of_bonds(cache: Path) -> None:
     )
     plan = schedule_of("1")
     assert plan is not None
-    due = plan.due_within(12, date(2026, 9, 22), Decimal(300000000))
+    due = plan.due_between(date(2026, 9, 22), date(2027, 10, 1), Decimal(300000000))
     assert due == Decimal("17.26") * 2 * 300000
 
 
@@ -88,7 +88,9 @@ def test_payments_outside_the_window_are_not_counted(cache: Path) -> None:
     )
     plan = schedule_of("1")
     assert plan is not None
-    assert plan.due_within(12, date(2026, 9, 22), Decimal(1000)) == Decimal(10)
+    assert plan.due_between(
+        date(2026, 9, 22), date(2027, 10, 1), Decimal(1000)
+    ) == Decimal(10)
 
 
 def test_redemption_and_coupon_of_one_day_are_added(cache: Path) -> None:
@@ -96,7 +98,9 @@ def test_redemption_and_coupon_of_one_day_are_added(cache: Path) -> None:
     put(cache, "1", [coupon("2026-12-05", "13.56", "1000")])
     plan = schedule_of("1")
     assert plan is not None
-    assert plan.due_within(12, date(2026, 9, 22), Decimal(1000)) == Decimal("1013.56")
+    assert plan.due_between(
+        date(2026, 9, 22), date(2027, 10, 1), Decimal(1000)
+    ) == Decimal("1013.56")
 
 
 def test_missing_schedule_is_not_zero(cache: Path) -> None:
@@ -113,7 +117,7 @@ def test_unknown_volume_gives_no_sum(cache: Path) -> None:
     put(cache, "1", [coupon("2026-10-05", "10")])
     plan = schedule_of("1")
     assert plan is not None
-    assert plan.due_within(12, date(2026, 9, 22), None) is None
+    assert plan.due_between(date(2026, 9, 22), date(2027, 10, 1), None) is None
     counted = refinancing(
         (FakeIssue(emission_id="1", outstanding=None),), 12, date(2026, 9, 22)
     )

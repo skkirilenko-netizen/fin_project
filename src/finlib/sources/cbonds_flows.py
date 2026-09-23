@@ -73,8 +73,15 @@ class Schedule:
     payments: tuple[Payment, ...]
     nominal: Decimal | None
 
-    def due_within(self, months: int, today: date, outstanding: Decimal | None) -> Decimal | None:
-        """Платежи ближайших месяцев в валюте выпуска; None — считать нечем.
+    def due_between(
+        self, start: date, edge: date, outstanding: Decimal | None
+    ) -> Decimal | None:
+        """Платежи отрезка в валюте выпуска; None — считать нечем.
+
+        **Отрезок задан двумя датами, а не сроком от одной.** Край окна
+        закреплён на отчётной дате плюс год, а считать надо от сегодня:
+        платёж, который уже сделан, впереди не стоит, а край при этом
+        не должен ехать — иначе он вносит и выносит платёж от смены месяца.
 
         **`None` и ноль различаются.** Ноль означает, что в окне платежей нет;
         `None` — что номинал либо объём в обращении неизвестны, и умножать
@@ -83,9 +90,8 @@ class Schedule:
         if not self.nominal or self.nominal <= 0 or outstanding is None:
             return None
         bonds = outstanding / self.nominal
-        edge = _shift(today, months)
         return sum(
-            (item.total * bonds for item in self.payments if today <= item.due < edge),
+            (item.total * bonds for item in self.payments if start <= item.due < edge),
             start=Decimal(0),
         )
 
@@ -190,25 +196,34 @@ class Refinancing:
         return self.issues > self.without_schedule + self.without_volume
 
 
-def refinancing(issues: tuple[object, ...], months: int, since: date) -> Refinancing:
+def refinancing(
+    issues: tuple[object, ...], months: int, since: date, today: date | None = None
+) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
     Оферты считаются порознь: предъявление — право владельца, и сложенное
     с купоном оно выдало бы возможное за состоявшееся.
 
-    **Окно отсчитывается от отчётной даты комплекта, а не от сегодняшнего
-    дня** (решение человека 23.09.2026). Причина двойная. Во-первых,
-    связность: денежные средства взяты на отчётную дату, и сравнивать с ними
-    платежи, отсчитанные от другого дня, — сравнивать разные моменты.
-    Во-вторых, дребезг: окно, едущее вместе с днём, вносило платёж
-    в перечень и выносило обратно от смены месяца. На пересчитанной истории
-    все двенадцать возвратов внутри окна отмены оказались этим — у одного
-    эмитента трижды, каждый раз на переходе месяца. Это свойство меры,
-    а не движение данных.
+    **Край окна закреплён на отчётной дате плюс год, а платежи считаются
+    от сегодня** (решение человека 23.09.2026). Три свойства сразу:
+
+    - **край не едет** — платёж, попавший в год от отчётной даты, не выходит
+      из окна от смены месяца. Дребезг был именно этим: на пересчитанной
+      истории все двенадцать возвратов внутри окна отмены оказались
+      движением края, у одного эмитента трижды подряд;
+    - **прошедшее не считается** — мера отвечает на вопрос «хватит ли денег
+      на то, что впереди», а не «хватило ли на то, что уже заплачено»;
+    - **моменты расходятся намеренно**: денежные средства всегда на отчётную
+      дату, платежи всегда будущие. Это не порок меры, а её предмет.
+
+    `today` пусто — считается от самой отчётной даты: так строится история
+    назад, где «сегодня» и есть та дата, на которую маршрут пересчитан.
     """
     scheduled = offered = Decimal(0)
     counted = no_schedule = no_volume = no_offers = 0
     edge = _shift(since, months)
+    # Платежи — от сегодня, но не раньше отчётной даты: до неё их и не было.
+    start = max(today or since, since)
     for issue in issues:
         status = str(getattr(issue, "status", ""))
         if status not in ("в обращении", "размещается"):
@@ -223,7 +238,7 @@ def refinancing(issues: tuple[object, ...], months: int, since: date) -> Refinan
         if outstanding is None:
             no_volume += 1
             continue
-        due = plan.due_within(months, since, outstanding)
+        due = plan.due_between(start, edge, outstanding)
         if due is None:
             no_volume += 1
             continue
@@ -236,7 +251,7 @@ def refinancing(issues: tuple[object, ...], months: int, since: date) -> Refinan
         if offers is None:
             no_offers += 1
             continue
-        if any(since <= item < edge for item in offers):
+        if any(start <= item < edge for item in offers):
             offered += outstanding
     return Refinancing(
         months=months,
