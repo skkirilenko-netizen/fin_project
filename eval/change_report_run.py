@@ -145,6 +145,27 @@ def _named(inn: str) -> str:
     return f"{name} ({inn})" if name else inn
 
 
+def _calendar(routing, row: dict, when: date) -> tuple:  # noqa: ANN001
+    """Что решает календарь при тех же данных: срок раскрытия и давность.
+
+    **День — тоже довод, и он меняется сам.** Срок сдачи годовой отчётности
+    наступает 1 июня, давность дефолта истекает через три года, давность
+    отзыва рейтинга — через год: в эти дни вердикт меняется при неизменных
+    данных и неизменной методике. Это не изменение у эмитента и не наше:
+    это календарь, и он назван отдельной причиной.
+
+    Без него такая смена попала бы в беспричинные — то есть в остановку, —
+    и первый же новый год объявил бы расчёт недетерминированным: на неделе
+    05.01.2026 у 35 структурных эмитентов основание срока раскрытия
+    перестаёт срабатывать разом.
+    """
+    latest = row["report_date"]
+    return (
+        routing.freshness.stale(latest, when),
+        routing.freshness.cycles_behind(latest, when),
+    )
+
+
 def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
     """Точки истории на дату: ИНН → вердикт."""
     return {
@@ -194,22 +215,33 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
     )
     # **Беспричинное изменение — остановка, а не строка.** Считается первым:
     # отчёт, начавшийся с перечня изменений, о нём умолчал бы.
-    causeless = [
+    same_data = [
         inn
         for inn, row in now.items()
         if inn in was
         and row["basket"] != was[inn]["basket"]
         and row["fingerprint"] == was[inn]["fingerprint"]
-        and row["code_version"] == was[inn]["code_version"]
-        and row["methodology"] == was[inn]["methodology"]
+    ]
+    # **Календарь — четвёртая причина, и без неё третья лжёт.** Срок сдачи
+    # отчётности наступает 1 июня, давность дефолта истекает через три года:
+    # вердикт меняется при неизменных данных и неизменной методике, и такая
+    # смена — не беспричинная.
+    by_calendar = [
+        inn
+        for inn in same_data
+        if _calendar(routing, was[inn], since) != _calendar(routing, now[inn], until)
     ]
     ours = [
         inn
-        for inn, row in now.items()
-        if inn in was
-        and row["basket"] != was[inn]["basket"]
-        and row["fingerprint"] == was[inn]["fingerprint"]
-        and inn not in causeless
+        for inn in same_data
+        if inn not in by_calendar
+        and (
+            now[inn]["code_version"] != was[inn]["code_version"]
+            or now[inn]["methodology"] != was[inn]["methodology"]
+        )
+    ]
+    causeless = [
+        inn for inn in same_data if inn not in by_calendar and inn not in ours
     ]
     moved = [
         inn
@@ -218,6 +250,11 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
         and row["basket"] != was[inn]["basket"]
         and row["fingerprint"] != was[inn]["fingerprint"]
     ]
+    logger.info(
+        "смен корзины: у эмитента %d, при тех же данных %d",
+        len(moved),
+        len(same_data),
+    )
     entered = sorted(set(now) - set(was))
     left = sorted(set(was) - set(now))
 
@@ -274,6 +311,24 @@ def _report(routing, kind, since, until, was, now, bonds) -> None:  # noqa: ANN0
     for inn in left[:10]:
         print(f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}")
     print()
+
+    print(f"## От календаря: {len(by_calendar)}\n")
+    if by_calendar:
+        print(
+            "Данные те же и методика та же, а день другой: наступил срок сдачи "
+            "отчётности либо истекла давность события. Это не изменение "
+            "у эмитента и не наша правка — это календарь, и корзину он меняет "
+            "по объявленному правилу.\n"
+        )
+        for inn in by_calendar[:10]:
+            print(
+                f"- {_named(inn)}: "
+                f"{_basket_name(routing, was[inn]['basket'])} → "
+                f"{_basket_name(routing, now[inn]['basket'])}"
+            )
+        print()
+    else:
+        print("ни одного.\n")
 
     print(f"## Наши правки: {len(ours)}\n")
     if ours:
