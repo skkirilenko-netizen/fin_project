@@ -124,6 +124,20 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 "basket": verdict.basket,
                 "basket_name": verdict.basket_name,
                 "order": basket.order,
+                # **Порядок подгруппы — порядок тяжести внутри корзины.**
+                # «Внимание» — 461 эмитент из 701, и корзина такого размера
+                # выбирать не помогает, если внутри неё нет порядка: события
+                # и рейтинги выше величин, величины выше нехватки данных
+                # и просрочки раскрытия. Берётся он у справочника, а не
+                # назначается страницей.
+                "subgroup_order": next(
+                    (
+                        entry.order
+                        for entry in basket.groups
+                        if entry.code == verdict.subgroup
+                    ),
+                    len(basket.groups) + 1,
+                ),
                 "subgroups": list(verdict.subgroup_names),
                 "actions": list(verdict.actions),
                 # Основание — наименование справочника, а под ним предмет
@@ -180,7 +194,9 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 "assessed": item.assessed_class,
             }
         )
-    rows.sort(key=lambda item: (item["order"], item["name"].lower()))
+    rows.sort(
+        key=lambda item: (item["order"], item["subgroup_order"], item["name"].lower())
+    )
     # **Единица сверяется у каждой строки, а не у документа одного.** Проверка
     # стояла только в заключении, и список печатал мимо неё: 39 строк подписали
     # миллионы тысячами. Сверяет её та же функция, что документ, и число

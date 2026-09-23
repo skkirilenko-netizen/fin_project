@@ -17,9 +17,11 @@
 `scoring.routing_store.routing_rows` — то же место, что список и распределение.
 """
 
+import json
 import logging
 import sys
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -31,10 +33,44 @@ from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import cards, exclusions, routing_rows  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
+from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 REFERENCE = Path(__file__).resolve().parent / "routing_reference.yaml"
+
+# Масштаб величин, объявленный источником построчно. Наименование единицы
+# по коду ОКЕИ берёт справочник строк; здесь — только перевод множителя
+# источника в то же наименование, и второй таблицы единиц не заводится.
+_SCALE_NAMES = {"1000": "384", "1000000": "385", "1000000000": "386"}
+
+
+@lru_cache(maxsize=1)
+def source_units() -> dict[tuple[str, date], set[str]]:
+    """Единица, объявленная источником у каждой строки отчётности по МСФО.
+
+    **Независимый ответ на тот же вопрос.** Единицу комплекта пишет загрузчик,
+    и сверять её с самой собой бессмысленно; здесь она читается из сохранённого
+    ответа источника — оттуда же, откуда пришла, но другим путём.
+    """
+    from finlib.normalize.lines import load_lines
+
+    path = Path("data/raw/cbonds/msfo_real_universe.json")
+    if not path.exists():
+        return {}
+    units = load_lines().units
+    found: dict[tuple[str, date], set[str]] = {}
+    for row in json.loads(path.read_text(encoding="utf-8")).get("items", []):
+        inn = (row.get("emitent_inn") or "").strip()
+        code = _SCALE_NAMES.get(str(row.get("ln105")))
+        if not inn or not code:
+            continue
+        try:
+            moment = date.fromisoformat(str(row.get("date")))
+        except ValueError:  # pragma: no cover — дата у строки всегда есть
+            continue
+        found.setdefault((inn, moment), set()).add(units.name_of(code))
+    return found
 
 
 def main() -> int:
@@ -75,6 +111,14 @@ def main() -> int:
         # исключений: третьего исхода нет, и молчание — не исход.
         if item.get("rule") == "every_bond_issuer":
             issuers = sorted(bonds)
+        # Строки, маршрут которых построен по консолидированной отчётности:
+        # единицу у них объявляет источник построчно, и сверить её есть с чем.
+        if item.get("rule") == "every_ifrs_row":
+            issuers = sorted(
+                row.inn
+                for row in rows
+                if row.standard is Standard.IFRS and row.report_date is not None
+            )
         # Эмитенты, у которых поле преемника заполнено, а статус карточки —
         # действующий. Прочитанное как «поглощён», поле вывело из списка
         # 24 живых эмитента; правило требует, чтобы они в нём стояли.
@@ -186,6 +230,24 @@ def main() -> int:
                         f"{code}: у {row.name} ({inn}) напечатана единица "
                         f"«{', '.join(wrong)}», а комплект составлен "
                         f"в «{row.unit}»"
+                    )
+            # **Единица строки сверяется с объявленной источником.** Проверка
+            # `unit_named` спрашивает другое — не напечатана ли в тексте чужая
+            # единица; она ловит расхождение внутри строки и молчит, если
+            # неверна сама графа. Умолчание «тыс. руб.» однажды подписало
+            # тысячами миллионы, и вопрос «а не вернулось ли оно» этой
+            # проверкой не закрывается.
+            if expect == "unit_matches_source":
+                told = source_units().get((inn, row.report_date))
+                if not told:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) единицу источника "
+                        "сверить нечем: строки за этот период в ответе нет"
+                    )
+                elif row.unit not in told:
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) в строке «{row.unit}», "
+                        f"а источник объявил «{', '.join(sorted(told))}»"
                     )
             if expect == "no_ground":
                 fired = {entry.ground for entry in row.verdict.findings}
