@@ -360,19 +360,22 @@ def render(rows: list[dict], summary: dict[str, int], routing, today: date) -> s
         groups=group_options,
         rows=body,
         coverage=html.escape(_coverage_line(summary)),
-        unchecked=html.escape(NOT_CHECKED),
+        unchecked=_limitations(routing),
     )
 
 
 # **Список называет то, чего он не проверяет.** Пустое место читается как
 # «проверено всё», и по этой же причине рядом с корзинами стоит строка охвата:
 # «347 эмитентов» без «из 702 с выпусками в обращении» выглядит полнотой.
-NOT_CHECKED = (
-    "Не проверяется: статус наблюдения рейтингового агентства — в источнике "
-    "его нет вовсе, есть только прогноз; рыночная цена и доходность выпуска; "
-    "раскрывает ли МСФО в своём отчёте эмитент, у которого их нет "
-    "у агрегатора."
-)
+# Сами оговорки объявлены методикой (`routing.limitations`): текст, который
+# читатель принимает за оговорку методики, правится диффом, а не кодом
+# страницы.
+def _limitations(routing) -> str:
+    """Ограничения списка одной строкой — в том порядке, в каком объявлены."""
+    return "".join(
+        f"<div>{html.escape(' '.join(item.split()))}</div>"
+        for item in routing.limitations
+    )
 
 
 def _coverage_line(summary: dict[str, int]) -> str:
