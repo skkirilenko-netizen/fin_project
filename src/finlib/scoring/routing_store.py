@@ -161,16 +161,15 @@ _DECISIONS = """
 SELECT DISTINCT ON (inn, standard)
        inn, standard, basket, author, reason, decided_on, valid_until
 FROM routing_decision
-WHERE standard = %(standard)s AND valid_until >= %(today)s
+WHERE valid_until >= %(today)s
 ORDER BY inn, standard, decided_on DESC, id DESC
 """
 
 _DECISIONS_EXPIRED = """
 SELECT count(DISTINCT inn) AS n FROM routing_decision
-WHERE standard = %(standard)s AND valid_until < %(today)s
+WHERE valid_until < %(today)s
   AND inn NOT IN (
-      SELECT inn FROM routing_decision
-      WHERE standard = %(standard)s AND valid_until >= %(today)s
+      SELECT inn FROM routing_decision WHERE valid_until >= %(today)s
   )
 """
 
@@ -183,12 +182,17 @@ def decisions(conn: PgConnection, today: date) -> dict[str, ManualFloor]:
     Решение принимается командой с автором и уходит в журнал; маршрут берёт
     последнее действующее. Истёкшее решение не применяется, но из журнала
     не исчезает — журнал доказательная база.
+
+    **Выборка называет стандарт строкой, а не одним на всех.** Прежде здесь
+    стоял `Standard.IFRS`, и это было верно ровно до того дня, когда
+    универсум задали долгом: у 439 эмитентов маршрут строится по отчётности
+    юридического лица, и решение человека о любом из них не нашлось бы
+    вовсе — то есть правило не срабатывало бы никогда, а по журналу
+    выглядело бы записанным.
     """
-    found: dict[str, ManualFloor] = {}
-    for row in fetch_all(
-        _DECISIONS, {"standard": Standard.IFRS.value, "today": today}, conn=conn
-    ):
-        found[row["inn"]] = ManualFloor(
+    found: dict[str, dict[str, ManualFloor]] = {}
+    for row in fetch_all(_DECISIONS, {"today": today}, conn=conn):
+        found.setdefault(row["inn"], {})[row["standard"]] = ManualFloor(
             basket=row["basket"],
             author=row["author"],
             reason=row["reason"],
@@ -196,6 +200,28 @@ def decisions(conn: PgConnection, today: date) -> dict[str, ManualFloor]:
             valid_until=row["valid_until"],
         )
     return found
+
+
+def floor_for(
+    decided: dict[str, dict[str, ManualFloor]],
+    inn: str,
+    standard: Standard | None,
+) -> ManualFloor | None:
+    """Действующее решение человека об этом эмитенте по его стандарту.
+
+    **У эмитента без отчётности стандарта нет вовсе**, и решение о нём берётся
+    какое есть: спутать его не с чем — комплекта, о котором оно сказало бы
+    другое, не существует. Там, где стандарт известен, берётся решение
+    его стандарта: ряды по РСБУ и по МСФО несопоставимы, и решение о группе
+    по консолидированной отчётности о комплекте юридического лица
+    не говорит.
+    """
+    by_standard = decided.get(inn)
+    if not by_standard:
+        return None
+    if standard is None:
+        return next(iter(by_standard.values()))
+    return by_standard.get(standard.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,7 +537,7 @@ def routing_rows(
         (
             fetch_all(
                 _DECISIONS_EXPIRED,
-                {"standard": Standard.IFRS.value, "today": today},
+                {"today": today},
                 conn=conn,
             )
             or [{"n": 0}]
@@ -689,7 +715,7 @@ def routing_rows(
             refinance=refinance,
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
-            manual_floor=decided.get(inn),
+            manual_floor=floor_for(decided, inn, standard),
             risk_sector=tuple(
                 replace(risky[item.isin], name=item.name)
                 for item in events.issues

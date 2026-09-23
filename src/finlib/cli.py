@@ -1881,6 +1881,13 @@ def routing_decide_command(
     decided: Annotated[
         str | None, typer.Option("--decided", help="Дата решения, ГГГГ-ММ-ДД")
     ] = None,
+    standard: Annotated[
+        str,
+        typer.Option(
+            "--standard",
+            help="Стандарт отчётности, по которой построен маршрут: rsbu либо ifrs",
+        ),
+    ] = Standard.IFRS.value,
     verbose: Annotated[bool, typer.Option("--verbose", help="Подробный журнал")] = False,
 ) -> None:
     """Вносит решение человека о корзине маршрута в журнал.
@@ -1894,6 +1901,11 @@ def routing_decide_command(
     агентства снимается, а запись о нём без срока пережила бы своё основание.
     «Не ниже», а не «назначить»: решение добавляется к машинным основаниям,
     а не отменяет их.
+
+    **Стандарт называется, как у всякой выборки по ИНН.** Маршрут строится
+    по консолидированной отчётности либо по отчётности юридического лица,
+    и решение ищется по стандарту своей строки: записанное под чужим,
+    оно не нашлось бы вовсе.
     """
     _setup_logging(verbose)
     _check_inn(inn)
@@ -1901,6 +1913,8 @@ def routing_decide_command(
 
     from finlib.db import execute
 
+    if standard not in (Standard.RSBU.value, Standard.IFRS.value):
+        _fail("стандарт решения — rsbu либо ifrs: выборка по ИНН называет стандарт")
     if basket not in ("attention", "review"):
         _fail("корзина решения — attention либо review: «не ниже», а не назначение")
     if not reason.strip():
@@ -1916,7 +1930,7 @@ def routing_decide_command(
         _DECISION_ADD,
         {
             "inn": inn,
-            "standard": Standard.IFRS.value,
+            "standard": standard,
             "basket": basket,
             "author": author,
             "reason": reason.strip(),
@@ -1925,8 +1939,9 @@ def routing_decide_command(
         },
     )
     typer.echo(
-        f"записано: {inn} не ниже «{basket}» до {valid_until:%d.%m.%Y} "
-        f"({author}, {decided_on:%d.%m.%Y}) — {reason.strip()}"
+        f"записано: {inn} ({standard}) не ниже «{basket}» до "
+        f"{valid_until:%d.%m.%Y} ({author}, {decided_on:%d.%m.%Y}) — "
+        f"{reason.strip()}"
     )
     rows = fetch_all(_DECISION_LIST, {})
     live = [row for row in rows if row["valid_until"] >= _date.today()]
@@ -1934,7 +1949,7 @@ def routing_decide_command(
     for row in rows:
         mark = " " if row in live else "истекло"
         typer.echo(
-            f"  {row['inn']:<12} {row['basket']:<10} до "
+            f"  {row['inn']:<12} {row['standard']:<5} {row['basket']:<10} до "
             f"{row['valid_until']:%d.%m.%Y} {mark:<8} {row['author']:<16} "
             f"{row['reason'][:56]}"
         )
