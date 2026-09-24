@@ -724,6 +724,11 @@ class RoutingPolicy(BaseModel):
     # Полоса вокруг конечной точки шкалы, в которой основание даёт внимание,
     # а не разбор: ступень у границы неустранима, но смягчаема.
     tolerance: Tolerance
+    # **Отсечка печати оценки сверху, а не корзины.** Выше неё граница
+    # не ограничивает ничего, и число читается как величина, которой оно
+    # не является; основание при этом остаётся тем же.
+    bound_meaningless_above: Decimal = Field(gt=0)
+    bound_meaningless_origin: str = Field(min_length=1)
     # Виды инструмента, называемые отдельно от биржевой облигации.
     instruments: Instruments
     # Правила пересчёта истории корзин назад: дата известности, шаг, глубина,
@@ -1433,10 +1438,18 @@ def route(
                     ),
                 )
             )
-    for name in sorted(absent):
+    # **Недостающие величины — один пробел, а не пробел на каждую.** Прежде
+    # у эмитента с двумя несобранными величинами в строке дважды стояло
+    # «данных для маршрута недостаточно», и читатель видел два обстоятельства
+    # там, где оно одно: у 0274051582 так повторялись денежные средства
+    # и долговая нагрузка. Предмет основания остаётся перечнем — по нему
+    # считается, какого поля не хватает чаще.
+    if absent:
         attention.append(
             Finding(
-                "data_insufficient", name, routing.say("data_insufficient", field=name)
+                "data_insufficient",
+                ", ".join(sorted(absent)),
+                routing.say("data_insufficient", field=", ".join(sorted(absent))),
             )
         )
 
@@ -1524,6 +1537,11 @@ def route(
 
     bound = by_code.get(rule.bound) if rule.bound else None
     if _bound_proves(bound, operating_profit) and bound.value > debt_threshold:
+        # **Оценка сверху, которая ничего не ограничивает, называется словами.**
+        # «Не выше 384 345,16x» — число настоящее и бесполезное: прибыль
+        # от продаж близка к нулю, и отношение к ней растёт без предела.
+        # Отсечка относится к печати, а не к корзине: основание то же.
+        empty = bound.value > routing.bound_meaningless_above
         attention.append(
             Finding(
                 "bound_above_threshold",
@@ -1533,6 +1551,7 @@ def route(
                 # величина, и формулировка обязана говорить именно так.
                 routing.say(
                     "bound_above_threshold",
+                    "meaningless" if empty else "",
                     value=catalogue.shown(rule.bound_of, bound.value, unit),
                 ),
             )
