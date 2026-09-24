@@ -317,6 +317,10 @@ class TypeMarkers(BaseModel):
     legal_name: tuple[str, ...] = ()
     bik: bool = False
     spv_flag: bool = False
+    # Вид эмитента, объявленный самим источником (`type_name_rus`): им
+    # различаются корпоративный эмитент, муниципальный и государственный.
+    # Это признак данных, а не наше суждение о наименовании.
+    kind: tuple[str, ...] = ()
 
     def matched(self, card: Mapping[str, object]) -> str:
         """Чем тип опознан у этой карточки; пусто — не опознан.
@@ -324,6 +328,9 @@ class TypeMarkers(BaseModel):
         Возвращается **название признака вместе со значением**: «структурный»
         без признака читается как наше суждение, а это признак данных.
         """
+        said = str(card.get("type_name_rus") or "")
+        if said and said in self.kind:
+            return f"вид эмитента у источника: {said}"
         branch = str(card.get("branch_name_rus") or "")
         if branch and branch in self.branch:
             return f"отрасль источника: {branch}"
@@ -797,6 +804,19 @@ class RoutingPolicy(BaseModel):
             raise ValueError(
                 "источник объявлен у оснований, которых нет: "
                 + ", ".join(sorted(unknown))
+            )
+        # **У каждого типа эмитента своя формулировка отброшенного основания.**
+        # «Приведены справочно» об SPV, о банке и о публично-правовом
+        # образовании говорит разное, и общая формулировка сказала бы о бюджете
+        # субъекта то же, что о балансе управляющей компании. Проверяется при
+        # загрузке: новый тип без формулировки падал на первом же эмитенте,
+        # у которого тип что-нибудь отбросил, — то есть посреди прогона.
+        said = self.statements.by_ground.get("inapplicable_here", {})
+        silent = {kind.code for kind in self.issuer_types} - set(said)
+        if silent:
+            raise ValueError(
+                "у типов эмитента нет формулировки отброшенного основания: "
+                + ", ".join(sorted(silent))
             )
         return self
 
@@ -1570,15 +1590,20 @@ def route(
                 )
             )
 
-    if routing.freshness.stale(latest_annual, today or date.today()):
+    # **Нарушение срока раскрытия говорит о запоздавшей отчётности, а не
+    # об отсутствующей.** У эмитента, отчётности которого нет ни по одному
+    # стандарту, обстоятельство названо своим основанием
+    # (`reporting_unavailable`), и второе, говорящее «последняя годовая
+    # отчётность за — её нет вовсе», было не сведением, а битой строкой:
+    # у 0273086494, 0274062111 и 0274034308 она и стояла.
+    if latest_annual is not None and routing.freshness.stale(
+        latest_annual, today or date.today()
+    ):
         attention.append(
             Finding(
                 "disclosure_overdue",
                 "",
-                routing.say(
-                    "disclosure_overdue",
-                    date=f"{latest_annual:%Y}" if latest_annual else "— её нет вовсе",
-                ),
+                routing.say("disclosure_overdue", date=f"{latest_annual:%Y}"),
             )
         )
 
