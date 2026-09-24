@@ -30,6 +30,7 @@
 import logging
 import sys
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.metrics.display import foreign_units, money  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
-from finlib.scoring.routing_store import cards, routing_rows  # noqa: E402
+from finlib.scoring.routing_store import SOURCE_NAMES, cards, routing_rows  # noqa: E402
 from finlib.sources.ratings_calendar import (  # noqa: E402
     NOT_CREDIT,
     bound,
@@ -45,10 +46,13 @@ from finlib.sources.ratings_calendar import (  # noqa: E402
     read_actions,
     transitions,
 )
+from finlib.utils import marked_by  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 OUT = Path("data/output/cards")
+# Полный текст границ метода: он одинаков у всех карточек, и место у него одно.
+LIMITS = OUT / "_границы_метода.md"
 
 # История наблюдения и история пересчёта не сравниваются: первая говорит,
 # что мы видели, вторая — что было бы видно, если бы мы смотрели. В таблице
@@ -136,7 +140,43 @@ def _title(inn: str, item, card: dict) -> tuple[str, str]:  # noqa: ANN001
     """
     short = str(card.get("name_rus") or "").strip()
     full = str(card.get("full_name_rus") or "").strip() or item.name
-    return (short or item.name), (full if full != (short or item.name) else "")
+    said = full if full != (short or item.name) else ""
+    # **Фирменное наименование — реквизит, и искажённым оно не печатается
+    # молча.** У «Простой еды» (1215229593) источник отдаёт «Общество
+    # с ограниченной откровенностью», у «СибСульфура» (2466127447) —
+    # «Ответсвенностью»: это ошибка агрегатора, а не наша и не эмитента,
+    # и проверяется она строением — развёрнутая в наименовании
+    # организационная форма обязана совпасть с объявленной у той же карточки.
+    if said and _form_broken(said):
+        said += (
+            " — **организационная форма в наименовании написана неверно "
+            "у источника; приведено как есть, не исправлено**"
+        )
+    return (short or item.name), said
+
+
+# **Сверяется одно устойчивое сочетание, а не форма целиком.** Полное
+# наименование и организационная форма у карточки расходятся законно:
+# «Акционерное общество "Волга"» при форме «Непубличное акционерное
+# общество» — это запись реестра против классификации, и таких 66 из 977.
+# Слова «с ограниченной ответственностью» предписаны ФЗ № 14-ФЗ, статья 4,
+# и разойтись не могут: их расхождение — опечатка источника.
+_LIMITED = "с ограниченной"
+_LIABILITY = "с ограниченной ответственностью"
+
+
+def _form_broken(name: str) -> bool:
+    """Искажена ли организационная форма в фирменном наименовании.
+
+    Найдено на двух карточках из 977: «Общество с ограниченной
+    **откровенностью** "Простая еда"» (1215229593) и «с Ограниченной
+    **Ответсвенностью** "СибСульфур"» (2466127447). Реквизит организации
+    мы не исправляем — ошибка не наша и не эмитента, — но и печатать её
+    молча нельзя.
+    """
+    return marked_by(name, (_LIMITED,), str.lower) and not marked_by(
+        name, (_LIABILITY,), str.lower
+    )
 
 
 def _ratings(item, routing, said: list) -> None:  # noqa: ANN001
@@ -207,6 +247,71 @@ def _ratings(item, routing, said: list) -> None:  # noqa: ANN001
         "Действия по выпускам видны ниже, в календаре, — но это история, "
         "а не действующее значение."
     )
+    # **«Рейтинга не было вовсе» при рейтингованных выпусках — неверно.**
+    # У Новоленской ТЭС (1400018759) снимок рейтингов эмитента пуст,
+    # а по выпуску 001Р-01 стоит ruAAA от 14.07.2026. Сказать «не оценивают»
+    # значило бы сказать о предмете, о котором речь не шла: оценивают выпуск.
+    # Значение берётся из календаря и помечено им: это последнее известное
+    # действие, а не действующее значение снимка.
+    for line in _issue_ratings(item):
+        add(f"\n{line}")
+
+
+def _issue_ratings(item) -> list[str]:  # noqa: ANN001
+    """Действующие рейтинги выпусков по календарю; пусто — их нет.
+
+    **Берётся последнее действие по каждому выпуску**, и отозванный рейтинг
+    действующим не считается: отзыв — значение шкалы, а не признак. Источник
+    назван прямо — календарь, слой проверки, а не снимок.
+    """
+    actions, names = _actions(), _bound()
+    if not actions:
+        return []
+    mine = [
+        entry
+        for entry in actions
+        if entry.about == "emission"
+        and entry.scale not in NOT_CREDIT
+        and names.get(prepared(entry.name.split(",")[0])) == item.inn
+    ]
+    latest: dict[str, object] = {}
+    for entry in sorted(mine, key=lambda x: x.when):
+        latest[entry.name] = entry
+    live = [
+        entry for entry in latest.values() if not entry.withdrawn  # type: ignore[attr-defined]
+    ]
+    if not live:
+        return []
+    said = [
+        "Рейтинги **выпусков** по календарю: "
+        + "; ".join(
+            f"{entry.name} — {_cell(entry.level)} ({entry.agency}, "  # type: ignore[attr-defined]
+            f"{entry.when:%d.%m.%Y})"  # type: ignore[attr-defined]
+            for entry in sorted(live, key=lambda x: x.name)[:6]  # type: ignore[attr-defined]
+        )
+        + (f" и ещё {len(live) - 6}" if len(live) > 6 else "")
+        + ". Это последнее известное действие, а не действующее значение "
+        "снимка: снимок рейтингов выпусков источник не отдаёт."
+    ]
+    return said
+
+
+@lru_cache(maxsize=1)
+def _actions() -> tuple:
+    """Календарь рейтинговых действий: читается один раз на прогон."""
+    try:
+        return read_actions()
+    except FileNotFoundError:
+        return ()
+
+
+@lru_cache(maxsize=1)
+def _bound() -> dict[str, str]:
+    """Привязка наименований календаря к ИНН: один раз на прогон."""
+    if not _actions():
+        return {}
+    names, _, _ = bound(_actions())
+    return names
 
 
 def _calendar(item, said: list, actions, names: dict[str, str]) -> None:  # noqa: ANN001
@@ -362,7 +467,12 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
         + ".\n"
     )
     if verdict.actions:
-        add(f"Действие: {verdict.actions[0]}\n")
+        # **Действие знает то, что знает карточка.** «Проверить, есть ли
+        # выпуски в обращении» рядом с «Выпусков всего 0» отправляет человека
+        # выяснять то, что страница уже говорит. Сам текст действия —
+        # методика и не правится: к нему добавляется наш ответ на ту часть
+        # вопроса, на которую ответ у нас есть.
+        add(f"Действие: {verdict.actions[0]}{_already_known(item)}\n")
     # **Ссылка на список ставится только на собранный.** Карточку открывают
     # из списка и возвращаются в него; обещать страницу, которой на диске нет,
     # хуже, чем не обещать ничего.
@@ -445,7 +555,9 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             )
 
     add("\n## Выпуски и события\n")
-    events = item.events
+    # Счётчики и перечень — о том, что **наступило**: событие позже дня сбора
+    # маршрут называет справочно, и складывать его с прочими нельзя.
+    events = _known(item)
     if events is None or not events.issues_known:
         add("перечня выпусков на диске нет — это не «выпусков нет».\n")
     else:
@@ -481,22 +593,56 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
     if not sets:
         add("комплектов нет: отчётность до нас не дошла.\n")
     else:
-        add("| Стандарт | Год | Откуда | Вид | Состояние | Раскрыта |")
-        add("|---|---|---|---|---|---|")
+        add("| Стандарт | Год | Откуда | Вид | Состояние | Раскрыта | В величинах |")
+        add("|---|---|---|---|---|---|---|")
         for row in sets:
             add(
                 f"| {row['standard']} | {row['report_year']} | {row['source']} "
                 f"| {row['reporting_kind'] or '—'} | {row['status']} "
-                f"| {row['disclosed'] or 'дата не сообщена — срок закона'} |"
+                f"| {row['disclosed'] or 'дата не сообщена — срок закона'} "
+                f"| {_in_values(item, row)} |"
             )
+        # **За год у эмитента два актуальных комплекта, и оба намеренно.**
+        # Величины собираются по фактам обоих с приоритетом первоисточника:
+        # у ГИР БО и документа он старше агрегатора, а агрегатор заполняет
+        # то, чего в них нет. Поэтому графа отвечает «идёт ли комплект
+        # в величины», а не «какой один из них выбран», — выбранного одного
+        # не существует.
+        add(
+            "\nВеличины собираются из фактов **всех** комплектов строки "
+            "с приоритетом первоисточника: ГИР БО и документ эмитента старше "
+            "агрегатора, агрегатор заполняет то, чего в них нет."
+        )
 
     _gaps(item, routing, list(sets), said)
 
+    # **Границы метода у всех карточек одни, и повторять их целиком незачем.**
+    # Две с половиной тысячи знаков на каждой из 900 страниц — это не сведение,
+    # а стена, которую перестают читать вместе с тем, что стоит выше неё.
+    # Печатается первая фраза каждой границы, полный текст лежит рядом
+    # и собирается один раз.
     add("\n## Границы метода\n")
-    add("Они у каждой карточки одни и доставкой не закрываются.\n")
+    add(
+        "Они у каждой карточки одни и доставкой не закрываются; полностью — "
+        f"в [{LIMITS.name}]({LIMITS.name}).\n"
+    )
     for line in routing.limitations:
-        add(f"- {' '.join(line.split())}")
+        add(f"- {_first_sentence(' '.join(line.split()))}")
     return "\n".join(said) + "\n"
+
+
+def _first_sentence(text: str) -> str:
+    """Первая фраза ограничения; длинная обрывается на границе предложения."""
+    head = text.split(". ")[0].rstrip(".")
+    return f"{head}." if len(head) + 2 >= len(text) else f"{head}. […]"
+
+
+def write_limits(routing) -> None:  # noqa: ANN001
+    """Кладёт полный текст границ метода рядом с карточками, один раз."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    said = ["# Границы метода\n", "Они одни у всех карточек списка.\n"]
+    said += [f"- {' '.join(line.split())}\n" for line in routing.limitations]
+    LIMITS.write_text("\n".join(said), encoding="utf-8")
 
 
 def _stale(item, said: list) -> None:  # noqa: ANN001
@@ -508,9 +654,12 @@ def _stale(item, said: list) -> None:  # noqa: ANN001
     Молчание об этом оставляет читателя с двумя несовместимыми утверждениями
     на одной странице.
     """
-    events, moment = item.events, item.report_date
+    events, moment = _known(item), item.report_date
     if events is None or moment is None:
         return
+    # **Считается от ближайшего наступившего события, а не от самого позднего.**
+    # У «Группы Продовольствие» самым поздним стоял купон 28.09.2026 — он ещё
+    # не наступил, — и разрыв выходил 271 день вместо 239 по событию 27.08.2026.
     later = [
         record.moment
         for record in events.open_records
@@ -520,10 +669,73 @@ def _stale(item, said: list) -> None:  # noqa: ANN001
         return
     said.append(
         f"\n**Величины описывают положение на {moment:%d.%m.%Y}.** Неисполненное "
-        f"обязательство наступило {max(later):%d.%m.%Y}, то есть "
-        f"{(max(later) - moment).days} дней спустя: здоровые величины "
+        f"обязательство наступило {min(later):%d.%m.%Y}, то есть "
+        f"{_days((min(later) - moment).days)} спустя: здоровые величины "
         "отчётности ему не противоречат — они о другом дне.\n"
     )
+
+
+def _in_values(item, row: dict) -> str:  # noqa: ANN001
+    """Идёт ли комплект в величины маршрута и почему нет.
+
+    Комплект другого периода либо стандарта — не пробел и не дефект:
+    маршрут строится по одному периоду, и сказать об этом надо словами,
+    иначе пустая графа читается как «отбракован».
+    """
+    if row["status"] == "quarantine":
+        return "нет: карантин"
+    if not row["is_actual"]:
+        return "нет: не актуален"
+    if item.standard is None or row["standard"] != item.standard.value:
+        return "нет: другой стандарт"
+    if item.report_date is None or row["report_year"] != item.report_date.year:
+        return "нет: другой период"
+    source = SOURCE_NAMES.get(row["source"], row["source"])
+    return "да, первоисточник" if row["source"] != "cbonds" else f"да, {source}"
+
+
+def _already_known(item) -> str:  # noqa: ANN001
+    """Чем карточка сама отвечает на действие; пусто — отвечать нечем.
+
+    Перечень выпусков лежит у нас, и «есть ли выпуски в обращении» он
+    закрывает наполовину: сколько их по нашим данным. Вторая половина
+    вопроса — обязан ли эмитент сдавать отчётность — остаётся человеку.
+    """
+    events = _known(item)
+    if events is None or not getattr(events, "issues_known", False):
+        return ""
+    alive = sum(1 for issue in events.issues if issue.status == "в обращении")
+    return (
+        f" — по нашему перечню выпусков в обращении {alive} "
+        f"из {len(events.issues)}"
+    )
+
+
+def _days(count: int) -> str:
+    """Число дней вместе с согласованным словом: «271 день», не «271 дней».
+
+    Правило закрытое и грамматическое, а не методическое: одиннадцать —
+    двадцать — всегда «дней», дальше решает последняя цифра.
+    """
+    tail, last = count % 100, count % 10
+    if 11 <= tail <= 14 or last == 0 or last >= 5:
+        return f"{count} дней"
+    return f"{count} день" if last == 1 else f"{count} дня"
+
+
+def _known(item) -> object:  # noqa: ANN001
+    """События эмитента так, как они известны сегодня.
+
+    **Событие, которое не наступило, в счётчик не идёт.** У «Группы
+    Продовольствие» стояло «событий дефолта 4, из них неисполненных 4»,
+    и четвёртым был купон 28.09.2026 — позже дня сбора. В основаниях маршрут
+    относит его в справочные верно, а счётчик карточки считал его наравне
+    с прочими: правило одно (`IssuerEvents.as_of`), и звать его обязаны оба.
+    """
+    events = item.events
+    if events is None or not hasattr(events, "as_of"):
+        return events
+    return events.as_of(date.today())
 
 
 def main() -> int:
@@ -536,6 +748,7 @@ def main() -> int:
         return 1
     routing = load_routing()
     OUT.mkdir(parents=True, exist_ok=True)
+    write_limits(routing)
     # Календарь читается один раз на прогон: выгрузка ручная, и по карточке
     # её перечитывать незачем.
     try:
