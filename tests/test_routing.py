@@ -180,8 +180,15 @@ def test_attention_is_split_by_nature_of_the_circumstance() -> None:
     assert verdict.subgroup == "value_risk"
 
 
-def test_review_has_no_subgroups() -> None:
-    """Корзина без подгрупп их не выдумывает: показывать было бы нечего."""
+def test_review_is_ordered_by_the_nature_of_the_circumstance() -> None:
+    """Внутри «Разбора» порядок тот же, что у природы: событие, рынок, величины.
+
+    **Корзина в полтораста строк выбирать не помогает без порядка** — тот же
+    довод, по которому разделено «Внимание» (решение владельца 24.09.2026).
+    Стоп-фактор — обстоятельство величин, и подгруппа у него своя, третья:
+    событие говорит о случившемся, рынок о мнении держателей сегодня,
+    величины — о положении на отчётную дату давностью до пятнадцати месяцев.
+    """
     verdict = route(
         healthy(),
         unit=UNIT,
@@ -191,8 +198,8 @@ def test_review_has_no_subgroups() -> None:
         today=date(2026, 5, 1),
     )
     assert verdict.basket == "review"
-    assert verdict.subgroups == ()
-    assert verdict.subgroup == ""
+    assert verdict.subgroups == ("value_risk",)
+    assert verdict.subgroup_names == ("риск по величинам",)
 
 
 def test_overdue_disclosure_is_its_own_ground() -> None:

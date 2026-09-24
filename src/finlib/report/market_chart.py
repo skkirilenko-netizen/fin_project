@@ -14,7 +14,9 @@
 """
 
 import logging
+import math
 from base64 import b64encode
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -40,21 +42,66 @@ def _x(day: date, first: date, last: date) -> float:
     return PAD_LEFT + inner * (day - first).days / span
 
 
-def _y(value: Decimal, low: Decimal, high: Decimal) -> float:
-    """Координата величины; ряд без размаха рисуется по середине рамки."""
-    span = high - low
-    inner = HEIGHT - PAD_TOP - PAD_BOTTOM
-    if span <= 0:
-        return PAD_TOP + inner / 2
-    return PAD_TOP + inner * float((high - value) / span)
+# **Нижняя граница логарифмической оси.** Логарифм нуля и отрицательного
+# не определён, а отрицательный спред правомерен: корпоративная бумага
+# изредка торгуется ниже кривой на коротком конце. Такие точки прижимаются
+# к низу рамки, и число их называется в подписи — молча их терять нельзя.
+FLOOR_BP = Decimal(1)
+
+# **Шкала цены постоянна у всех карточек**: они сравниваются между собой,
+# а своя шкала у каждой делает сравнение невозможным. Сто десять процентов
+# сверху — запас над номиналом: бумага с высоким купоном торгуется выше него.
+PRICE_LOW = Decimal(0)
+PRICE_HIGH = Decimal(110)
+
+
+@dataclass(frozen=True, slots=True)
+class Axis:
+    """Ось значений: как считать координату и где ставить отметки.
+
+    **Шкала — часть утверждения графика, а не оформление.** Весь рыночный
+    слой построен на кратности к ориентиру, и линейная ось прятала обычный
+    диапазон бумаги в нижние проценты высоты: у Кириллицы она шла от 29
+    до 16 348 б. п., и видно было плоскую линию со всплеском.
+    """
+
+    low: Decimal
+    high: Decimal
+    scale: int
+    logarithmic: bool = False
+    # Отметки помимо краёв: величина и признак «подписать особо» (граница).
+    marks: tuple[tuple[Decimal, bool], ...] = ()
+    clamped: int = 0
+
+    def y(self, value: Decimal) -> float:
+        """Координата величины; ряд без размаха рисуется по середине рамки."""
+        inner = HEIGHT - PAD_TOP - PAD_BOTTOM
+        low, high = self.low, self.high
+        if high <= low:
+            return PAD_TOP + inner / 2
+        if self.logarithmic:
+            spot = _log(max(value, low))
+            return PAD_TOP + inner * float(
+                (_log(high) - spot) / (_log(high) - _log(low))
+            )
+        value = min(max(value, low), high)
+        return PAD_TOP + inner * float((high - value) / (high - low))
+
+    def ticks(self) -> tuple[tuple[Decimal, bool], ...]:
+        """Края шкалы и промежуточные отметки — снизу вверх."""
+        return ((self.low, False), *self.marks, (self.high, False))
+
+
+def _log(value: Decimal) -> Decimal:
+    """Десятичный логарифм величины; ниже нижней границы — сама граница."""
+    return Decimal(math.log10(float(max(value, FLOOR_BP))))
 
 
 def _line(
     points: list[tuple[date, Decimal]],
     first: date,
     last: date,
-    low: Decimal,
-    high: Decimal,
+    axis: Axis,
     colour: str,
     dashed: bool = False,
 ) -> str:
@@ -62,8 +109,7 @@ def _line(
     if not points:
         return ""
     spots = " ".join(
-        f"{_x(day, first, last):.0f},{_y(value, low, high):.0f}"
-        for day, value in points
+        f"{_x(day, first, last):.0f},{axis.y(value):.0f}" for day, value in points
     )
     dash = ' stroke-dasharray="4 3"' if dashed else ""
     return (
@@ -77,21 +123,31 @@ def _frame(
     lines: list[tuple[list[tuple[date, Decimal]], str, bool]],
     first: date,
     last: date,
-    scale: int,
+    axis: Axis,
 ) -> str:
-    """Одна рамка: подпись, ось значений по краям и ломаные внутри.
+    """Одна рамка: подпись, отметки оси, ломаные и линии сетки.
 
-    Подписываются **только края шкалы и края времени**: сетка с десятком
-    подписей на графике величиной в две строки читается хуже, чем без неё,
-    а край шкалы отвечает на вопрос «в каких пределах это двигалось».
+    **Подписаны края и одна-две промежуточные отметки.** Одни края отвечают
+    на вопрос «в каких пределах это двигалось» и не отвечают на вопрос «где
+    сейчас»: уровень приходилось прикидывать на глаз.
     """
-    values = [value for series, _, _ in lines for _, value in series]
-    if not values:
+    if not any(series for series, _, _ in lines):
         return ""
-    low, high = min(values), max(values)
     drawn = "".join(
-        _line(series, first, last, low, high, colour, dashed)
+        _line(series, first, last, axis, colour, dashed)
         for series, colour, dashed in lines
+    )
+    grid = "".join(
+        f'<line x1="{PAD_LEFT}" y1="{axis.y(value):.0f}" '
+        f'x2="{WIDTH - PAD_RIGHT}" y2="{axis.y(value):.0f}" '
+        f'stroke="#ececec" stroke-width="1"/>'
+        for value, _ in axis.marks
+    )
+    labels = "".join(
+        f'<text x="{PAD_LEFT - 6}" y="{axis.y(value) + 4:.0f}" '
+        f'text-anchor="end" fill="{"#8a2b2b" if bold else "#666"}">'
+        f"{digits(value, axis.scale)}</text>"
+        for value, bold in axis.ticks()
     )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" '
@@ -101,16 +157,47 @@ def _frame(
         f'width="{WIDTH - PAD_LEFT - PAD_RIGHT}" '
         f'height="{HEIGHT - PAD_TOP - PAD_BOTTOM}" fill="none" '
         f'stroke="#d8d8d8"/>'
+        f"{grid}"
         f'<text x="{PAD_LEFT}" y="10" fill="#333">{title}</text>'
-        f'<text x="{PAD_LEFT - 6}" y="{PAD_TOP + 4}" text-anchor="end" '
-        f'fill="#666">{digits(high, scale)}</text>'
-        f'<text x="{PAD_LEFT - 6}" y="{HEIGHT - PAD_BOTTOM}" '
-        f'text-anchor="end" fill="#666">{digits(low, scale)}</text>'
+        f"{labels}"
         f'<text x="{PAD_LEFT}" y="{HEIGHT - 6}" fill="#666">'
         f"{first:%d.%m.%Y}</text>"
         f'<text x="{WIDTH - PAD_RIGHT}" y="{HEIGHT - 6}" text-anchor="end" '
         f'fill="#666">{last:%d.%m.%Y}</text>'
         f"{drawn}</svg>"
+    )
+
+
+def _log_axis(values: list[Decimal], scale: int) -> Axis:
+    """Логарифмическая ось спреда с отметками по круглым кратностям.
+
+    Отметки берутся из ряда 1, 2, 5 × 10ⁿ — тех же, по которым читается
+    кратность: между 100 и 1 000 б. п. разница не в девятистах пунктах,
+    а в десяти разах, и ось обязана показывать именно это.
+    """
+    low = max(min(values), FLOOR_BP)
+    high = max(max(values), low * 10)
+    marks: list[tuple[Decimal, bool]] = []
+    step = Decimal(1)
+    while step <= high:
+        for size in (Decimal(1), Decimal(2), Decimal(5)):
+            value = step * size
+            # Отметка ближе двух крат к краю накладывается на его подпись:
+            # «10 000» и «16 348» в одиннадцать пунктов не расходятся.
+            if low * 2 < value < high / 2:
+                marks.append((value, False))
+        step *= 10
+    # Больше трёх отметок на рамку высотой в сто пикселей не читается:
+    # берутся крайние и средняя.
+    if len(marks) > 3:
+        marks = [marks[0], marks[len(marks) // 2], marks[-1]]
+    return Axis(
+        low=low,
+        high=high,
+        scale=scale,
+        logarithmic=True,
+        marks=tuple(marks),
+        clamped=sum(1 for value in values if value < FLOOR_BP),
     )
 
 
@@ -167,22 +254,44 @@ def charts(
     )
     below = policy.distress_zone.price_below_percent
     edge = [(first, below), (last, below)] if price else []
+    # **Шкала спреда логарифмическая, и это сказано в подписи.** Слой
+    # построен на кратности к ориентиру: между 100 и 1 000 б. п. разница
+    # не в девятистах пунктах, а в десяти разах.
+    spread_axis = _log_axis(
+        [value for _, value in spread + level] or [FLOOR_BP],
+        int(policy.display["spread_scale"]),
+    )
+    lost = (
+        f", ниже {digits(FLOOR_BP, 0)} б. п. прижато к низу: {spread_axis.clamped}"
+        if spread_axis.clamped
+        else ""
+    )
+    # **Шкала цены одна на все карточки.** Своя у каждой делала их
+    # несравнимыми между собой: у эмитента с ценой 5,8 % нижняя подпись
+    # стояла на 5,8, и граница 60 % сливалась с осью.
+    price_axis = Axis(
+        low=PRICE_LOW,
+        high=PRICE_HIGH,
+        scale=int(policy.display["price_scale"]),
+        marks=((below, True), (Decimal(100), False)),
+    )
     return (
         _frame(
-            "Спред к кривой ОФЗ, б. п.: наибольший за неделю "
-            "(серым — ориентир рынка)",
+            "Спред к кривой ОФЗ, б. п.: наибольший за неделю, шкала "
+            f"логарифмическая (серым — ориентир рынка{lost})",
             [(spread, "#24486b", False), (level, "#9a9a9a", False)],
             first,
             last,
-            int(policy.display["spread_scale"]),
+            spread_axis,
         ),
         _frame(
-            f"Цена, % номинала: наименьшая за неделю "
+            f"Цена, % номинала: наименьшая за неделю, шкала "
+            f"{digits(PRICE_LOW, 0)}–{digits(PRICE_HIGH, 0)} у всех карточек "
             f"(пунктиром — граница {digits(below, 0)} %)",
             [(price, "#8a2b2b", False), (edge, "#9a9a9a", True)],
             first,
             last,
-            int(policy.display["price_scale"]),
+            price_axis,
         ),
     )
 
