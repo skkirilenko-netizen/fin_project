@@ -106,15 +106,17 @@ ON CONFLICT (inn) DO UPDATE SET
 
 _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
-    inn, standard, report_year, source, form_codes, correction_version,
+    inn, standard, report_year, period_end, source, form_codes, correction_version,
     is_actual, reporting_type, reporting_kind, unit_code, unit_source,
     status, meta, code_version
 ) VALUES (
-    %(inn)s, %(standard)s, %(report_year)s, 'cbonds', %(form_codes)s, 0,
-    true, %(reporting_type)s, 'full', %(unit_code)s, %(unit_source)s,
+    %(inn)s, %(standard)s, %(report_year)s, %(period_end)s, 'cbonds',
+    %(form_codes)s, 0,
+    true, %(reporting_type)s, %(reporting_kind)s, %(unit_code)s, %(unit_source)s,
     %(status)s, %(meta)s, %(code_version)s
 )
-ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
+ON CONFLICT (inn, standard, period_end, source, correction_version) DO UPDATE SET
+    reporting_kind = EXCLUDED.reporting_kind,
     form_codes = EXCLUDED.form_codes,
     reporting_type = EXCLUDED.reporting_type,
     unit_code = EXCLUDED.unit_code,
@@ -130,9 +132,13 @@ RETURNING id
 # доставок.** Комплект документа за тот же год остаётся актуальным: это
 # другой способ получения той же отчётности, и в расчёт идут оба — величины
 # документа старше по правилу приоритета.
+# **Признак актуальности снимается по периоду, а не по году** (фаза 5,
+# 24.09.2026). Годовой комплект и промежуточный за тот же год — два разных
+# периода, и оба актуальны: снятие по году гасило бы годовой при загрузке
+# полугодового, то есть отчётность года исчезала бы от появления свежей.
 _DROP_ACTUAL = """
 UPDATE src_file SET is_actual = false
-WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)s
+WHERE inn = %(inn)s AND standard = %(standard)s AND period_end = %(period_end)s
   AND source = 'cbonds' AND id <> %(keep)s AND is_actual
 """
 
@@ -382,16 +388,17 @@ def _checked_reason(
                 "к отдельному юридическому лицу, и смешивать её "
                 "с консолидированной нельзя",
             )
-    if report.annual_only and not str(row.get("date") or "").endswith("12-31"):
-        # **Вид причины стоит перед двоеточием, а подробность после.** Сводка
-        # причин отказа группирует по виду, и дата в начале дробила один вид
-        # на столько причин, сколько в источнике кварталов.
-        return Rejection(
-            CheckCode.CBONDS_SET_REJECTED,
-            f"период не годовой: {row.get('date')}, ключ комплекта содержит "
-            "год, и квартальная строка заняла бы место годовой",
-        )
     return None
+
+
+def _is_annual(moment: date) -> bool:
+    """Годовой ли период: отчётная дата — 31 декабря.
+
+    **Правило одно на проект.** Длительность периода выводится из отчётной
+    даты и в методике показателей (`annualisation.months_from`); второе
+    определение «годового» разошлось бы с первым.
+    """
+    return (moment.month, moment.day) == (12, 31)
 
 
 def _zero_checks(
@@ -599,6 +606,15 @@ def load_row(
             "inn": inn,
             "standard": standard,
             "report_year": moment.year,
+            # **Период в ключе комплекта, а не год** (фаза 5, 24.09.2026):
+            # у организации за год бывает четыре комплекта — годовой и три
+            # промежуточных, — и квартальная строка занимала место годовой.
+            "period_end": moment,
+            # Вид отчётности выводится из самой даты: 31 декабря — годовая,
+            # прочие отчётные даты — промежуточная. Правило одно на проект
+            # и объявлено у методики показателей (`annualisation.months_from`),
+            # здесь оно только применяется.
+            "reporting_kind": "full" if _is_annual(moment) else "interim",
             "form_codes": forms,
             "reporting_type": report.reporting_type,
             "unit_code": _unit_of(row, report, forms),
@@ -621,7 +637,7 @@ def load_row(
         {
             "inn": inn,
             "standard": standard,
-            "report_year": moment.year,
+            "period_end": moment,
             "keep": src_file_id,
         },
         conn=conn,

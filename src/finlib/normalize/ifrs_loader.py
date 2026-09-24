@@ -140,16 +140,17 @@ WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)
 
 _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
-    inn, standard, report_year, source, raw_path, checksum, form_codes,
+    inn, standard, report_year, period_end, source, raw_path, checksum, form_codes,
     correction_version, is_actual, reporting_type, reporting_kind, unit_code,
     unit_source, digit_grouping, status, meta, code_version
 ) VALUES (
-    %(inn)s, %(standard)s, %(report_year)s, 'file', %(raw_path)s, %(checksum)s,
+    %(inn)s, %(standard)s, %(report_year)s, %(period_end)s, 'file', %(raw_path)s,
+    %(checksum)s,
     %(form_codes)s, %(correction_version)s, true, 'full', %(reporting_kind)s,
     %(unit_code)s, 'explicit', %(digit_grouping)s, %(status)s, %(meta)s,
     %(code_version)s
 )
-ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
+ON CONFLICT (inn, standard, period_end, source, correction_version) DO UPDATE SET
     raw_path = EXCLUDED.raw_path,
     checksum = EXCLUDED.checksum,
     form_codes = EXCLUDED.form_codes,
@@ -735,6 +736,10 @@ def _write_src_file(
             "inn": inn,
             "standard": Standard.IFRS.value,
             "report_year": report_year,
+            # Период в ключе комплекта: у эмитента за год бывает годовой
+            # комплект и промежуточный, и год их сталкивал. Берётся первая
+            # отчётная дата профиля — она и есть отчётный период комплекта.
+            "period_end": profile.report_dates[0],
             "raw_path": raw_path,
             "checksum": checksum,
             "form_codes": list(profile.forms),

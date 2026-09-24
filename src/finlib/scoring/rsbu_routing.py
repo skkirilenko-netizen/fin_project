@@ -42,6 +42,13 @@ FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'rsbu' AND s.is_actual AND s.status <> 'quarantine'
+  -- **Основание маршрута — годовой комплект** (`standards.yaml`,
+  -- `period_preference.basis`). С загрузкой промежуточных периодов
+  -- (24.09.2026) `max(report_date)` без этого условия стал бы возвращать
+  -- полугодовую дату, и маршрут молча сменил бы основание: шкалы
+  -- откалиброваны на годовых величинах, и полугодовая выручка в них —
+  -- ошибка не в данных, а в мере.
+  AND COALESCE(s.reporting_kind, 'full') <> 'interim'
   AND (
       %(as_of)s::date IS NULL
       -- Настоящая дата раскрытия старше смоделированной: правило берётся

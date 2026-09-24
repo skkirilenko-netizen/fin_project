@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS src_file (
     id                bigserial PRIMARY KEY,
     inn               text NOT NULL REFERENCES organization (inn) ON DELETE CASCADE,
     report_year       integer NOT NULL,
+    -- **Отчётная дата комплекта, и она же в ключе уникальности.** Год ключом
+    -- быть перестал 24.09.2026 (фаза 5): у организации за один год бывает
+    -- четыре комплекта — годовой и три промежуточных, — и квартальная строка
+    -- занимала место годовой. Год остаётся рядом как удобство запросов,
+    -- но ключ строится по дате: она и есть период.
+    period_end        date,
     -- Способ получения комплекта, а не стандарт отчётности: `cbonds` —
     -- нормализованные данные агрегатора, и они входят в ключ уникальности
     -- наравне с прочими способами. Один и тот же период приходит и файлом,
@@ -81,7 +87,8 @@ CREATE TABLE IF NOT EXISTS src_file (
     -- прежних разборов: удалять их нельзя, а считать за нынешние — тем более.
     code_version      text,
     loaded_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT src_file_uniq UNIQUE (inn, standard, report_year, source, correction_version)
+    CONSTRAINT src_file_uniq
+        UNIQUE (inn, standard, period_end, source, correction_version)
 );
 
 -- Колонка заведена позже таблицы: CREATE TABLE IF NOT EXISTS её в готовую
@@ -708,6 +715,33 @@ ALTER TABLE ifrs_line_confirmation
 ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS match_key text;
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_match_idx
     ON ifrs_line_confirmation (inn, form_code, match_key);
+
+-- **Догонка 24.09.2026: период в ключе комплекта (фаза 5).** Колонка
+-- добавляется, заполняется по отчётным датам фактов комплекта, и лишь потом
+-- меняется ключ: перестроить ключ раньше заполнения значило бы столкнуть
+-- все комплекты организации в одну пустую дату.
+ALTER TABLE src_file ADD COLUMN IF NOT EXISTS period_end date;
+
+-- Дата берётся у самих фактов: она там есть с первого дня, и выдумывать
+-- её из года не нужно. Комплект без фактов (отбракованный на приёме) берёт
+-- 31 декабря своего года — другого о нём не известно.
+UPDATE src_file SET period_end = latest.moment
+FROM (
+    SELECT src_file_id, max(report_date) AS moment
+    FROM fact_report GROUP BY src_file_id
+) AS latest
+WHERE src_file.id = latest.src_file_id AND src_file.period_end IS NULL;
+
+UPDATE src_file SET period_end = make_date(report_year, 12, 31)
+WHERE period_end IS NULL;
+
+ALTER TABLE src_file DROP CONSTRAINT IF EXISTS src_file_uniq;
+ALTER TABLE src_file ADD CONSTRAINT src_file_uniq
+    UNIQUE (inn, standard, period_end, source, correction_version);
+
+COMMENT ON COLUMN src_file.period_end IS
+    'Отчётная дата комплекта; входит в ключ уникальности вместо года — '
+    'за год бывает четыре комплекта, годовой и три промежуточных';
 
 -- Догонка 24.09.2026: удаление мёртвого. Колонки объявлялись и не читались
 -- ничем, и обе удаляются вместе с объявлением — иначе в живой базе они

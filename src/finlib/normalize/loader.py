@@ -91,16 +91,18 @@ WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)
 
 _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
-    inn, standard, report_year, source, source_url, raw_path, checksum, form_codes, knd,
+    inn, standard, report_year, period_end, source, source_url, raw_path, checksum,
+    form_codes, knd,
     girbo_bfo_id, correction_version, is_actual, reporting_type, unit_code,
     unit_source, status, meta, code_version
 ) VALUES (
-    %(inn)s, %(standard)s, %(report_year)s, %(source)s, %(source_url)s, %(raw_path)s,
+    %(inn)s, %(standard)s, %(report_year)s, %(period_end)s, %(source)s,
+    %(source_url)s, %(raw_path)s,
     %(checksum)s, %(form_codes)s, %(knd)s, %(girbo_bfo_id)s, %(correction_version)s,
     %(is_actual)s, %(reporting_type)s, %(unit_code)s, %(unit_source)s,
     'loaded', %(meta)s, %(code_version)s
 )
-ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
+ON CONFLICT (inn, standard, period_end, source, correction_version) DO UPDATE SET
     source_url = EXCLUDED.source_url,
     raw_path = EXCLUDED.raw_path,
     checksum = EXCLUDED.checksum,
@@ -522,6 +524,9 @@ def _upsert_src_file(
         "inn": report.inn,
         "standard": standard.value,
         "report_year": report.report_year,
+        # **Период — часть ключа комплекта с 24.09.2026** (фаза 5): за год
+        # у организации бывает четыре комплекта, и год ключом их сталкивал.
+        "period_end": report.report_date,
         "source": source.value,
         "source_url": source_url,
         "raw_path": raw_path,

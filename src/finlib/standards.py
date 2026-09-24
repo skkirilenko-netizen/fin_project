@@ -98,6 +98,24 @@ class DivergenceRule(BaseModel):
         return self
 
 
+class PeriodPreference(BaseModel):
+    """Выбор между годовым комплектом и промежуточным за тот же год.
+
+    **Объявляется явно, потому что это тот случай, где мы уже получали
+    произвольный выбор.** Выборка «комплект года» без порядка возвращает
+    любой из четырёх, и расхождение видно только тогда, когда его ищут.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    basis: str = Field(pattern="^(annual|interim)$")
+    basis_origin: str = Field(min_length=1)
+    interim_use: str = Field(min_length=1)
+    interim_confidence: str = Field(pattern="^(same|lower)$")
+    interim_confidence_origin: str = Field(min_length=1)
+    both_actual: bool
+
+
 class StandardsPolicy(BaseModel):
     """Правила обращения со стандартом отчётности."""
 
@@ -107,6 +125,10 @@ class StandardsPolicy(BaseModel):
     base_standard: BaseStandardRule
     mixing: MixingRule
     divergence: DivergenceRule
+    # **Годовой комплект и промежуточный за один год.** Правило объявлено
+    # целиком: основание оценки — годовой, промежуточный служит наблюдением
+    # между годовыми и приводится к скользящим двенадцати месяцам.
+    period_preference: PeriodPreference
 
 
 def default_path() -> Path:

@@ -266,7 +266,6 @@ def test_passed_checks_reach_the_journal_with_their_denominator(db_conn) -> None
         ({"ln105": "0"}, "единица измерения"),
         ({"ln102": "МСФО"}, "неконсолидированная"),
         ({"ln102": "РСБУ"}, "стандарт отчётности не опознан"),
-        ({"date": "2025-06-30"}, "не годовой"),
     ],
 )
 def test_unfit_row_does_not_become_a_set(db_conn, change: dict, reason: str) -> None:

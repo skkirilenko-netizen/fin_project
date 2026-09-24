@@ -97,6 +97,10 @@ FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn
 WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
+  -- Основание маршрута — годовой комплект (`standards.yaml`,
+  -- `period_preference.basis`): промежуточный служит наблюдением между
+  -- годовыми, а шкалы откалиброваны на годовых величинах.
+  AND COALESCE(s.reporting_kind, 'full') <> 'interim'
   AND (
       %(as_of)s::date IS NULL
       -- **Настоящая дата раскрытия старше смоделированной.** ГИР БО её
