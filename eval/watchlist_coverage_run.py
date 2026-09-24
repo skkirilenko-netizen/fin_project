@@ -81,6 +81,14 @@ SELECT DISTINCT inn, standard FROM src_file
 WHERE is_actual AND status <> 'quarantine'
 """
 
+# Последняя точка пересчёта: тот же код и те же данные, только рыночного слоя
+# в ней ещё нет. С ней и сравнивается нынешний вердикт.
+_BEFORE_MARKET = """
+SELECT inn, basket, grounds_all FROM routing_history
+WHERE kind = 'backfill'
+  AND as_of = (SELECT max(as_of) FROM routing_history WHERE kind = 'backfill')
+"""
+
 
 def _inns(name: str) -> set[str]:
     """ИНН из сохранённого перечня источника; отсутствие файла — отказ."""
@@ -104,6 +112,84 @@ def _reason_of(message: str) -> str:
     """
     head = message.split(":")[0].strip().lower()
     return head or "причина не названа"
+
+
+def _market_share(rows: list, conn_rows: list, names: dict,  # noqa: ANN001
+                  grounds: dict) -> None:
+    """Что рыночный слой добавил к корзинам и чем именно.
+
+    **Корзина, выросшая вдвое, требует разбивки.** «Разбор» вырос с 90 до 164,
+    и без ответа «чем именно пришли» это число говорит только о размере:
+    человек, открывший список, обязан знать, сколько строк там по цене,
+    сколько по спреду и сколько уже стояло во «Внимании» по другим основаниям.
+
+    Сравнение идёт с последней записанной точкой пересчёта: она посчитана
+    тем же кодом на тех же данных, только без рыночного слоя.
+    """
+    before = {
+        row["inn"]: (row["basket"], set(row["grounds_all"] or ()))
+        for row in fetch_all(_BEFORE_MARKET, {})
+    }
+    if not before:
+        print("\n## Что добавил рыночный слой\n")
+        print("истории корзин на диске нет — сравнивать не с чем.\n")
+        return
+    fresh = [item for item in rows if item.inn in before]
+    came = [
+        item
+        for item in fresh
+        if item.verdict.basket == "review" and before[item.inn][0] != "review"
+    ]
+    by_ground: Counter = Counter()
+    from_where: Counter = Counter()
+    standing = 0
+    for item in came:
+        mine = [
+            code for code in item.verdict.grounds if code.startswith("market_")
+        ]
+        by_ground["без рыночного основания" if not mine else ""] += int(not mine)
+        for code in mine:
+            by_ground[grounds.get(code, code)] += 1
+        if len(mine) > 1:
+            by_ground["и ценой, и спредом"] += 1
+        from_where[before[item.inn][0]] += 1
+        # Стоял ли эмитент во «Внимании» по основанию, к рынку не относящемуся:
+        # «пришёл рынком» и «рынок добавился к уже известному» — разные сведения.
+        if before[item.inn][0] == "attention" and any(
+            not code.startswith("market_") for code in before[item.inn][1]
+        ):
+            standing += 1
+    print("\n## Что добавил рыночный слой\n")
+    print(
+        f"Сравнение с последней точкой пересчёта: тот же код и те же данные, "
+        f"только без рыночного слоя. Строк сравнено {len(fresh)}.\n"
+    )
+    print(
+        f"В «Разбор» пришли **{len(came)}** эмитентов. Из них уже стояли "
+        f"во «Внимании» по нерыночным основаниям **{standing}** — рынок "
+        "не открыл их, а поднял тяжесть; остальным он и есть единственное "
+        "обстоятельство.\n"
+    )
+    print("| Чем пришли | Эмитентов |")
+    print("|---|---|")
+    for name, count in by_ground.most_common():
+        if name and count:
+            print(f"| {name} | {count} |")
+    print("\n| Откуда пришли | Эмитентов |")
+    print("|---|---|")
+    for code, count in from_where.most_common():
+        print(f"| {names.get(code, code)} | {count} |")
+    # Подгруппа «рынок» во «Внимании»: ступень p95 корзины не повышает,
+    # и её вклад считается отдельно — иначе он теряется в общем числе.
+    watched = [
+        item
+        for item in conn_rows
+        if "market_risk" in item.verdict.subgroups
+    ]
+    print(
+        f"\nПодгруппа «рынок» во «Внимании» — **{len(watched)}** строк: "
+        "ступень p95 корзины не повышает и в «Разбор» никого не приводит."
+    )
 
 
 def main() -> int:
@@ -181,6 +267,17 @@ def main() -> int:
         f"| **итого** | **{len(with_bonds)}** | "
         + " | ".join(f"**{total.get(code, 0)}**" for code in ordered)
         + " |"
+    )
+
+    _market_share(
+        with_bonds,
+        conn_rows=rows,
+        names=names,
+        grounds={
+            ground.code: ground.name
+            for basket in routing.baskets
+            for ground in basket.grounds
+        },
     )
 
     # --- строки без выпусков ------------------------------------------------

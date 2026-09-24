@@ -143,6 +143,56 @@ def _first_day(
     return None
 
 
+def _first_new_day(
+    history: dict[date, set[str]],
+    sources: dict[str, str],
+    words: tuple[str, ...],
+    until: date = date.max,
+) -> date | None:
+    """Первый день, когда у слоя **появилось** основание, которого не было.
+
+    **Упреждение, упирающееся в начало истории, упреждением не является**
+    (решение владельца 24.09.2026). Основание, стоявшее уже в первый
+    наблюдавшийся день, ничего не предсказало: оно описывает положение,
+    а не событие, и сколько оно стояло до начала наблюдения — неизвестно.
+    Здесь такие основания исключаются, и остаётся только появление нового.
+    """
+    days = sorted(day for day in history)
+    if not days:
+        return None
+    mine = {
+        ground
+        for ground in history[days[0]]
+        if any(word in sources.get(ground, "") for word in words)
+    }
+    for when in days:
+        if when > until:
+            return None
+        for ground in history[when]:
+            if ground in mine:
+                continue
+            if any(word in sources.get(ground, "") for word in words):
+                return when
+    return None
+
+
+def _appeared(points: list[Point], holds, until: date, of: int, out_of: int):  # noqa: ANN001, ANN201
+    """День срабатывания признака, если он **не** держался с первого дня ряда.
+
+    То же правило, что у слоёв истории, и применяется оно к рынку наравне:
+    признак, стоявший с первого наблюдавшегося дня, о событии не предупредил.
+    У Кириллицы ступень p95 стояла с четвёртого дня ряда и до самого
+    события — это описание положения, а не упреждение.
+    """
+    first = first_day_when(points, holds, until, of, out_of)
+    if first is None or not points:
+        return None
+    # Признак держался уже в самом начале ряда: подтверждение набирается
+    # за первые `out_of` наблюдений, и раньше него сработать оно не может.
+    edge = points[min(out_of, len(points)) - 1].day
+    return None if first <= edge else first
+
+
 def _said(days: list[int]) -> str:
     """Упреждение словами: медиана, край и знаменатель."""
     if not days:
@@ -153,21 +203,33 @@ def _said(days: list[int]) -> str:
     )
 
 
-def _row(name: str, first, over: set[str], inside: dict, base: float) -> None:  # noqa: ANN001
-    """Строка сравнения признаков: пять чисел и упреждение."""
+def _row(name: str, first, over: set[str], inside: dict, base: float,  # noqa: ANN001
+         short: bool = False) -> None:
+    """Строка сравнения признаков: пять чисел и упреждение.
+
+    `short` убирает графу ложных срабатываний — она выводится из первых двух,
+    и в таблице появления места ей нет.
+    """
     fired = {inn for inn in over if first(inn, date.max) is not None}
-    hit = fired & set(inside)
-    leads = [
-        (inside[inn] - day).days
-        for inn in hit
+    # **Высказаться после события — не поймать его.** Прежде «с событием»
+    # считало всякого, у кого признак сработал когда угодно, в том числе
+    # на следующий день после неисполненного платежа: у цены это давало
+    # выявляемость 96,9 %, тогда как до события она срабатывала реже.
+    # Признак засчитывается пойманным, только если он сработал **до** события.
+    days = {
+        inn: day
+        for inn in fired & set(inside)
         if (day := first(inn, inside[inn])) is not None
-    ]
+    }
+    hit = set(days)
+    leads = [(inside[inn] - day).days for inn, day in days.items()]
     precision = len(hit) / len(fired) if fired else 0
     mine = set(inside) & over
     recall = len(hit) / len(mine) if mine else 0
     lift = precision / base if base else 0
+    false = "" if short else f"| {len(fired) - len(hit)} "
     print(
-        f"| {name} | {len(fired)} | {len(hit)} | {len(fired) - len(hit)} "
+        f"| {name} | {len(fired)} | {len(hit)} {false}"
         f"| {precision:.1%} | {recall:.1%} | {lift:.1f}× | {_said(leads)} |"
     )
 
@@ -372,6 +434,134 @@ def _told(history: dict, sources: dict, words: tuple[str, ...],
     return f"{edge}{(moment - day).days}"
 
 
+def _appearance(policy, market: Market, history: dict, sources: dict,  # noqa: ANN001
+                inside: dict, common: dict, started: date, base: float) -> None:
+    """Упреждение появившихся оснований против упреждения стоявших.
+
+    **Основание, стоявшее с первого наблюдавшегося дня, не упредило ничего**
+    (решение владельца 24.09.2026). «Медиана 240 дней» у слоя отчётности
+    означала «стояло уже тогда, когда мы начали смотреть», и сравнивать её
+    с рыночной было нельзя. Здесь то же измерение сделано по появлению:
+    первый день, когда у слоя возникло основание, которого прежде не было.
+
+    Правило применяется и к рынку — иначе оно мерило бы слои разными мерками.
+    """
+    print("\n### Упреждение появления, а не стояния\n")
+    print(
+        "Из упреждения исключены основания, стоявшие уже в первый "
+        "наблюдавшийся день: они описывают положение, а не предсказывают "
+        "событие, и сколько они стояли до начала наблюдения — неизвестно. "
+        "Разница между этой таблицей и предыдущими и есть цена различения.\n"
+    )
+    print(
+        "| Признак | Появился | С событием | Точность | Выявляемость "
+        "| Прирост | Упреждение |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    known = set(market.issuers)
+    for step in sorted(policy.route_steps, key=lambda item: item.percentile):
+        # Подтверждение берётся у самой ступени: у p99 оно своё — «5 из 10».
+        rule = step.confirmation or policy.confirmation.default
+        _row(
+            f"уровень p{step.percentile} ({step.multiple:.2f}×, "
+            f"подтверждение {rule.of} из {rule.out_of})",
+            lambda inn, until, s=step, r=rule: _appeared(
+                points_of(market, inn),
+                holds_level(market, s.multiple),
+                until,
+                r.of,
+                r.out_of,
+            ),
+            known,
+            inside,
+            base,
+            short=True,
+        )
+    below = policy.distress_zone.price_below_percent
+    _row(
+        f"цена ниже {below:.0f} % номинала",
+        lambda inn, until: _appeared(
+            points_of(market, inn), holds_price(below), until, 1, 1
+        ),
+        known,
+        inside,
+        base,
+        short=True,
+    )
+    share = len(set(common) & set(history)) / len(history) if history else 0
+    for name, words in (
+        (f"отчётность (с {started:%d.%m.%Y})", _REPORTING),
+        (f"рейтинги (с {started:%d.%m.%Y})", _RATING),
+    ):
+        _row(
+            name,
+            lambda inn, until, w=words: _first_new_day(
+                history.get(inn, {}), sources, w, until
+            ),
+            set(history),
+            common,
+            share,
+            short=True,
+        )
+
+
+def _halted(market: Market, inside: dict) -> None:
+    """Прекращение торгов перед событием: у скольких и за сколько дней.
+
+    **Граница метода, найденная на Кириллице.** Бумага перестала торговаться
+    за восемнадцать дней до неисполненного погашения, и рыночный слой лишился
+    предмета ровно тогда, когда был нужнее всего. Вопрос владельца: частый ли
+    это случай — и если частый, то само прекращение торгов есть признак.
+    """
+    print("\n## Прекращение торгов перед событием\n")
+    # **Событие позже последнего доставленного дня в меру не идёт.** Разрыв
+    # у него равен возрасту нашей доставки, а не молчанию бумаги: у события
+    # 28.09.2026 при ряде до 21.09.2026 выходит «семь дней без торгов», хотя
+    # торги, возможно, шли. Это та же ошибка, что «ноль упреждения» у события
+    # раньше начала ряда, только с другого конца.
+    last_day = max(market.benchmark, default=date.min)
+    late = {inn for inn, moment in inside.items() if moment > last_day}
+    rows: list[tuple[str, date, date, int]] = []
+    for inn, moment in sorted(inside.items(), key=lambda item: item[1]):
+        if inn in late:
+            continue
+        traded = [
+            item.day
+            for item in market.ordered(inn)
+            if item.price is not None and item.day <= moment
+        ]
+        if not traded:
+            continue
+        rows.append((inn, moment, traded[-1], (moment - traded[-1]).days))
+    if not rows:
+        print("ни одного эмитента с торгами до события — мерить нечего.\n")
+        return
+    gaps = sorted(gap for _, _, _, gap in rows)
+    print(
+        f"Из меры исключены {len(late)} эмитентов, чьё событие позже "
+        f"последнего доставленного дня ({last_day:%d.%m.%Y}): разрыв у них "
+        "равен возрасту доставки, а не молчанию бумаги.\n"
+    )
+    print(
+        f"Эмитентов с событием и торгами до него **{len(rows)}**. Разрыв "
+        "между последним днём торгов и событием: медиана "
+        f"**{statistics.median(gaps):.0f}** дн., от {min(gaps)} до {max(gaps)}. "
+        f"Торги прекратились за неделю и более до события у "
+        f"**{sum(1 for gap in gaps if gap >= 7)}**, за месяц и более — "
+        f"у **{sum(1 for gap in gaps if gap >= 30)}**.\n"
+    )
+    print(
+        "**Разрыв — не молчание рынка, а отсутствие предмета.** Там, где торги "
+        "прекратились, рыночный признак не может ни сработать, ни промолчать: "
+        "наблюдения нет вовсе. Ноль здесь означает, что бумага торговалась "
+        "в самый день события.\n"
+    )
+    print("| ИНН | Событие | Последний день торгов | Разрыв, дн. |")
+    print("|---|---|---|---|")
+    for inn, moment, last, gap in sorted(rows, key=lambda item: -item[3])[:15]:
+        print(f"| {inn} | {moment:%d.%m.%Y} | {last:%d.%m.%Y} | {gap} |")
+
+
 def _overlap(policy, market: Market, history: dict, sources: dict,  # noqa: ANN001
              inside: dict, common: dict, started: date) -> None:
     """Кто ловит событие: только отчётность, только рейтинги, только рынок.
@@ -387,10 +577,9 @@ def _overlap(policy, market: Market, history: dict, sources: dict,  # noqa: ANN0
         "с рейтингами упредить не могли по нашей доставке, а не по своему "
         "молчанию.\n"
     )
-    rule = policy.confirmation.default
-    extreme = next(
-        step.multiple for step in policy.route_steps if step.basket == "review"
-    )
+    top = next(step for step in policy.route_steps if step.basket == "review")
+    rule = top.confirmation or policy.confirmation.default
+    extreme = top.multiple
     below = policy.distress_zone.price_below_percent
 
     def by_price(points: list[Point], moment: date) -> bool:
@@ -716,6 +905,9 @@ def main() -> int:
             inside,
             base,
         )
+
+    _appearance(policy, market, history, sources, inside, common, started, base)
+    _halted(market, inside)
 
     print("\n## Пересечение слоёв на событиях в окне\n")
     print(

@@ -49,6 +49,22 @@ _RULES = settings.methodology_dir / "market.yaml"
 _LOADED: "Market | None" = None
 
 
+class Rule(BaseModel):
+    """Подтверждение «K из N»: сколько наблюдений из скольких."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    of: int = Field(gt=0)
+    out_of: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _fits(self) -> "Rule":
+        """Требовать больше наблюдений, чем окно, нельзя."""
+        if self.of > self.out_of:
+            raise ValueError("подтверждение требует больше точек, чем в окне")
+        return self
+
+
 class Step(BaseModel):
     """Ступень лестницы кратности: порог вместе с тем, что он отсекает."""
 
@@ -68,10 +84,21 @@ class Step(BaseModel):
     escalation: bool | None = None
     why: str = ""
     statement_origin: str = ""
+    # **Подтверждение бывает своим у ступени.** Оно объявлено рядом с числами
+    # размена: у p99 смягчено до «5 из 10» решением владельца 24.09.2026,
+    # у прочих ступеней действует общее правило (`confirmation.default`).
+    # Отсутствие поля означает «общее», а не «без подтверждения».
+    confirmation: Rule | None = None
+    confirmation_status: str = ""
 
     @model_validator(mode="after")
     def _route_step_is_named(self) -> "Step":
         """Ступень маршрута обязана назвать основание и корзину."""
+        if self.confirmation is not None and not self.confirmation_status:
+            raise ValueError(
+                f"у ступени {self.code} своё подтверждение без объявленной "
+                "зрелости: порог без статуса калибровки выглядит проверенным"
+            )
         if not self.in_route:
             return self
         if not self.ground or not self.basket:
@@ -96,6 +123,9 @@ class Ladder(BaseModel):
     # Цена подтверждения, измеренная на самой ступени: прирост и упреждение
     # при разных «K из N». Без неё выбранное правило выглядит единственным.
     confirmation_measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
+    # Упреждение появления против упреждения стояния: то же измерение
+    # без оснований, стоявших с первого наблюдавшегося дня.
+    appearance_measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
     # **Подтверждение здесь не украшение, а условие осмысленности.** Порог,
     # отсекающий процент рынка в день, за два года срабатывает почти у каждого.
     requires_confirmation: bool
@@ -113,22 +143,6 @@ class Ladder(BaseModel):
                     "различение, которого нет"
                 )
             taken.add(step.basket)
-        return self
-
-
-class Rule(BaseModel):
-    """Подтверждение «K из N»: сколько наблюдений из скольких."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    of: int = Field(gt=0)
-    out_of: int = Field(gt=0)
-
-    @model_validator(mode="after")
-    def _fits(self) -> "Rule":
-        """Требовать больше наблюдений, чем окно, нельзя."""
-        if self.of > self.out_of:
-            raise ValueError("подтверждение требует больше точек, чем в окне")
         return self
 
 
@@ -156,6 +170,10 @@ class Distress(BaseModel):
     measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
     measured_origin: str = Field(min_length=1)
     confirmation_declined: dict[str, Decimal]
+    # **Наблюдение — не правило, и место у него своё.** Случай, увиденный
+    # однажды, порога не даёт; записанный рядом с правилами, он бы читался
+    # как правило, а забытый — искался бы заново.
+    observed: tuple[dict[str, str], ...] = ()
     statement_origin: str = Field(min_length=1)
     yield_is_meaningless: bool
 

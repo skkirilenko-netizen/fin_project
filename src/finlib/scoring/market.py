@@ -235,18 +235,28 @@ def findings(
 
     У системно значимого эмитента подтверждение длиннее (`confirmation.
     systemic`): цена ложной тревоги там выше, и это решение владельца.
+
+    **Подтверждение бывает своим у ступени** и тогда берётся у неё: у p99 оно
+    смягчено до «5 из 10», потому что размен измерен — выявляемость с 69 %
+    до 81 %, упреждение с 79 до 138 дней при приросте с 4,7× до 3,6×.
+    Системное правило старше: у системно значимого эмитента цена ложной
+    тревоги выше, и мягкая ступень ему послаблением служить не должна.
     """
     points = _ordered(market, inn, today)
     if not points:
         return ()
-    rule = policy.confirmation.systemic if systemic else policy.confirmation.default
-    of, out_of = (
-        (rule.of, rule.out_of) if policy.ladder.requires_confirmation else (1, 1)
-    )
     found: list[MarketFinding] = []
     for step in sorted(
         policy.route_steps, key=lambda item: item.percentile, reverse=True
     ):
+        rule = (
+            policy.confirmation.systemic
+            if systemic
+            else (step.confirmation or policy.confirmation.default)
+        )
+        of, out_of = (
+            (rule.of, rule.out_of) if policy.ladder.requires_confirmation else (1, 1)
+        )
         said = _level_finding(step, market, points, today, of, out_of)
         if said is not None:
             found.append(said)

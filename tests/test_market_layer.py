@@ -136,11 +136,12 @@ def test_the_level_and_the_price_are_two_grounds() -> None:
     # «кратность 31» без ориентира дня не говорит ничего.
     level = next(item for item in said if item.ground.endswith("extreme"))
     assert level.benchmark == Decimal(100)
-    # **Подтверждение откладывает вывод ровно на то, чем он подтверждается.**
-    # Признак держится с первого дня, а основание возникает на седьмом:
-    # «7 из 10» и есть эта задержка, и цена её измерена — 79 дней упреждения
-    # у p99 с подтверждением против 398 без него.
-    assert level.since == first + timedelta(days=policy.confirmation.default.of - 1)
+    # **Подтверждение откладывает вывод ровно на то, чем он подтверждается,
+    # и берётся оно у самой ступени.** У p99 оно смягчено до «5 из 10»:
+    # признак держится с первого дня, а основание возникает на пятом.
+    step = next(item for item in policy.route_steps if item.basket == "review")
+    rule = step.confirmation or policy.confirmation.default
+    assert level.since == first + timedelta(days=rule.of - 1)
     price = next(item for item in said if item.ground.endswith("distress"))
     assert price.since == first, "у цены подтверждения нет намеренно"
 
