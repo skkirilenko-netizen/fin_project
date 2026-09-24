@@ -24,6 +24,7 @@
 (`scoring.routing_store.routing_rows`) с названной датой.
 """
 
+import json
 import logging
 import sys
 from collections import Counter
@@ -55,15 +56,18 @@ WHERE id = %(id)s
 _POINT = """
 INSERT INTO routing_history
        (run_id, inn, as_of, kind, standard, basket, subgroup, grounds,
-        fingerprint, report_date)
+        grounds_all, inputs, fingerprint, report_date)
 VALUES (%(run)s, %(inn)s, %(as_of)s, 'backfill', %(standard)s, %(basket)s,
-        %(subgroup)s, %(grounds)s, %(fingerprint)s, %(report_date)s)
+        %(subgroup)s, %(grounds)s, %(grounds_all)s, %(inputs)s,
+        %(fingerprint)s, %(report_date)s)
 ON CONFLICT (inn, as_of, kind) DO UPDATE SET
     run_id = EXCLUDED.run_id,
     standard = EXCLUDED.standard,
     basket = EXCLUDED.basket,
     subgroup = EXCLUDED.subgroup,
     grounds = EXCLUDED.grounds,
+    grounds_all = EXCLUDED.grounds_all,
+    inputs = EXCLUDED.inputs,
     fingerprint = EXCLUDED.fingerprint,
     report_date = EXCLUDED.report_date
 """
@@ -94,6 +98,36 @@ def grid(today: date, step: int, depth: int) -> tuple[tuple[date, ...], int]:
     # на неделю сетки, второй точкой не становится, и приписывать его
     # событиям значило бы посчитать одну точку дважды.
     return tuple(sorted(weekly | events)), len(events - weekly)
+
+
+def decision_values(row) -> dict:  # noqa: ANN001
+    """Величины, которыми решение получено, — строками.
+
+    **Исход без величин не отвечает на вопрос «а если порог другой».**
+    Калибровка фазы 6 задаст истории десятки таких вопросов, и каждый стоил бы
+    обхода года по сорок минут. Строками потому, что `Decimal` в JSON иначе
+    становится `float`, а денежные величины у нас только `Decimal`
+    (инвариант 5).
+
+    Величины берутся у строки маршрута, а не считаются здесь заново: второй
+    путь к покрытию разошёлся бы с первым.
+    """
+    found: dict = {
+        "metrics": {code: str(value) for code, value in row.values.items()},
+        "unit": row.unit,
+    }
+    if row.cash is not None:
+        found["cash"] = str(row.cash)
+    money = row.refinance
+    if money is not None:
+        found["refinance"] = {
+            "due": str(money.due) if money.due is not None else None,
+            "offered": str(money.offered) if money.offered is not None else None,
+            "cash": str(money.cash) if money.cash is not None else None,
+            "unit": money.unit,
+            "days": money.days,
+        }
+    return found
 
 
 def main() -> int:
@@ -165,6 +199,14 @@ def main() -> int:
                             "basket": row.verdict.basket,
                             "subgroup": row.verdict.subgroup,
                             "grounds": list(row.verdict.grounds),
+                            # **Все сработавшие основания, а не только
+                            # называющие корзину**: у эмитента в «Разборе»
+                            # основание рефинансирования корзину не называет,
+                            # и ряд по `grounds` объявил бы его несрабатывающим.
+                            "grounds_all": sorted(
+                                {item.ground for item in row.verdict.findings}
+                            ),
+                            "inputs": json.dumps(decision_values(row)),
                             "fingerprint": row.fingerprint,
                             "report_date": row.report_date,
                         },

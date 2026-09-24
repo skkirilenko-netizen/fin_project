@@ -44,18 +44,33 @@ from finlib.sources import moex  # noqa: E402
 logger = logging.getLogger(__name__)
 
 XSEC = "history/engines/stock/markets/bonds/securities.json"
-ZCYC = "history/engines/stock/zcyc.json"
+# **Кривая берётся методом закрытия дня, а не историей внутри дня** (решение
+# человека 24.09.2026). `history/engines/stock/zcyc.json?date=` отдаёт около
+# девятнадцати тысяч внутридневных записей, из которых нужна одна: 1 427 МБ
+# кэша против 1 660 МБ всех срезов торгов разом. Здешний метод отдаёт одну
+# строку параметров на закрытие и вдобавок `yearyields` — саму кривую
+# в одиннадцати опорных точках, которыми фаза 3 обязана сверить формулу.
+ZCYC = "engines/stock/zcyc.json"
 CURVES = moex.CACHE / "zcyc_by_day.json"
 
 
 def curve_of(day: date) -> dict | None:
-    """Параметры кривой на закрытие дня; None — торгов в этот день не было."""
-    answer = moex.fetch(ZCYC, f"zcyc_{day}", {"date": f"{day}", "iss.meta": "off"})
+    """Кривая на закрытие дня: параметры и опубликованные точки.
+
+    `None` — торгов в этот день не было. Точки хранятся рядом с параметрами
+    намеренно: по параметрам кривая считается, а точками счёт проверяется,
+    и второй запрос за ними разошёлся бы с первым по дню.
+    """
+    answer = moex.fetch(ZCYC, f"zcyc_day_{day}", {"date": f"{day}", "iss.meta": "off"})
     got = moex.rows(answer, "params")
     if not got:
         return None
-    # Внутри дня кривая меняется; «кривая на дату» — её последняя запись.
-    return max(got, key=lambda item: str(item.get("tradetime") or ""))
+    found = dict(got[0])
+    found["yearyields"] = [
+        {"period": item.get("period"), "value": item.get("value")}
+        for item in moex.rows(answer, "yearyields")
+    ]
+    return found
 
 
 def _arg(name: str, fallback: int) -> int:
@@ -99,7 +114,12 @@ def main() -> int:
                 XSEC, f"xsec_{day}", "history", {"date": key, "iss.meta": "off"}
             )
             _applied(rows, day)
-            found = curve_of(day) if key not in curves else curves[key]
+            # **Запись без опубликованных точек считается недобранной.**
+            # Прежний метод отдавал только параметры, и отличить «кривой нет»
+            # от «кривая взята дорогим методом» можно единственным способом —
+            # по составу самой записи.
+            got = curves.get(key)
+            found = got if got and "yearyields" in got else curve_of(day)
         except moex.MoexError as failure:
             # **Ранняя остановка, а не пропуск дня.** Прогон, идущий дальше
             # сквозь отказы, кончается сеткой с дырами, и по числу дней этого
@@ -111,11 +131,10 @@ def main() -> int:
         if not rows:
             empty += 1
             continue
-        if key not in curves:
-            if found is None:
-                logger.warning("кривой на %s нет: спред этого дня не посчитать", day)
-            else:
-                curves[key] = found
+        if found is None:
+            logger.warning("кривой на %s нет: спред этого дня не посчитать", day)
+        else:
+            curves[key] = found
         done += 1
         logger.info("%s: строк среза %d", day, len(rows))
         # Кривые пишутся после каждого дня, а не в конце: прогон идёт минуты,

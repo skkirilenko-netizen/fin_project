@@ -30,6 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
 
+from routing_backfill_run import decision_values
+
 from finlib.db import connection, execute, fetch_all
 from finlib.scoring.routing import load_routing
 from finlib.scoring.routing_store import routing_rows
@@ -163,15 +165,18 @@ WHERE id = %(id)s
 _POINT = """
 INSERT INTO routing_history
        (run_id, inn, as_of, kind, standard, basket, subgroup, grounds,
-        fingerprint, report_date)
+        grounds_all, inputs, fingerprint, report_date)
 VALUES (%(run)s, %(inn)s, %(as_of)s, 'run', %(standard)s, %(basket)s,
-        %(subgroup)s, %(grounds)s, %(fingerprint)s, %(report_date)s)
+        %(subgroup)s, %(grounds)s, %(grounds_all)s, %(inputs)s,
+        %(fingerprint)s, %(report_date)s)
 ON CONFLICT (inn, as_of, kind) DO UPDATE SET
     run_id = EXCLUDED.run_id,
     standard = EXCLUDED.standard,
     basket = EXCLUDED.basket,
     subgroup = EXCLUDED.subgroup,
     grounds = EXCLUDED.grounds,
+    grounds_all = EXCLUDED.grounds_all,
+    inputs = EXCLUDED.inputs,
     fingerprint = EXCLUDED.fingerprint,
     report_date = EXCLUDED.report_date
 """
@@ -235,6 +240,14 @@ def main() -> int:
                     "basket": row.verdict.basket,
                     "subgroup": row.verdict.subgroup,
                     "grounds": list(row.verdict.grounds),
+                    # Перечень всех сработавших и величины решения пишет
+                    # тот же код, что и пересчёт: два способа записать одну
+                    # историю разошлись бы составом, и сравнить их было бы
+                    # нечем — наблюдение с пересчётом не сравнивается.
+                    "grounds_all": sorted(
+                        {item.ground for item in row.verdict.findings}
+                    ),
+                    "inputs": json.dumps(decision_values(row)),
                     "fingerprint": row.fingerprint,
                     "report_date": row.report_date,
                 },
