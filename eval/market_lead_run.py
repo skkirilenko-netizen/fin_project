@@ -143,6 +143,30 @@ def _first_day(
     return None
 
 
+def first_new_ground(
+    history: dict[date, set[str]],
+    pick,  # noqa: ANN001
+    until: date = date.max,
+) -> date | None:
+    """Первый день, когда у слоя **появилось** основание, отбираемое `pick`.
+
+    Отбор доводом, а не словами источника: слой бывает нужно разделить —
+    рефинансирование против остальной отчётности, — и второе определение
+    «появления» разошлось бы с первым.
+    """
+    days = sorted(history)
+    if not days:
+        return None
+    standing = {ground for ground in history[days[0]] if pick(ground)}
+    for when in days:
+        if when > until:
+            return None
+        for ground in history[when]:
+            if ground not in standing and pick(ground):
+                return when
+    return None
+
+
 def _first_new_day(
     history: dict[date, set[str]],
     sources: dict[str, str],
@@ -157,23 +181,13 @@ def _first_new_day(
     а не событие, и сколько оно стояло до начала наблюдения — неизвестно.
     Здесь такие основания исключаются, и остаётся только появление нового.
     """
-    days = sorted(day for day in history)
-    if not days:
-        return None
-    mine = {
-        ground
-        for ground in history[days[0]]
-        if any(word in sources.get(ground, "") for word in words)
-    }
-    for when in days:
-        if when > until:
-            return None
-        for ground in history[when]:
-            if ground in mine:
-                continue
-            if any(word in sources.get(ground, "") for word in words):
-                return when
-    return None
+    return first_new_ground(
+        history,
+        lambda ground: any(
+            word in sources.get(ground, "") for word in words
+        ),
+        until,
+    )
 
 
 def _appeared(points: list[Point], holds, until: date, of: int, out_of: int):  # noqa: ANN001, ANN201

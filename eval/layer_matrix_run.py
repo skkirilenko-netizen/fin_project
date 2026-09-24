@@ -34,6 +34,7 @@ from market_lead_run import (  # noqa: E402
     _appeared,
     _first_new_day,
     events,
+    first_new_ground,
     layers,
     points_of,
 )
@@ -42,6 +43,15 @@ from finlib.scoring.market import holds_level, holds_price  # noqa: E402
 from finlib.sources.market import load_market, series  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# **Рефинансирование мерится отдельно от прочей отчётности** (требование
+# владельца 24.09.2026). Прирост слоя отчётности 1,1× может скрывать сильную
+# часть внутри слабой: в сентябре обе меры рефинансирования поймали двоих
+# из трёх пропущенных — «Эффективные технологии» (оферты 360 000 против
+# 168 795) и Донецкую Долину (30 000 против 16 616), — и поймали, не зная
+# о событии. Слой, у которого сильная часть неотличима от слабой, описан
+# в материалах неверно.
+REFINANCING = frozenset({"refinancing_gap", "refinancing_offers"})
 
 
 def _market_day(policy, market, inn: str, until: date) -> date | None:  # noqa: ANN001
@@ -70,6 +80,52 @@ def _market_day(policy, market, inn: str, until: date) -> date | None:  # noqa: 
     return min(said) if said else None
 
 
+def _reporting_day(history: dict, sources: dict, until: date,  # noqa: ANN001
+                   part: str = "всё") -> date | None:
+    """День появления основания слоя отчётности: целиком либо частью.
+
+    `part` — «рефинансирование», «величины» либо «всё»: слой делится надвое
+    и мерится порознь, потому что сильная часть внутри слабой неотличима
+    от слабого слоя целиком.
+    """
+    if part == "всё":
+        return _first_new_day(history, sources, _REPORTING, until)
+
+    def pick(ground: str) -> bool:
+        mine = ground in REFINANCING
+        if part == "рефинансирование":
+            return mine
+        return not mine and any(
+            word in sources.get(ground, "") for word in _REPORTING
+        )
+
+    return first_new_ground(history, pick, until)
+
+
+def _spoke_at_all(history: dict, sources: dict, part: str,  # noqa: ANN001
+                  until: date) -> date | None:
+    """Первый день, когда часть слоя высказалась — со стоявшими вместе.
+
+    Вторая мера рядом с мерой появления: у состояния появление — плохая
+    мера того, чем оно является, и разница двух таблиц отвечает на вопрос
+    «сигнал это или описание».
+    """
+    for when in sorted(history):
+        if when > until:
+            return None
+        for ground in history[when]:
+            mine = ground in REFINANCING
+            if part == "рефинансирование" and mine:
+                return when
+            if (
+                part == "величины"
+                and not mine
+                and any(word in sources.get(ground, "") for word in _REPORTING)
+            ):
+                return when
+    return None
+
+
 def _spoke(policy, market, history, sources, inside: dict) -> dict[str, dict]:  # noqa: ANN001
     """По каждому эмитенту с событием — день высказывания каждого слоя.
 
@@ -78,15 +134,16 @@ def _spoke(policy, market, history, sources, inside: dict) -> dict[str, dict]:  
     """
     found: dict[str, dict] = {}
     for inn, moment in inside.items():
+        own = history.get(inn, {})
         found[inn] = {
             "событие": moment,
             "рынок": _market_day(policy, market, inn, moment),
-            "отчётность": _first_new_day(
-                history.get(inn, {}), sources, _REPORTING, moment
+            "отчётность": _reporting_day(own, sources, moment),
+            "рейтинги": _first_new_day(own, sources, _RATINGS, moment),
+            "рефинансирование": _reporting_day(
+                own, sources, moment, "рефинансирование"
             ),
-            "рейтинги": _first_new_day(
-                history.get(inn, {}), sources, _RATINGS, moment
-            ),
+            "величины": _reporting_day(own, sources, moment, "величины"),
         }
     return found
 
@@ -101,11 +158,15 @@ def _fired(policy, market, history, sources, circle: set[str],  # noqa: ANN001
     """
     said: set[str] = set()
     for inn in circle:
+        own = history.get(inn, {})
         if layer == "рынок":
             day = _market_day(policy, market, inn, date.max)
+        elif layer == "рейтинги":
+            day = _first_new_day(own, sources, _RATINGS, date.max)
+        elif layer in ("рефинансирование", "величины"):
+            day = _reporting_day(own, sources, date.max, layer)
         else:
-            words = _REPORTING if layer == "отчётность" else _RATINGS
-            day = _first_new_day(history.get(inn, {}), sources, words, date.max)
+            day = _reporting_day(own, sources, date.max)
         if day is not None:
             said.add(inn)
     return said
@@ -183,6 +244,64 @@ def main() -> int:
         }
         alone[name] = caught
         _measure(name, caught, len(fired[name]), len(inside), base)
+
+    # **Слой отчётности разбирается надвое.** Прирост 1,1× у слоя целиком
+    # может скрывать сильную часть внутри слабой, и проверить это дешевле,
+    # чем описывать слой неверно в материалах наружу.
+    print("\n### Слой отчётности порознь\n")
+    print(
+        "Рефинансирование против остальной отчётности — величин, "
+        "стоп-факторов и шкал. Мера та же.\n"
+    )
+    print(
+        "| Часть слоя | Сработал | Поймал | Точность | Выявляемость | Прирост "
+        "| Упреждение, медиана |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    for part in ("рефинансирование", "величины"):
+        caught = {
+            inn: (said["событие"] - said[part]).days
+            for inn, said in spoke.items()
+            if said[part] is not None
+        }
+        alone[part] = caught
+        fired[part] = _fired(policy, market, history, sources, circle, part)
+        _measure(part, caught, len(fired[part]), len(inside), base)
+
+    # **У состояния мера появления слабая по устройству, и это надо сказать.**
+    # Основание по величинам стоит у эмитента постоянно: оно описывает
+    # положение, а не перемену, — и «появилось» у него означает лишь смену
+    # отчётности либо переход через порог. Поэтому рядом печатается вторая
+    # мера — «высказался хоть как», со стоявшими вместе, — и разница между
+    # таблицами и есть ответ, сигнал это или описание.
+    print("\n#### То же со стоявшими основаниями\n")
+    print(
+        "| Часть слоя | Сработал | Поймал | Точность | Выявляемость | Прирост "
+        "| Упреждение, медиана |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    for part in ("рефинансирование", "величины"):
+        caught = {}
+        said_by = set()
+        for inn in circle:
+            day = _spoke_at_all(history.get(inn, {}), sources, part, date.max)
+            if day is not None:
+                said_by.add(inn)
+        for inn, moment in inside.items():
+            day = _spoke_at_all(history.get(inn, {}), sources, part, moment)
+            if day is not None:
+                caught[inn] = (moment - day).days
+        _measure(part, caught, len(said_by), len(inside), base)
+    print(
+        "\n**Слой отчётности неоднороден, и 1,1× у него целиком — среднее "
+        "сильной части и слабой.** Рефинансирование как сигнал даёт прирост "
+        "2,2× при упреждении 108 дней, остальная отчётность — 0,9×, то есть "
+        "хуже случайного отбора. Как описание положения обе части сильнее "
+        "(2,6× и 1,4×) и обе поздние: упреждение там упирается в начало "
+        "истории. Вывод для материалов: **упреждает не отчётность, а график "
+        "платежей против денежных средств** — величина, которой в самой "
+        "отчётности нет, она собирается из графика выпусков.\n"
+    )
 
     print("\n## Сочетания: «сказал хотя бы один»\n")
     print(
