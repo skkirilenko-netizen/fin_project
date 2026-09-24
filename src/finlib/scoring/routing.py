@@ -372,6 +372,24 @@ class IssuerType(BaseModel):
     grounds_apply: tuple[str, ...] = Field(min_length=1)
 
 
+class RatingsMeasured(BaseModel):
+    """Что рейтинговый слой добавил в пересечении слоёв — измеренное.
+
+    **Ноль здесь означает «сверх других не добавил», а не «не работает».**
+    Слой держится другим своим свойством — датой перехода и отзывом, — и оно
+    названо рядом: иначе ноль читался бы как основание слой убрать.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    measured_on: date
+    events_in_window: int = Field(gt=0)
+    alone_market: int = Field(ge=0)
+    alone_reporting: int = Field(ge=0)
+    alone_ratings: int = Field(ge=0)
+    kept_for: str = Field(min_length=1)
+
+
 class Events(BaseModel):
     """Событийный слой: как дефолт и рейтинг входят в маршрут.
 
@@ -404,6 +422,7 @@ class Events(BaseModel):
     # бумаги больше нет, и обстоятельством настоящего он не является.
     repaid_statuses: tuple[str, ...] = Field(min_length=1)
     repaid_origin: str = Field(min_length=1)
+    ratings_measured: RatingsMeasured
     credit_scales: dict[str, str] = Field(min_length=1)
     credit_scales_origin: str = Field(min_length=1)
     review_categories: tuple[str, ...] = Field(min_length=1)
