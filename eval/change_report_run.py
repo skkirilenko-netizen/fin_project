@@ -445,6 +445,14 @@ def _report(routing, kind, since, until, was, now, bonds, previous) -> None:  # 
                 f"{_basket_name(routing, was[inn]['basket'])} → "
                 f"{_basket_name(routing, now[inn]['basket'])}"
             )
+        # **Перечень, показанный не целиком, говорит об этом.** «От календаря:
+        # 39» с десятью строками под ним читается как полный перечень,
+        # и остальные двадцать девять пропадают молча.
+        if len(by_calendar) > 10:
+            print(
+                f"\nПоказаны первые десять из {len(by_calendar)}; "
+                "остальные видны в истории."
+            )
         print()
     else:
         print("ни одного.\n")

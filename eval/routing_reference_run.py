@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import issuer_card_run as issuer_card  # noqa: E402
 
-from finlib.db import connection  # noqa: E402
+from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import cards, exclusions, routing_rows  # noqa: E402
@@ -161,9 +161,36 @@ def source_units() -> dict[tuple[str, date], set[str]]:
     return found
 
 
+_RUNNING = "SELECT id, kind FROM routing_run WHERE status = 'running' ORDER BY id"
+
+
+def writing() -> str:
+    """Идущий прогон, который пишет историю; пусто — таких нет.
+
+    **Эталон не работает, пока история пишется** (решение человека
+    24.09.2026). Сводный ряд смен оснований и карточка читают одну и ту же
+    таблицу порознь, и пересчёт, дописывающий её между этими чтениями, даёт
+    расхождение, которого нет: 24.09.2026 так покраснели Арагон и Почта
+    России. Красный по гонке эталон приучает не читать его вовсе — а эталон
+    это то, чему верят.
+    """
+    with connection() as conn:
+        found = fetch_all(_RUNNING, {}, conn=conn)
+    return ", ".join(f"{item['kind']} №{item['id']}" for item in found)
+
+
 def main() -> int:
     """Печатает исход сверки; 1 — при первом же расхождении."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
+    if busy := writing():
+        print("# Эталон списка наблюдения: уровень проекта\n")
+        print(
+            f"**Прогон не выполнялся: история пишется прогоном {busy}.** "
+            "Сверка читает `routing_history` дважды — сводным рядом и по "
+            "карточке, — и запись между этими чтениями даёт расхождение, "
+            "которого нет. Запусти после того, как прогон кончится."
+        )
+        return 1
     declared = yaml.safe_load(REFERENCE.read_text(encoding="utf-8"))
     with connection() as conn:
         rows, counts = routing_rows(conn, date.today())
