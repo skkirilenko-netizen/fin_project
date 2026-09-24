@@ -27,6 +27,7 @@
     uv run python eval/issuer_card_run.py --all
 """
 
+import json
 import logging
 import sys
 from datetime import date
@@ -551,6 +552,7 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
         )
     _stale(item, said)
     _market(item, said)
+    _shares(item, said)
 
     add("\n## История корзин\n")
     rows = fetch_all(_HISTORY, {"inn": item.inn}, conn=conn)
@@ -716,6 +718,93 @@ def _market(item, said: list) -> None:  # noqa: ANN001
     ):
         if svg:
             add("\n" + as_image(svg, alt) + "\n")
+
+
+def _shares(item, said: list) -> None:  # noqa: ANN001
+    """Акции эмитента: справочно, без основания и без участия в маршруте.
+
+    **Слой акций замерен и не заведён** (фаза 4 закрыта 24.09.2026): из 37
+    событий в окне акции есть у одного эмитента, и мерить признак не на чем.
+    Но аналитику, разбирающему эмитента, цена его акции полезна — поэтому
+    она печатается сведением, как печатается справочное основание маршрута:
+    видно, и корзины не называет.
+
+    **Сравнивать её надо с ценовым индексом, а не с индексом полной
+    доходности**: IMOEX — цена, MCFTR — цена с реинвестированными
+    дивидендами, и сравнение цены бумаги со вторым засчитало бы бумаге
+    отставание ровно на дивиденды рынка. Дивидендов у нас нет ни от одного
+    источника, и это единственный способ сравнения, который не врёт.
+    """
+    found = _traded_shares().get(item.inn)
+    if not found:
+        return
+    said.append("\n## Акции\n")
+    said.append(
+        "Справочно: в маршруте не участвуют и корзины не называют — слой "
+        "замерен и не заведён, мерить его на нашем круге событий не на чем.\n"
+    )
+    for share in found:
+        level = share.get("listlevel")
+        said.append(
+            f"- {share['secid']} ({share.get('shortname') or '—'}), "
+            f"ISIN {share.get('isin') or '—'}"
+            + (f", уровень листинга {level}" if level else "")
+        )
+    said.append(
+        "\nСравнивать динамику следует с ценовым индексом (IMOEX), "
+        "а не с индексом полной доходности (MCFTR): у бумаги мы видим цену "
+        "без дивидендов, и сравнение с доходностью рынка засчитало бы ей "
+        "отставание ровно на дивиденды.\n"
+    )
+
+
+def _traded_shares() -> dict[str, list[dict]]:
+    """ИНН → торгуемые акции эмитента; читается с диска один раз на прогон.
+
+    Перечень берётся из снимка листинга, который кладёт ежедневный прогон:
+    ходить в сеть при сборке девятисот карточек незачем, а снимок и так
+    делается каждый день.
+    """
+    global _SHARES
+    if _SHARES is not None:
+        return _SHARES
+    _SHARES = {}
+    found = sorted(Path("data/raw/moex/listing").glob("*.json")) if Path(
+        "data/raw/moex/listing"
+    ).exists() else []
+    if not found:
+        return _SHARES
+    seen = json.loads(found[-1].read_text(encoding="utf-8")).get("securities") or []
+    # ИНН у среза доски нет, и связывается он поиском ISS — тем же, которым
+    # разведка связала круг: `emitent_inn` отдаёт сама биржа.
+    by_secid = _share_issuers({str(item.get("SECID")) for item in seen})
+    for item in seen:
+        inn = by_secid.get(str(item.get("SECID")))
+        if not inn:
+            continue
+        _SHARES.setdefault(inn, []).append(
+            {
+                "secid": item.get("SECID"),
+                "shortname": item.get("SHORTNAME"),
+                "isin": item.get("ISIN"),
+                "listlevel": item.get("LISTLEVEL"),
+            }
+        )
+    return _SHARES
+
+
+def _share_issuers(secids: set[str]) -> dict[str, str]:
+    """SECID → ИНН эмитента из кэша поиска ISS; пусто — связи нет на диске."""
+    where = Path("data/raw/moex/share_issuers.json")
+    if not where.exists():
+        return {}
+    known = json.loads(where.read_text(encoding="utf-8"))
+    return {code: inn for code, inn in known.items() if code in secids}
+
+
+# Перечень акций читается один раз на прогон: девятьсот карточек спрашивают
+# его девятьсот раз, а файл один и тот же.
+_SHARES: dict[str, list[dict]] | None = None
 
 
 def _stale(item, said: list) -> None:  # noqa: ANN001
