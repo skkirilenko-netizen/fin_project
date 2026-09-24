@@ -97,6 +97,10 @@ market-lead:  ## Упреждение слоёв: рынок против отч
 	uv run python eval/market_lead_run.py > data/output/market_lead.md
 	@echo "data/output/market_lead.md"
 
+interim-lead:  ## Промежуточная отчётность: свежесть, рефинансирование, признаки изменения
+	uv run python eval/interim_lead_run.py > data/output/interim_lead.md
+	@echo "data/output/interim_lead.md"
+
 ratings-history:  ## Календарь рейтинговых действий: упреждение, тревоги, понижения
 	uv run python eval/ratings_history_run.py $(ARGS)
 

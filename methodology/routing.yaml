@@ -121,6 +121,7 @@ standards:
       earnings: ebitda
       operating_line: ifrs.operating_profit
       cash_line: ifrs.cash
+      short_debt_line: ifrs.short_term_borrowings
       # Текущая ликвидность девелопера заменена методикой диапазоном
       # (`ifrs_metrics.yaml`, adjustments.replaced_by): за полноту отвечает
       # верхняя граница. «Не рассчитана» здесь было бы неправдой — это
@@ -154,6 +155,7 @@ standards:
       earnings: ""
       operating_line: "2200"
       cash_line: "1250"
+      short_debt_line: "1510"
       cover: [debt_to_op_profit, equity_ratio, cur_liq]
       absent_names:
         debt_to_op_profit: долговая нагрузка

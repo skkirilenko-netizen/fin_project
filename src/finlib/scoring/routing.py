@@ -926,6 +926,25 @@ def load_routing(path: Path | None = None) -> RoutingPolicy:
     return policy
 
 
+def short_of_cash(
+    routing: "RoutingPolicy", cash: Decimal | None, payments: Decimal | None
+) -> bool:
+    """Не хватает ли денежных средств на названные платежи.
+
+    **Сравнение вынесено в функцию, потому что спрашивают его двое** — маршрут
+    и замер промежуточной отчётности, который сравнивает ту же меру на свежих
+    денежных средствах. Второе выражение того же сравнения разошлось бы
+    с первым при первой же правке отсечки, и увидеть это можно было бы, только
+    сверив два ответа.
+
+    Пусто в любой из величин — сравнивать нечем: это пробел данных, а не
+    достаток средств, и решает его тот, кто спрашивает.
+    """
+    if cash is None or not payments:
+        return False
+    return cash * routing.refinancing.cover_ratio < payments
+
+
 @dataclass(frozen=True, slots=True)
 class Refinance:
     """Платежи по облигациям ближайших месяцев против денежных средств.
@@ -1405,7 +1424,7 @@ def route(
             # Величина платежей есть, знаменателя нет: это пробел данных,
             # а не обстоятельство риска, и поле называется.
             absent.add("денежные средства")
-        elif refinance.cash * routing.refinancing.cover_ratio < refinance.due:
+        elif short_of_cash(routing, refinance.cash, refinance.due):
             attention.append(
                 Finding(
                     "refinancing_gap",
@@ -1425,11 +1444,8 @@ def route(
     # Довод снят существом права — предъявляют оферту именно в стрессе,
     # и ошибиться в мягкую сторону здесь дешевле. Отсечка та же, своего
     # числа здесь нет.
-    if (
-        refinance is not None
-        and refinance.offered
-        and refinance.cash is not None
-        and refinance.cash * routing.refinancing.cover_ratio < refinance.offered
+    if refinance is not None and short_of_cash(
+        routing, refinance.cash, refinance.offered
     ):
         # **Доля оферт в долге — часть обстоятельства, а не украшение.**
         # «Не хватит» у эмитента, у которого к выкупу предъявляется десятая

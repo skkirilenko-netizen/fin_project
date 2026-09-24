@@ -111,6 +111,9 @@ class PeriodPreference(BaseModel):
     basis: str = Field(pattern="^(annual|interim)$")
     basis_origin: str = Field(min_length=1)
     interim_use: str = Field(min_length=1)
+    rolling_formula: str = Field(min_length=1)
+    rolling_origin: str = Field(min_length=1)
+    interim_balance: str = Field(min_length=1)
     interim_confidence: str = Field(pattern="^(same|lower)$")
     interim_confidence_origin: str = Field(min_length=1)
     both_actual: bool
