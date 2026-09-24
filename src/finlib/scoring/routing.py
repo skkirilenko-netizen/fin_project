@@ -712,6 +712,11 @@ class RoutingPolicy(BaseModel):
     # и одно поле на оба утверждения читалось бы как согласие с числами.
     thresholds: str = Field(default="preliminary", pattern="^(preliminary|calibrated)$")
     thresholds_origin: str = ""
+    # **Измеренное основание для калибровки, а не пожелание о ней.** Прирост
+    # появившегося основания по величинам 0,9× означает, что коэффициенты
+    # в нынешних шкалах не различают эмитента с событием и без; порог,
+    # о котором это известно, обязан быть перекалиброван.
+    calibration_required: dict[str, object] = Field(default_factory=dict)
     origin: str = Field(min_length=1)
     # Чем зовутся величины маршрута в каждом стандарте: маршрут один,
     # справочника показателей два.
