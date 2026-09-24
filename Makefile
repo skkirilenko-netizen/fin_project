@@ -85,6 +85,10 @@ iss-history:  ## Доставка дневных срезов ISS: make iss-hist
 iss-summary:  ## Что доставлено с ISS: глубина, поля, место на диске
 	uv run python eval/iss_history_run.py $(ARGS)
 
+market-lead:  ## Упреждение слоёв: рынок против отчётности и рейтингов (замер)
+	uv run python eval/market_lead_run.py > data/output/market_lead.md
+	@echo "data/output/market_lead.md"
+
 ratings-history:  ## Календарь рейтинговых действий: упреждение, тревоги, понижения
 	uv run python eval/ratings_history_run.py $(ARGS)
 
