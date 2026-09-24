@@ -166,6 +166,7 @@ def test_control_catches_a_broken_delta() -> None:
         score=None,
         level_score=None,
         dynamics_score=None,
+        periods_used=2,
         exclusion_reason=None,
         exclusion_kind=None,
     )
@@ -209,6 +210,7 @@ def test_control_passes_a_consistent_delta() -> None:
         score=None,
         level_score=None,
         dynamics_score=None,
+        periods_used=2,
         exclusion_reason=None,
         exclusion_kind=None,
     )

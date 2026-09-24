@@ -41,6 +41,7 @@ def row(code: str, reason_code: str) -> MetricRow:
         score=None,
         level_score=None,
         dynamics_score=None,
+        periods_used=0,
         exclusion_reason="не рассчитан",
         exclusion_kind="no_data",
     )

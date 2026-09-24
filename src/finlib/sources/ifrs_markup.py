@@ -957,7 +957,7 @@ def known_codes(catalog: IfrsCatalog) -> dict[str, IfrsPosition | None]:
 # между комплектами — не помощь, а тихое присвоение чужого кода.
 _SAVED = """
 SELECT code, inn, report_date, source_name, match_key, form_code, row_index,
-       relation, related_codes
+       relation, related_codes, arithmetic_confirmed
 FROM ifrs_line_confirmation WHERE inn = ANY(%(inns)s)
 """
 
@@ -988,12 +988,28 @@ class SavedMarkup:
     fate: str
     catalog_code: str | None = None
     reason: str = ""
+    # **Сошлась ли арифметика при том решении.** Признак пишется в журнал
+    # с первого дня разметки и до 24.09.2026 не читался ничем: подтверждение,
+    # сделанное при сошедшемся итоге, и подтверждение при провалившемся
+    # выглядели одинаково, а доверие к ним разное. `None` означает «проверять
+    # было нечем» — не то же, что «не сошлось».
+    arithmetic: bool | None = None
 
     def describe(self) -> str:
-        """Строка для отчёта."""
+        """Строка для отчёта.
+
+        **Сила прежнего решения называется вместе с ним.** Подтверждение,
+        сделанное при сошедшемся итоге, и подтверждение при провалившемся
+        выглядели одинаково, а доверие к ним разное: первое проверено
+        арифметикой, второе — только глазами.
+        """
         tail = f" → справочник даёт {self.catalog_code}" if self.catalog_code else ""
         if self.reason:
             tail += f" — {self.reason}"
+        if self.arithmetic is not None:
+            tail += (
+                ", арифметика сошлась" if self.arithmetic else ", арифметика не сошлась"
+            )
         return f"{self.inn} «{self.source_name}» = {self.code} [{self.fate}]{tail}"
 
     @property
@@ -1055,6 +1071,7 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
                     if position.code == row["code"]
                     else FATE_OTHER_CODE,
                     position.code,
+                    arithmetic=row["arithmetic_confirmed"],
                 )
             )
             continue
@@ -1088,6 +1105,7 @@ def review_saved(issuers: list[IssuerMarkup], conn=None) -> list[SavedMarkup]:
                 row["relation"] or Relation.EXACT.value,
                 fate,
                 reason=refused or "",
+                arithmetic=row["arithmetic_confirmed"],
             )
         )
     return found

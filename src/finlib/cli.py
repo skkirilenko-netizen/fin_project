@@ -1525,6 +1525,16 @@ def ifrs_reapply_command(
     )
     for fate, count in fates.most_common():
         typer.echo(f"  {fate}: {count}")
+    # **Сила подтверждений называется числом.** Признак сходимости писался
+    # в журнал с первого дня разметки и не читался ничем: подтверждение
+    # при сошедшемся итоге и при провалившемся выглядели одинаково. Три
+    # исхода, и третий — «проверять было нечем» — не то же, что «не сошлось».
+    strength = Counter(item.arithmetic for item in saved)
+    typer.echo(
+        "  арифметика при подтверждении: сошлась "
+        f"{strength.get(True, 0)}, не сошлась {strength.get(False, 0)}, "
+        f"проверять было нечем {strength.get(None, 0)}"
+    )
 
     written = 0
     for issuer in issuers:

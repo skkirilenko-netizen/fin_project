@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS src_file (
     correction_version integer NOT NULL DEFAULT 0,
     is_actual         boolean NOT NULL DEFAULT true,
     unit_code         text,
-    unit_multiplier   numeric,
     unit_source       text NOT NULL DEFAULT 'unknown'
                       CHECK (unit_source IN ('form_standard', 'explicit', 'unknown')),
     -- Конвенция записи чисел в исходном документе. Для источников, отдающих
@@ -138,7 +137,6 @@ COMMENT ON COLUMN src_file.correction_version IS
     'несколько версий за один год, и они сохраняются обе';
 COMMENT ON COLUMN src_file.is_actual IS
     'Является ли эта корректировка актуальной по данным источника; в расчёт идёт только актуальная';
-COMMENT ON COLUMN src_file.unit_multiplier IS 'Коэффициент приведения значений источника к тысячам рублей';
 COMMENT ON COLUMN src_file.status IS 'quarantine — данные не прошли контроли качества и в расчёт не идут';
 COMMENT ON COLUMN src_file.digit_grouping IS
     'Конвенция записи чисел исходного документа: russian — разряды пробелом, '
@@ -631,13 +629,12 @@ CREATE TABLE IF NOT EXISTS ifrs_line_confirmation (
     -- содержала долю выручки, а у строки потока — отношение оборота за год
     -- к запасу на дату: у О'КЕЙ 336,9 % валюты баланса.
     materiality_share numeric(10, 6),
-    -- По какому правилу посчитана мера. Журнал — доказательная база, и задним
-    -- числом он не правится: 290 записей, сделанных до 21.09.2026, хранят долю
-    -- валюты баланса у строк любой формы — правило, которое тогда действовало.
-    -- Переписать их значило бы подменить запись о том, что было; поэтому
-    -- правило названо рядом с величиной.
-    materiality_rule text NOT NULL DEFAULT 'per_form_base'
-                 CHECK (materiality_rule IN ('total_assets', 'per_form_base')),
+    -- Колонка `materiality_rule` удалена 24.09.2026: она объявлялась
+    -- со значением по умолчанию и не писалась и не читалась ничем —
+    -- ни одного упоминания в коде, только DDL. Правило существенности
+    -- с тех пор объявлено формой (`ifrs_lines.yaml`, `materiality.bases`),
+    -- и запись о нём в журнале подтверждений была бы вторым экземпляром
+    -- того же правила.
     -- Вид разметки: чем строка приходится позиции справочника. От него
     -- зависит, как разметка проверяется арифметикой, и смешивать виды
     -- нельзя. exact — строка и есть позиция; part_of — строка вместе
@@ -712,18 +709,12 @@ ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS match_key text;
 CREATE INDEX IF NOT EXISTS ifrs_line_confirmation_match_idx
     ON ifrs_line_confirmation (inn, form_code, match_key);
 
-ALTER TABLE ifrs_line_confirmation ADD COLUMN IF NOT EXISTS materiality_rule text;
-UPDATE ifrs_line_confirmation SET materiality_rule = 'total_assets'
-    WHERE materiality_rule IS NULL;
-ALTER TABLE ifrs_line_confirmation
-    ALTER COLUMN materiality_rule SET DEFAULT 'per_form_base';
-ALTER TABLE ifrs_line_confirmation
-    ALTER COLUMN materiality_rule SET NOT NULL;
-ALTER TABLE ifrs_line_confirmation
-    DROP CONSTRAINT IF EXISTS ifrs_line_confirmation_materiality_rule_check;
-ALTER TABLE ifrs_line_confirmation
-    ADD CONSTRAINT ifrs_line_confirmation_materiality_rule_check
-    CHECK (materiality_rule IN ('total_assets', 'per_form_base'));
+-- Догонка 24.09.2026: удаление мёртвого. Колонки объявлялись и не читались
+-- ничем, и обе удаляются вместе с объявлением — иначе в живой базе они
+-- остались бы, а в файле их нет, и сверка схемы объявила бы лишнее.
+ALTER TABLE ifrs_line_confirmation DROP COLUMN IF EXISTS materiality_rule;
+ALTER TABLE src_file DROP COLUMN IF EXISTS unit_multiplier;
+DROP VIEW IF EXISTS ifrs_core_candidate;
 
 -- Перечень видов разметки 18.09.2026 пополнился решением «не статья»:
 -- прежде оно жило один присест и в базу не попадало вовсе, поэтому строка
@@ -813,30 +804,13 @@ COMMENT ON COLUMN ifrs_line_confirmation.materiality_share IS
     'Мера существенности: величина строки к базе своей формы (баланс — валюта '
     'баланса, отчёт о прибыли — выручка). NULL — базы у формы нет, мерить нечем';
 
--- Кандидат в ядро: статья, подтверждённая у нескольких эмитентов независимо.
--- Признак машинный и никого ни к чему не обязывает — поднятие позиции в ядро
--- остаётся решением человека и правкой ifrs_lines.yaml руками. Признак лишь
--- показывает, что пора посмотреть. Порог (core_candidate.distinct_issuers)
--- задан методикой, здесь печатается само число эмитентов.
-CREATE OR REPLACE VIEW ifrs_core_candidate AS
-SELECT
-    code,
-    count(DISTINCT inn)                      AS issuers,
-    count(*)                                 AS confirmations,
-    array_agg(DISTINCT source_name ORDER BY source_name) AS source_names,
-    max(materiality_share)                   AS max_share,
-    max(confirmed_at)                        AS last_confirmed_at
-FROM ifrs_line_confirmation
--- Решение «не статья» хранится здесь же, но статьёй не является и
--- кандидатом в ядро быть не может: иначе колонтитул, отмеченный у трёх
--- эмитентов, выглядел бы позицией, созревшей для справочника.
-WHERE relation <> 'not_a_line'
-GROUP BY code;
-
-COMMENT ON VIEW ifrs_core_candidate IS
-    'Специфические статьи в разрезе кода: сколько эмитентов подтвердили её '
-    'независимо и под какими наименованиями. Порог кандидата в ядро задан '
-    'в methodology/ifrs_lines.yaml, решение о поднятии принимает человек';
+-- **Представление `ifrs_core_candidate` удалено 24.09.2026.** Оно считало,
+-- у скольких эмитентов статья подтверждена независимо, и **ни одного запроса
+-- к нему в проекте не было** — только упоминание в комментарии. Признак,
+-- которого никто не читает, не показывает ничего: дефект в нём не проявился
+-- бы ничем, а порог кандидата в методике оставался правилом без места
+-- применения. Тот же счёт печатает теперь прогон разметки
+-- (`eval/ifrs_synonym_candidates.py`), где его и читают глазами.
 
 -- Журнал ручных решений о маршруте -------------------------------------------
 

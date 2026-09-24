@@ -193,7 +193,55 @@ def main(argv: list[str] | None = None) -> int:
         print("\nНЕ ПОДНИМАТЬ: наименование уже в справочнике, не определился раздел")
         for item in sorted(known.values(), key=lambda value: value["name"]):
             print(f"  «{item['name']}» → {', '.join(sorted(item['codes']))}")
+    _core_candidates()
     return 0
+
+
+_CANDIDATES = """
+SELECT code, count(DISTINCT inn) AS issuers, count(*) AS confirmations,
+       array_agg(DISTINCT source_name ORDER BY source_name) AS names
+FROM ifrs_line_confirmation
+WHERE relation <> 'not_a_line' AND source_name <> ''
+GROUP BY code ORDER BY count(DISTINCT inn) DESC, code
+"""
+
+
+def _core_candidates() -> None:
+    """Специфические статьи, подтверждённые у нескольких эмитентов независимо.
+
+    **Счёт переехал сюда из представления базы 24.09.2026.** Представление
+    `ifrs_core_candidate` считало то же самое, и ни одного запроса к нему
+    в проекте не было: признак, которого никто не читает, не показывает
+    ничего, а порог кандидата в методике оставался правилом без места
+    применения. Здесь его читают глазами — там же, где решают о подъёме.
+
+    Поднятие остаётся решением человека и правкой `ifrs_lines.yaml` руками:
+    подтверждение говорит «у **этого** эмитента строка означает это»,
+    а справочник — «у любого».
+    """
+    from finlib.db import connection, fetch_all
+    from finlib.normalize.ifrs_lines import load_ifrs_lines
+
+    least = load_ifrs_lines().core_candidate.distinct_issuers
+    with connection() as conn:
+        rows = fetch_all(_CANDIDATES, {}, conn=conn)
+    ripe = [row for row in rows if row["issuers"] >= least]
+    print(
+        f"\nКАНДИДАТЫ В ЯДРО (порог методики — {least} эмитента и более): "
+        f"{len(ripe)} из {len(rows)} кодов"
+    )
+    if not ripe:
+        # Знаменатель печатается всегда: ноль кандидатов при неизвестном
+        # числе кодов неотличим от пустого журнала подтверждений.
+        print("  ни один код порога не достиг")
+        return
+    for row in ripe:
+        names = ", ".join(f"«{name}»" for name in row["names"][:3])
+        tail = " и др." if len(row["names"]) > 3 else ""
+        print(
+            f"  {row['code']}: эмитентов {row['issuers']}, "
+            f"подтверждений {row['confirmations']} — {names}{tail}"
+        )
 
 
 # Сколько слов должно быть в наименовании, чтобы оно не выглядело обрывком.

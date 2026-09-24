@@ -281,6 +281,10 @@ class MetricRow:
     score: Decimal | None
     level_score: Decimal | None
     dynamics_score: Decimal | None
+    # **На скольких точках посчитана динамика.** Сорок процентов балла
+    # показателя — динамика, и два наблюдения от пяти в документе выглядели
+    # одинаково: число считалось, хранилось и не печаталось нигде.
+    periods_used: int
     exclusion_reason: str | None
     exclusion_kind: str | None
 
@@ -915,6 +919,7 @@ def _metric_row(
         score=scored["score"] if scored else None,
         level_score=scored["level_score"] if scored else None,
         dynamics_score=scored["dynamics_score"] if scored else None,
+        periods_used=int(scored["periods_used"]) if scored else 0,
         exclusion_reason=scored["exclusion_reason"] if scored else None,
         exclusion_kind=scored["exclusion_kind"] if scored else None,
     )

@@ -24,6 +24,7 @@ from finlib.report.appendix import (
     checks_table,
     exclusions_table,
     groups_table,
+    metric_scores_table,
     metrics_table,
     not_calculated_table,
     provenance,
@@ -880,6 +881,9 @@ def _write_appendix(
         metrics_table(data),
         exclusions_table(data),
         not_calculated_table(data),
+        # Балл показателя стоит перед баллом групп: группа складывается
+        # из показателей, и читать её разложение, не видя их, нельзя.
+        metric_scores_table(data),
         groups_table(data),
         checks_table(data),
     ]

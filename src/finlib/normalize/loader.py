@@ -92,12 +92,12 @@ WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)
 _UPSERT_SRC_FILE = """
 INSERT INTO src_file (
     inn, standard, report_year, source, source_url, raw_path, checksum, form_codes, knd,
-    girbo_bfo_id, correction_version, is_actual, reporting_type, unit_code, unit_multiplier,
+    girbo_bfo_id, correction_version, is_actual, reporting_type, unit_code,
     unit_source, status, meta, code_version
 ) VALUES (
     %(inn)s, %(standard)s, %(report_year)s, %(source)s, %(source_url)s, %(raw_path)s,
     %(checksum)s, %(form_codes)s, %(knd)s, %(girbo_bfo_id)s, %(correction_version)s,
-    %(is_actual)s, %(reporting_type)s, %(unit_code)s, %(unit_multiplier)s, %(unit_source)s,
+    %(is_actual)s, %(reporting_type)s, %(unit_code)s, %(unit_source)s,
     'loaded', %(meta)s, %(code_version)s
 )
 ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE SET
@@ -110,7 +110,6 @@ ON CONFLICT (inn, standard, report_year, source, correction_version) DO UPDATE S
     is_actual = EXCLUDED.is_actual,
     reporting_type = EXCLUDED.reporting_type,
     unit_code = EXCLUDED.unit_code,
-    unit_multiplier = EXCLUDED.unit_multiplier,
     unit_source = EXCLUDED.unit_source,
     meta = EXCLUDED.meta,
     code_version = EXCLUDED.code_version,
@@ -541,7 +540,9 @@ def _upsert_src_file(
         # и в комплект попадает только та, что опознана справочником:
         # неопознанная останавливает разбор до создания комплекта.
         "unit_code": units.okei_code,
-        "unit_multiplier": units.multiplier,
+        # Множитель единицы в комплекте больше не хранится (удалён 24.09.2026):
+        # величины лежат в единице комплекта, а печать берёт код ОКЕИ —
+        # поле писалось и не читалось ничем.
         "unit_source": unit_source.value,
         "meta": json.dumps(
             {

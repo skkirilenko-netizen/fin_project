@@ -412,9 +412,16 @@ def test_core_candidate_counts_issuers_not_confirmations(db_conn) -> None:
         "2100010824",
         "Дебиторская задолженность Принципала",
     )
+    # **Счёт переехал из представления в прогон разметки 24.09.2026.**
+    # Представление никто не читал — ни одного запроса в проекте, — и признак,
+    # которого не читают, не показывает ничего. Запрос здесь тот же, что
+    # в `eval/ifrs_synonym_candidates.py`: проверяется правило, а не место.
     rows = fetch_all(
-        "SELECT issuers, confirmations, source_names FROM ifrs_core_candidate "
-        "WHERE code = 'ifrs.principal_receivable'",
+        "SELECT count(DISTINCT inn) AS issuers, count(*) AS confirmations, "
+        "array_agg(DISTINCT source_name ORDER BY source_name) AS source_names "
+        "FROM ifrs_line_confirmation "
+        "WHERE relation <> 'not_a_line' AND source_name <> '' "
+        "AND code = 'ifrs.principal_receivable' GROUP BY code",
         {},
         conn=db_conn,
     )

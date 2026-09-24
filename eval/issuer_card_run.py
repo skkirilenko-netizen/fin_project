@@ -72,6 +72,15 @@ FROM src_file WHERE inn = %(inn)s
 ORDER BY standard, report_year DESC, source
 """
 
+# **Сверка стоп-фактора с аудиторским заключением.** Ради неё читается само
+# заключение, а до 24.09.2026 ответ попадал только в документ по МСФО —
+# карточка, с которой человек и начинает разбор, о ней молчала.
+_AUDIT = """
+SELECT report_date, stop_factor_audit FROM assessment
+WHERE inn = %(inn)s AND stop_factor_audit IS NOT NULL
+ORDER BY report_date DESC LIMIT 1
+"""
+
 
 def _moves(rows: list[dict]) -> list[tuple[dict, dict | None]]:
     """Точки, в которых изменилась корзина **или перечень оснований**.
@@ -497,6 +506,16 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
         add("\n**Справочно** — корзину не называет, но и не исчезает:\n")
         for entry in verdict.notes:
             add(f"- {entry.text}")
+    # **Сверка с заключением стоит рядом со стоп-фактором, а не где-нибудь.**
+    # Вопрос сверки — видит ли аудитор то же, что видим мы, — и ответ на него
+    # относится к тому самому основанию, под которым он и печатается.
+    audit = fetch_all(_AUDIT, {"inn": item.inn}, conn=conn)
+    if audit:
+        add(
+            f"\n*Сверка с аудиторским заключением (комплект "
+            f"{audit[0]['report_date']:%d.%m.%Y}): "
+            f"{audit[0]['stop_factor_audit']}*\n"
+        )
 
     add("\n## Величины маршрута\n")
     if not item.shown_values:
