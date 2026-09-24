@@ -21,9 +21,10 @@
 import json
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -194,6 +195,7 @@ class MarketPolicy(BaseModel):
         return tuple(step for step in self.ladder.steps if step.in_route)
 
 
+@lru_cache(maxsize=2)
 def load_market(path: Path | None = None) -> MarketPolicy:
     """Методика рыночного слоя; величины отсюда только читаются."""
     return MarketPolicy.model_validate(
@@ -228,10 +230,22 @@ class Market:
     census: dict[str, dict[str, int]]
     universe: int
     with_isin: int
+    # Ряд по возрастанию дня, собранный при первом спросе: пересчёт истории
+    # спрашивает об одном эмитенте двести раз, и сортировать заново каждый
+    # раз значило бы платить за один и тот же ответ.
+    sorted_by_day: dict[str, list[Point]] = field(default_factory=dict, repr=False)
 
     def points(self, inn: str) -> dict[date, Point]:
         """Ряд эмитента; пусто — рынок о нём не высказывался."""
         return self.issuers.get(inn, {})
+
+    def ordered(self, inn: str) -> list[Point]:
+        """Ряд эмитента по возрастанию дня."""
+        if inn not in self.sorted_by_day:
+            self.sorted_by_day[inn] = [
+                item for _, item in sorted(self.issuers.get(inn, {}).items())
+            ]
+        return self.sorted_by_day[inn]
 
     def silence(self, inn: str) -> str:
         """Почему у эмитента нет ряда: три разных ответа, не один."""
@@ -301,16 +315,30 @@ def percentile(values: list[Decimal], place: int) -> Decimal:
     return values[low] + (values[high] - values[low]) * (spot - low)
 
 
-def excluded(row: dict, policy: MarketPolicy) -> str:
-    """Почему спред у этой бумаги не считается; пусто — считается.
+def excluded(row: dict, policy: MarketPolicy, what: str = "yield") -> str:
+    """Почему величина у этой бумаги не считается; пусто — считается.
 
     Возвращается **код правила**, а не «да/нет»: перечень отброшенного
     печатается построчно, и без кода нельзя сказать, что именно отсекло
     половину рынка.
+
+    **Правило объявляет, что оно ломает** (`breaks`): у флоатера не определена
+    доходность, а цена определена; у структурной бумаги не означает ничего
+    и цена. Спрашивать надо порознь — иначе одно исправление заводит обратный
+    дефект, как это и случилось 24.09.2026 дважды подряд.
     """
     for item in policy.comparability["exclude"]:
+        if what not in item["breaks"]:
+            continue
         if item.get("keep_only"):
             if str(row.get(item["by"]) or "") not in item["keep_only"]:
+                return str(item["code"])
+            continue
+        if item.get("equals_zero"):
+            # Пустое поле нулём не считается: «купон не объявлен» и «купона
+            # нет» — разные сведения, и второе из первого не следует.
+            got = _number(row.get(item["by"]))
+            if got is not None and got == 0:
                 return str(item["code"])
             continue
         if str(row.get(item["by"]) or "") not in item.get("values", ()):
@@ -368,7 +396,20 @@ def build(policy: MarketPolicy | None = None) -> Market:
             counted["строк"] += 1
             inn = mine_of.get(str(row.get("SECID") or ""))
             turnover = _number(row.get("VALUE")) or Decimal(0)
+            trades = _number(row.get("NUMTRADES")) or Decimal(0)
             price = _number(row.get("LEGALCLOSEPRICE")) or _number(row.get("CLOSE"))
+            # **Цена живёт по своим правилам, а не по правилу доходности.**
+            # Своим — потому что процент от номинала у структурной, валютной,
+            # индексируемой и дисконтной бумаги означает не то; и потому что
+            # цена без единой сделки есть расчётная величина биржи, а не
+            # мнение рынка.
+            if price is not None:
+                if refused := excluded(row, policy, "price"):
+                    counted[f"цена отброшена: {refused}"] += 1
+                    price = None
+                elif policy.comparability["price_needs_trade"] and trades <= 0:
+                    counted["цена без сделок"] += 1
+                    price = None
             spread: Decimal | None = None
             if why := excluded(row, policy):
                 counted[f"отброшено: {why}"] += 1
@@ -383,12 +424,11 @@ def build(policy: MarketPolicy | None = None) -> Market:
                 if spread > ceiling:
                     counted["выше потолка"] += 1
                     spread = None
-                else:
-                    trades = _number(row.get("NUMTRADES")) or Decimal(0)
-                    if trades >= core["min_trades"] and turnover >= core[
-                        "min_turnover_rub"
-                    ]:
-                        market.append(spread)
+                elif (
+                    trades >= core["min_trades"]
+                    and turnover >= core["min_turnover_rub"]
+                ):
+                    market.append(spread)
             if inn is not None:
                 census[inn]["rows"] += 1
                 census[inn]["with_price"] += int(price is not None)
@@ -446,6 +486,15 @@ def series(refresh: bool = False, policy: MarketPolicy | None = None) -> Market:
     """
     if SERIES.exists() and not refresh:
         return _read(json.loads(SERIES.read_text(encoding="utf-8")))
+    if not (CACHE / "zcyc_by_day.json").exists():
+        # **Пустой ряд означает «доставки не было», а не «рынок молчал».**
+        # Считать отсутствие срезов отсутствием сигнала — тот же дефект,
+        # что ноль срабатываний при неизвестном числе проверок.
+        logger.warning(
+            "срезов биржи на диске нет: рыночный ряд пуст, доставка — "
+            "scripts/moex_market_fetch.py"
+        )
+        return Market({}, {}, {}, {}, 0, 0)
     found = build(policy)
     SERIES.parent.mkdir(parents=True, exist_ok=True)
     SERIES.write_text(_written(found), encoding="utf-8")

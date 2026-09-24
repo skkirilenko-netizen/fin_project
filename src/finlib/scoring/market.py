@@ -22,6 +22,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from statistics import median
 
+from finlib.metrics.display import digits
 from finlib.sources.market import Market, MarketPolicy, Point, Step
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,28 @@ class MarketFinding:
     threshold: Decimal
     since: date
     benchmark: Decimal | None = None
+
+    def slots(self, policy: MarketPolicy) -> dict[str, str]:
+        """Величины основания так, как они печатаются читателю.
+
+        **Разрядность объявлена методикой** (`market.yaml`, блок `display`),
+        и печатает их единая точка округления: второй способ печати тех же
+        величин разошёлся бы с первым в первой же строке списка.
+        """
+        spread = int(policy.display["spread_scale"])
+        ratio = int(policy.display["multiple_scale"])
+        price = int(policy.display["price_scale"])
+        said = {
+            "value": digits(self.value, spread if self.benchmark else price),
+            "threshold": digits(self.threshold, ratio if self.benchmark else price),
+            "since": f"{self.since:%d.%m.%Y}",
+            "benchmark": "",
+            "multiple": "",
+        }
+        if self.benchmark:
+            said["benchmark"] = digits(self.benchmark, spread)
+            said["multiple"] = digits(self.value / self.benchmark, ratio)
+        return said
 
 
 def holds_level(market: Market, multiple: Decimal) -> Holds:
@@ -163,11 +186,7 @@ def first_day_when(
 
 def _ordered(market: Market, inn: str, until: date) -> list[Point]:
     """Ряд эмитента по возрастанию дня, не позже названного."""
-    return [
-        item
-        for _, item in sorted(market.points(inn).items())
-        if item.day <= until
-    ]
+    return [item for item in market.ordered(inn) if item.day <= until]
 
 
 def _level_finding(
@@ -190,7 +209,11 @@ def _level_finding(
         basket=step.basket,
         subgroup=step.subgroup,
         escalation=bool(step.escalation),
-        value=last.spread / level,
+        # **Величина здесь спред, а не кратность.** Кратность — отношение
+        # к ориентиру дня, и печатается она вместе с ним: «31×» без «при
+        # ориентире 310 б. п.» не говорит ничего, потому что уровень рынка
+        # двигается.
+        value=last.spread,
         threshold=step.multiple,
         since=since,
         benchmark=level,

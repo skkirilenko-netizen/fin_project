@@ -1174,6 +1174,10 @@ def route(
     # снимок датирует последнее подтверждение, и у Кириллицы «28.08.2026»
     # читалось как день перевода, тогда как в категории C она с 14.05.2026.
     rating_since: dict[tuple[str, str, str], object] | None = None,
+    # Сработавшие рыночные основания: уровень спреда к ориентиру дня и цена
+    # бумаги. Считает их `scoring.market` по доставленным срезам биржи,
+    # маршрут получает готовыми — тем же правилом, каким получает величины.
+    market: "tuple[object, ...]" = (),
 ) -> Verdict:
     """Определяет корзину эмитента по посчитанным величинам и обстоятельствам.
 
@@ -1326,6 +1330,23 @@ def route(
                 ),
             )
         )
+    # **Рыночный слой называет корзину сам, а не через величины отчётности.**
+    # Основание датировано днём наблюдения, а не отчётной датой: между ними
+    # бывает пятнадцать месяцев, и у Кириллицы рынок держал доходность выше
+    # двенадцатикратной за 132 дня до неисполненного погашения, пока величины
+    # 2025 года оставались здоровыми. Корзину и подгруппу называет само
+    # основание — методика рынка, а не этот код.
+    if market:
+        from finlib.sources.market import load_market
+
+        rules = load_market()
+        for item in market:
+            said = Finding(
+                item.ground,
+                item.ground,
+                routing.say(item.ground, **item.slots(rules)),
+            )
+            (review if item.basket == "review" else attention).append(said)
     if events is not None:
         by_default, watched, referenced = _default_findings(
             events, routing, today or date.today()

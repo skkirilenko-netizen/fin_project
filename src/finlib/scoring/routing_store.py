@@ -44,6 +44,8 @@ from pathlib import Path
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
 from finlib.normalize.lines import load_lines
+from finlib.scoring.market import MarketFinding
+from finlib.scoring.market import findings as market_findings
 from finlib.scoring.routing import (
     IssuerType,
     ManualFloor,
@@ -71,6 +73,8 @@ from finlib.sources.cbonds_events import (
     point_order,
 )
 from finlib.sources.cbonds_flows import refinancing
+from finlib.sources.market import Market, load_market
+from finlib.sources.market import series as _market_series
 from finlib.sources.moex_risk import RiskSector, risk_sectors
 from finlib.sources.ratings_calendar import Transition, transitions
 from finlib.standards import Standard, load_standards
@@ -523,6 +527,16 @@ def routing_rows(
     # Пустой словарь означает, что доставки не было, — и это не «переводов
     # нет»: `scripts/moex_fetch.py`.
     risky = risk_sectors()
+    # **Рыночный ряд читается один раз на прогон.** Пустой ряд означает, что
+    # срезов биржи на диске нет вовсе, — и это не «рынок молчал»: доставка
+    # идёт `scripts/moex_market_fetch.py`, а пересчёт ряда — `sources.market`.
+    market_rules = load_market()
+    market: Market = _market_series()
+    if not market.issuers:
+        logger.warning(
+            "рыночного ряда на диске нет: основания рынка в маршрут не "
+            "попадут, и это отсутствие данных, а не отсутствие сигнала"
+        )
     # Даты перехода в нынешнюю рейтинговую категорию: выгрузка ручная,
     # и пустой словарь означает «календаря на диске нет», а не «переходов
     # не было». Корзину он не двигает — только датирует основание.
@@ -864,6 +878,17 @@ def routing_rows(
             # **Перевод биржи датирован, и в пересчёте он виден с даты
             # перевода.** Недатированный перевод в историю не идёт вовсе:
             # поставить его на произвольный день значило бы выдумать событие.
+            # **Рыночные основания считаются на дату маршрута.** В пересчёте
+            # это дата обхода: ряд идёт по дням, и взять сегодняшнюю цену
+            # для прошлогодней точки значило бы дать маршруту знание, которого
+            # в тот день не было.
+            market=market_findings(
+                market_rules,
+                market,
+                inn,
+                as_of or today,
+                systemic=inn in systemic,
+            ),
             risk_sector=tuple(
                 replace(risky[item.isin], name=item.name)
                 for item in events.issues
@@ -1119,6 +1144,11 @@ def _rendered(value: object) -> str:
         return f"{value.isin}:{value.board}:{value.since}"
     if isinstance(value, Transition):
         return f"{value.agency}:{value.since}:{value.was_level}:{value.direction}"
+    if isinstance(value, MarketFinding):
+        # Величина в отпечаток входит вместе с днём, с которого признак
+        # держится: спред двигается ежедневно, и отпечаток без него менялся бы
+        # каждый день — то есть объявлял бы изменение у эмитента всякий раз.
+        return f"{value.ground}:{value.since}:{value.threshold}"
     raise UnknownInputError(
         f"довод маршрута {type(value).__name__} в отпечаток не входит: "
         "пропущенный довод даёт изменение, которое не объяснится ничем"

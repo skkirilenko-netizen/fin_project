@@ -19,6 +19,7 @@
 
 import json
 import logging
+import re
 import sys
 from datetime import date
 from functools import lru_cache
@@ -39,6 +40,28 @@ from finlib.sources.ratings_calendar import bound, read_actions, transitions  # 
 from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Дата в формулировке основания: рыночная величина без дня, с которого она
+# такая, не отличает вчерашнее падение от полугодового состояния.
+_RU_DATE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+
+# Порядок корзин тяжести: чем больше число, тем мягче. Очереди («установить
+# статус», «вне периметра», «структурный эмитент», «добрать поручителя») сюда
+# не входят вовсе — они задают другой вопрос, а не меньшую тяжесть.
+_WEAKER = {"review": 0, "attention": 1, "clear": 2}
+
+
+def _market_baskets() -> dict[str, str]:
+    """Корзина, объявленная у каждого рыночного основания самой методикой."""
+    from finlib.sources.market import load_market
+
+    policy = load_market()
+    found = {step.ground: step.basket for step in policy.route_steps}
+    found[policy.distress_zone.ground] = policy.distress_zone.basket
+    return found
+
+
+_MARKET_BASKETS = _market_baskets()
 
 REFERENCE = Path(__file__).resolve().parent / "routing_reference.yaml"
 
@@ -282,6 +305,19 @@ def main() -> int:
                 for row in rows
                 if row.events is not None and row.events.ratings
             ]
+        # --- фаза 3: круг рыночного слоя ------------------------------------
+        # Эмитенты, у которых сработало рыночное основание. Круг пустой
+        # означал бы «доставки срезов нет», а не «рынок молчал», и объявляется
+        # он тем же способом, что и прочие: числом проверенных.
+        if item.get("rule") == "every_issuer_with_market_ground":
+            issuers = [
+                row.inn
+                for row in rows
+                if any(
+                    entry.ground.startswith("market_")
+                    for entry in row.verdict.findings
+                )
+            ]
         if item.get("rule") == "every_issuer_with_transition":
             moved = {holder for holder, _, _, _ in transitions()}
             issuers = [row.inn for row in rows if row.inn in moved]
@@ -458,6 +494,68 @@ def main() -> int:
                         f"{code}: в истории {row.name} ({inn}) нет точек "
                         f"смены оснований {', '.join(missing)}"
                     )
+            # --- фаза 3: рыночное основание -----------------------------
+            # **Рыночная величина без даты и без ориентира не говорит
+            # ничего.** Спред двигается ежедневно, и «кратность 31×» без
+            # ориентира дня — число неизвестного смысла; «цена 30 %» без дня,
+            # с которого она такая, не отличает вчерашнее падение
+            # от полугодового состояния.
+            if expect == "market_ground_speaks":
+                for entry in row.verdict.findings:
+                    if not entry.ground.startswith("market_"):
+                        continue
+                    if not _RU_DATE.search(entry.text):
+                        divergences.append(
+                            f"{code}: у {row.name} ({inn}) основание "
+                            f"{entry.ground} без даты: «{entry.text}»"
+                        )
+                    if entry.ground.startswith("market_spread") and (
+                        "ориентире" not in entry.text
+                    ):
+                        divergences.append(
+                            f"{code}: у {row.name} ({inn}) спред напечатан "
+                            f"без ориентира дня: «{entry.text}»"
+                        )
+                # Корзина не мягче той, которую основание называет: рыночное
+                # основание либо названо корзиной, либо погашено — молча
+                # исчезнуть оно не вправе.
+                grounds = set(row.verdict.grounds) | set(row.verdict.muted)
+                # **Корзину называют основания той тяжести, по которой она
+                # выбрана.** Основание внимания у эмитента в разборе корзины
+                # не называет — и это не потеря, а порядок: потерей было бы
+                # обратное, корзина мягче собственного основания.
+                lost = [
+                    entry.ground
+                    for entry in row.verdict.findings
+                    if entry.ground.startswith("market_")
+                    and entry.ground not in grounds
+                    and _WEAKER.get(row.verdict.basket, 9)
+                    > _WEAKER.get(_MARKET_BASKETS.get(entry.ground, ""), 9)
+                ]
+                # **Очередь старше корзин тяжести, и это не потеря.** У эмитента
+                # в очереди статуса вопрос другой — что с ним стало, — и корзину
+                # рыночное основание там не называет. Но исчезнуть оно не вправе:
+                # в карточке оно обязано стоять, иначе читатель увидит очередь
+                # и не увидит, что рынок о нём говорит.
+                if lost and row.verdict.basket in ("review", "attention", "clear"):
+                    divergences.append(
+                        f"{code}: у {row.name} ({inn}) рыночное основание "
+                        f"{', '.join(lost)} не назвало корзины и не погашено: "
+                        f"корзина «{row.verdict.basket}»"
+                    )
+                elif lost:
+                    text = built(row) or ""
+                    unseen = [
+                        entry.text
+                        for entry in row.verdict.findings
+                        if entry.ground in lost and entry.text not in text
+                    ]
+                    if unseen:
+                        divergences.append(
+                            f"{code}: у {row.name} ({inn}) корзина "
+                            f"«{row.verdict.basket}» старше рыночного основания, "
+                            "а самого основания в карточке нет"
+                        )
             if expect == "ratings_split_by_object":
                 text = built(row) or ""
                 if "Рейтинги эмитента (снимок)" not in text:
