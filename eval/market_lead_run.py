@@ -30,8 +30,8 @@ import json
 import logging
 import statistics
 import sys
-from collections import defaultdict
-from datetime import date
+from collections import Counter, defaultdict
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -256,29 +256,19 @@ def layers() -> tuple[dict[str, dict[date, set[str]]], dict[str, str]]:
 
 
 def _first_day(
-    history: dict[date, set[str]], sources: dict[str, str], words: tuple[str, ...]
+    history: dict[date, set[str]],
+    sources: dict[str, str],
+    words: tuple[str, ...],
+    until: date = date.max,
 ) -> date | None:
     """Первый день, когда слой высказался; None — не высказывался вовсе."""
     for when in sorted(history):
+        if when > until:
+            return None
         for ground in history[when]:
             source = sources.get(ground, "")
             if any(word in source for word in words):
                 return when
-    return None
-
-
-def _first_market(series: dict[str, dict], benchmark: dict[str, float],
-                  multiple: float, until: date) -> date | None:
-    """Первый день, когда кратность к ориентиру не ниже названной."""
-    for day in sorted(series):
-        when = date.fromisoformat(day)
-        if when > until:
-            return None
-        level = benchmark.get(day)
-        if not level or level <= 0:
-            continue
-        if series[day]["spread"] / level >= multiple:
-            return when
     return None
 
 
@@ -292,6 +282,103 @@ def _first_price(series: dict[str, dict], below: float, until: date) -> date | N
         if price is not None and price < below:
             return when
     return None
+
+
+def first_day_when(own: dict, holds, until: date, of: int = 1, out_of: int = 1):  # noqa: ANN001, ANN201
+    """Первый день, когда признак держался в K точках из последних N.
+
+    **Без подтверждения «сработал хотя бы раз за два года» насыщается.**
+    У эмитента пятьсот наблюдений, и порог, отсекающий на дне процент рынка,
+    за два года срабатывает почти у каждого: перцентиль p99 дал 272 эмитента
+    из 431. Мера «хотя бы раз» отвечает не на вопрос о признаке, а на вопрос
+    о длине ряда. Подтверждение объявлено методикой (`confirmation`), здесь
+    оно только применяется; `of=1, out_of=1` означает «без подтверждения».
+    """
+    days = sorted(own)
+    seen: list[bool] = []
+    for number, day in enumerate(days):
+        when = date.fromisoformat(day)
+        if when > until:
+            return None
+        seen.append(bool(holds(own, days, number)))
+        window = seen[-out_of:]
+        if len(window) >= of and sum(window) >= of:
+            return when
+    return None
+
+
+def _holds_level(benchmark: dict, multiple: float):  # noqa: ANN201
+    """Признак дня: кратность спреда к ориентиру не ниже названной."""
+
+    def holds(own: dict, days: list[str], number: int) -> bool:
+        level = benchmark.get(days[number])
+        if not level or level <= 0:
+            return False
+        return own[days[number]]["spread"] / level >= multiple
+
+    return holds
+
+
+def _holds_widening(growth: float, back: int, calendar: bool):  # noqa: ANN201
+    """Признак дня: спред вырос на долю `growth` от прежнего наблюдения.
+
+    Прежнее берётся либо по числу наблюдений, либо по календарю: у неликвидной
+    бумаги четыре наблюдения растягиваются на месяцы, и два способа отвечают
+    на разные вопросы. Отрицательный прежний спред сравнением не годится —
+    рост от −20 до +100 в долях не выражается.
+    """
+
+    def holds(own: dict, days: list[str], number: int) -> bool:
+        if calendar:
+            edge = date.fromisoformat(days[number]) - timedelta(days=back)
+            earlier = [
+                item for item in days[:number] if date.fromisoformat(item) <= edge
+            ]
+            if not earlier:
+                return False
+            was = own[earlier[-1]]["spread"]
+        else:
+            if number < back:
+                return False
+            was = own[days[number - back]]["spread"]
+        now = own[days[number]]["spread"]
+        return was > 0 and (now - was) / was >= growth
+
+    return holds
+
+
+def _holds_own_norm(multiple: float, window: int, least: int):  # noqa: ANN201
+    """Признак дня: спред выше собственной нормы эмитента кратностью.
+
+    Норма — медиана спреда за прошедшие дни у него же. Признак отвечает
+    на вопрос «дорого **для него**», а не «дорого вообще»: у бумаги, всегда
+    стоявшей втрое дороже рынка, кратность к ориентиру говорит об отрасли
+    и размере, а не о перемене.
+    """
+
+    def holds(own: dict, days: list[str], number: int) -> bool:
+        edge = date.fromisoformat(days[number]) - timedelta(days=window)
+        past = [
+            own[item]["spread"]
+            for item in days[:number]
+            if date.fromisoformat(item) >= edge
+        ]
+        if len(past) < least:
+            return False
+        norm = statistics.median(past)
+        return norm > 0 and own[days[number]]["spread"] / norm >= multiple
+
+    return holds
+
+
+def _holds_price(below: float):  # noqa: ANN201
+    """Признак дня: цена ушла ниже границы зоны дефолта."""
+
+    def holds(own: dict, days: list[str], number: int) -> bool:
+        price = own[days[number]].get("price")
+        return price is not None and price < below
+
+    return holds
 
 
 def _said(days: list[int]) -> str:
@@ -356,136 +443,207 @@ def main() -> int:
     for place, value in _quantiles(series, benchmark):
         print(f"| {place} | {value:.2f}× |")
 
-    print("\n## Упреждение у эмитентов с событием\n")
-    market_leads: dict[float, list[int]] = {}
-    for step in rule["ladder"]["steps"]:
-        multiple = float(step["multiple"])
-        market_leads[multiple] = []
-    price_leads: list[int] = []
-    reporting_leads: list[int] = []
-    rating_leads: list[int] = []
-    rows: list[tuple] = []
     # **Событие раньше первого дня доставки рынок упредить не мог.** У ДВМП
     # дефолт датирован 2018 годом, у двух эмитентов — 2009 и 2016: истории
     # торгов до 24.09.2024 у нас нет вовсе, и ноль упреждения там означал бы
-    # «рынок молчал», тогда как молчим мы.
+    # «рынок молчал», тогда как молчим мы. Оговорка стоит в каждом замере
+    # рынка (требование владельца 24.09.2026).
     first_day = min(benchmark) if benchmark else "9999-12-31"
     inside = {
-        inn: moment
-        for inn, moment in when.items()
-        if f"{moment}" >= first_day
+        inn: moment for inn, moment in when.items() if f"{moment}" >= first_day
     }
-    for inn, moment in sorted(inside.items(), key=lambda item: item[1]):
-        own = series.get(inn, {})
-        market: dict[float, date | None] = {
-            multiple: _first_market(own, benchmark, multiple, moment)
-            for multiple in market_leads
-        }
-        price = _first_price(
-            own, float(rule["distress_zone"]["price_below_percent"]), moment
-        )
-        reporting = _first_day(history.get(inn, {}), sources, _REPORTING)
-        rating = _first_day(history.get(inn, {}), sources, _RATING)
-        for multiple, day in market.items():
-            if day is not None:
-                market_leads[multiple].append((moment - day).days)
-        if price is not None:
-            price_leads.append((moment - price).days)
-        if reporting is not None and reporting <= moment:
-            reporting_leads.append((moment - reporting).days)
-        if rating is not None and rating <= moment:
-            rating_leads.append((moment - rating).days)
-        rows.append((inn, moment, own, market, price, reporting, rating))
-
-    print(
-        f"Эмитентов с событием {len(when)}, из них с рыночным рядом "
-        f"**{sum(1 for item in rows if item[2])}**: у остальных выпуск "
-        "за два года не торговался ни дня, и упреждать рынку нечем.\n"
-    )
+    print("\n## Признаки: точность, выявляемость, прирост, упреждение\n")
     print(
         f"**В окне доставки — {len(inside)} событий из {len(when)}.** Событие "
         f"раньше {first_day} рынок упредить не мог: истории торгов до этого дня "
         "у нас нет вовсе, и ноль упреждения там означал бы «рынок молчал», "
-        "тогда как молчим мы. Упреждение ниже считается по этим "
-        f"{len(inside)}.\n"
+        "тогда как молчим мы.\n"
     )
-    print("| Слой | Упреждение |")
-    print("|---|---|")
-    for multiple in sorted(market_leads):
-        print(f"| рынок, кратность {multiple}× | {_said(market_leads[multiple])} |")
+    known = set(series)
+    base = len(set(inside) & known) / len(known) if known else 0
     print(
-        f"| рынок, цена ниже "
-        f"{rule['distress_zone']['price_below_percent']} % | {_said(price_leads)} |"
+        f"Круг рыночных признаков — {len(known)} эмитентов с рядом, из них "
+        f"с событием в окне {len(set(inside) & known)}: базовая доля "
+        f"**{base:.1%}**. Прирост — точность признака к этой доле.\n"
     )
-    print(f"| отчётность | {_said(reporting_leads)} |")
-    print(f"| рейтинги | {_said(rating_leads)} |")
+    # **Подтверждение объявлено методикой, и мерится с ним и без него.**
+    # Разница между таблицами и есть цена подтверждения: сколько ложных оно
+    # снимает и на сколько дней откладывает.
+    of, out_of = (
+        int(rule["confirmation"]["default"]["of"]),
+        int(rule["confirmation"]["default"]["out_of"]),
+    )
+    for title, hold_of, hold_out in (
+        ("### Без подтверждения: сработал хотя бы раз", 1, 1),
+        (f"### С подтверждением {of} из {out_of}", of, out_of),
+    ):
+        print(f"\n{title}\n")
+        print(
+            "| Признак | Сработал | С событием | Ложных | Точность | "
+            "Выявляемость | Прирост | Упреждение |"
+        )
+        print("|---|---|---|---|---|---|---|---|")
+        for name, holds in _signals(series, benchmark):
+            _row(
+                name,
+                lambda own, until, h=holds, a=hold_of, b=hold_out: first_day_when(
+                    own, h, until, a, b
+                ),
+                series,
+                inside,
+                known,
+                base,
+            )
+        # Слои отчётности и рейтингов мерятся тем же способом и на своём
+        # круге: у них он шире — 900 эмитентов истории против 431 с рядом.
+        # Подтверждение к ним не применяется: основание маршрута — не дневная
+        # величина, и «7 из 10» у него не определено.
+        if hold_of == 1:
+            for name, words in (("отчётность: любое основание", _REPORTING),
+                                ("рейтинги: любое основание", _RATING)):
+                _row(
+                    name,
+                    lambda own, until, w=words: _first_day(own, sources, w, until),
+                    history,
+                    inside,
+                    set(history),
+                    len(set(inside) & set(history)) / len(history) if history else 0,
+                )
 
-    # **Упреждение без ложных тревог ничего не значит.** Признак, который
-    # срабатывает у половины рынка, «предупреждает» о каждом дефолте
-    # за год — и о каждом недефолте тоже. Знаменатель здесь и есть ответ.
+    print("\n## Пересечение слоёв на событиях в окне\n")
     print(
-        "\n### Сколько эмитентов сказало то же, а события не случилось\n"
+        "Вопрос матрицы слоёв: что она добавляет. Рынок здесь — цена ниже "
+        f"{rule['distress_zone']['price_below_percent']} %, как признак, "
+        "который разделяет; уровень и расширение в пересечение не берутся "
+        "порознь, чтобы не считать один слой дважды.\n"
     )
-    print(
-        "Упреждение без этого числа ничего не значит: признак, срабатывающий "
-        "у половины рынка, «предупреждает» о каждом дефолте и о каждом "
-        "недефолте разом.\n"
-    )
-    print("| Признак | Сработал у эмитентов | Из них с событием | Ложных |")
-    print("|---|---|---|---|")
-    quiet = {inn for inn in series if inn not in when}
-    for multiple in sorted(market_leads):
-        fired = {
-            inn
-            for inn, own in series.items()
-            if _first_market(own, benchmark, multiple, date.max) is not None
-        }
-        with_event = len(fired & set(when))
-        print(
-            f"| кратность {multiple}× | {len(fired)} | {with_event} "
-            f"| {len(fired & quiet)} |"
-        )
-    fired = {
-        inn
-        for inn, own in series.items()
-        if _first_price(own, float(rule["distress_zone"]["price_below_percent"]),
-                        date.max) is not None
-    }
-    print(
-        f"| цена ниже {rule['distress_zone']['price_below_percent']} % "
-        f"| {len(fired)} | {len(fired & set(when))} | {len(fired & quiet)} |"
-    )
-    # Те же три числа у слоёв отчётности и рейтингов: сравнивать упреждение
-    # слоёв, измерив ложные тревоги только у одного, значило бы сравнивать
-    # разные величины.
-    for name, words in (("отчётность", _REPORTING), ("рейтинги", _RATING)):
-        fired = {
-            inn
-            for inn, own in history.items()
-            if _first_day(own, sources, words) is not None
-        }
-        print(
-            f"| {name} (любое основание слоя) | {len(fired)} "
-            f"| {len(fired & set(when))} | {len(fired - set(when))} |"
-        )
+    _overlap(rule, series, benchmark, history, sources, inside)
 
     print("\n## Построчно: кто что сказал и когда\n")
     print(
         "Пусто — слой не высказался до события вовсе. Даты слоёв отчётности "
         "и рейтингов — из записанной истории корзин, рыночные — из срезов.\n"
     )
-    print("| ИНН | Событие | Рынок 2× | Рынок 3× | Цена | Отчётность | Рейтинги |")
+    print(
+        "| ИНН | Событие | Расширение | Своя норма | Цена < 60 % "
+        "| Отчётность | Рейтинги |"
+    )
     print("|---|---|---|---|---|---|---|")
-    for inn, moment, own, market, price, reporting, rating in rows:
+    for inn, moment in sorted(inside.items(), key=lambda item: item[1]):
+        own = series.get(inn, {})
         if not own:
             continue
         print(
             f"| {inn} | {moment:%d.%m.%Y} "
-            f"| {_lead(market.get(2.0), moment)} | {_lead(market.get(3.0), moment)} "
-            f"| {_lead(price, moment)} | {_lead(reporting, moment)} "
-            f"| {_lead(rating, moment)} |"
+            f"| {_lead(first_day_when(own, _holds_widening(0.6, 4, False), moment), moment)} "
+            f"| {_lead(first_day_when(own, _holds_own_norm(2.0, 90, 20), moment), moment)} "
+            f"| {_lead(_first_price(own, 60.0, moment), moment)} "
+            f"| {_lead(_first_day(history.get(inn, {}), sources, _REPORTING, moment), moment)} "
+            f"| {_lead(_first_day(history.get(inn, {}), sources, _RATING, moment), moment)} |"
         )
     return 0
+
+
+def _signals(series: dict, benchmark: dict) -> list[tuple]:
+    """Перечень рыночных признаков: имя и признак дня.
+
+    **Ступени лестницы стоят на перцентилях распределения**, а не на круглых
+    числах: замер 24.09.2026 показал, что 1,5× отсекает три четверти рынка,
+    то есть мерит фон. Ниже p75 в маршрут не идёт ничего (решение владельца).
+    """
+    steps = dict(_quantiles(series, benchmark))
+    found: list[tuple] = []
+    for place in (75, 90, 95, 99):
+        multiple = steps.get(place)
+        if multiple is not None:
+            found.append(
+                (
+                    f"уровень: кратность ≥ {multiple:.2f}× (p{place})",
+                    _holds_level(benchmark, multiple),
+                )
+            )
+    # Расширение: то же движение, померенное наблюдениями и календарём.
+    for back, calendar, name in (
+        (4, False, "4 наблюдения"),
+        (14, True, "две недели"),
+        (30, True, "месяц"),
+    ):
+        found.append(
+            (
+                f"расширение: спред +60 % за {name}",
+                _holds_widening(0.6, back, calendar),
+            )
+        )
+    for multiple in (1.5, 2.0, 3.0):
+        found.append(
+            (
+                f"своя норма: спред ≥ {multiple}× медианы за 90 дней",
+                _holds_own_norm(multiple, 90, 20),
+            )
+        )
+    for below in (75.0, 60.0, 40.0):
+        found.append(
+            (f"цена ниже {below:.0f} % номинала", _holds_price(below))
+        )
+    return found
+
+
+def _row(name: str, first, source: dict, inside: dict, known: set, base: float) -> None:  # noqa: ANN001
+    """Строка сравнения признаков: пять чисел и упреждение."""
+    fired = {inn for inn, own in source.items() if first(own, date.max) is not None}
+    hit = fired & set(inside)
+    leads = [
+        (inside[inn] - day).days
+        for inn in hit
+        if (day := first(source[inn], inside[inn])) is not None
+    ]
+    precision = len(hit) / len(fired) if fired else 0
+    recall = len(hit) / len(set(inside) & known) if set(inside) & known else 0
+    lift = precision / base if base else 0
+    print(
+        f"| {name} | {len(fired)} | {len(hit)} | {len(fired) - len(hit)} "
+        f"| {precision:.1%} | {recall:.1%} | {lift:.1f}× | {_said(leads)} |"
+    )
+
+
+def _overlap(rule: dict, series: dict, benchmark: dict, history: dict,
+             sources: dict, inside: dict) -> None:
+    """Кто ловит событие: только отчётность, только рейтинги, только рынок.
+
+    **Это и есть ответ на вопрос, нужна ли матрица слоёв.** Если каждый
+    эмитент с событием ловится всеми тремя, матрица не добавляет ничего;
+    если у каждого свой слой — она и есть ответ.
+    """
+    counted: Counter = Counter()
+    for inn, moment in inside.items():
+        own = series.get(inn, {})
+        market = _first_price(own, 60.0, moment) is not None if own else False
+        reporting = (
+            _first_day(history.get(inn, {}), sources, _REPORTING, moment) is not None
+        )
+        rating = (
+            _first_day(history.get(inn, {}), sources, _RATING, moment) is not None
+        )
+        said = tuple(
+            name
+            for name, yes in (
+                ("рынок", market), ("отчётность", reporting), ("рейтинги", rating)
+            )
+            if yes
+        )
+        counted[said or ("никто",)] += 1
+    print("| Кто сказал до события | Эмитентов |")
+    print("|---|---|")
+    for names, count in sorted(counted.items(), key=lambda item: -item[1]):
+        print(f"| {', '.join(names)} | {count} |")
+    alone = {
+        name: counted[(name,)] for name in ("рынок", "отчётность", "рейтинги")
+    }
+    print(
+        f"\nТолько рынок — {alone['рынок']}, только отчётность — "
+        f"{alone['отчётность']}, только рейтинги — {alone['рейтинги']}, "
+        f"никто — {counted[('никто',)]} из {len(inside)}."
+    )
 
 
 def _lead(day: date | None, moment: date) -> str:
