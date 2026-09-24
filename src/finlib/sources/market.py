@@ -1,0 +1,505 @@
+"""Рыночный слой: спред к кривой ОФЗ, цена бумаги и ориентир дня.
+
+**Счёт живёт здесь, а не в замере.** Пока методика не была утверждена, спред
+считался в `eval/market_lead_run.py` — и это был объявленный долг: два пути
+к одному ответу расходятся, и расхождения не видно, пока их не сравнить.
+Методика утверждена решением владельца 24.09.2026, и счёт переехал сюда;
+замер теперь зовёт эти же функции.
+
+**Что здесь считается.** Дневной срез торгов по рынку облигаций целиком
+превращается в три величины: ориентир дня (перцентиль ликвидного ядра),
+спред эмитента ко кривой ОФЗ и цена его бумаг. Правила — `market.yaml`,
+и ни одно число здесь не зашито.
+
+**Цена берётся раньше правила сравнимости.** Правило это о доходности:
+у флоатера доходность к сроку не определена, пока не известен будущий купон.
+Цена определена у любой бумаги, и отбросив строку целиком, мы теряли бы
+вместе с несравнимой доходностью вполне сравнимую цену: ценовой ряд есть
+у 484 эмитентов, спредовый — у 431.
+"""
+
+import json
+import logging
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from finlib.config import settings
+from finlib.sources.cbonds import bond_issuers
+from finlib.sources.cbonds_events import issues_of
+from finlib.sources.moex import CACHE
+
+logger = logging.getLogger(__name__)
+
+# **Посчитанное хранится, сырое — нет** (`market.yaml`, блок `storage`).
+# Сырые срезы занимают полтора гигабайта и переспрашиваются у источника
+# в любой день; ряд спредов восстанавливается только пересчётом.
+SERIES = settings.data_dir / "market" / "series.json"
+
+_RULES = settings.methodology_dir / "market.yaml"
+
+
+class Step(BaseModel):
+    """Ступень лестницы кратности: порог вместе с тем, что он отсекает."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    percentile: int = Field(gt=0, lt=100)
+    multiple: Decimal = Field(gt=0)
+    calibration_status: str = Field(min_length=1)
+    # Что ступень отсекает и чего стоит: доля рынка, прирост, точность,
+    # выявляемость. Порог без этих чисел — не порог, а число.
+    measured: dict[str, Decimal] = Field(min_length=1)
+    in_route: bool
+    ground: str = ""
+    basket: str = ""
+    subgroup: str = ""
+    escalation: bool | None = None
+    why: str = ""
+    statement_origin: str = ""
+
+    @model_validator(mode="after")
+    def _route_step_is_named(self) -> "Step":
+        """Ступень маршрута обязана назвать основание и корзину."""
+        if not self.in_route:
+            return self
+        if not self.ground or not self.basket:
+            raise ValueError(f"ступень {self.code} в маршруте без основания или корзины")
+        if self.basket == "attention" and (not self.subgroup or self.escalation is None):
+            raise ValueError(
+                f"ступень {self.code} во внимании без подгруппы либо без "
+                "объявления об эскалации"
+            )
+        return self
+
+
+class Ladder(BaseModel):
+    """Лестница кратности спреда к ориентиру дня."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    metric: str = Field(min_length=1)
+    steps: tuple[Step, ...] = Field(min_length=1)
+    measured_on: date
+    measured_origin: str = Field(min_length=1)
+    # **Подтверждение здесь не украшение, а условие осмысленности.** Порог,
+    # отсекающий процент рынка в день, за два года срабатывает почти у каждого.
+    requires_confirmation: bool
+
+    @model_validator(mode="after")
+    def _route_steps_are_distinct(self) -> "Ladder":
+        """Одна корзина — одна ступень: две ступени одной корзины не различают."""
+        taken: set[str] = set()
+        for step in self.steps:
+            if not step.in_route:
+                continue
+            if step.basket in taken:
+                raise ValueError(
+                    f"корзину {step.basket} называют две ступени лестницы: "
+                    "различение, которого нет"
+                )
+            taken.add(step.basket)
+        return self
+
+
+class Rule(BaseModel):
+    """Подтверждение «K из N»: сколько наблюдений из скольких."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    of: int = Field(gt=0)
+    out_of: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _fits(self) -> "Rule":
+        """Требовать больше наблюдений, чем окно, нельзя."""
+        if self.of > self.out_of:
+            raise ValueError("подтверждение требует больше точек, чем в окне")
+        return self
+
+
+class Confirmation(BaseModel):
+    """Правило подтверждения устойчивости признака."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    default: Rule
+    systemic: Rule
+    systemic_origin: str = Field(min_length=1)
+
+
+class Distress(BaseModel):
+    """Зона дефолта по цене: ниже границы доходность смысла не имеет."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    price_below_percent: Decimal = Field(gt=0, le=100)
+    calibration_status: str = Field(min_length=1)
+    in_route: bool
+    basket: str = Field(min_length=1)
+    ground: str = Field(min_length=1)
+    narrowing_declined: dict[str, Decimal | str]
+    measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
+    measured_origin: str = Field(min_length=1)
+    confirmation_declined: dict[str, Decimal]
+    statement_origin: str = Field(min_length=1)
+    yield_is_meaningless: bool
+
+
+class MarketPolicy(BaseModel):
+    """Методика рыночного слоя целиком: числа только отсюда."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    status_origin: str = Field(min_length=1)
+    source: dict
+    comparability: dict
+    spread: dict
+    cleaning: dict
+    benchmark: dict
+    ladder: Ladder
+    widening: dict
+    own_norm: dict
+    confirmation: Confirmation
+    distress_zone: Distress
+    display: dict
+    storage: dict
+
+    @model_validator(mode="after")
+    def _idle_rules_say_why(self) -> "MarketPolicy":
+        """Недействующее правило объявляет числа, по которым отвергнуто.
+
+        Удалённое правило неотличимо от забытого, а замолчавшее — от
+        работающего. Поэтому `in_route: false` требует блока `measured`.
+        """
+        for name in ("widening", "own_norm"):
+            rule = getattr(self, name)
+            if rule.get("in_route") is None:
+                raise ValueError(f"правило {name} не объявило, идёт ли оно в маршрут")
+            if not rule.get("in_route") and not rule.get("measured"):
+                raise ValueError(f"правило {name} недействующее и без чисел замера")
+        return self
+
+    @property
+    def route_steps(self) -> tuple[Step, ...]:
+        """Ступени, которые называют корзину."""
+        return tuple(step for step in self.ladder.steps if step.in_route)
+
+
+def load_market(path: Path | None = None) -> MarketPolicy:
+    """Методика рыночного слоя; величины отсюда только читаются."""
+    return MarketPolicy.model_validate(
+        yaml.safe_load((path or _RULES).read_text(encoding="utf-8"))
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Point:
+    """Рыночный день эмитента: спред, цена и оборот.
+
+    **Спред бывает пуст при известной цене.** У флоатера доходность к сроку
+    не определена, а цена определена — и ценовой признак по такому дню
+    считается, спредовый нет.
+    """
+
+    day: date
+    spread: Decimal | None
+    price: Decimal | None
+    weight: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class Market:
+    """Ряд рыночного слоя: ориентир дня, точки эмитентов и знаменатели."""
+
+    benchmark: dict[date, Decimal]
+    issuers: dict[str, dict[date, Point]]
+    counted: dict[str, int]
+    # Перепись строк по эмитенту: «рынок молчал» — три разных ответа, и без
+    # неё они выглядят одинаково.
+    census: dict[str, dict[str, int]]
+    universe: int
+    with_isin: int
+
+    def points(self, inn: str) -> dict[date, Point]:
+        """Ряд эмитента; пусто — рынок о нём не высказывался."""
+        return self.issuers.get(inn, {})
+
+    def silence(self, inn: str) -> str:
+        """Почему у эмитента нет ряда: три разных ответа, не один."""
+        own = self.census.get(inn)
+        if not own or not own["rows"]:
+            return "выпусков эмитента в истории биржи нет вовсе"
+        if not own["with_price"]:
+            return (
+                f"бумаги допущены, но не торговались: строк среза {own['rows']}, "
+                "цены нет ни в одной"
+            )
+        return (
+            f"строк среза {own['rows']}, с ценой {own['with_price']}, "
+            f"со спредом {own['with_spread']}"
+        )
+
+
+def holders() -> dict[str, str]:
+    """ISIN → ИНН по всем выпускам эмитентов списка, включая погашенные."""
+    found: dict[str, str] = {}
+    for inn in bond_issuers():
+        issues, known = issues_of(inn)
+        if not known:
+            continue
+        for item in issues:
+            if item.isin:
+                found[item.isin] = inn
+    return found
+
+
+def curve_of(points: list[dict]) -> list[tuple[Decimal, Decimal]]:
+    """Опубликованные точки кривой парами «годы, доходность»."""
+    return sorted(
+        (Decimal(str(item["period"])), Decimal(str(item["value"])))
+        for item in points
+        if item.get("period") is not None and item.get("value") is not None
+    )
+
+
+def curve_at(
+    points: list[tuple[Decimal, Decimal]], years: Decimal
+) -> tuple[Decimal, bool]:
+    """Кривая в точке дюрации и признак «это край, а не значение».
+
+    Линейная интерполяция между опубликованными точками; за их пределами
+    берётся крайняя точка, и строка помечается — продлевать кривую собственным
+    правилом мы не будем, а формулу параметров не воспроизводим по памяти.
+    """
+    if years <= points[0][0]:
+        return points[0][1], True
+    if years >= points[-1][0]:
+        return points[-1][1], True
+    for (left, low), (right, high) in zip(points, points[1:], strict=False):
+        if left <= years <= right:
+            share = (years - left) / (right - left)
+            return low + (high - low) * share, False
+    return points[-1][1], True
+
+
+def percentile(values: list[Decimal], place: int) -> Decimal:
+    """Перцентиль отсортированного ряда; ряд пуст — вызывающий не спрашивает."""
+    if len(values) == 1:
+        return values[0]
+    spot = Decimal(len(values) - 1) * Decimal(place) / Decimal(100)
+    low = int(spot)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (spot - low)
+
+
+def excluded(row: dict, policy: MarketPolicy) -> str:
+    """Почему спред у этой бумаги не считается; пусто — считается.
+
+    Возвращается **код правила**, а не «да/нет»: перечень отброшенного
+    печатается построчно, и без кода нельзя сказать, что именно отсекло
+    половину рынка.
+    """
+    for item in policy.comparability["exclude"]:
+        if item.get("keep_only"):
+            if str(row.get(item["by"]) or "") not in item["keep_only"]:
+                return str(item["code"])
+            continue
+        if str(row.get(item["by"]) or "") not in item.get("values", ()):
+            continue
+        # Оговорка правила: то же значение при другом горизонте правомерно.
+        spare = item.get("unless")
+        if spare and str(row.get(spare["by"]) or "") in spare["values"]:
+            continue
+        return str(item["code"])
+    return ""
+
+
+def _number(value: object) -> Decimal | None:
+    """Число среза в `Decimal`; пусто — величины нет."""
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except ArithmeticError:
+        return None
+
+
+def build(policy: MarketPolicy | None = None) -> Market:
+    """Пересчёт ряда из срезов: один проход по доставленным дням.
+
+    Хранится только сведённое — по эмитенту на дату: полтора миллиона строк
+    не помещаются ни в память, ни в осмысленный файл.
+    """
+    policy = policy or load_market()
+    core = policy.benchmark["liquid_core"]
+    place = int(policy.benchmark["percentile"])
+    ceiling = Decimal(str(policy.spread["ceiling_bp"]))
+    mine_of = holders()
+    curves = json.loads((CACHE / "zcyc_by_day.json").read_text(encoding="utf-8"))
+    by_issuer: dict[str, dict[date, Point]] = defaultdict(dict)
+    benchmark: dict[date, Decimal] = {}
+    counted: dict[str, int] = defaultdict(int)
+    census: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"rows": 0, "with_price": 0, "with_spread": 0}
+    )
+    for path in sorted(CACHE.glob("xsec_*.json")):
+        if "_p" in path.name:
+            continue
+        name = path.name[len("xsec_") : -len(".json")]
+        points = curves.get(name, {}).get("yearyields")
+        if not points:
+            continue
+        day = date.fromisoformat(name)
+        curve = curve_of(points)
+        market: list[Decimal] = []
+        mine: dict[str, list[tuple[Decimal | None, Decimal, Decimal | None]]] = (
+            defaultdict(list)
+        )
+        for row in json.loads(path.read_text(encoding="utf-8")).get("history") or []:
+            counted["строк"] += 1
+            inn = mine_of.get(str(row.get("SECID") or ""))
+            turnover = _number(row.get("VALUE")) or Decimal(0)
+            price = _number(row.get("LEGALCLOSEPRICE")) or _number(row.get("CLOSE"))
+            spread: Decimal | None = None
+            if why := excluded(row, policy):
+                counted[f"отброшено: {why}"] += 1
+            elif (got := _number(row.get("YIELDATWAP") or row.get("YIELDCLOSE"))) is None:
+                counted["без доходности"] += 1
+            elif (days := _number(row.get("DURATION"))) is None or not days:
+                counted["без дюрации"] += 1
+            else:
+                level, edge = curve_at(curve, days / Decimal(365))
+                counted["край кривой"] += int(edge)
+                spread = (got - level) * 100
+                if spread > ceiling:
+                    counted["выше потолка"] += 1
+                    spread = None
+                else:
+                    trades = _number(row.get("NUMTRADES")) or Decimal(0)
+                    if trades >= core["min_trades"] and turnover >= core[
+                        "min_turnover_rub"
+                    ]:
+                        market.append(spread)
+            if inn is not None:
+                census[inn]["rows"] += 1
+                census[inn]["with_price"] += int(price is not None)
+                census[inn]["with_spread"] += int(spread is not None)
+                if spread is not None or price is not None:
+                    mine[inn].append((spread, turnover, price))
+        if len(market) < 5:
+            # Ядро из трёх бумаг ориентиром не является: день остаётся
+            # без ориентира, и спреды этого дня в кратность не идут.
+            continue
+        benchmark[day] = percentile(sorted(market), place)
+        for inn, rows in mine.items():
+            by_issuer[inn][day] = _of_day(day, rows)
+    return Market(
+        benchmark=benchmark,
+        issuers=dict(by_issuer),
+        counted=dict(counted),
+        census=dict(census),
+        universe=len(bond_issuers()),
+        with_isin=len(set(mine_of.values())),
+    )
+
+
+def _of_day(
+    day: date, rows: list[tuple[Decimal | None, Decimal, Decimal | None]]
+) -> Point:
+    """Величина дня у эмитента: оборотом взвешенный спред и наименьшая цена.
+
+    **Порядок частей — часть правила.** Сперва величина дня у выпуска, потом
+    у эмитента: сложив сделки всех выпусков в кучу, мы дали бы эмитенту
+    с десятью выпусками десятикратный вес против эмитента с одним.
+    """
+    weight = sum((item[1] for item in rows), Decimal(0)) or Decimal(len(rows))
+    spreads = [item for item in rows if item[0] is not None]
+    spread = None
+    if spreads:
+        total = sum((item[1] or Decimal(1) for item in spreads), Decimal(0))
+        spread = sum(
+            (item[0] * (item[1] or Decimal(1)) for item in spreads), Decimal(0)
+        ) / (total or Decimal(len(spreads)))
+    prices = [item[2] for item in rows if item[2]]
+    return Point(
+        day=day,
+        spread=spread,
+        price=min(prices) if prices else None,
+        weight=weight,
+    )
+
+
+def series(refresh: bool = False, policy: MarketPolicy | None = None) -> Market:
+    """Ряд с диска, а при его отсутствии — пересчёт и запись.
+
+    Пересчёт идёт по доставленным срезам и сети не касается вовсе: доставка —
+    отдельный прогон (`scripts/moex_market_fetch.py`).
+    """
+    if SERIES.exists() and not refresh:
+        return _read(json.loads(SERIES.read_text(encoding="utf-8")))
+    found = build(policy)
+    SERIES.parent.mkdir(parents=True, exist_ok=True)
+    SERIES.write_text(_written(found), encoding="utf-8")
+    return found
+
+
+def _written(found: Market) -> str:
+    """Ряд в JSON: величины строками, иначе `Decimal` станет `float`."""
+    return json.dumps(
+        {
+            "benchmark": {
+                f"{day}": str(value) for day, value in found.benchmark.items()
+            },
+            "issuers": {
+                inn: {
+                    f"{day}": {
+                        "spread": None if item.spread is None else str(item.spread),
+                        "price": None if item.price is None else str(item.price),
+                        "weight": str(item.weight),
+                    }
+                    for day, item in own.items()
+                }
+                for inn, own in found.issuers.items()
+            },
+            "counted": found.counted,
+            "census": found.census,
+            "universe": found.universe,
+            "with_isin": found.with_isin,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _read(raw: dict) -> Market:
+    """Ряд из JSON: величины обратно в `Decimal`."""
+    return Market(
+        benchmark={
+            date.fromisoformat(day): Decimal(value)
+            for day, value in raw["benchmark"].items()
+        },
+        issuers={
+            inn: {
+                date.fromisoformat(day): Point(
+                    day=date.fromisoformat(day),
+                    spread=None if item["spread"] is None else Decimal(item["spread"]),
+                    price=None if item["price"] is None else Decimal(item["price"]),
+                    weight=Decimal(item["weight"]),
+                )
+                for day, item in own.items()
+            }
+            for inn, own in raw["issuers"].items()
+        },
+        counted=raw["counted"],
+        census=raw["census"],
+        universe=raw["universe"],
+        with_isin=raw["with_isin"],
+    )
