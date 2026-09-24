@@ -89,6 +89,10 @@ facts:  ## Фактическая часть для материалов рук�
 	uv run python eval/leadership_facts_run.py > data/output/leadership_facts.md
 	@echo "data/output/leadership_facts.md"
 
+layer-matrix:  ## Матрица слоёв: что даёт сочетание сверх лучшего слоя (замер)
+	uv run python eval/layer_matrix_run.py > data/output/layer_matrix.md
+	@echo "data/output/layer_matrix.md"
+
 market-lead:  ## Упреждение слоёв: рынок против отчётности и рейтингов (замер)
 	uv run python eval/market_lead_run.py > data/output/market_lead.md
 	@echo "data/output/market_lead.md"

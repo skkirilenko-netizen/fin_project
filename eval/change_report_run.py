@@ -52,6 +52,14 @@ FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
 """
 
+# Здоровье доставок того дня, о котором отчёт. Берётся последний прогон дня:
+# прогон может быть повторён руками, и отчёт говорит о последнем.
+_HEALTH = """
+SELECT status, sources, note, finished_at FROM routing_run
+WHERE as_of = %(as_of)s AND kind = %(kind)s
+ORDER BY started_at DESC LIMIT 1
+"""
+
 # Наименования корзин и оснований берутся у справочника: технических кодов
 # в отчёте нет — их читает не человек.
 _NAMES: dict[str, str] = {}
@@ -309,15 +317,67 @@ def main() -> int:
         previous = max((item for item in dates if item < until), default=since)
         was, now = _read(conn, kind, since), _read(conn, kind, until)
         bonds = set(bond_issuers())
-        _report(routing, kind, since, until, was, now, bonds, previous)
+        health = fetch_all(_HEALTH, {"as_of": until, "kind": kind}, conn=conn)
+        _report(routing, kind, since, until, was, now, bonds, previous, health)
     return 0
 
 
-def _report(routing, kind, since, until, was, now, bonds, previous) -> None:  # noqa: ANN001
+def _health(kind: str, rows: list) -> None:
+    """Здоровье доставок — первым, до всяких изменений.
+
+    **«Изменений нет» при недошедшей доставке и при полной — разные
+    сведения, а выглядят одинаково.** Правило объявлено с заведения
+    ежедневного прогона, и до 24.09.2026 отчёт его не исполнял: отказ
+    источника лежал в журнале прогона и в отчёт не попадал вовсе.
+    """
+    if kind != "run":
+        print(
+            "*Это пересчёт назад, а не наблюдение: доставок в нём нет "
+            "по устройству, и здоровье источников к нему не относится.*\n"
+        )
+        return
+    if not rows:
+        print(
+            "> **Записи прогона за этот день нет.** Отчёт собран по истории, "
+            "а чем она получена — неизвестно: это не «доставки прошли».\n"
+        )
+        return
+    said = rows[0]
+    sources = said.get("sources") or []
+    failed = [
+        item
+        for item in sources
+        if str(item.get("status")) in ("failed", "no_quota", "stopped")
+    ]
+    if failed:
+        print("> **Доставка неполна, и список собран на том, что дошло.**\n>")
+        for item in failed:
+            why = item.get("why") or item.get("error") or "причина не записана"
+            print(f"> - {item.get('name', item.get('code'))}: {why}")
+        print(
+            f">\n> Прогон завершён со статусом «{said.get('status')}»"
+            + (f": {said['note']}" if said.get("note") else "")
+            + ". Изменений ниже могло не быть просто потому, что новых "
+            "данных не пришло.\n"
+        )
+        return
+    names = ", ".join(
+        f"{item.get('name', item.get('code'))} — {item.get('status')}"
+        for item in sources
+    )
+    print(
+        f"*Доставки дня: {names or 'ни одной не объявлено'}. Прогон — "
+        f"«{said.get('status')}».*\n"
+    )
+
+
+def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN001
+            health) -> None:
     """Собирает и печатает сам отчёт."""
     names = _ground_names(routing)
     order = {basket.code: basket.order for basket in routing.baskets}
     print(f"# Что изменилось: {until:%d.%m.%Y}\n")
+    _health(kind, health)
     print(
         f"Сравнение с {since:%d.%m.%Y} — **неделя, а не сутки**: медиана "
         "обычного дня ноль, и пустой отчёт каждый день приучает не открывать. "
