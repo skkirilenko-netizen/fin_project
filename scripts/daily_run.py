@@ -25,7 +25,7 @@ import runpy
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
@@ -36,6 +36,7 @@ from finlib.db import connection, execute, fetch_all
 from finlib.scoring.routing import load_routing
 from finlib.scoring.routing_store import routing_rows
 from finlib.sources import cbonds
+from finlib.sources.market import series as market_series
 from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,23 @@ STAGES: tuple[Stage, ...] = (
         why=(
             "Перевод в режим «Д» — событие дня с датой; биржа отвечает "
             "без подписки, и на суточную норму Cbonds это не тратится."
+        ),
+    ),
+    # **Торги биржи — ежедневная доставка, и пропущенный день не добирается
+    # задним числом дешевле, чем сразу**: глубина хранения у ISS годы, но
+    # каждый день — отдельный запрос, и накопленный пропуск стоит столько же
+    # дней. На суточную норму Cbonds это не тратится — источник другой.
+    Stage(
+        code="market",
+        name="дневной срез торгов и кривая ОФЗ",
+        script="scripts/moex_market_fetch.py",
+        every=1,
+        blocking=False,
+        why=(
+            "Рыночные основания маршрута считаются по ряду спредов и цен, "
+            "и ряд этот наращивается днями: пропущенный день оставляет "
+            "в нём дыру, а признак — подтверждение «7 из 10» — считает "
+            "наблюдения, а не календарь."
         ),
     ),
     Stage(
@@ -228,6 +246,11 @@ def main() -> int:
             conn=conn,
         )[0]["id"]
         conn.commit()
+        # **Ряд спредов пересчитывается после доставки, а не читается
+        # вчерашний.** Доставка кладёт новый срез, и маршрут, посчитанный
+        # по старому ряду, объявил бы вчерашнее состояние сегодняшним.
+        # Пересчёт идёт по диску и сети не касается вовсе.
+        market_series(refresh=True)
         rows, counts = routing_rows(conn, today)
         for row in rows:
             execute(
@@ -314,6 +337,13 @@ def _marker(stage: Stage) -> Path:
         return ROOT / "data" / "raw" / "cbonds" / "ratings" / f"{date.today():%Y-%m-%d}.json"
     if stage.code == "moex":
         return ROOT / "data" / "raw" / "moex" / "bonds_traded.json"
+    # Срез торгов вчерашнего дня: сегодняшнего у биржи ещё нет, и ждать
+    # его — значит не доставить ничего.
+    if stage.code == "market":
+        return (
+            ROOT / "data" / "raw" / "moex"
+            / f"xsec_{date.today() - timedelta(days=1):%Y-%m-%d}.json"
+        )
     return ROOT / "data" / "raw" / "cbonds" / "emissions_7736050003.json"
 
 

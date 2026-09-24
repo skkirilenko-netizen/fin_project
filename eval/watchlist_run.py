@@ -31,10 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
+from finlib.report.market_chart import charts  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
+from finlib.sources.market import load_market as _market_rules  # noqa: E402
+from finlib.sources.market import series as _market_series  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,20 @@ _DEFAULT_OUTCOME_NAMES: dict[str, str] = {
     "default_settled_stale": "улажен, старше: справочно",
 }
 _DEFAULT_OUTCOMES = frozenset(_DEFAULT_OUTCOME_NAMES)
+
+
+def _chart(inn: str) -> str:
+    """Рамки рыночного ряда эмитента встроенным SVG; пусто — ряда нет.
+
+    Рисует их тот же код, что и в карточке (`report.market_chart`): страница
+    и карточка обязаны показывать одно, а второй рисовальщик разошёлся бы
+    с первым в первом же масштабе.
+    """
+    market = _market_series()
+    points = market.ordered(inn)
+    if not points:
+        return ""
+    return "".join(charts(points, market, _market_rules()))
 
 
 def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
@@ -158,6 +175,17 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
                 # десятилетней давности человек найдёт в карточке сам,
                 # и молчание маршрута прочтёт как недосмотр.
                 "notes": [entry.text for entry in verdict.notes],
+                # **График рисуется там, где рынок высказался**, а не у всех
+                # подряд: он объясняет основание, и у эмитента без рыночного
+                # основания объяснять нечего. Цена полноты измерена — две
+                # рамки весят около четырёх килобайт, и на все 900 строк это
+                # четыре мегабайта против страницы в полтора.
+                "chart": _chart(item.inn)
+                if any(
+                    entry.ground.startswith("market_")
+                    for entry in verdict.findings
+                )
+                else "",
                 # **Чистый долг и EBITDA называются порознь.** Отрицательное
                 # отношение означает либо чистую денежную позицию, либо убыток,
                 # и по одному отношению их не различить.
@@ -448,9 +476,27 @@ def _row_html(item: dict) -> str:
         # **Строка покрытия у «Без внимания».** Пустая графа читается
         # как «ничего не проверяли», тогда как проверено всё, что маршрут
         # умеет: величины и события.
-        else f'<div class="cover">{html.escape(item["coverage"])}</div>'
-        + "".join(f'<span class="gd">{html.escape(text)}</span>' for text in rest)
+        else ""
     )
+    # **График свёрнут, а не вынесен в отдельную графу.** Строка списка
+    # отвечает «что с эмитентом», а ряд — «как он к этому пришёл»: открывают
+    # его тогда, когда первое уже прочитано.
+    if item["chart"]:
+        grounds += (
+            '<details class="more"><summary>рынок: спред и цена</summary>'
+            f'<div class="chart">{item["chart"]}</div></details>'
+        )
+    if not main:
+        # **Строка покрытия у «Без внимания».** Пустая графа читается
+        # как «ничего не проверяли», тогда как проверено всё, что маршрут
+        # умеет: величины и события.
+        grounds = (
+            f'<div class="cover">{html.escape(item["coverage"])}</div>'
+            + "".join(
+                f'<span class="gd">{html.escape(text)}</span>' for text in rest
+            )
+            + grounds
+        )
     values = "".join(
         f'<div class="v"><span class="vn">{html.escape(name)}</span>'
         f'<span class="vv">{html.escape(shown)}</span></div>'
@@ -565,6 +611,8 @@ _PAGE = """<!DOCTYPE html>
   .g {{ margin-bottom: 6px; }}
   .gn {{ display: block; }}
   .gd {{ display: block; color: var(--mut); font-size: 12px; }}
+  .chart {{ margin-top: 6px; overflow-x: auto; }}
+  .chart svg {{ display: block; margin-bottom: 4px; }}
   .v {{ display: flex; justify-content: space-between; gap: 10px; }}
   .vn {{ color: var(--mut); }}
   .vv {{ font-variant-numeric: tabular-nums; }}

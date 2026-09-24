@@ -48,9 +48,15 @@ from finlib.scoring.market import (  # noqa: E402
     holds_price,
     holds_widening,
 )
-from finlib.sources.cbonds import bond_issuers  # noqa: E402
 from finlib.sources.cbonds_events import default_records, issues_of  # noqa: E402
-from finlib.sources.market import Market, Point, load_market, percentile, series  # noqa: E402
+from finlib.sources.market import (  # noqa: E402
+    Market,
+    Point,
+    load_market,
+    percentile,
+    series,
+    universe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +85,16 @@ def points_of(market: Market, inn: str) -> list[Point]:
 
 
 def events() -> dict[str, date]:
-    """ИНН → дата первого неисполненного события дефолта."""
+    """ИНН → дата первого неисполненного события дефолта.
+
+    **Круг тот же, что у рыночного ряда** (`sources.market.universe`):
+    у эмитента в дефолте выпусков «в обращении» не остаётся, и перечень
+    по ним терял бы ровно тех, ради кого слой заведён — у Кириллицы все три
+    бумаги погашены либо в дефолте по погашению.
+    """
     records = default_records()
     first: dict[str, date] = {}
-    for inn in bond_issuers():
+    for inn in universe():
         issues, known = issues_of(inn)
         if not known:
             continue
@@ -674,6 +686,36 @@ def main() -> int:
                     common,
                     share,
                 )
+
+    # **Цена подтверждения меряется на самой ступени, а не вообще.**
+    # У Кириллицы кратность дошла до 115× за неделю до неисполненного
+    # погашения, а «7 из 10» этого всплеска не застало: бумага перестала
+    # торговаться раньше, чем набралось семь наблюдений. Подтверждение снимает
+    # фон и снимает же короткий всплеск — а короткий всплеск и есть событие.
+    extreme = next(
+        step.multiple for step in policy.route_steps if step.basket == "review"
+    )
+    print(f"\n### Цена подтверждения на ступени p99 ({extreme:.2f}×)\n")
+    print(
+        "Подтверждение откладывает вывод ровно на то, чем он подтверждается, "
+        "и здесь видно, сколько это стоит. Строка «1 из 1» — без "
+        "подтверждения.\n"
+    )
+    print(
+        "| Подтверждение | Сработал | С событием | Ложных | Точность "
+        "| Выявляемость | Прирост | Упреждение |"
+    )
+    print("|---|---|---|---|---|---|---|---|")
+    for of, out_of in ((1, 1), (3, 5), (5, 10), (7, 10), (14, 20)):
+        _row(
+            f"{of} из {out_of}",
+            lambda inn, until, a=of, b=out_of: first_day_when(
+                points_of(market, inn), holds_level(market, extreme), until, a, b
+            ),
+            known,
+            inside,
+            base,
+        )
 
     print("\n## Пересечение слоёв на событиях в окне\n")
     print(

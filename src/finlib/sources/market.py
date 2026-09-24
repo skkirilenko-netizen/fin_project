@@ -44,6 +44,10 @@ SERIES = settings.data_dir / "market" / "series.json"
 
 _RULES = settings.methodology_dir / "market.yaml"
 
+# Ряд, прочитанный в этом процессе: двести тысяч точек читаются с диска
+# однажды. `None` означает «ещё не читали», а не «ряда нет».
+_LOADED: "Market | None" = None
+
 
 class Step(BaseModel):
     """Ступень лестницы кратности: порог вместе с тем, что он отсекает."""
@@ -89,6 +93,9 @@ class Ladder(BaseModel):
     steps: tuple[Step, ...] = Field(min_length=1)
     measured_on: date
     measured_origin: str = Field(min_length=1)
+    # Цена подтверждения, измеренная на самой ступени: прирост и упреждение
+    # при разных «K из N». Без неё выбранное правило выглядит единственным.
+    confirmation_measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
     # **Подтверждение здесь не украшение, а условие осмысленности.** Порог,
     # отсекающий процент рынка в день, за два года срабатывает почти у каждого.
     requires_confirmation: bool
@@ -264,9 +271,20 @@ class Market:
 
 
 def holders() -> dict[str, str]:
-    """ISIN → ИНН по всем выпускам эмитентов списка, включая погашенные."""
+    """ISIN → ИНН по всем выпускам всех эмитентов справочника.
+
+    **Круг задан справочником эмитентов, а не выпусками в обращении**, и это
+    третий случай того же дефекта универсума. У Кириллицы бумаги погашены
+    и одна в дефолте по погашению, выпусков «в обращении» нет ни одного —
+    и рыночного ряда у неё не было вовсе, притом что именно её случай
+    и завёл рыночный слой. Слой, слепой у того, у кого дефолт уже случился,
+    отвечал бы на вопрос о своей доставке.
+
+    Мера: эмитентов с карточкой 977, с выпусками в обращении 702; у 108
+    из остальных 275 выпуски с ISIN известны, и это 414 бумаг.
+    """
     found: dict[str, str] = {}
-    for inn in bond_issuers():
+    for inn in universe():
         issues, known = issues_of(inn)
         if not known:
             continue
@@ -274,6 +292,18 @@ def holders() -> dict[str, str]:
             if item.isin:
                 found[item.isin] = inn
     return found
+
+
+def universe() -> list[str]:
+    """Эмитенты, о которых рынок вообще может что-то сказать.
+
+    Справочник эмитентов, а не выпуски в обращении: у эмитента в дефолте
+    бумаг «в обращении» не остаётся, а история их торгов — ровно то, ради
+    чего слой заведён. Карточки читаются тем же кодом, что и в маршруте.
+    """
+    from finlib.scoring.routing_store import cards
+
+    return sorted(set(cards()) | set(bond_issuers()))
 
 
 def curve_of(points: list[dict]) -> list[tuple[Decimal, Decimal]]:
@@ -447,7 +477,7 @@ def build(policy: MarketPolicy | None = None) -> Market:
         issuers=dict(by_issuer),
         counted=dict(counted),
         census=dict(census),
-        universe=len(bond_issuers()),
+        universe=len(universe()),
         with_isin=len(set(mine_of.values())),
     )
 
@@ -483,9 +513,18 @@ def series(refresh: bool = False, policy: MarketPolicy | None = None) -> Market:
 
     Пересчёт идёт по доставленным срезам и сети не касается вовсе: доставка —
     отдельный прогон (`scripts/moex_market_fetch.py`).
+
+    **Ряд читается один раз на процесс.** Сборка девятисот карточек
+    спрашивала его девятьсот раз, и чтение файла в двести тысяч точек занимало
+    больше, чем всё остальное: четыре минуты против сорока секунд. `refresh`
+    память сбрасывает — ежедневный прогон пересчитывает ряд после доставки.
     """
+    global _LOADED
+    if _LOADED is not None and not refresh:
+        return _LOADED
     if SERIES.exists() and not refresh:
-        return _read(json.loads(SERIES.read_text(encoding="utf-8")))
+        _LOADED = _read(json.loads(SERIES.read_text(encoding="utf-8")))
+        return _LOADED
     if not (CACHE / "zcyc_by_day.json").exists():
         # **Пустой ряд означает «доставки не было», а не «рынок молчал».**
         # Считать отсутствие срезов отсутствием сигнала — тот же дефект,
@@ -498,6 +537,7 @@ def series(refresh: bool = False, policy: MarketPolicy | None = None) -> Market:
     found = build(policy)
     SERIES.parent.mkdir(parents=True, exist_ok=True)
     SERIES.write_text(_written(found), encoding="utf-8")
+    _LOADED = found
     return found
 
 

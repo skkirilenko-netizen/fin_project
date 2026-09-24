@@ -36,9 +36,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
-from finlib.metrics.display import foreign_units, money  # noqa: E402
+from finlib.metrics.display import digits, foreign_units, money  # noqa: E402
+from finlib.report.market_chart import as_image, charts  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import SOURCE_NAMES, cards, routing_rows  # noqa: E402
+from finlib.sources.market import load_market as _market_rules  # noqa: E402
+from finlib.sources.market import series as _market_series  # noqa: E402
 from finlib.sources.ratings_calendar import (  # noqa: E402
     NOT_CREDIT,
     bound,
@@ -528,6 +531,7 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             f"средства {money(cash) if cash is not None else 'не раскрыты'}\n"
         )
     _stale(item, said)
+    _market(item, said)
 
     add("\n## История корзин\n")
     rows = fetch_all(_HISTORY, {"inn": item.inn}, conn=conn)
@@ -643,6 +647,56 @@ def write_limits(routing) -> None:  # noqa: ANN001
     said = ["# Границы метода\n", "Они одни у всех карточек списка.\n"]
     said += [f"- {' '.join(line.split())}\n" for line in routing.limitations]
     LIMITS.write_text("\n".join(said), encoding="utf-8")
+
+
+def _market(item, said: list) -> None:  # noqa: ANN001
+    """Рыночный ряд эмитента: спред против ориентира и цена против границы.
+
+    **Величина рынка меняется ежедневно, и график отвечает на то, чего число
+    не говорит**: стоит ли бумага дёшево давно или подешевела на прошлой
+    неделе. Основание маршрута называет день, с которого признак держится,
+    а ряд показывает, как он туда пришёл.
+
+    Молчание здесь объявляется причиной, а не пустотой: ряда не бывает у того,
+    чьи бумаги не торговались, и это не то же, что «рынок ничего не говорит».
+    """
+    add = said.append
+    add("\n## Рынок\n")
+    market, policy = _market_series(), _market_rules()
+    points = market.ordered(item.inn)
+    if not points:
+        add(market.silence(item.inn) + ".\n")
+        return
+    last = points[-1]
+    level = market.benchmark.get(last.day)
+    add(
+        f"Наблюдений {len(points)} за {points[0].day:%d.%m.%Y} — "
+        f"{last.day:%d.%m.%Y}. На последний день: "
+        + (
+            f"спред {digits(last.spread, 0)} б. п."
+            if last.spread is not None
+            else "спреда нет (доходность к сроку не определена)"
+        )
+        + (
+            f" при ориентире рынка {digits(level, 0)} б. п. "
+            f"(кратность {digits(last.spread / level, 2)}x)"
+            if level and last.spread is not None
+            else ""
+        )
+        + (
+            f", цена {digits(last.price, 1)} % номинала"
+            if last.price is not None
+            else ", цены нет: в этот день не торговались"
+        )
+        + ".\n"
+    )
+    for svg, alt in zip(
+        charts(points, market, policy),
+        ("Спред к кривой ОФЗ", "Цена в процентах номинала"),
+        strict=False,
+    ):
+        if svg:
+            add("\n" + as_image(svg, alt) + "\n")
 
 
 def _stale(item, said: list) -> None:  # noqa: ANN001
