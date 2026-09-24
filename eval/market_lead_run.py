@@ -106,19 +106,26 @@ def ours() -> dict[str, str]:
     return found
 
 
-def excluded(row: dict, rule: dict) -> bool:
-    """Не считается ли спред у этой бумаги — по признакам самой биржи."""
+def excluded(row: dict, rule: dict) -> str:
+    """Почему спред у этой бумаги не считается; пусто — считается.
+
+    Возвращается **код правила**, а не «да/нет»: перечень отброшенного
+    печатается построчно, и без кода нельзя сказать, что именно отсекло
+    половину рынка.
+    """
     for item in rule["comparability"]["exclude"]:
         if item.get("keep_only"):
             if str(row.get(item["by"]) or "") not in item["keep_only"]:
-                return True
+                return item["code"]
             continue
-        if str(row.get(item["by"]) or "") in item.get("values", ()):
-            return True
-        field = item.get("also_when_null")
-        if field and row.get(field) is None:
-            return True
-    return False
+        if str(row.get(item["by"]) or "") not in item.get("values", ()):
+            continue
+        # Оговорка правила: то же значение при другом горизонте правомерно.
+        spare = item.get("unless")
+        if spare and str(row.get(spare["by"]) or "") in spare["values"]:
+            continue
+        return item["code"]
+    return ""
 
 
 def collect() -> dict:
@@ -140,8 +147,7 @@ def collect() -> dict:
     )
     by_issuer: dict[str, dict[str, dict]] = defaultdict(dict)
     benchmark: dict[str, float] = {}
-    counted = {"строк": 0, "исключено правилом сравнимости": 0, "без дюрации": 0,
-               "без доходности": 0, "край кривой": 0, "выше потолка": 0}
+    counted: dict[str, int] = defaultdict(int)
     for path in sorted(CACHE.glob("xsec_*.json")):
         if "_p" in path.name:
             continue
@@ -154,8 +160,8 @@ def collect() -> dict:
         mine: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
         for row in json.loads(path.read_text(encoding="utf-8")).get("history") or []:
             counted["строк"] += 1
-            if excluded(row, rule):
-                counted["исключено правилом сравнимости"] += 1
+            if why := excluded(row, rule):
+                counted[f"отброшено: {why}"] += 1
                 continue
             got = row.get("YIELDATWAP") or row.get("YIELDCLOSE")
             if got is None:
@@ -201,7 +207,7 @@ def collect() -> dict:
     found = {
         "benchmark": {day: round(value, 1) for day, value in benchmark.items()},
         "issuers": by_issuer,
-        "counted": counted,
+        "counted": dict(counted),
     }
     SERIES.parent.mkdir(parents=True, exist_ok=True)
     SERIES.write_text(json.dumps(found, ensure_ascii=False), encoding="utf-8")
@@ -340,6 +346,15 @@ def main() -> int:
     shares = _ladder(rule, series, benchmark)
     for code, multiple, share, place in shares:
         print(f"| {code} | {multiple}× | {share:.2%} | {place:.1f} |")
+    print(
+        "\n**Обратная таблица — то, чего лестнице не хватает.** Ступень, "
+        "объявленная кратностью, отвечает «сколько отсекается»; калибровке "
+        "нужен обратный вопрос — какая кратность стоит на нужном перцентиле.\n"
+    )
+    print("| Перцентиль кратности | Кратность |")
+    print("|---|---|")
+    for place, value in _quantiles(series, benchmark):
+        print(f"| {place} | {value:.2f}× |")
 
     print("\n## Упреждение у эмитентов с событием\n")
     market_leads: dict[float, list[int]] = {}
@@ -350,7 +365,17 @@ def main() -> int:
     reporting_leads: list[int] = []
     rating_leads: list[int] = []
     rows: list[tuple] = []
-    for inn, moment in sorted(when.items(), key=lambda item: item[1]):
+    # **Событие раньше первого дня доставки рынок упредить не мог.** У ДВМП
+    # дефолт датирован 2018 годом, у двух эмитентов — 2009 и 2016: истории
+    # торгов до 24.09.2024 у нас нет вовсе, и ноль упреждения там означал бы
+    # «рынок молчал», тогда как молчим мы.
+    first_day = min(benchmark) if benchmark else "9999-12-31"
+    inside = {
+        inn: moment
+        for inn, moment in when.items()
+        if f"{moment}" >= first_day
+    }
+    for inn, moment in sorted(inside.items(), key=lambda item: item[1]):
         own = series.get(inn, {})
         market: dict[float, date | None] = {
             multiple: _first_market(own, benchmark, multiple, moment)
@@ -377,6 +402,13 @@ def main() -> int:
         f"**{sum(1 for item in rows if item[2])}**: у остальных выпуск "
         "за два года не торговался ни дня, и упреждать рынку нечем.\n"
     )
+    print(
+        f"**В окне доставки — {len(inside)} событий из {len(when)}.** Событие "
+        f"раньше {first_day} рынок упредить не мог: истории торгов до этого дня "
+        "у нас нет вовсе, и ноль упреждения там означал бы «рынок молчал», "
+        "тогда как молчим мы. Упреждение ниже считается по этим "
+        f"{len(inside)}.\n"
+    )
     print("| Слой | Упреждение |")
     print("|---|---|")
     for multiple in sorted(market_leads):
@@ -387,6 +419,55 @@ def main() -> int:
     )
     print(f"| отчётность | {_said(reporting_leads)} |")
     print(f"| рейтинги | {_said(rating_leads)} |")
+
+    # **Упреждение без ложных тревог ничего не значит.** Признак, который
+    # срабатывает у половины рынка, «предупреждает» о каждом дефолте
+    # за год — и о каждом недефолте тоже. Знаменатель здесь и есть ответ.
+    print(
+        "\n### Сколько эмитентов сказало то же, а события не случилось\n"
+    )
+    print(
+        "Упреждение без этого числа ничего не значит: признак, срабатывающий "
+        "у половины рынка, «предупреждает» о каждом дефолте и о каждом "
+        "недефолте разом.\n"
+    )
+    print("| Признак | Сработал у эмитентов | Из них с событием | Ложных |")
+    print("|---|---|---|---|")
+    quiet = {inn for inn in series if inn not in when}
+    for multiple in sorted(market_leads):
+        fired = {
+            inn
+            for inn, own in series.items()
+            if _first_market(own, benchmark, multiple, date.max) is not None
+        }
+        with_event = len(fired & set(when))
+        print(
+            f"| кратность {multiple}× | {len(fired)} | {with_event} "
+            f"| {len(fired & quiet)} |"
+        )
+    fired = {
+        inn
+        for inn, own in series.items()
+        if _first_price(own, float(rule["distress_zone"]["price_below_percent"]),
+                        date.max) is not None
+    }
+    print(
+        f"| цена ниже {rule['distress_zone']['price_below_percent']} % "
+        f"| {len(fired)} | {len(fired & set(when))} | {len(fired & quiet)} |"
+    )
+    # Те же три числа у слоёв отчётности и рейтингов: сравнивать упреждение
+    # слоёв, измерив ложные тревоги только у одного, значило бы сравнивать
+    # разные величины.
+    for name, words in (("отчётность", _REPORTING), ("рейтинги", _RATING)):
+        fired = {
+            inn
+            for inn, own in history.items()
+            if _first_day(own, sources, words) is not None
+        }
+        print(
+            f"| {name} (любое основание слоя) | {len(fired)} "
+            f"| {len(fired & set(when))} | {len(fired - set(when))} |"
+        )
 
     print("\n## Построчно: кто что сказал и когда\n")
     print(
@@ -412,6 +493,31 @@ def _lead(day: date | None, moment: date) -> str:
     if day is None or day > moment:
         return "—"
     return f"{(moment - day).days}"
+
+
+def _quantiles(series: dict, benchmark: dict) -> list[tuple[int, float]]:
+    """Кратность на опорных перцентилях распределения по дням.
+
+    Считается по дням и усредняется медианой: распределение кратности
+    двигается вместе с рынком, и один перцентиль по всей истории смешал бы
+    спокойный год с кризисным месяцем.
+    """
+    by_day: dict[str, list[float]] = defaultdict(list)
+    for own in series.values():
+        for day, item in own.items():
+            level = benchmark.get(day)
+            if level and level > 0:
+                by_day[day].append(item["spread"] / level)
+    found: list[tuple[int, float]] = []
+    for place in (50, 75, 90, 95, 99):
+        values = [
+            _percentile(sorted(items), place)
+            for items in by_day.values()
+            if len(items) >= 20
+        ]
+        if values:
+            found.append((place, statistics.median(values)))
+    return found
 
 
 def _ladder(rule: dict, series: dict, benchmark: dict) -> list[tuple]:
