@@ -87,10 +87,13 @@ def grid(today: date, step: int, depth: int) -> tuple[tuple[date, ...], int]:
     # Даты событий: дефолт и перевод биржи датированы днём, и точка ставится
     # ровно на него — иначе событие видно неделей позже, чем случилось.
     events: set[date] = set()
+    # У неплатежа два дня: объявление (с него виден неплатёж) и конец
+    # льготного срока (с него — дефолт); точка ставится на оба.
     for records in default_records().values():
         for item in records:
-            if item.moment is not None and start <= item.moment <= today:
-                events.add(item.moment)
+            for day in (item.known_on, item.moment):
+                if day is not None and start <= day <= today:
+                    events.add(day)
     for entry in risk_sectors().values():
         if entry.since is not None and start <= entry.since <= today:
             events.add(entry.since)

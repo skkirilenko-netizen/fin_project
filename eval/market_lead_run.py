@@ -100,10 +100,15 @@ def events() -> dict[str, date]:
             continue
         for issue in issues:
             for item in records.get(issue.emission_id, ()):
-                if item.settled or item.moment is None:
+                # **Событие — объявленный неплатёж, а не конец льготного
+                # срока** (решение владельца 25.09.2026): `default_date`
+                # у технического дефолта на 14 дней позже неплатежа, и
+                # календарь по нему сдвигал событие на две недели вперёд —
+                # упреждение каждого слоя выходило длиннее настоящего.
+                if item.settled or item.known_on is None:
                     continue
-                if inn not in first or item.moment < first[inn]:
-                    first[inn] = item.moment
+                if inn not in first or item.known_on < first[inn]:
+                    first[inn] = item.known_on
     return first
 
 
