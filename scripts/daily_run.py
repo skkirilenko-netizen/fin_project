@@ -134,6 +134,22 @@ STAGES: tuple[Stage, ...] = (
             "меняют его в тот же день."
         ),
     ),
+    # **Отчётность агрегатора — ежедневно** (решение владельца 25.09.2026):
+    # МСФО справочником целиком (2 запроса), РСБУ отбором по дате создания
+    # и обновления (единицы запросов плюс три на эмитента). ГИР БО остаётся
+    # первоисточником РСБУ: приоритет источников при записи не меняется.
+    Stage(
+        code="reporting",
+        name="отчётность агрегатора",
+        script="scripts/reporting_fetch.py",
+        every=1,
+        blocking=False,
+        why=(
+            "Новый комплект меняет основание маршрута, а в сезон раскрытия "
+            "комплекты приходят каждый день; отбор по дате стоит единиц "
+            "запросов, и ждать недели незачем."
+        ),
+    ),
     Stage(
         code="moex",
         name="сектор повышенного риска биржи",
@@ -500,6 +516,11 @@ def _marker(stage: Stage) -> Path:
         return ROOT / "data" / "raw" / "cbonds" / f"defaults_ru_{date.today():%Y-%m-%d}.json"
     if stage.code == "flows":
         return ROOT / "data" / "raw" / "cbonds" / f"flows_delta_{date.today():%Y-%m-%d}.json"
+    if stage.code == "reporting":
+        return (
+            ROOT / "data" / "raw" / "cbonds"
+            / f"reporting_delta_{date.today():%Y-%m-%d}.json"
+        )
     if stage.code == "moex":
         return ROOT / "data" / "raw" / "moex" / "bonds_traded.json"
     # Срез торгов вчерашнего дня: сегодняшнего у биржи ещё нет, и ждать

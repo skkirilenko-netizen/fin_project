@@ -383,6 +383,69 @@ def _snapshot_of(day: date) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _reporting_of(day: date) -> dict | None:
+    """Итог доставки отчётности агрегатора за день; None — доставки не было."""
+    path = SNAPSHOTS.parent / f"reporting_delta_{day:%Y-%m-%d}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _new_reporting(found: dict | None, names: dict[str, str] | None = None) -> None:
+    """Раздел «Новая отчётность»: новые комплекты и пересмотры дня.
+
+    **Новый комплект и пересмотр — разные сведения.** Новый говорит, что
+    об эмитенте стало известно больше; пересмотр — что изменилось уже
+    известное, и число изменённых величин называется рядом. Смена корзины
+    от нового комплекта видна ниже как изменение «у эмитента»; здесь —
+    что именно пришло.
+    """
+    print("## Новая отчётность\n")
+    if found is None:
+        print("Доставки отчётности агрегатора за этот день не было.\n")
+        return
+    if names is None:
+        cards = SNAPSHOTS.parent / "emitents.json"
+        names = (
+            {
+                inn: str(card.get("name_rus") or inn)
+                for inn, card in json.loads(cards.read_text(encoding="utf-8")).items()
+            }
+            if cards.exists()
+            else {}
+        )
+    new = found.get("new") or []
+    revised = found.get("revised") or []
+    print(
+        f"С {found.get('since')}: новых комплектов **{len(new)}**, пересмотров "
+        f"**{len(revised)}**; отказов доставки {found.get('failed', 0)}.\n"
+    )
+    if new:
+        print("| Эмитент | ИНН | Стандарт | Отчётная дата | Вид |")
+        print("|---|---|---|---|---|")
+        for item in new[:40]:
+            print(
+                f"| {names.get(item['inn'], item['inn'])} | {item['inn']} "
+                f"| {'МСФО' if item['standard'] == 'ifrs' else 'РСБУ'} "
+                f"| {item['period_end']} | {item['kind']} |"
+            )
+        if len(new) > 40:
+            print(f"\nПоказаны 40 из {len(new)}.")
+        print()
+    if revised:
+        print("| Эмитент | ИНН | Стандарт | Отчётная дата | Изменено величин |")
+        print("|---|---|---|---|---|")
+        for item in revised[:40]:
+            print(
+                f"| {names.get(item['inn'], item['inn'])} | {item['inn']} "
+                f"| {'МСФО' if item['standard'] == 'ifrs' else 'РСБУ'} "
+                f"| {item['period_end']} | {item['changed']} |"
+            )
+        if len(revised) > 40:
+            print(f"\nПоказаны 40 из {len(revised)}.")
+        print()
+
+
 def _ratings_health(found: dict | None) -> None:
     """Полнота снимка рейтингов за день — в шапке, рядом со здоровьем доставок.
 
@@ -452,6 +515,7 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     _health(kind, health)
     if kind == "run":
         _ratings_health(_snapshot_of(until))
+        _new_reporting(_reporting_of(until))
     print(
         f"Сравнение с {since:%d.%m.%Y} — **неделя, а не сутки**: медиана "
         "обычного дня ноль, и пустой отчёт каждый день приучает не открывать. "
