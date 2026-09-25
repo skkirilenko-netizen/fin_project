@@ -190,6 +190,10 @@ class Observation:
     unit_code: str
     values: dict[str, Decimal | None]
     rolling: dict[str, Rolling]
+    # Стандарт ряда: от него зависит срок раскрытия (402-ФЗ против 208-ФЗ),
+    # и наблюдение, не знающее своего стандарта, видимым стало бы по чужому
+    # сроку. Умолчания нет намеренно.
+    standard: Standard
 
     @property
     def interim(self) -> bool:
@@ -249,6 +253,7 @@ def series(
                 rolling={
                     name: rolling_flow(flows[name], day) for name in LINES
                 },
+                standard=standard,
             )
         )
     return tuple(found)

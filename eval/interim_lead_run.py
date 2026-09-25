@@ -26,6 +26,7 @@
 import logging
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -50,7 +51,7 @@ from finlib.scoring.routing import load_routing, short_of_cash  # noqa: E402
 from finlib.sources.cbonds_events import in_unit, issues_of  # noqa: E402
 from finlib.sources.cbonds_flows import refinancing  # noqa: E402
 from finlib.sources.market import load_market, universe  # noqa: E402
-from finlib.standards import Standard  # noqa: E402
+from finlib.standards import Standard, load_standards  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +83,17 @@ def _share(value: Decimal) -> str:
     return f"{value * 100:.1f} %"
 
 
-def _visible(moment: date, kind: str, known) -> date:  # noqa: ANN001
+def _visible(moment: date, kind: str, known, standard: Standard) -> date:  # noqa: ANN001
     """День, с которого комплект виден: отчётная дата плюс срок закона.
 
     Настоящей даты раскрытия у данных агрегатора нет вовсе — он её не
     сообщает ничем, — и берётся срок закона тем же правилом, каким его берёт
     маршрут (`routing.history.known_from`). Правило объявлено предварительным
-    там же, и второго его экземпляра здесь не заводится.
+    там же, и второго его экземпляра здесь не заводится. Срок свой у каждого
+    стандарта: 402-ФЗ у РСБУ, 208-ФЗ у МСФО.
     """
     return moment + timedelta(
-        days=known.days(Standard.RSBU, interim=kind == "interim")
+        days=known.days(standard, interim=kind == "interim")
     )
 
 
@@ -102,7 +104,8 @@ def _freshest(
     seen = [
         item
         for item in observations
-        if (interim or not item.interim) and _visible(item.moment, item.kind, known) <= edge
+        if (interim or not item.interim)
+        and _visible(item.moment, item.kind, known, item.standard) <= edge
     ]
     return seen[-1] if seen else None
 
@@ -116,14 +119,34 @@ def _said(days: list[int]) -> str:
 
 def _load() -> tuple[dict[str, tuple[Observation, ...]], dict[str, date], set[str]]:
     """Ряды комплектов всех эмитентов универсума, события и кто имеет промежуточные."""
+    # **Ряд эмитента — одного стандарта, и выбирается он общим правилом
+    # предпочтения** (`standards.yaml`, `base_standard`): у группы
+    # с консолидированной отчётностью — МСФО, у прочих — РСБУ. Пары
+    # комплектов разных стандартов не сравниваются: ряды несопоставимы.
+    # До 25.09.2026 ряд брался только по РСБУ — промежуточных МСФО в базе
+    # не было, потому что их отбраковала загрузка с ключом по году.
+    preference = load_standards().base_standard
     with connection() as conn:
         rows = fetch_all(_WITH_INTERIM, {}, conn=conn)
         have = {row["inn"] for row in rows}
         known = sorted(set(universe()) | have)
-        found = {
-            inn: series(conn, inn, Standard.RSBU) for inn in known
-        }
-    return {inn: obs for inn, obs in found.items() if obs}, events(), have
+        found: dict[str, tuple[Observation, ...]] = {}
+        for inn in known:
+            by_standard = {
+                standard: series(conn, inn, standard) for standard in Standard
+            }
+            chosen = preference.choose(
+                {standard for standard, obs in by_standard.items() if obs}
+            )
+            if chosen is not None:
+                found[inn] = by_standard[chosen]
+                _CHOSEN[inn] = chosen
+    return found, events(), have
+
+
+# Стандарт ряда каждого эмитента: печатается счётом, чтобы было видно,
+# на чём замер стоит.
+_CHOSEN: dict[str, Standard] = {}
 
 
 def _sets_table() -> None:
@@ -143,11 +166,13 @@ def _sets_table() -> None:
                 f"| {row['standard']} | {row['kind']} | {row['sets']} | "
                 f"{row['issuers']} | {row['first_day']} | {row['last_day']} |"
             )
+    # **Прежде здесь стояло «промежуточной консолидированной отчётности нет
+    # ни одной — агрегатор её не отдаёт вовсе».** Это было нашей ошибкой:
+    # их отбраковала загрузка с ключом по году, и сказанное строкой пережило
+    # перегрузку. Теперь о составе говорит только таблица выше.
     print(
-        "\n**Промежуточной консолидированной отчётности нет ни одной**, и это "
-        "свойство источника, а не доставки: агрегатор её не отдаёт вовсе. "
-        "Поэтому весь замер — о РСБУ, и EBITDA в нём не бывает по устройству "
-        "форм (`interim.yaml`, блок `not_measured`)."
+        "\nПромежуточная отчётность МСФО агрегатора перегружена 25.09.2026: "
+        "прежде её отбраковывала загрузка с ключом комплекта по году."
     )
 
 
@@ -180,8 +205,8 @@ def _window(
 
 def _freshness(
     by_issuer: dict[str, tuple[Observation, ...]], inside: dict[str, date]
-) -> None:
-    """Вопрос 1: на сколько раньше виден промежуточный комплект."""
+) -> int | None:
+    """Вопрос 1: на сколько раньше виден промежуточный комплект; медиана выигрыша."""
     known = load_routing().history.known_from
     print("\n## Вопрос 1. Свежесть: насколько ближе к событию стоит комплект\n")
     print(
@@ -243,12 +268,13 @@ def _freshness(
         print(f"| {inn} | {annual} | {anyone} | {kind} | {said} |")
     if len(rows) > 25:
         print(f"\nПоказаны 25 строк из {len(rows)}.")
+    return int(statistics.median(gained)) if gained else None
 
 
 def _refinancing(
     by_issuer: dict[str, tuple[Observation, ...]], inside: dict[str, date]
-) -> None:
-    """Вопрос 2: рефинансирование на промежуточных денежных средствах."""
+) -> int:
+    """Вопрос 2: рефинансирование на промежуточных денежных средствах; скольким открыл."""
     routing = load_routing()
     known = routing.history.known_from
     policy = load_interim()
@@ -333,6 +359,7 @@ def _refinancing(
             "комплектах и есть график платежей."
         )
     print(f"\nПризнаков изменения в справочнике: {len(policy.features)}.")
+    return counts["промежуточный открыл нехватку"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,7 +464,7 @@ def _features(
             visible = [
                 item
                 for item in obs
-                if _visible(item.moment, item.kind, known) <= edge_day
+                if _visible(item.moment, item.kind, known, item.standard) <= edge_day
             ]
             last = visible[-1] if visible else None
             if last is not None and last in fired:
@@ -447,15 +474,20 @@ def _features(
             early = [
                 item
                 for item in fired
-                if _visible(item.moment, item.kind, known) <= moment
+                if _visible(item.moment, item.kind, known, item.standard) <= moment
             ]
             if early:
                 ever_lead.append(
-                    (moment - _visible(early[0].moment, early[0].kind, known)).days
+                    (
+                        moment
+                        - _visible(
+                            early[0].moment, early[0].kind, known, early[0].standard
+                        )
+                    ).days
                 )
             if last is not None and last in fired:
                 caught[inn] = (
-                    moment - _visible(last.moment, last.kind, known)
+                    moment - _visible(last.moment, last.kind, known, last.standard)
                 ).days
         share = len(caught) / len(standing) if standing else 0.0
         lift = share / base if base else 0.0
@@ -483,8 +515,8 @@ def _features(
 
 def _together(
     by_issuer: dict[str, tuple[Observation, ...]], inside: dict[str, date]
-) -> None:
-    """Все признаки разом: сколько эмитентов с событием увидены хоть одним."""
+) -> tuple[int, int]:
+    """Все признаки разом: сколько эмитентов с событием увидены хоть одним и из скольких."""
     policy = load_interim()
     spread, _ = distribution(policy, by_issuer)
     edges = cutoffs(policy, spread)
@@ -496,7 +528,7 @@ def _together(
         if not obs:
             continue
         visible = [
-            item for item in obs if _visible(item.moment, item.kind, known) <= moment
+            item for item in obs if _visible(item.moment, item.kind, known, item.standard) <= moment
         ]
         if not visible:
             continue
@@ -508,7 +540,7 @@ def _together(
         if not active:
             silent.append(inn)
             continue
-        lead = (moment - _visible(last.moment, last.kind, known)).days
+        lead = (moment - _visible(last.moment, last.kind, known, last.standard)).days
         seen[inn] = (
             lead,
             f"{last.moment:%d.%m.%Y}",
@@ -530,6 +562,7 @@ def _together(
             seen.items(), key=lambda item: -item[1][0]
         )[:20]:
             print(f"| {inn} | {day} | {lead} | {names} |")
+    return len(seen), len(inside)
 
 
 def _market_said() -> str:
@@ -561,11 +594,17 @@ def _market_said() -> str:
     )
 
 
-def _verdict(measured: tuple[Measured, ...]) -> None:
+def _verdict(
+    measured: tuple[Measured, ...],
+    gain: int | None,
+    opened: int,
+    held: tuple[int, int],
+) -> None:
     """Чем измеренное кончается: что признавать, чего не признавать.
 
-    Числа признаков приходят из того же прогона (`_features`): вписанные
-    строкой, они пережили бы правку признаков неизменными.
+    Все числа приходят из того же прогона: вписанные строкой, они пережили бы
+    правку данных неизменными — так «у семи из тридцати пяти» осталось бы
+    в выводе, когда после перегрузки промежуточных МСФО их стало шесть.
     """
     working = [item for item in measured if item.caught]
     strongest = max(working, key=lambda item: item.lift) if working else None
@@ -587,10 +626,11 @@ def _verdict(measured: tuple[Measured, ...]) -> None:
     print(
         "**Свежесть промежуточная отчётность даёт, признаки изменения — почти "
         "нет, и это два разных ответа.** Комплект к моменту события "
-        "оказывается ближе на 90 дней по медиане, и у двух эмитентов свежая "
+        f"оказывается ближе на {gain if gain is not None else '—'} дней "
+        f"по медиане, и у {opened} эмитентов свежая "
         "величина денежных средств открывает нехватку, которой годовая "
         "не показывала. Признаки же изменения на свежем комплекте держались "
-        f"у семи эмитентов с событием из тридцати пяти{silent_said}.\n"
+        f"у {held[0]} эмитентов с событием из {held[1]}{silent_said}.\n"
     )
     print(
         "**Сравнивать это следует с рыночным слоем, и сравнение не в пользу "
@@ -607,8 +647,9 @@ def _verdict(measured: tuple[Measured, ...]) -> None:
         "ежедневно.\n"
     )
     print(
-        "**Чего замер не говорит.** Промежуточных комплектов по МСФО нет "
-        "ни одного, и о группах он не говорит ничего. Дата раскрытия "
+        "**Чего замер не говорит.** EBITDA признаком не мерится: признак "
+        "операционного результата смотрит операционную прибыль, и у МСФО "
+        "тоже. Дата раскрытия "
         "у агрегатора отсутствует вовсе, поэтому видимость комплекта "
         "смоделирована сроком закона — а срок этот в хвосте распределения "
         "ошибается на сотни дней в одну сторону: раскрывают позже, а не "
@@ -627,12 +668,19 @@ def main() -> int:
     )
     _sets_table()
     by_issuer, moments, have = _load()
+    counted = Counter(standard.value for standard in _CHOSEN.values())
+    print(
+        f"\nРяд эмитента берётся одного стандарта, правилом предпочтения: "
+        f"по МСФО — {counted.get('ifrs', 0)}, по РСБУ — {counted.get('rsbu', 0)}. "
+        "Отсечки признаков считаются по долям изменения обоих стандартов вместе: "
+        "доля безразмерна, но состав величин у стандартов свой.\n"
+    )
     _first, _last, inside = _window(by_issuer, moments)
-    _freshness(by_issuer, inside)
-    _refinancing(by_issuer, inside)
+    gain = _freshness(by_issuer, inside)
+    opened = _refinancing(by_issuer, inside)
     measured = _features(by_issuer, inside, have)
-    _together(by_issuer, inside)
-    _verdict(measured)
+    held = _together(by_issuer, inside)
+    _verdict(measured, gain, opened, held)
     return 0
 
 

@@ -19,6 +19,7 @@ from finlib.scoring.interim import (
     load_interim,
     percentile,
 )
+from finlib.standards import Standard
 
 
 def _flows() -> dict[date, Decimal | None]:
@@ -96,6 +97,7 @@ def _observation(moment: date, cash: int, debt: int, kind: str = "interim") -> O
             "short_debt": Decimal(debt),
             "operating": Decimal(10),
         },
+        standard=Standard.RSBU,
         rolling={
             name: Rolling(Decimal(10)) for name in ("cash", "short_debt", "operating")
         },
