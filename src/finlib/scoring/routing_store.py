@@ -122,8 +122,14 @@ GROUP BY f.inn
 # в разбор по комплекту МСФО; но и отбрасывать её нельзя — маршрут строится
 # теперь и по РСБУ. Стандарт входит в ключ, и совпадать он обязан с тем,
 # по которому маршрут построен.
+#
+# **Ключ — отчётная дата комплекта, а не год.** С тех пор как в ключ комплекта
+# вошёл период, за год у эмитента бывает четыре комплекта, и провал проверки
+# нуля у квартала, отобранный по году, ложился на годовой: 25.09.2026
+# АвтоМоё Опт ушла в «Разбор» по двум промежуточным комплектам при годовом,
+# проверку прошедшем.
 _ZERO_FAILED = """
-SELECT DISTINCT d.inn, s.standard, s.report_year
+SELECT DISTINCT d.inn, s.standard, s.period_end
 FROM dq_log d JOIN src_file s ON s.id = d.src_file_id
 WHERE d.status = 'fail' AND d.check_code IN (
     'cbonds_identity_mismatch', 'cbonds_sections_mismatch', 'cbonds_zero_total'
@@ -157,10 +163,13 @@ WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
 ORDER BY f.line_code, source_rank(s.source)
 """
 
+# Комплекты той отчётной даты, по которой построен маршрут, — не года:
+# единица и вид отчётности промежуточного комплекта того же года о годовом
+# не говорят.
 _SOURCES = """
 SELECT DISTINCT source, unit_code, reporting_type FROM src_file
 WHERE inn = %(inn)s AND standard = %(standard)s AND is_actual
-  AND status <> 'quarantine' AND report_year = %(year)s
+  AND status <> 'quarantine' AND period_end = %(period_end)s
 """
 
 # Эмитенты, по которым комплект до нас дошёл — в любом состоянии. Отличает
@@ -179,7 +188,7 @@ WHERE a.standard = 'ifrs' AND a.class_code IS NOT NULL
   AND EXISTS (
       SELECT 1 FROM src_file s
       WHERE s.inn = a.inn AND s.standard = 'ifrs' AND s.source <> 'cbonds'
-        AND s.report_year = EXTRACT(YEAR FROM a.report_date)::int
+        AND s.period_end = a.report_date
   )
 ORDER BY a.inn, a.report_date DESC
 """
@@ -210,6 +219,25 @@ WHERE valid_until < %(today)s
 """
 
 SOURCE_NAMES = {"file": "PDF", "gir_bo": "ГИР БО", "cbonds": "Cbonds"}
+
+
+def zero_failed(conn: PgConnection) -> set[tuple[str, str, date]]:
+    """Комплекты с проваленной проверкой нуля: ИНН, стандарт, отчётная дата."""
+    return {
+        (row["inn"], row["standard"], row["period_end"])
+        for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
+    }
+
+
+def sources_of(
+    inn: str, standard: Standard, moment: date, conn: PgConnection
+) -> list[dict]:
+    """Способ получения, единица и вид актуальных комплектов на эту дату."""
+    return fetch_all(
+        _SOURCES,
+        {"inn": inn, "standard": standard.value, "period_end": moment},
+        conn=conn,
+    )
 
 
 def decisions(conn: PgConnection, today: date) -> dict[str, ManualFloor]:
@@ -560,10 +588,7 @@ def routing_rows(
     assessed: dict[str, str] = {}
     for row in fetch_all(_ASSESSED, {}, conn=conn):
         assessed.setdefault(row["inn"], row["class_code"])
-    quarantined = {
-        (row["inn"], row["standard"], row["report_year"])
-        for row in fetch_all(_ZERO_FAILED, {}, conn=conn)
-    }
+    quarantined = zero_failed(conn)
 
     # **Универсум: эмитенты с выпусками в обращении и те, чья отчётность
     # у нас загружена.** Первое — предмет маршрута, второе — то, о чём нам
@@ -775,15 +800,7 @@ def routing_rows(
             )
         secured = backing[inn]
         delivered = (
-            fetch_all(
-                _SOURCES,
-                {
-                    "inn": inn,
-                    "year": moment.year,
-                    "standard": (standard or Standard.IFRS).value,
-                },
-                conn=conn,
-            )
+            sources_of(inn, standard or Standard.IFRS, moment, conn)
             if moment is not None
             else []
         )
@@ -833,7 +850,7 @@ def routing_rows(
             quarantined=(
                 moment is not None
                 and standard is not None
-                and (inn, standard.value, moment.year) in quarantined
+                and (inn, standard.value, moment) in quarantined
             ),
             stop_factors=triggered,
             stop_factor_values=fired,
