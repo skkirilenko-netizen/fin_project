@@ -48,7 +48,7 @@ from finlib.scoring.interim import (  # noqa: E402
 from finlib.scoring.routing import load_routing, short_of_cash  # noqa: E402
 from finlib.sources.cbonds_events import in_unit, issues_of  # noqa: E402
 from finlib.sources.cbonds_flows import refinancing  # noqa: E402
-from finlib.sources.market import universe  # noqa: E402
+from finlib.sources.market import load_market, universe  # noqa: E402
 from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -505,6 +505,35 @@ def _together(
             print(f"| {inn} | {day} | {lead} | {names} |")
 
 
+def _market_said() -> str:
+    """Числа рыночного слоя для сравнения — из методики, а не из текста замера.
+
+    **Число, вписанное в строку, устаревает молча.** Прежде здесь стояло
+    «4,9× при упреждении 79 дней» — ступень p99 с подтверждением «7 из 10»;
+    24.09.2026 подтверждение смягчено до «5 из 10», и сравнение печатало
+    величины правила, которого в маршруте больше нет.
+    """
+    policy = load_market()
+    step = next(
+        item for item in policy.route_steps if item.basket == "review"
+    )
+    rule = step.confirmation or policy.confirmation.default
+    at = policy.ladder.confirmation_measured[f"at_{rule.of}_of_{rule.out_of}"]
+    zone = policy.distress_zone
+    price = zone.measured[f"at_{zone.price_below_percent:.0f}"]
+
+    def times(value: Decimal) -> str:
+        return f"{value:.1f}".replace(".", ",")
+
+    return (
+        f"у ступени p{step.percentile} с подтверждением «{rule.of} из "
+        f"{rule.out_of}» прирост {times(at['lift'])}× при упреждении "
+        f"{at['lead_days']:.0f} дней, у цены ниже "
+        f"{zone.price_below_percent:.0f} % номинала {times(price['lift'])}× "
+        f"при {price['lead_days']:.0f} днях"
+    )
+
+
 def _verdict() -> None:
     """Чем измеренное кончается: что признавать, чего не признавать."""
     print("\n## Что из этого следует\n")
@@ -519,8 +548,7 @@ def _verdict() -> None:
     )
     print(
         "**Сравнивать это следует с рыночным слоем, и сравнение не в пользу "
-        "отчётности**: у ступени p99 прирост 4,9× при упреждении 79 дней, "
-        "у цены 6,2× при 43 днях и полной выявляемости; у самого сильного "
+        f"отчётности**: {_market_said()}; у самого сильного "
         "признака изменения прирост 2,61× при упреждении 35 дней. Вывод тот "
         "же, что и прежде: **упреждение даёт рынок**, а отчётность отвечает "
         "на вопрос «каково положение» — только теперь отвечает свежее.\n"
