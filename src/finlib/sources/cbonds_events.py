@@ -217,6 +217,34 @@ class DefaultRecord:
         """Дата события: дата дефолта, иначе плановый срок, иначе объявление."""
         return self.when or self.due or self.announced
 
+    @property
+    def known_on(self) -> date | None:
+        """День, с которого о событии известно: объявление, иначе дата события.
+
+        **Неплатёж виден с объявления, а не с планового срока** (решение
+        владельца 25.09.2026): пересчёт истории не вправе знать о неплатеже
+        раньше, чем о нём сказано публично.
+        """
+        return self.announced or self.moment
+
+    def in_grace(self, today: date) -> bool:
+        """Неплатёж объявлен, льготный срок ещё идёт, обязательство не исполнено.
+
+        **`default_date` у технического дефолта — конец льготного срока,
+        а не день неплатежа.** Проверено на перечне 25.09.2026: у всех 38
+        записей «позже дня сбора» дата дефолта ровно на 14 дней позже планового
+        срока, и объявление у всех уже состоялось. Неплатёж случился в срок
+        платежа; дефолт по истечении льготного срока — отдельное событие
+        со своей датой.
+        """
+        return (
+            self.known_on is not None
+            and self.known_on <= today
+            and (self.met is None or self.met > today)
+            and self.when is not None
+            and self.when > today
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DefaultEvent:
@@ -352,6 +380,9 @@ class IssuerEvents:
     # Пусто при непустом `defaulted` означает, что перечня нет на диске.
     records: tuple[DefaultRecord, ...] = ()
     records_known: bool = False
+    # Объявленные неплатежи в льготный срок (`as_of`): не дефолт, а своё
+    # основание. Заполняется только отсечкой на день.
+    grace: tuple[DefaultRecord, ...] = ()
 
     @property
     def open_records(self) -> tuple[DefaultRecord, ...]:
@@ -359,31 +390,39 @@ class IssuerEvents:
         return tuple(item for item in self.records if not item.settled)
 
     def as_of(self, today: date) -> "IssuerEvents":
-        """Тот же эмитент без событий, которые ещё не наступили.
+        """Тот же эмитент, каким его события были известны на этот день.
 
-        **Событие, которое не наступило, основанием быть не может.**
-        У «Открытие Холдинг, 03» технический дефолт датирован 02.10.2026 —
-        позже дня сбора, — и держать по нему корзину значило бы предсказывать,
-        а не наблюдать. Событие не исчезает: оно называется справочным
-        основанием, и `ahead` отдаёт его отдельно.
+        **Три судьбы записи, и развести их надо до всего остального.**
+        Не объявленное к этому дню не известно вовсе (`ahead`). Объявленный
+        неплатёж, льготный срок которого ещё идёт, — не дефолт, а своё
+        обстоятельство (`grace`): у «Открытие Холдинг, 03» купон не оплачен
+        18.09.2026, объявлено в тот же день, а `default_date` 02.10 — конец
+        льготного срока. Прежде такая запись считалась ненаступившим событием
+        и две недели маршрута не касалась вовсе. Прочее — дефолт либо его
+        история. Исполнение, случившееся позже этого дня, тогда ещё
+        не случилось, и пересчёт истории о нём не знает.
         """
-        if not self.records:
+        if not self.records and not self.grace:
             return self
+        # Отсечка применяется и повторно (пересчёт истории отсекает на дату,
+        # маршрут — на день ещё раз), поэтому исходом служат обе части.
+        known = tuple(
+            item if item.met is None or item.met <= today else replace(item, met=None)
+            for item in (*self.records, *self.grace)
+            if item.known_on is None or item.known_on <= today
+        )
         return replace(
             self,
-            records=tuple(
-                item
-                for item in self.records
-                if item.moment is None or item.moment <= today
-            ),
+            records=tuple(item for item in known if not item.in_grace(today)),
+            grace=tuple(item for item in known if item.in_grace(today)),
         )
 
     def ahead(self, today: date) -> tuple[DefaultRecord, ...]:
-        """События, дата которых позже дня сбора: назвать, но не считать."""
+        """События, о которых к этому дню не объявлено: назвать, но не считать."""
         return tuple(
             item
             for item in self.records
-            if item.moment is not None and item.moment > today
+            if item.known_on is not None and item.known_on > today
         )
 
     @property
@@ -404,7 +443,10 @@ class IssuerEvents:
         """
         if self.records:
             return bool(self.open_records)
-        return bool(self.defaulted)
+        # Признак карточки у выпуска, по которому идёт льготный срок, говорит
+        # о том же неплатеже: второе основание на одно обстоятельство.
+        in_grace = {item.emission_id for item in self.grace}
+        return any(item.emission_id not in in_grace for item in self.defaulted)
 
     @property
     def settled_only(self) -> bool:

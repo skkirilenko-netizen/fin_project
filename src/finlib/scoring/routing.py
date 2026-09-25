@@ -1877,10 +1877,12 @@ def _default_findings(
     не датирует» — это срок будущего платежа, а не дефолт (решение человека
     23.09.2026). Такой признак идёт справочным основанием и считается.
 
-    **Событие, которое не наступило, основанием быть не может.** События
-    позже дня сбора отсекаются до всего остального (`IssuerEvents.as_of`)
-    и называются справочно: у «Открытие Холдинг, 03» технический дефолт
-    датирован на девять дней позже дня сбора списка.
+    **Событие известно со дня объявления, и не раньше** (`IssuerEvents.as_of`).
+    Не объявленное к этому дню называется справочно. Объявленный неплатёж
+    в льготный срок — своё основание разбора (`payment_missed`): у «Открытие
+    Холдинг, 03» купон не оплачен 18.09.2026 и объявлено в тот же день,
+    а `default_date` 02.10 — конец льготного срока, а не день события.
+    Прежде по этой дате запись две недели считалась ненаступившей.
     """
     review: list[Finding] = []
     attention: list[Finding] = []
@@ -1902,12 +1904,59 @@ def _default_findings(
                     issue=_issue_name(events, record.emission_id)
                     or record.emission_id
                     or "источник не называет",
-                    date=f"{record.moment:%d.%m.%Y}",
+                    date=f"{record.known_on:%d.%m.%Y}",
                 ),
             )
         )
     if hasattr(events, "as_of"):
         events = events.as_of(today)
+
+    # **Неплатёж в льготный срок — своё основание, и оно разбора** (решение
+    # владельца 25.09.2026). Датируется объявлением: пересчёт истории
+    # не вправе знать о неплатеже раньше, чем о нём сказано. Дефолт
+    # по истечении льготного срока — отдельное событие со своей датой,
+    # и приходит оно сюда же, когда срок истечёт.
+    grace_ids: set[str] = set()
+    for record in getattr(events, "grace", ()):
+        grace_ids.add(record.emission_id)
+        issue = next(
+            (
+                item
+                for item in getattr(events, "issues", ())
+                if item.emission_id == record.emission_id
+            ),
+            None,
+        )
+        review.append(
+            Finding(
+                "payment_missed",
+                record.emission_id,
+                routing.say(
+                    "payment_missed",
+                    what=record.kind.lower() or "обязательство",
+                    kind=(
+                        _kind(issue, routing).dative
+                        if issue is not None
+                        else routing.instruments.default.dative
+                    ),
+                    issue=(
+                        _named(issue, routing)
+                        if issue is not None
+                        else _issue_name(events, record.emission_id)
+                        or "источник не называет"
+                    ),
+                    reg=_reg(issue, routing) if issue is not None else "",
+                    amount=(
+                        f", не исполнено {money(record.amount)} руб."
+                        if record.amount is not None
+                        else ""
+                    ),
+                    due=f"{record.due:%d.%m.%Y}" if record.due else "не назван",
+                    announced=f"{record.known_on:%d.%m.%Y}",
+                    until=f"{record.when:%d.%m.%Y}",
+                ),
+            )
+        )
 
     unsettled = bool(getattr(events, "unsettled_default", False))
     settled_only = bool(getattr(events, "settled_only", False))
@@ -1953,6 +2002,9 @@ def _default_findings(
         }
         for issue in getattr(events, "issues", ()):
             if issue.emission_id not in flagged and issue.emission_id not in open_ones:
+                continue
+            # Признак у выпуска в льготный срок назван неплатежом выше.
+            if issue.emission_id in grace_ids and issue.emission_id not in open_ones:
                 continue
             where = _where_of(events, issue)
             # **Признак дефолта по погашенному выпуску — кредитная история.**

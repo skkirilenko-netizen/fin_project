@@ -544,17 +544,23 @@ def record(
     kind: str = "Купон",
     status: str = "Дефолт",
     amount: str | None = None,
+    due: str | None = None,
+    announced: str | None = None,
 ):
-    """Событие дефолта: дата, вид, факт исполнения и неисполненная сумма."""
+    """Событие дефолта: дата, вид, факт исполнения и неисполненная сумма.
+
+    `due` — плановый срок платежа (по умолчанию дата события), `announced` —
+    дата объявления.
+    """
     from finlib.sources.cbonds_events import DefaultRecord
 
     return DefaultRecord(
         emission_id=emission,
         kind=kind,
         status=status,
-        due=date.fromisoformat(when),
+        due=date.fromisoformat(due or when),
         when=date.fromisoformat(when),
-        announced=None,
+        announced=date.fromisoformat(announced) if announced else None,
         met=date.fromisoformat(met) if met else None,
         amount=Decimal(amount) if amount else None,
     )
@@ -646,41 +652,67 @@ def test_an_undated_default_flag_is_a_reference_ground() -> None:
     assert "default_flag_undated" in {entry.ground for entry in verdict.notes}
 
 
-def test_an_event_that_has_not_happened_is_not_a_ground() -> None:
-    """Событие позже дня сбора корзины не называет и не молчит.
+def _missed_coupon():  # noqa: ANN202
+    """«Открытие Холдинг, 03»: купон не оплачен 18.09.2026, объявлено тогда же,
+    `default_date` 02.10 — конец льготного срока, а не день события."""
+    return with_issues(
+        issue("03", "в обращении", date(2027, 3, 14), unsettled=True),
+        records=(
+            record(
+                "03",
+                "2026-10-02",
+                due="2026-09-18",
+                announced="2026-09-18",
+                status="Технический дефолт",
+                amount="140000",
+            ),
+        ),
+    )
 
-    У «Открытие Холдинг, 03» технический дефолт датирован на девять дней
-    позже дня сбора списка. Дата будущего говорит о сроке, а не о том, что
-    случилось, и держать по ней разбор значило бы предсказывать. Исчезнуть
-    событие при этом не вправе: до срока остаются дни.
+
+def test_a_missed_payment_is_seen_on_the_day_it_is_announced() -> None:
+    """Неплатёж виден маршруту в день объявления, а не через 14 дней.
+
+    Прежде `default_date` читался датой события, и неплатёж две недели
+    считался ненаступившим: у всех 38 записей «позже дня сбора» 25.09.2026
+    дата дефолта была ровно на 14 дней позже планового срока.
     """
-    verdict = verdict_for(
-        with_issues(
-            issue("03", "в обращении", date(2027, 3, 14), unsettled=True),
-            records=(record("03", "2026-10-02"),),
-        ),
-        today=date(2026, 9, 23),
-    )
+    verdict = verdict_for(_missed_coupon(), today=date(2026, 9, 18))
+    assert verdict.basket == "review"
+    assert verdict.grounds == ("payment_missed",)
+    said = verdict.details[0]
+    assert "02.10.2026" in said and "18.09.2026" in said and "руб." in said
+
+
+def test_a_missed_payment_is_not_known_before_it_is_announced() -> None:
+    """Днём раньше объявления о неплатеже не известно: пересчёт истории не знает
+    раньше публикации, и событие названо справочно, а не корзиной."""
+    verdict = verdict_for(_missed_coupon(), today=date(2026, 9, 17))
     assert verdict.basket == "clear"
-    named = {entry.ground for entry in verdict.notes}
-    assert "default_event_ahead" in named
-    ahead = next(
-        entry for entry in verdict.notes if entry.ground == "default_event_ahead"
-    )
-    assert "02.10.2026" in ahead.text
+    assert "default_event_ahead" in {entry.ground for entry in verdict.notes}
 
 
-def test_the_same_event_once_it_has_happened_is_a_ground() -> None:
-    """То же событие днём позже — разбор: правило о дате, а не о событии."""
-    verdict = verdict_for(
-        with_issues(
-            issue("03", "в обращении", date(2027, 3, 14), unsettled=True),
-            records=(record("03", "2026-10-02"),),
-        ),
-        today=date(2026, 10, 2),
-    )
+def test_the_default_after_the_grace_period_is_its_own_event() -> None:
+    """По истечении льготного срока — дефолт, отдельное событие со своей датой."""
+    verdict = verdict_for(_missed_coupon(), today=date(2026, 10, 2))
     assert verdict.basket == "review"
     assert verdict.grounds == ("emission_default",)
+
+
+def test_a_payment_made_within_the_grace_period_is_not_a_default() -> None:
+    """Исполнено в льготный срок — неплатежа нет; в пересчёте на день до
+    исполнения он был, и исполнение будущего дня тогда известно не было."""
+    events = with_issues(
+        issue("03", "в обращении", date(2027, 3, 14), unsettled=False),
+        records=(
+            record(
+                "03", "2026-10-02", due="2026-09-18", announced="2026-09-18",
+                status="Технический дефолт", met="2026-09-25",
+            ),
+        ),
+    )
+    assert verdict_for(events, today=date(2026, 9, 26)).grounds != ("payment_missed",)
+    assert verdict_for(events, today=date(2026, 9, 20)).grounds == ("payment_missed",)
 
 
 def test_a_default_on_a_repaid_issue_is_credit_history() -> None:

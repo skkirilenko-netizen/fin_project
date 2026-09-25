@@ -592,8 +592,8 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             )
 
     add("\n## Выпуски и события\n")
-    # Счётчики и перечень — о том, что **наступило**: событие позже дня сбора
-    # маршрут называет справочно, и складывать его с прочими нельзя.
+    # Счётчики и перечень — о том, что **объявлено**: не объявленное к дню
+    # сбора маршрут называет справочно, неплатёж в льготный срок — отдельно.
     events = _known(item)
     if events is None or not events.issues_known:
         add("перечня выпусков на диске нет — это не «выпусков нет».\n")
@@ -617,6 +617,22 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             )
             when = f"{record.moment:%d.%m.%Y}" if record.moment else "дата не названа"
             add(f"- {issue}: {record.kind.lower()} {when}, не исполнено")
+        # **Неплатёж в льготный срок — не дефолт и не молчание**: печатается
+        # отдельно, со сроком платежа, днём объявления и концом льготного срока.
+        for record in getattr(events, "grace", ()):
+            issue = next(
+                (
+                    entry.name
+                    for entry in events.issues
+                    if entry.emission_id == record.emission_id
+                ),
+                record.emission_id,
+            )
+            due = f"{record.due:%d.%m.%Y}" if record.due else "срок не назван"
+            add(
+                f"- {issue}: {record.kind.lower()} {due}, неплатёж объявлен "
+                f"{record.known_on:%d.%m.%Y}, льготный срок до {record.when:%d.%m.%Y}"
+            )
     # **Рейтинги печатаются независимо от выпусков.** Прежде раздел стоял
     # внутри ветки «перечень выпусков есть», и у эмитента, чьих выпусков нет
     # на диске, рейтинги исчезали вместе с ними — хотя снимок рейтингов
