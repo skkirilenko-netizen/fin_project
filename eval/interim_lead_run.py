@@ -26,6 +26,7 @@
 import logging
 import statistics
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -334,6 +335,17 @@ def _refinancing(
     print(f"\nПризнаков изменения в справочнике: {len(policy.features)}.")
 
 
+@dataclass(frozen=True, slots=True)
+class Measured:
+    """Признак изменения, как его померил прогон: держался, поймал, прирост."""
+
+    name: str
+    standing: int
+    caught: int
+    lift: float
+    lead: int | None
+
+
 def _fired_on(
     policy, feature, obs: tuple[Observation, ...], edge: Decimal  # noqa: ANN001
 ) -> list[Observation]:
@@ -350,11 +362,11 @@ def _features(
     by_issuer: dict[str, tuple[Observation, ...]],
     inside: dict[str, date],
     have: set[str],
-) -> tuple[float, int] | None:
+) -> tuple["Measured", ...]:
     """Вопрос 3: признаки изменения порознь от уровней.
 
-    Возвращает прирост и медиану упреждения сильнейшего признака — вывод
-    берёт их отсюда, а не вписывает строкой; None — ни один не поймал события.
+    Возвращает измеренное по каждому признаку — вывод берёт числа отсюда,
+    а не вписывает строкой.
     """
     policy = load_interim()
     spread, denominators = distribution(policy, by_issuer)
@@ -406,7 +418,7 @@ def _features(
         "С событием, свежий | Прирост | Упреждение, дней | «Хотя бы раз», дней |"
     )
     print("|---|---|---|---|---|---|---|")
-    strongest: tuple[float, int] | None = None
+    measured: list[Measured] = []
     for feature in policy.features:
         edge = edges.get(feature.code)
         if edge is None:
@@ -447,8 +459,15 @@ def _features(
                 ).days
         share = len(caught) / len(standing) if standing else 0.0
         lift = share / base if base else 0.0
-        if caught and (strongest is None or lift > strongest[0]):
-            strongest = (lift, int(statistics.median(caught.values())))
+        measured.append(
+            Measured(
+                name=feature.name,
+                standing=len(standing),
+                caught=len(caught),
+                lift=lift,
+                lead=int(statistics.median(caught.values())) if caught else None,
+            )
+        )
         print(
             f"| {feature.name} | {len(ever)} | {len(standing)} | {len(caught)} | "
             f"{lift:.2f}× | {_said(sorted(caught.values()))} | {_said(sorted(ever_lead))} |"
@@ -459,7 +478,7 @@ def _features(
         f"**{base * 100:.1f} %**. Эмитентов, у которых промежуточные "
         f"комплекты есть вовсе, **{len(have)}**."
     )
-    return strongest
+    return tuple(measured)
 
 
 def _together(
@@ -542,17 +561,27 @@ def _market_said() -> str:
     )
 
 
-def _verdict(strongest: tuple[float, int] | None) -> None:
+def _verdict(measured: tuple[Measured, ...]) -> None:
     """Чем измеренное кончается: что признавать, чего не признавать.
 
-    Числа сильнейшего признака приходят из того же прогона (`_features`):
-    вписанные строкой, они пережили бы правку признаков неизменными.
+    Числа признаков приходят из того же прогона (`_features`): вписанные
+    строкой, они пережили бы правку признаков неизменными.
     """
+    working = [item for item in measured if item.caught]
+    strongest = max(working, key=lambda item: item.lift) if working else None
     strongest_said = (
         f"у самого сильного признака изменения прирост "
-        f"{strongest[0]:.2f}× при упреждении {strongest[1]} дней".replace(".", ",")
+        f"{strongest.lift:.2f}× при упреждении {strongest.lead} дней".replace(".", ",")
         if strongest is not None
         else "ни один признак изменения события на свежем комплекте не поймал"
+    )
+    # Признак, державшийся у кого-то и не поймавший ни одного события, —
+    # тот, что не различает вовсе; называется числом тех, у кого держался.
+    silent = [item for item in measured if item.standing and not item.caught]
+    silent_said = "".join(
+        f", а «{item.name.lower()}» — ни у одного из {item.standing}, "
+        "у кого он держался вообще"
+        for item in silent
     )
     print("\n## Что из этого следует\n")
     print(
@@ -561,8 +590,7 @@ def _verdict(strongest: tuple[float, int] | None) -> None:
         "оказывается ближе на 90 дней по медиане, и у двух эмитентов свежая "
         "величина денежных средств открывает нехватку, которой годовая "
         "не показывала. Признаки же изменения на свежем комплекте держались "
-        "у семи эмитентов с событием из тридцати пяти, а рост краткосрочного "
-        "долга — ни у одного из двадцати семи, у кого он держался вообще.\n"
+        f"у семи эмитентов с событием из тридцати пяти{silent_said}.\n"
     )
     print(
         "**Сравнивать это следует с рыночным слоем, и сравнение не в пользу "
@@ -602,9 +630,9 @@ def main() -> int:
     _first, _last, inside = _window(by_issuer, moments)
     _freshness(by_issuer, inside)
     _refinancing(by_issuer, inside)
-    strongest = _features(by_issuer, inside, have)
+    measured = _features(by_issuer, inside, have)
     _together(by_issuer, inside)
-    _verdict(strongest)
+    _verdict(measured)
     return 0
 
 
