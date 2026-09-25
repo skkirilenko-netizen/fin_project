@@ -327,6 +327,10 @@ class IssuerEvents:
     # одинаково, а значат противоположное.
     issues_known: bool = False
     ratings_known: bool = False
+    # Дата снимка, из которого взяты рейтинги, когда в снимке дня эмитента
+    # нет: источник по нему промолчал, и значение перенесено из прежнего.
+    # None — наблюдение того же дня, что и снимок.
+    ratings_observed_on: date | None = None
     # События дефолтов по выпускам эмитента: даты, суммы, факт исполнения.
     # Пусто при непустом `defaulted` означает, что перечня нет на диске.
     records: tuple[DefaultRecord, ...] = ()
@@ -609,8 +613,27 @@ def unknown_scales(snapshot: dict[str, list[dict]]) -> dict[str, int]:
     return found
 
 
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """Снимок рейтингов дня и то, чьё наблюдение взято из прежних снимков.
+
+    `observed` — ИНН, по которым источник в день снимка не ответил, и дата
+    того снимка, из которого взято их значение. Пусто — все наблюдения дня.
+    """
+
+    on: date | None
+    issuers: dict[str, list[dict]]
+    observed: dict[str, date]
+
+
 def latest_snapshot() -> tuple[date | None, dict[str, list[dict]]]:
-    """Свежий снимок рейтингов: его дата и записи по ИНН.
+    """Свежий снимок рейтингов: его дата и записи по ИНН (см. `read_snapshot`)."""
+    found = read_snapshot()
+    return found.on, found.issuers
+
+
+def read_snapshot() -> Snapshot:
+    """Свежий снимок рейтингов: его дата, записи по ИНН и перенесённые наблюдения.
 
     **Отсутствие ответа — не отсутствие рейтинга.** Эмитент, по которому
     источник в день снимка не ответил (`refused`), в `issuers` не стоит,
@@ -620,23 +643,31 @@ def latest_snapshot() -> tuple[date | None, dict[str, list[dict]]]:
     нет вовсе: берётся последнее наблюдение. Не наблюдавшийся никогда
     остаётся без записей — `ratings_known` у него ложен, и маршрут не делает
     из этого ни отзыва, ни «рейтинга нет».
+
+    **Перенесённое наблюдение несёт дату своего снимка.** Иначе вчерашнее
+    значение печаталось бы как сегодняшнее.
     """
     if not SNAPSHOTS.exists():
-        return None, {}
+        return Snapshot(None, {}, {})
     files = sorted(SNAPSHOTS.glob("*.json"), reverse=True)
     if not files:
-        return None, {}
+        return Snapshot(None, {}, {})
     found = json.loads(files[0].read_text(encoding="utf-8"))
     snapshot = dict(found.get("issuers") or {})
+    observed: dict[str, date] = {}
     missing = {inn for inn in found.get("refused") or {} if inn not in snapshot}
     for older in files[1:]:
         if not missing:
             break
-        seen = json.loads(older.read_text(encoding="utf-8")).get("issuers") or {}
+        earlier = json.loads(older.read_text(encoding="utf-8"))
+        seen = earlier.get("issuers") or {}
+        moment = _as_date(earlier.get("date"))
         for inn in missing & set(seen):
             snapshot[inn] = seen[inn]
+            if moment is not None:
+                observed[inn] = moment
         missing -= set(seen)
-    return _as_date(found.get("date")), snapshot
+    return Snapshot(_as_date(found.get("date")), snapshot, observed)
 
 
 def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:
@@ -675,10 +706,16 @@ def events_of(
     credit: frozenset[str] | None = None,
     order: dict[tuple[str, str], int] | None = None,
     defaults: dict[str, tuple[DefaultRecord, ...]] | None = None,
+    observed: dict[str, date] | None = None,
 ) -> IssuerEvents:
-    """События эмитента: выпуски с диска, рейтинги снимка, события дефолтов."""
+    """События эмитента: выпуски с диска, рейтинги снимка, события дефолтов.
+
+    `observed` — перенесённые наблюдения (`Snapshot.observed`); берётся
+    вместе со снимком, когда снимок не передан.
+    """
     if snapshot is None:
-        _, snapshot = latest_snapshot()
+        found = read_snapshot()
+        snapshot, observed = found.issuers, found.observed
     if credit is None:
         credit = credit_scales()
     if order is None:
@@ -708,6 +745,7 @@ def events_of(
         ratings=ratings,
         issues_known=known,
         ratings_known=rated is not None,
+        ratings_observed_on=(observed or {}).get(inn),
         records=tuple(
             entry for item in issues for entry in defaults.get(item.emission_id, ())
         ),

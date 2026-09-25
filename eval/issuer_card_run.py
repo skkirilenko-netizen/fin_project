@@ -205,7 +205,19 @@ def _ratings(item, routing, said: list) -> None:  # noqa: ANN001
         for (holder, agency, scale, category), moved in transitions().items()
         if holder == item.inn
     }
-    add("\n### Рейтинги эмитента (снимок)\n")
+    # **Перенесённое наблюдение называет свой снимок.** Источник по эмитенту
+    # в день снимка промолчал, значение взято из прежнего — без даты оно
+    # читалось бы как сегодняшнее.
+    carried = getattr(events, "ratings_observed_on", None)
+    if carried is not None:
+        add(f"\n### Рейтинги эмитента (снимок от {carried:%d.%m.%Y})\n")
+        add(
+            f"Наблюдение от {carried:%d.%m.%Y}: в свежем снимке источник "
+            "по эмитенту не ответил, рейтинговых действий после этой даты "
+            "в карточке нет.\n"
+        )
+    else:
+        add("\n### Рейтинги эмитента (снимок)\n")
     if not live:
         add("Действующих кредитных рейтингов нет ни одного.")
     else:

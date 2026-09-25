@@ -2197,25 +2197,44 @@ def _rating_findings(
                 Finding(
                     "rating_default",
                     rating.category,
-                    routing.say(
+                    _with_observed(
+                        routing.say(
+                            "rating_default",
+                            "since" if moved is not None else "",
+                            point=rating.point,
+                            agency=rating.agency,
+                            date=(
+                                f"{rating.assigned:%d.%m.%Y}"
+                                if rating.assigned is not None
+                                else "дата не указана"
+                            ),
+                            category=rating.category,
+                            since=(
+                                f"{moved.since:%d.%m.%Y}" if moved is not None else ""
+                            ),
+                            move=_moved(moved, routing),
+                        ),
+                        events,
+                        routing,
                         "rating_default",
-                        "since" if moved is not None else "",
-                        point=rating.point,
-                        agency=rating.agency,
-                        date=(
-                            f"{rating.assigned:%d.%m.%Y}"
-                            if rating.assigned is not None
-                            else "дата не указана"
-                        ),
-                        category=rating.category,
-                        since=(
-                            f"{moved.since:%d.%m.%Y}" if moved is not None else ""
-                        ),
-                        move=_moved(moved, routing),
                     ),
                 )
             )
     return found
+
+
+def _with_observed(
+    text: str, events: object, routing: RoutingPolicy, ground: str
+) -> str:
+    """Формулировка рейтингового основания с датой перенесённого наблюдения.
+
+    Источник по эмитенту в день снимка промолчал, и значение взято из прежнего
+    снимка: без его даты оно читалось бы как сегодняшнее.
+    """
+    moment = getattr(events, "ratings_observed_on", None)
+    if moment is None:
+        return text
+    return f"{text}; " + routing.say(ground, "observed", observed=f"{moment:%d.%m.%Y}")
 
 
 def _moved(moved: object, routing: RoutingPolicy) -> str:
@@ -2258,11 +2277,16 @@ def _rating_outlook_adverse(events: object, routing: RoutingPolicy) -> list[Find
                 Finding(
                     "rating_outlook_adverse",
                     rating.category,
-                    routing.say(
+                    _with_observed(
+                        routing.say(
+                            "rating_outlook_adverse",
+                            point=rating.point,
+                            agency=rating.agency,
+                            outlook=rating.outlook.lower(),
+                        ),
+                        events,
+                        routing,
                         "rating_outlook_adverse",
-                        point=rating.point,
-                        agency=rating.agency,
-                        outlook=rating.outlook.lower(),
                     ),
                 )
             )
@@ -2299,11 +2323,16 @@ def _rating_withdrawn(
         Finding(
             "rating_withdrawn",
             "rating",
-            routing.say(
+            _with_observed(
+                routing.say(
+                    "rating_withdrawn",
+                    "" if moment is not None else "undated",
+                    agencies=named,
+                    date=f"{moment:%d.%m.%Y}" if moment is not None else "",
+                ),
+                events,
+                routing,
                 "rating_withdrawn",
-                "" if moment is not None else "undated",
-                agencies=named,
-                date=f"{moment:%d.%m.%Y}" if moment is not None else "",
             ),
         )
     ]

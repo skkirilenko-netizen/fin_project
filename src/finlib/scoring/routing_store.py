@@ -69,8 +69,8 @@ from finlib.sources.cbonds_events import (
     guarantees_of,
     in_unit,
     issues_of,
-    latest_snapshot,
     point_order,
+    read_snapshot,
 )
 from finlib.sources.cbonds_flows import refinancing
 from finlib.sources.market import Market, load_market
@@ -546,7 +546,8 @@ def routing_rows(
     spv = {
         inn for inn, card in known.items() if str(card.get("emitent_spv")) == "1"
     }
-    on, snapshot = latest_snapshot()
+    taken = read_snapshot()
+    on, snapshot = taken.on, taken.issuers
     # Справочники шкал читаются один раз на прогон, а не на эмитента: файл
     # один и тот же, а эмитентов триста.
     credit = credit_scales()
@@ -762,7 +763,9 @@ def routing_rows(
         # на весь проход, а дата маршрута отсекает их уже после чтения.
         known_events = memo.setdefault("events", {})
         if inn not in known_events:
-            known_events[inn] = events_of(inn, snapshot, credit, order, defaults)
+            known_events[inn] = events_of(
+                inn, snapshot, credit, order, defaults, taken.observed
+            )
         events = known_events[inn]
         # **Ноль по всем строкам заёмных средств у эмитента с выпусками
         # в обращении — нераскрытие, а не отсутствие долга.** Признак внешний:

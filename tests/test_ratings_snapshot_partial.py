@@ -10,8 +10,10 @@ import io
 import json
 import sys
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -24,6 +26,9 @@ sys.path.insert(0, str(settings.base_dir / "eval"))
 
 import ratings_snapshot  # noqa: E402
 from change_report_run import _ratings_health  # noqa: E402
+from issuer_card_run import _ratings as _card_ratings  # noqa: E402
+
+from finlib.scoring.routing import _rating_findings, load_routing  # noqa: E402
 
 TODAY = date(2026, 9, 25)
 RATED = {"scale_id": "1", "scale_point_name": "ruC", "agency_name_rus": "Эксперт РА"}
@@ -119,6 +124,38 @@ def test_silence_is_not_read_as_a_withdrawal(tmp_path: Path, monkeypatch) -> Non
     assert not unseen.ratings_known
     assert not unseen.never_rated
     assert unseen.left_unrated() == (False, None)
+
+
+def _carried(tmp_path: Path, monkeypatch, inn: str):  # noqa: ANN202
+    """События эмитента по снимку с перенесёнными наблюдениями."""
+    _snapshots(tmp_path, monkeypatch)
+    return cbonds_events.events_of(
+        inn, credit=frozenset({"1"}), order={}, defaults={}
+    )
+
+
+def test_a_carried_value_names_its_snapshot_in_the_ground(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Перенесённый рейтинг в основании — с датой своего снимка, не сегодняшний."""
+    events = _carried(tmp_path, monkeypatch, "A")
+    assert events.ratings_observed_on == date(2026, 9, 24)
+    found = _rating_findings(events, load_routing())
+    assert found and "по снимку 24.09.2026" in found[0].text
+    # Наблюдение дня даты снимка не приписывает: оно и есть сегодняшнее.
+    today = replace(events, ratings_observed_on=None)
+    assert "по снимку" not in _rating_findings(today, load_routing())[0].text
+
+
+def test_a_carried_value_names_its_snapshot_in_the_card(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Карточка печатает перенесённое значение с датой снимка."""
+    events = _carried(tmp_path, monkeypatch, "A")
+    said: list[str] = []
+    _card_ratings(SimpleNamespace(inn="A", events=events), load_routing(), said)
+    text = "\n".join(said)
+    assert "снимок от 24.09.2026" in text and "Наблюдение от 24.09.2026" in text
 
 
 def _said(found: dict | None) -> str:
