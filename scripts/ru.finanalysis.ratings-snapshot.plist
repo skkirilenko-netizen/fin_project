@@ -18,6 +18,9 @@
   **Если машина спала, launchd выполняет пропущенный календарный запуск при
   пробуждении** — на это и рассчитано: снимок дня не перезаписывается, поэтому
   запуск после пробуждения и запуск по расписанию дают один файл, а не два.
+  **Если машина была выключена, запуск дня теряется**: `RunAtLoad` выключен,
+  и launchd календарный запуск после загрузки не догоняет. Отсюда время —
+  утро рабочего дня, когда машина включена.
 -->
 <plist version="1.0">
 <dict>
@@ -41,13 +44,46 @@
   <key>WorkingDirectory</key>
   <string>/Users/sk/Work/fin-analysis</string>
 
-  <!-- Раз в сутки, после открытия рынка: рейтинговые действия публикуются
-       днём, и снимок к вечеру застаёт их того же дня. -->
+  <!-- **10:30 по рабочим дням** (решение владельца 25.09.2026; прежде 19:30,
+       но вечером машина выключена, а выключенная машина запуск теряет).
+       Снимок застаёт действия, опубликованные накануне; действия выходных
+       застанет снимок понедельника.
+       Ежедневный прогон в 10:00 снимает рейтинги сам первой доставкой,
+       и ответ по каждому эмитенту ложится на диск отдельно — агент берёт
+       снятое оттуда. **Но в 10:30 прогон ещё идёт**: 977 эмитентов при
+       30 запросах в минуту — около 33 минут (замер 25.09.2026: 660 запросов
+       за 21 минуту 44 секунды), и хвост снимка два процесса запрашивают
+       одновременно, каждый со своим счётчиком частоты.
+       Пять записей: `StartCalendarInterval` принимает массив словарей,
+       Weekday 1 — понедельник, 5 — пятница. -->
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>19</integer>
-    <key>Minute</key><integer>30</integer>
-  </dict>
+  <array>
+    <dict>
+      <key>Weekday</key><integer>1</integer>
+      <key>Hour</key><integer>10</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>10</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>10</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>10</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>10</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+  </array>
 
   <!-- Журнал прогона: без него «снимка за день нет» не отличить
        от «прогон не запускался». -->
