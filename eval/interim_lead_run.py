@@ -350,8 +350,12 @@ def _features(
     by_issuer: dict[str, tuple[Observation, ...]],
     inside: dict[str, date],
     have: set[str],
-) -> None:
-    """Вопрос 3: признаки изменения порознь от уровней."""
+) -> tuple[float, int] | None:
+    """Вопрос 3: признаки изменения порознь от уровней.
+
+    Возвращает прирост и медиану упреждения сильнейшего признака — вывод
+    берёт их отсюда, а не вписывает строкой; None — ни один не поймал события.
+    """
     policy = load_interim()
     spread, denominators = distribution(policy, by_issuer)
     edges = cutoffs(policy, spread)
@@ -402,6 +406,7 @@ def _features(
         "С событием, свежий | Прирост | Упреждение, дней | «Хотя бы раз», дней |"
     )
     print("|---|---|---|---|---|---|---|")
+    strongest: tuple[float, int] | None = None
     for feature in policy.features:
         edge = edges.get(feature.code)
         if edge is None:
@@ -442,6 +447,8 @@ def _features(
                 ).days
         share = len(caught) / len(standing) if standing else 0.0
         lift = share / base if base else 0.0
+        if caught and (strongest is None or lift > strongest[0]):
+            strongest = (lift, int(statistics.median(caught.values())))
         print(
             f"| {feature.name} | {len(ever)} | {len(standing)} | {len(caught)} | "
             f"{lift:.2f}× | {_said(sorted(caught.values()))} | {_said(sorted(ever_lead))} |"
@@ -452,6 +459,7 @@ def _features(
         f"**{base * 100:.1f} %**. Эмитентов, у которых промежуточные "
         f"комплекты есть вовсе, **{len(have)}**."
     )
+    return strongest
 
 
 def _together(
@@ -534,8 +542,18 @@ def _market_said() -> str:
     )
 
 
-def _verdict() -> None:
-    """Чем измеренное кончается: что признавать, чего не признавать."""
+def _verdict(strongest: tuple[float, int] | None) -> None:
+    """Чем измеренное кончается: что признавать, чего не признавать.
+
+    Числа сильнейшего признака приходят из того же прогона (`_features`):
+    вписанные строкой, они пережили бы правку признаков неизменными.
+    """
+    strongest_said = (
+        f"у самого сильного признака изменения прирост "
+        f"{strongest[0]:.2f}× при упреждении {strongest[1]} дней".replace(".", ",")
+        if strongest is not None
+        else "ни один признак изменения события на свежем комплекте не поймал"
+    )
     print("\n## Что из этого следует\n")
     print(
         "**Свежесть промежуточная отчётность даёт, признаки изменения — почти "
@@ -548,8 +566,7 @@ def _verdict() -> None:
     )
     print(
         "**Сравнивать это следует с рыночным слоем, и сравнение не в пользу "
-        f"отчётности**: {_market_said()}; у самого сильного "
-        "признака изменения прирост 2,61× при упреждении 35 дней. Вывод тот "
+        f"отчётности**: {_market_said()}; {strongest_said}. Вывод тот "
         "же, что и прежде: **упреждение даёт рынок**, а отчётность отвечает "
         "на вопрос «каково положение» — только теперь отвечает свежее.\n"
     )
@@ -585,9 +602,9 @@ def main() -> int:
     _first, _last, inside = _window(by_issuer, moments)
     _freshness(by_issuer, inside)
     _refinancing(by_issuer, inside)
-    _features(by_issuer, inside, have)
+    strongest = _features(by_issuer, inside, have)
     _together(by_issuer, inside)
-    _verdict()
+    _verdict(strongest)
     return 0
 
 
