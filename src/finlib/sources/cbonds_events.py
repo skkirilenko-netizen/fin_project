@@ -610,14 +610,33 @@ def unknown_scales(snapshot: dict[str, list[dict]]) -> dict[str, int]:
 
 
 def latest_snapshot() -> tuple[date | None, dict[str, list[dict]]]:
-    """Свежий снимок рейтингов: его дата и записи по ИНН."""
+    """Свежий снимок рейтингов: его дата и записи по ИНН.
+
+    **Отсутствие ответа — не отсутствие рейтинга.** Эмитент, по которому
+    источник в день снимка не ответил (`refused`), в `issuers` не стоит,
+    и прочитанный как есть он выглядел бы эмитентом без рейтинга, а после
+    вчерашнего «ruC» — как исчезнувшим мнением. Наблюдения за день у него
+    нет, и поступает с ним то же, что со всем снимком в день, когда файла
+    нет вовсе: берётся последнее наблюдение. Не наблюдавшийся никогда
+    остаётся без записей — `ratings_known` у него ложен, и маршрут не делает
+    из этого ни отзыва, ни «рейтинга нет».
+    """
     if not SNAPSHOTS.exists():
         return None, {}
-    files = sorted(SNAPSHOTS.glob("*.json"))
+    files = sorted(SNAPSHOTS.glob("*.json"), reverse=True)
     if not files:
         return None, {}
-    found = json.loads(files[-1].read_text(encoding="utf-8"))
-    return _as_date(found.get("date")), found.get("issuers") or {}
+    found = json.loads(files[0].read_text(encoding="utf-8"))
+    snapshot = dict(found.get("issuers") or {})
+    missing = {inn for inn in found.get("refused") or {} if inn not in snapshot}
+    for older in files[1:]:
+        if not missing:
+            break
+        seen = json.loads(older.read_text(encoding="utf-8")).get("issuers") or {}
+        for inn in missing & set(seen):
+            snapshot[inn] = seen[inn]
+        missing -= set(seen)
+    return _as_date(found.get("date")), snapshot
 
 
 def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:

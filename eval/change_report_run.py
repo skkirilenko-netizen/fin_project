@@ -25,6 +25,7 @@
 маршрутизацией, и своей арифметики не имеет.
 """
 
+import json
 import logging
 import sys
 from collections import Counter
@@ -36,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
-from finlib.sources.cbonds_events import events_of  # noqa: E402
+from finlib.sources.cbonds_events import SNAPSHOTS, events_of  # noqa: E402
 from finlib.sources.moex_risk import risk_sectors  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -372,6 +373,41 @@ def _health(kind: str, rows: list) -> None:
     _off_hour(said.get("finished_at"))
 
 
+def _snapshot_of(day: date) -> dict | None:
+    """Снимок рейтингов за день; None — файла нет."""
+    path = SNAPSHOTS / f"{day:%Y-%m-%d}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _ratings_health(found: dict | None) -> None:
+    """Полнота снимка рейтингов за день — в шапке, рядом со здоровьем доставок.
+
+    **Доставка «прошла» ещё не значит, что снимок полон.** Эмитент без ответа
+    уходит в `refused`, и снимок идёт дальше; маршрут берёт для него последнее
+    наблюдение, а не делает из молчания отзыв. Но читатель обязан знать,
+    что по части эмитентов сегодняшнего наблюдения нет: «рейтинговых
+    изменений нет» у них значит «не спрашивали успешно».
+    """
+    if found is None:
+        print(
+            "> **Снимка рейтингов за этот день нет.** Маршрут построен "
+            "по последнему снимку: рейтинговых действий дня в нём нет.\n"
+        )
+        return
+    got = len(found.get("issuers") or {})
+    refused = found.get("refused") or {}
+    if not refused:
+        return
+    total = got + len(refused)
+    print(
+        f"> **Снимок рейтингов неполный: {got} из {total}.** По {len(refused)} "
+        "эмитентам источник не ответил; для них взято последнее наблюдение, "
+        "и рейтинговых действий дня по ним в отчёте нет.\n"
+    )
+
+
 # Час, на который поставлен агент. Прогон, пошедший не в свой час, —
 # это либо ручной запуск, либо пропущенный календарный, выполненный
 # при пробуждении или при загрузке агента.
@@ -412,6 +448,8 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     order = {basket.code: basket.order for basket in routing.baskets}
     print(f"# Что изменилось: {until:%d.%m.%Y}\n")
     _health(kind, health)
+    if kind == "run":
+        _ratings_health(_snapshot_of(until))
     print(
         f"Сравнение с {since:%d.%m.%Y} — **неделя, а не сутки**: медиана "
         "обычного дня ноль, и пустой отчёт каждый день приучает не открывать. "
