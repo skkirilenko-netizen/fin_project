@@ -104,6 +104,21 @@ STAGES: tuple[Stage, ...] = (
             "случившийся после последней, не виден вовсе."
         ),
     ),
+    # **Графики платежей и оферты — дозапросом по изменившимся выпускам.**
+    # Полный повтор — около 11 000 запросов, больше суточной нормы; окно
+    # по дате обновления стоит единиц запросов плюс два на изменившийся выпуск.
+    Stage(
+        code="flows",
+        name="графики платежей и оферты",
+        script="scripts/flows_fetch.py",
+        every=1,
+        blocking=False,
+        why=(
+            "Рефинансирование — самое частое основание «Внимания», и считается "
+            "оно по графику: новый выпуск без графика и сдвинутая оферта "
+            "меняют его в тот же день."
+        ),
+    ),
     Stage(
         code="moex",
         name="сектор повышенного риска биржи",
@@ -480,6 +495,8 @@ def _marker(stage: Stage) -> Path:
         return ROOT / "data" / "raw" / "cbonds" / "ratings" / f"{date.today():%Y-%m-%d}.json"
     if stage.code == "defaults":
         return ROOT / "data" / "raw" / "cbonds" / f"defaults_ru_{date.today():%Y-%m-%d}.json"
+    if stage.code == "flows":
+        return ROOT / "data" / "raw" / "cbonds" / f"flows_delta_{date.today():%Y-%m-%d}.json"
     if stage.code == "moex":
         return ROOT / "data" / "raw" / "moex" / "bonds_traded.json"
     # Срез торгов вчерашнего дня: сегодняшнего у биржи ещё нет, и ждать
