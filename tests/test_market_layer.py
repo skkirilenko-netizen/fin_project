@@ -172,3 +172,45 @@ def test_widening_is_declared_and_idle() -> None:
     ]
     holds = holds_widening(Decimal("0.6"), 4, False)
     assert first_day_when(points, holds, date.max) == points[4].day
+
+
+def _price_ground(policy: MarketPolicy) -> str:
+    """Формулировка ценового основания так, как её печатает маршрут."""
+    from finlib.scoring.market import MarketFinding
+    from finlib.scoring.routing import load_routing
+
+    finding = MarketFinding(
+        ground="market_price_distress",
+        basket="review",
+        subgroup="market_risk",
+        escalation=False,
+        value=Decimal("42.5"),
+        threshold=policy.distress_zone.price_below_percent,
+        since=date(2026, 9, 1),
+    )
+    return load_routing().say(finding.ground, **finding.slots(policy))
+
+
+def test_the_price_ground_prints_the_lead_from_the_measurement() -> None:
+    """Упреждение в формулировке — из замера, а не строкой.
+
+    «43 дня» были вписаны в текст основания и пережили перемер 25.09.2026,
+    давший 61: читатель получал число, которого замер больше не показывает.
+    """
+    policy = load_market()
+    zone = policy.distress_zone
+    lead = zone.measured[f"at_{zone.price_below_percent:.0f}"]["lead_days"]
+    assert f"на {lead:.0f} дн." in _price_ground(policy)
+    # Перемер меняет формулировку сам: подставленное число следует за замером.
+    changed = zone.model_copy(
+        update={
+            "measured": {
+                **zone.measured,
+                f"at_{zone.price_below_percent:.0f}": {
+                    **zone.measured[f"at_{zone.price_below_percent:.0f}"],
+                    "lead_days": Decimal(7),
+                },
+            }
+        }
+    )
+    assert "на 7 дн." in _price_ground(policy.model_copy(update={"distress_zone": changed}))

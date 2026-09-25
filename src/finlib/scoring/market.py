@@ -70,6 +70,16 @@ class MarketFinding:
         if self.benchmark:
             said["benchmark"] = digits(self.benchmark, spread)
             said["multiple"] = digits(self.value / self.benchmark, ratio)
+        # **Упреждение, которое формулировка называет, берётся из замера,
+        # а не пишется строкой** (решение владельца 25.09.2026): «43 дня»
+        # в тексте основания пережили перемер, давший 61, и читатель получал
+        # число, которого замер больше не показывает.
+        said["lead_days"] = ""
+        if not self.benchmark:
+            zone = policy.distress_zone
+            measured = zone.measured.get(f"at_{zone.price_below_percent:.0f}")
+            if measured is not None:
+                said["lead_days"] = f"{measured['lead_days']:.0f}"
         return said
 
 
