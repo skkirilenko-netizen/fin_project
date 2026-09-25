@@ -94,6 +94,23 @@ def _applied(rows: list[dict], day: date) -> None:
         )
 
 
+def _forget_empty(day: date) -> None:
+    """Пустой срез рабочего дня, лежащий на диске с прежних прогонов, — забыть.
+
+    Иначе он брался бы с диска вечно: так 22–25.09.2026 выпали из ряда.
+    """
+    kept = moex.CACHE / f"xsec_{day}.json"
+    if not kept.exists():
+        return
+    if json.loads(kept.read_text(encoding="utf-8")).get("history"):
+        return
+    for stale in (
+        *moex.CACHE.glob(f"xsec_{day}*.json"),
+        *moex.CACHE.glob(f"zcyc_day_{day}.json"),
+    ):
+        stale.unlink()
+
+
 def main() -> int:
     """Забирает срезы и кривые; 1 — если источник отказал либо дней нет."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -106,9 +123,12 @@ def main() -> int:
     if CURVES.exists():
         curves = json.loads(CURVES.read_text(encoding="utf-8"))
     done = empty = 0
+    unpublished: list[str] = []
     stopped = ""
     for day in days:
         key = f"{day}"
+        if day.weekday() < 5:
+            _forget_empty(day)
         try:
             rows = moex.paged(
                 XSEC, f"xsec_{day}", "history", {"date": key, "iss.meta": "off"}
@@ -128,6 +148,22 @@ def main() -> int:
             stopped = f"{day}: {failure}"
             logger.error("доставка остановлена — %s", stopped)
             break
+        if not rows and day.weekday() < 5:
+            # **Пустой ответ за рабочий день — отказ, а не данные** (решение
+            # владельца 25.09.2026). Итоги дня биржа публикует после торгов,
+            # и срез, спрошенный раньше, приходит пустым: 22–25.09.2026 такие
+            # ответы легли на диск и брались оттуда как «торгов не было».
+            # Пустой ответ не хранится, и следующий прогон спросит снова.
+            # Праздник в рабочий день выглядит так же и будет спрошен снова
+            # — это дешевле, чем принять недоставку за отсутствие торгов.
+            for stale in (
+                *moex.CACHE.glob(f"xsec_{day}*.json"),
+                *moex.CACHE.glob(f"zcyc_day_{day}.json"),
+            ):
+                stale.unlink()
+            curves.pop(key, None)
+            unpublished.append(key)
+            continue
         if not rows:
             empty += 1
             continue
@@ -153,6 +189,11 @@ def main() -> int:
         f"{len(curves)}; запросов к источнику {moex.pace.requested}, "
         f"ответов с диска {moex.pace.from_cache}"
     )
+    if unpublished:
+        print(
+            f"рабочих дней без итогов торгов {len(unpublished)}: "
+            f"{', '.join(unpublished)} — не данные, а недоставка; спросим снова"
+        )
     if stopped:
         print(f"**Доставка остановлена отказом источника** — {stopped}")
         return 1

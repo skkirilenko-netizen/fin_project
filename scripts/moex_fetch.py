@@ -50,10 +50,14 @@ def main() -> int:
     """Забирает перечень и карточки; 1 — если источник не ответил."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
+        # **Перечень — текущее состояние, и он переспрашивается каждый раз.**
+        # С диска он устаревает: с 22.09 по 25.09.2026 стадия брала его
+        # из кэша и писала «done», а перевод в сектор риска не был бы виден.
         answer = moex.fetch(
             "engines/stock/markets/bonds/securities.json",
             TRADED,
             {"iss.meta": "off", "iss.only": "securities"},
+            refresh=True,
         )
     except moex.MoexError as failure:
         print(f"перечень торгуемых облигаций не получен: {failure}")

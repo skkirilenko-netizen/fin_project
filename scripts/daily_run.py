@@ -71,6 +71,10 @@ class Stage:
     every: int
     blocking: bool
     why: str
+    # Доводы скрипта стадии: у среза торгов — окно в неделю по дням, иначе
+    # скрипт спрашивал бы по умолчанию сегодня и каждый седьмой день назад,
+    # а вчерашнего, ради которого стадия заведена, не спрашивал бы вовсе.
+    args: tuple[str, ...] = ()
 
 
 STAGES: tuple[Stage, ...] = (
@@ -127,6 +131,7 @@ STAGES: tuple[Stage, ...] = (
             "в нём дыру, а признак — подтверждение «7 из 10» — считает "
             "наблюдения, а не календарь."
         ),
+        args=("--depth-days", "7", "--step", "1"),
     ),
     # **Уровень листинга — то же, что рейтинги: истории у источника нет.**
     # ISS отдаёт только текущий уровень, и не начав копить снимки, мы
@@ -184,7 +189,7 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
     written_before = _stamp(_marker(stage))
     argv = sys.argv
     try:
-        sys.argv = [stage.script]
+        sys.argv = [stage.script, *stage.args]
         runpy.run_path(str(ROOT / stage.script), run_name="__main__")
         said |= {"status": "done"}
     except SystemExit as stop:

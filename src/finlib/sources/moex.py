@@ -65,14 +65,18 @@ class Pace:
 pace = Pace()
 
 
-def fetch(path: str, name: str, params: dict[str, Any] | None = None) -> dict:
+def fetch(
+    path: str, name: str, params: dict[str, Any] | None = None, refresh: bool = False
+) -> dict:
     """Ответ ISS по пути; сохранённый берётся с диска, сеть не дёргается.
 
     `path` — путь внутри `/iss`, `name` — имя файла кэша, оно же называет
-    запрос человеку.
+    запрос человеку. `refresh` переспрашивает источник: ответ о текущем
+    состоянии (перечень режимов торгов) с диска устаревает — с 22.09.2026
+    по 25.09 сектор риска брался из кэша, и перевод выпуска не был бы виден.
     """
     where = CACHE / f"{name}.json"
-    if where.exists():
+    if where.exists() and not refresh:
         pace.from_cache += 1
         return json.loads(where.read_text(encoding="utf-8"), parse_float=Decimal)
     # **Обрыв связи ответом не является, и повтор здесь не роскошь.** Прогон
