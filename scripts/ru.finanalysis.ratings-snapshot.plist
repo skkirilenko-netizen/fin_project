@@ -44,43 +44,44 @@
   <key>WorkingDirectory</key>
   <string>/Users/sk/Work/fin-analysis</string>
 
-  <!-- **10:30 по рабочим дням** (решение владельца 25.09.2026; прежде 19:30,
+  <!-- **11:30 по рабочим дням** (решение владельца 25.09.2026; прежде 19:30,
        но вечером машина выключена, а выключенная машина запуск теряет).
        Снимок застаёт действия, опубликованные накануне; действия выходных
        застанет снимок понедельника.
-       Ежедневный прогон в 10:00 снимает рейтинги сам первой доставкой,
-       и ответ по каждому эмитенту ложится на диск отдельно — агент берёт
-       снятое оттуда. **Но в 10:30 прогон ещё идёт**: 977 эмитентов при
-       30 запросах в минуту — около 33 минут (замер 25.09.2026: 660 запросов
-       за 21 минуту 44 секунды), и хвост снимка два процесса запрашивают
-       одновременно, каждый со своим счётчиком частоты.
+       **Агент — страховка, а не основной путь.** Снимает рейтинги ежедневный
+       прогон в 10:00, первой доставкой: 977 эмитентов при 30 запросах
+       в минуту — около 33 минут (замер 25.09.2026: 660 запросов за 21 минуту
+       44 секунды). К 11:30 он заведомо закончил, и два процесса к источнику
+       одновременно не ходят. Снимок дня готов — агент ничего не делает;
+       прогон упал — агент добирает остаток: ответ по каждому эмитенту
+       прогон уже положил на диск отдельно, и в сеть идут только недошедшие.
        Пять записей: `StartCalendarInterval` принимает массив словарей,
        Weekday 1 — понедельник, 5 — пятница. -->
   <key>StartCalendarInterval</key>
   <array>
     <dict>
       <key>Weekday</key><integer>1</integer>
-      <key>Hour</key><integer>10</integer>
+      <key>Hour</key><integer>11</integer>
       <key>Minute</key><integer>30</integer>
     </dict>
     <dict>
       <key>Weekday</key><integer>2</integer>
-      <key>Hour</key><integer>10</integer>
+      <key>Hour</key><integer>11</integer>
       <key>Minute</key><integer>30</integer>
     </dict>
     <dict>
       <key>Weekday</key><integer>3</integer>
-      <key>Hour</key><integer>10</integer>
+      <key>Hour</key><integer>11</integer>
       <key>Minute</key><integer>30</integer>
     </dict>
     <dict>
       <key>Weekday</key><integer>4</integer>
-      <key>Hour</key><integer>10</integer>
+      <key>Hour</key><integer>11</integer>
       <key>Minute</key><integer>30</integer>
     </dict>
     <dict>
       <key>Weekday</key><integer>5</integer>
-      <key>Hour</key><integer>10</integer>
+      <key>Hour</key><integer>11</integer>
       <key>Minute</key><integer>30</integer>
     </dict>
   </array>
