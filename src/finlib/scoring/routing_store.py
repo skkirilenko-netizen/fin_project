@@ -43,6 +43,7 @@ from pathlib import Path
 
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.ifrs import MetricValue
+from finlib.metrics.interim import Rolling
 from finlib.normalize.lines import load_lines
 from finlib.scoring.market import MarketFinding
 from finlib.scoring.market import findings as market_findings
@@ -115,6 +116,30 @@ WHERE f.standard = 'ifrs' AND s.is_actual AND s.status <> 'quarantine'
       ) <= %(as_of)s::date
   )
 GROUP BY f.inn
+"""
+
+# **Свежий промежуточный комплект по каждому стандарту** — кандидат в базу
+# маршрута (`standards.yaml`, `period_preference.basis: ltm`). Виден он с дня
+# появления записи у агрегатора (`meta.cbonds.created_at`, решение владельца
+# 25.09.2026); настоящая дата раскрытия старше и её, а срок закона — только
+# там, где нет ни той, ни другой. Графа `by_law` называет такие комплекты:
+# их число печатается.
+_LATEST_INTERIM = """
+SELECT DISTINCT ON (s.inn, s.standard)
+       s.inn, s.standard, s.period_end,
+       (s.meta->>'disclosed_on') IS NULL
+         AND (s.meta->'cbonds'->>'created_at') IS NULL AS by_law
+FROM src_file s
+WHERE s.is_actual AND s.status <> 'quarantine' AND s.reporting_kind = 'interim'
+  AND (
+      %(as_of)s::date IS NULL
+      OR COALESCE(
+          (s.meta->>'disclosed_on')::date,
+          (s.meta->'cbonds'->>'created_at')::date,
+          s.period_end + CASE s.standard WHEN 'ifrs' THEN %(ifrs)s ELSE %(rsbu)s END
+      ) <= %(as_of)s::date
+  )
+ORDER BY s.inn, s.standard, s.period_end DESC
 """
 
 # **Выборка называет стандарт — графой, а не условием.** Те же коды проверок
@@ -305,6 +330,11 @@ class RoutingRow:
     # было бы утверждением о другом предмете.
     standard: Standard | None = None
     basis: str = ""
+    # Оговорка о базе: пусто — годовая аудированная; иначе LTM
+    # на промежуточную дату, неаудированная (`interim.yaml`, `confidence`).
+    basis_note: str = ""
+    # Годовой комплект — опора базы: срок раскрытия, заключение аудитора.
+    annual_date: date | None = None
     # Есть ли у эмитента выпуски в обращении: строки без долга показываются
     # отдельным разделом и в сводные доли не идут.
     has_bonds: bool = True
@@ -533,9 +563,10 @@ def routing_rows(
     просто ответ не спрашивается дважды об одном.
     """
     memo = memo if memo is not None else {}
-    from finlib.metrics.ifrs_store import compute_from_facts
+    from finlib.metrics.ifrs_store import compute_from_facts, compute_ltm_from_facts
     from finlib.normalize.ifrs_metrics import load_ifrs_metrics
     from finlib.scoring.ifrs_store import stop_factors_of
+    from finlib.scoring.interim import load_interim
     from finlib.scoring.rsbu_routing import latest_annual
 
     today = today or date.today()
@@ -610,6 +641,18 @@ def routing_rows(
         )
     }
     rsbu_latest = latest_annual(conn, as_of)
+    interim_latest = {
+        (row["inn"], row["standard"]): (row["period_end"], bool(row["by_law"]))
+        for row in fetch_all(
+            _LATEST_INTERIM,
+            {
+                "as_of": as_of,
+                "ifrs": disclosed.days(Standard.IFRS, interim=True),
+                "rsbu": disclosed.days(Standard.RSBU, interim=True),
+            },
+            conn=conn,
+        )
+    }
     universe = sorted(set(bonds) | set(ifrs_latest) | set(rsbu_latest))
     preference = load_standards().base_standard
     # Комплекты, которые до нас дошли, — независимо от их состояния.
@@ -646,6 +689,12 @@ def routing_rows(
         "маршрут по МСФО": 0,
         "маршрут по РСБУ": 0,
         "маршрут по событиям и рейтингам": 0,
+        # База маршрута: LTM по промежуточному комплекту либо годовая.
+        # Отказ LTM и видимость по сроку закона считаются рядом — иначе
+        # «база LTM у N» не говорит, у скольких её не сложилось.
+        "база LTM": 0,
+        "база годовая: LTM не сложился": 0,
+        "база LTM: видимость по сроку закона": 0,
         "холдингов на одной РСБУ": 0,
         # Четвёртый признак «ноль не означает нуля»: считается вместе
         # со знаменателем, как всякое правило — иначе ноль срабатываний
@@ -711,6 +760,34 @@ def routing_rows(
             if standard is not None
             else None
         )
+        # **База маршрута — LTM на последнюю отчётную дату** (`standards.yaml`,
+        # `period_preference.basis: ltm`). Промежуточный комплект того же
+        # стандарта становится базой, только если он новее годового; годовой
+        # того же года, раскрытый позже, возвращает базу себе — он новее.
+        # Годовой при этом остаётся опорой: срок раскрытия, заключение
+        # аудитора и его стоп-факторы, признак холдинга.
+        annual_moment = moment
+        basis_note = ""
+        interim = interim_base(inn, standard, moment, interim_latest)
+        if interim is not None:
+            operating = _operating_ltm(inn, interim[0], conn, standard)
+            if operating.known:
+                moment = interim[0]
+                basis_note = load_interim().confidence.said("interim", moment)
+                counts["база LTM"] += 1
+                counts["база LTM: видимость по сроку закона"] += int(interim[1])
+            else:
+                # **Не сложился LTM — база остаётся годовой, и причина
+                # называется**: подставить полугодие вместо года значило бы
+                # мерить годовой шкалой половину года.
+                counts["база годовая: LTM не сложился"] += 1
+                logger.info(
+                    "%s: промежуточный комплект на %s новее годового, но LTM "
+                    "не сложился (%s) — база годовая",
+                    inn,
+                    interim[0],
+                    operating.reason,
+                )
         card = known.get(inn, {})
         # **Тип эмитента берётся у данных карточки, а не у наименования.**
         # Признак, которым он опознан, идёт вместе с ним: «структурный»
@@ -734,20 +811,27 @@ def routing_rows(
         # считался бы полсотни раз подряд.
         counted = memo.setdefault("metrics", {})
         key = (inn, standard.value if standard else "", moment)
+        ltm = bool(basis_note)
         if standard is Standard.IFRS:
             if key not in counted:
-                found = compute_from_facts(inn, moment, conn, policy)
+                found = (
+                    compute_ltm_from_facts(inn, moment, annual_moment, conn, policy)
+                    if ltm
+                    else compute_from_facts(inn, moment, conn, policy)
+                )
                 counted[key] = (
                     found,
                     {},
                     "",
-                    stop_factors_of(inn, moment, found, conn).triggered,
+                    # Заключение аудитора и тип эмитента — у годового
+                    # комплекта: промежуточный их не несёт.
+                    stop_factors_of(inn, annual_moment, found, conn).triggered,
                 )
             computed, fired, okved, triggered = counted[key]
             counts["маршрут по МСФО"] += 1
         elif standard is Standard.RSBU:
             if key not in counted:
-                found, values, activity = _rsbu_inputs(inn, moment, conn)
+                found, values, activity = _rsbu_inputs(inn, moment, conn, ltm=ltm)
                 counted[key] = (
                     found,
                     values,
@@ -869,17 +953,27 @@ def routing_rows(
             issuer_type=kind,
             type_marker=marker,
             operating_profit=(
-                _operating_profit(inn, moment, conn, standard)
+                (
+                    _operating_ltm(inn, moment, conn, standard).value
+                    if basis_note
+                    else _operating_profit(inn, moment, conn, standard)
+                )
                 if standard is not None
                 else None
             ),
-            latest_annual=moment,
+            # Срок раскрытия спрашивается о годовой отчётности: промежуточная
+            # его не отменяет.
+            latest_annual=annual_moment,
+            basis_note=basis_note,
             assessed_class=assessed.get(inn),
             branch=str(card.get("branch_name_rus") or ""),
             group=str(card.get("group_name_rus") or ""),
             okved=okved,
+            # Признак холдинга — строение организации, и читается он
+            # по годовому комплекту: выручка в нём — поток, и промежуточный
+            # о строении ничего нового не скажет.
             holding_lines=(
-                _holding_lines(inn, moment, conn, standard, routing)
+                _holding_lines(inn, annual_moment, conn, standard, routing)
                 if standard is Standard.RSBU
                 else None
             ),
@@ -957,6 +1051,8 @@ def routing_rows(
                 computed=computed,
                 standard=standard,
                 basis=catalogue.label if standard is not None else _NO_REPORTING,
+                basis_note=basis_note,
+                annual_date=annual_moment,
                 has_bonds=inn in bonds,
                 shown_values=_shown_values(catalogue, computed, unit),
                 stop_factors=triggered,
@@ -1452,22 +1548,126 @@ def _without_undisclosed_debt(
     )
 
 
+def interim_base(
+    inn: str,
+    standard: Standard | None,
+    annual: date | None,
+    interim_latest: Mapping[tuple[str, str], tuple[date, bool]],
+) -> tuple[date, bool] | None:
+    """Промежуточный комплект, становящийся базой; None — база годовая.
+
+    **Стандарт у базы один**: кандидат берётся того же стандарта, что выбран
+    правилом предпочтения, и промежуточный РСБУ базой эмитента с годовой
+    МСФО не становится — ряды несопоставимы. **Базой он становится, только
+    если новее годового**: годовой того же года, раскрытый позже, новее
+    любого промежуточного этого года и возвращает базу себе.
+    """
+    if standard is None or annual is None:
+        return None
+    found = interim_latest.get((inn, standard.value))
+    if found is None or found[0] <= annual:
+        return None
+    return found
+
+
+_TREND = """
+SELECT DISTINCT ON (f.report_date, f.line_code) f.report_date, f.line_code, f.value
+FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
+WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.line_code = ANY(%(codes)s)
+  AND s.is_actual AND s.status <> 'quarantine'
+ORDER BY f.report_date, f.line_code, source_rank(s.source)
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class TrendPoint:
+    """Отчётная дата тренда: LTM по строкам и динамика с начала года."""
+
+    moment: date
+    ltm: dict[str, Rolling]
+    # Изменение с начала года к тому же периоду прошлого года, долей;
+    # None — нет прошлогодней величины либо она неположительна.
+    ytd_change: dict[str, Decimal | None]
+
+
+def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoint]:
+    """Тренд LTM на последние отчётные даты (`interim.yaml`, `trend`).
+
+    Величины — тем же тождеством, что база маршрута (`metrics.interim`),
+    и из той же выборки фактов: с предпочтением первоисточника, вне карантина.
+    """
+    from finlib.metrics.interim import rolling_flow, same_ytd_year_before
+    from finlib.scoring.interim import load_interim
+
+    rule = load_interim().trend
+    codes = sorted(rule.lines.get(standard.value, {}))
+    if not codes:
+        return []
+    series: dict[str, dict[date, Decimal | None]] = {code: {} for code in codes}
+    for row in fetch_all(
+        _TREND, {"inn": inn, "standard": standard.value, "codes": codes}, conn=conn
+    ):
+        series[row["line_code"]][row["report_date"]] = row["value"]
+    dates = sorted({day for values in series.values() for day in values}, reverse=True)
+    points: list[TrendPoint] = []
+    for moment in dates[: rule.quarters]:
+        change: dict[str, Decimal | None] = {}
+        for code in codes:
+            now = series[code].get(moment)
+            before = series[code].get(same_ytd_year_before(moment))
+            change[code] = (
+                now / before - 1 if now is not None and before and before > 0 else None
+            )
+        points.append(
+            TrendPoint(
+                moment,
+                {code: rolling_flow(series[code], moment) for code in codes},
+                change,
+            )
+        )
+    return points
+
+
+def _operating_ltm(
+    inn: str, moment: date, conn: PgConnection, standard: Standard
+) -> Rolling:
+    """Операционный результат за скользящие двенадцать месяцев на эту дату.
+
+    Три слагаемых тождества берутся тем же правилом, что операционный
+    результат периода (`_operating_profit`): ноль агрегатора величиной
+    не считается, и слагаемое без величины отменяет сумму целиком.
+    На годовую дату — годовая величина как есть.
+    """
+    from finlib.metrics.interim import rolling_flow, same_ytd_year_before
+
+    days = {moment, date(moment.year - 1, 12, 31), same_ytd_year_before(moment)}
+    return rolling_flow(
+        {day: _operating_profit(inn, day, conn, standard) for day in days}, moment
+    )
+
+
 def _rsbu_inputs(
-    inn: str, moment: date, conn: PgConnection
+    inn: str, moment: date, conn: PgConnection, *, ltm: bool
 ) -> tuple[tuple[MetricValue, ...], dict[str, str], str]:
     """Показатели, сработавшие стоп-факторы и вид деятельности эмитента РСБУ.
 
     Величины считает боевой расчёт, стоп-факторы — та же функция, что
     и при оценке. Здесь только сборка: перечень, написанный второй раз,
-    разошёлся бы с первым.
+    разошёлся бы с первым. `ltm` — база на промежуточную дату: потоки
+    за скользящие двенадцать месяцев, баланс на дату. Довод обязательный:
+    молча не переданная база неотличима от годовой.
     """
     from finlib.metrics.definitions import load_metrics
     from finlib.scoring.definitions import load_scoring
     from finlib.scoring.engine import triggered_stop_factors
-    from finlib.scoring.rsbu_routing import computed_of, with_denominator
+    from finlib.scoring.rsbu_routing import computed_ltm, computed_of, with_denominator
 
-    computed = computed_of(inn, moment, conn)
-    profit = _operating_profit(inn, moment, conn, Standard.RSBU)
+    if ltm:
+        computed, _ = computed_ltm(inn, moment, conn)
+        profit = _operating_ltm(inn, moment, conn, Standard.RSBU).value
+    else:
+        computed = computed_of(inn, moment, conn)
+        profit = _operating_profit(inn, moment, conn, Standard.RSBU)
     bound = catalogue_for(Standard.RSBU).rule.bound
     computed = with_denominator(computed, bound, profit)
     values = {item.code: item.value for item in computed}

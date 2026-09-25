@@ -581,6 +581,10 @@ def load_row(
             "row_id": row.get("id"),
             "updated_at": row.get("update_time"),
             "src_updated_at": row.get("src_updated_at"),
+            # День появления записи у агрегатора — фактическая видимость
+            # комплекта: пересчёт истории не вправе знать о нём раньше.
+            # У сведённого комплекта РСБУ — поздняя из дат его форм.
+            "created_at": row.get("_created_at") or row.get("created_at"),
             "reported": _reported(row, report),
             # Доставки сведённого комплекта: у РСБУ их три, и по документу
             # обязано быть видно, из чего он собран.

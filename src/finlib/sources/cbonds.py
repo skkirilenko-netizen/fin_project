@@ -328,6 +328,13 @@ def deliveries_of(report: object, inn: str, refresh: bool = False) -> list[dict]
                 },
             )
             into["_deliveries"].append(delivery.method)
+            # **Комплект появился у агрегатора, когда пришла последняя
+            # из его форм**: дата появления — поздняя из трёх, а не первая
+            # попавшаяся. Она служит днём видимости промежуточного комплекта
+            # в пересчёте истории (`standards.yaml`, `interim_visible_from`).
+            created = str(row.get("created_at") or "")
+            if created and created > str(into.get("_created_at") or ""):
+                into["_created_at"] = created
             for key, item in row.items():
                 if item in (None, ""):
                     continue

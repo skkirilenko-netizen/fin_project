@@ -39,8 +39,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.metrics.display import digits, foreign_units, money  # noqa: E402
 from finlib.report.market_chart import as_image, charts  # noqa: E402
+from finlib.scoring.interim import load_interim  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
-from finlib.scoring.routing_store import SOURCE_NAMES, cards, routing_rows  # noqa: E402
+from finlib.scoring.routing_store import (  # noqa: E402
+    SOURCE_NAMES,
+    cards,
+    ltm_trend,
+    routing_rows,
+)
 from finlib.sources.market import load_market as _market_rules  # noqa: E402
 from finlib.sources.market import series as _market_series  # noqa: E402
 from finlib.sources.ratings_calendar import (  # noqa: E402
@@ -190,6 +196,44 @@ def _form_broken(name: str) -> bool:
     return marked_by(name, (_LIMITED,), str.lower) and not marked_by(
         name, (_LIABILITY,), str.lower
     )
+
+
+def _trend(item, conn, said: list) -> None:  # noqa: ANN001
+    """Тренд LTM за последние отчётные даты и динамика с начала года.
+
+    Величины даёт боевой путь (`routing_store.ltm_trend`) тем же тождеством,
+    что базу маршрута; карточка только печатает — единой точкой печати
+    и в единице комплекта.
+    """
+    if item.standard is None:
+        return
+    points = ltm_trend(item.inn, item.standard, conn)
+    names = load_interim().trend.lines.get(item.standard.value, {})
+    if not points or not names:
+        return
+    codes = sorted(names)
+    add = said.append
+    add(f"\n### Тренд LTM ({item.unit or 'единица не названа'})\n")
+    add(
+        "| Отчётная дата | "
+        + " | ".join(f"{names[code]}, LTM" for code in codes)
+        + " | "
+        + " | ".join(f"{names[code]}: с начала года к прошлому году" for code in codes)
+        + " |"
+    )
+    add("|---|" + "---|" * (2 * len(codes)))
+    for point in points:
+        ltm = [
+            money(point.ltm[code].value) if point.ltm[code].known else "не сложился"
+            for code in codes
+        ]
+        change = [
+            f"{digits(point.ytd_change[code] * 100, 1)} %"
+            if point.ytd_change[code] is not None
+            else "—"
+            for code in codes
+        ]
+        add(f"| {point.moment:%d.%m.%Y} | " + " | ".join(ltm + change) + " |")
 
 
 def _ratings(item, routing, said: list) -> None:  # noqa: ANN001
@@ -546,10 +590,27 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             )
             + f", единица — {item.unit or 'не названа'}\n"
         )
+        # **База называется прямо** (фаза 5-бис): LTM на промежуточную дату —
+        # потоки за скользящие двенадцать месяцев, баланс на дату, отчётность
+        # неаудирована; годовой комплект остаётся опорой срока раскрытия
+        # и заключения аудитора.
+        if item.basis_note:
+            add(
+                f"База: LTM на {item.report_date:%d.%m.%Y} — {item.basis_note}; "
+                "потоки за скользящие двенадцать месяцев, баланс на дату. "
+                "Опора — годовой комплект"
+                + (
+                    f" на {item.annual_date:%d.%m.%Y}"
+                    if item.annual_date is not None
+                    else ""
+                )
+                + ".\n"
+            )
         add("\n| Показатель | Значение |")
         add("|---|---|")
         for _, name, shown in item.shown_values:
             add(f"| {name} | {shown} |")
+        _trend(item, conn, said)
     if item.refinance is not None and item.refinance.due is not None:
         # **Величины печатаются той же единой точкой округления**, что
         # в списке и в документе: набранные здесь во второй раз, они пришли бы

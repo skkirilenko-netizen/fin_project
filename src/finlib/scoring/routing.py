@@ -1115,6 +1115,10 @@ def route(
     # доводом: расчёт показателей её не отдаёт, а знак её и есть основание.
     operating_profit: Decimal | None = None,
     latest_annual: date | None = None,
+    # Оговорка о базе маршрута: пусто — база годовая аудированная; иначе
+    # формулировка неаудированной LTM-базы (`interim.yaml`, `confidence`),
+    # и она приписывается к каждому основанию о величинах базы.
+    basis_note: str = "",
     # Класс, присвоенный нами по разобранному документу. Довод именно класс,
     # а не «оценка есть»: класс A у эмитента с тяжёлым балансом агрегатора —
     # не обстоятельство, а опровержение признака.
@@ -1741,6 +1745,11 @@ def route(
                 )
             )
 
+    if basis_note:
+        status, review, attention = (
+            _with_basis(items, basis_note, routing)
+            for items in (status, review, attention)
+        )
     found = status + review + attention
     # **Корзину называют основания той тяжести, по которой она выбрана.**
     # Прежде перечень собирался из всех сработавших по одному признаку —
@@ -1791,6 +1800,28 @@ def route(
         inapplicable=inapplicable,
         named=named,
     )
+
+
+def _with_basis(
+    findings: list[Finding], note: str, routing: RoutingPolicy
+) -> list[Finding]:
+    """Основания о величинах базы — с оговоркой о неаудированной базе.
+
+    **Оговорка стоит в самой формулировке, а не рядом** (решение владельца
+    25.09.2026, фаза 5-бис): в списке печатается строка основания,
+    и оговорка, оставшаяся в другом месте, до читателя не доходит.
+    """
+    from dataclasses import replace
+
+    from finlib.scoring.interim import load_interim
+
+    sources = set(load_interim().confidence.applies_to_sources)
+    return [
+        replace(item, text=f"{item.text} ({note})")
+        if routing.ground_sources.get(item.ground, "") in sources
+        else item
+        for item in findings
+    ]
 
 
 def led_by_guarantor(

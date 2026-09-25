@@ -285,6 +285,12 @@ REGISTRY: dict[CheckCode, Wiring] = {
             CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED,
         )
     },
+    # --- сверка IV квартала (фаза 5-бис) -------------------------------------
+    # Годовой минус девять месяцев; зовётся из приёма доставки агрегатора после
+    # загрузки всех периодов эмитента — пара складывается из двух комплектов.
+    CheckCode.IMPLIED_Q4_ANOMALY: Wiring(
+        WiringStatus.WIRED, date(2026, 9, 25), ("quality/implied_q4.py",)
+    ),
 }
 
 

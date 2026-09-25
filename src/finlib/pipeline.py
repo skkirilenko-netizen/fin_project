@@ -520,6 +520,12 @@ def accept_cbonds_report(
                 run_checks(outcome.src_file_id, active)
         if rejected:
             log_rejections(inn, rejected, active)
+        # **Сверка IV квартала — после загрузки всех периодов эмитента**
+        # (фаза 5-бис): пара «год — девять месяцев» складывается из двух
+        # комплектов, и сверять её по одному нечего.
+        from finlib.quality.implied_q4 import check_implied_q4
+
+        check_implied_q4(inn, Standard(definition.standard), active)
     accepted = [item for item in outcomes if item.accepted]
     say(
         Stage.LOAD,

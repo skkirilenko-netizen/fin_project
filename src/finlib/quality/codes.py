@@ -167,6 +167,12 @@ class CheckCode(StrEnum):
     # период. Первоисточник старше, и величина не перезаписывается, но
     # расхождение содержательно: у Автодора так виден пересмотр 2024 года.
     CBONDS_VALUE_MISMATCH = "cbonds_value_mismatch"
+    # **Подразумеваемый IV квартал: годовой минус девять месяцев** (фаза 5-бис,
+    # решение владельца 25.09.2026). Доля IV квартала в годовой величине
+    # за пределами распределения — аномалия пары комплектов: то ли годовой
+    # пересмотрен, то ли девять месяцев собраны не так. Уровень warning,
+    # в маршрут не идёт; рядом пишется число сверенных пар.
+    IMPLIED_Q4_ANOMALY = "implied_q4_anomaly"
     # **Ноль агрегатора против нераскрытой строки первоисточника — не
     # расхождение величин, а прямая улика** того, что ноль здесь означает
     # нераскрытие. Три объявленных признака этого рода — арифметические,
@@ -265,6 +271,7 @@ LOADER_SEVERITY: dict[CheckCode, Severity] = {
     CheckCode.CBONDS_VALUE_MISMATCH: Severity.INFO,
     CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: Severity.INFO,
     CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED: Severity.INFO,
+    CheckCode.IMPLIED_Q4_ANOMALY: Severity.WARNING,
 }
 
 # Наименования контролей для документа. Код — механизм, а не часть заключения:
@@ -328,6 +335,7 @@ CHECK_NAMES: dict[CheckCode, str] = {
     CheckCode.CBONDS_VALUE_MISMATCH: "расхождение агрегатора с первоисточником",
     CheckCode.CBONDS_ZERO_FOR_UNDISCLOSED: "ноль агрегатора против нераскрытой строки",
     CheckCode.CBONDS_VALUE_FOR_UNDISCLOSED: "величина агрегатора против нераскрытой строки",
+    CheckCode.IMPLIED_Q4_ANOMALY: "подразумеваемый IV квартал: годовой минус девять месяцев",
 }
 
 

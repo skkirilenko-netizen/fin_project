@@ -94,7 +94,13 @@ def rolling_flow(values: dict[date, Decimal | None], moment: date) -> Rolling:
         # Правило объявлено в методике, и код его только применяет: другое
         # значение означает, что методика изменилась, а расчёт — нет.
         return Rolling(None, reason=f"правило приведения не поддержано: {rule.interim_use}")
-    annual = last_annual_before(moment, set(values))
+    # **Годовой — ровно прошлого года, а не ближайший из известных.** Тождество
+    # верно только тогда, когда прошлогоднее с начала года лежит внутри того
+    # же годового периода, что прибавлен; «ближайший годовой» при пропущенном
+    # годе брал позапрошлый, и выходила величина настоящего вида, которой
+    # не соответствует ни один период.
+    wanted = date(moment.year - 1, 12, 31)
+    annual = wanted if wanted in values else None
     before = same_ytd_year_before(moment)
     current_value = values.get(moment)
     parts = {
@@ -112,3 +118,26 @@ def rolling_flow(values: dict[date, Decimal | None], moment: date) -> Rolling:
         - (values[before] or Decimal(0))
     )
     return Rolling(value, annual=annual, current=moment, previous=before)
+
+
+def ltm_values(
+    by_date: dict[date, dict[str, Decimal | None]],
+    moment: date,
+    flows: set[str],
+) -> tuple[dict[str, Decimal | None], dict[str, Rolling]]:
+    """Величины базы на дату: потоки за скользящие двенадцать месяцев, баланс как есть.
+
+    **База маршрута — LTM** (`standards.yaml`, `period_preference.basis`).
+    Поток, у которого тождество не сложилось, остаётся без величины — отказ,
+    а не приближение, — и его состав возвращается рядом, чтобы причина
+    называлась. Балансовая величина берётся на дату: приводить её не к чему.
+    """
+    current = dict(by_date.get(moment, {}))
+    rolled: dict[str, Rolling] = {}
+    for code in flows:
+        found = rolling_flow(
+            {day: values.get(code) for day, values in by_date.items()}, moment
+        )
+        rolled[code] = found
+        current[code] = found.value
+    return current, rolled

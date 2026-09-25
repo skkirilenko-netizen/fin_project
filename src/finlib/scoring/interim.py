@@ -54,6 +54,9 @@ class Confidence(BaseModel):
     origin: str = Field(min_length=1)
     note: str = Field(min_length=1)
     kind_words: dict[str, str] = Field(min_length=1)
+    # Источники оснований маршрута (`routing.yaml`, `ground_sources`), к которым
+    # оговорка о неаудированной базе приписывается.
+    applies_to_sources: tuple[str, ...] = Field(min_length=1)
 
     def said(self, kind: str, moment: date) -> str:
         """Оговорка словами: вид комплекта и его отчётная дата."""
@@ -125,6 +128,51 @@ class NotMeasured(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class Band(BaseModel):
+    """Отсечки доли IV квартала: ниже `low` и выше `high` — аномалия."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    low: Decimal
+    high: Decimal
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "Band":
+        """Нижняя отсечка ниже верхней, иначе аномалией было бы всё."""
+        if self.low >= self.high:
+            raise ValueError("нижняя отсечка IV квартала не ниже верхней")
+        return self
+
+
+class ImpliedQuarter(BaseModel):
+    """Сверка IV квартала: строки, отсечки и откуда они взяты."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    in_route: bool
+    measured_on: date
+    measured_origin: str = Field(min_length=1)
+    # Стандарт → код строки → отсечки.
+    lines: dict[str, dict[str, Band]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _not_in_route(self) -> "ImpliedQuarter":
+        """Сверка — запись журнала, а не основание: так решено 25.09.2026."""
+        if self.in_route:
+            raise ValueError("сверка IV квартала в маршрут не идёт")
+        return self
+
+
+class Trend(BaseModel):
+    """Тренд LTM в карточке: сколько отчётных дат и какие строки."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    quarters: int = Field(ge=2)
+    # Стандарт → код строки → наименование словами.
+    lines: dict[str, dict[str, str]] = Field(min_length=1)
+
+
 class InterimPolicy(BaseModel):
     """Справочник признаков изменения по промежуточной отчётности."""
 
@@ -136,6 +184,8 @@ class InterimPolicy(BaseModel):
     measure: Measure
     features: tuple[Feature, ...] = Field(min_length=1)
     not_measured: tuple[NotMeasured, ...] = Field(min_length=1)
+    trend: Trend
+    implied_q4: ImpliedQuarter
 
     @model_validator(mode="after")
     def _codes_are_unique(self) -> "InterimPolicy":

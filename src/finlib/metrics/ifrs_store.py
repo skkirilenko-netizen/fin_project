@@ -199,6 +199,80 @@ def inputs_of(
     )
 
 
+# Форма, величины которой стоят на дату. Прочие формы — отчёт о прибыли
+# и отчёт о движении денежных средств — дают величины за период, и в LTM-базе
+# они приводятся к скользящим двенадцати месяцам.
+STOCK_FORM = "ifrs.statement_of_financial_position"
+
+
+def ltm_inputs_of(
+    inn: str,
+    moment: date,
+    annual: date,
+    conn: PgConnection | None = None,
+    policy: IfrsMetricsPolicy | None = None,
+) -> tuple[Inputs, dict[str, object]]:
+    """Вход расчёта по LTM-базе: потоки за двенадцать месяцев, баланс на дату.
+
+    **Тип эмитента берётся у годового комплекта**, а не у промежуточного:
+    агрегатор его не сообщает вовсе, а обстановку эмитента — тип,
+    заключение аудитора — несёт годовая аудированная отчётность
+    (`standards.yaml`, `period_preference.basis_origin`). Величин примечаний
+    у LTM-базы нет: примечания годовые, и сложить их с полугодием нечем.
+    Возвращается и состав скользящих величин — для карточки и замера.
+    """
+    from finlib.metrics.interim import ltm_values, same_ytd_year_before
+
+    policy = policy or load_ifrs_metrics()
+    by_date: dict[date, dict[str, Decimal | None]] = {}
+    flows: set[str] = set()
+    for day in (moment, date(moment.year - 1, 12, 31), same_ytd_year_before(moment)):
+        rows = fetch_all(
+            _FACTS,
+            {"inn": inn, "standard": Standard.IFRS.value, "date": day, "source": ""},
+            conn=conn,
+        )
+        chosen, _ = pick_by_form(
+            [row for row in rows if row["recognition"] != "note"], Standard.IFRS
+        )
+        by_date[day] = {row["line_code"]: row["value"] for row in chosen}
+        flows |= {row["line_code"] for row in chosen if row["form_code"] != STOCK_FORM}
+    values, rolled = ltm_values(by_date, moment, flows & set(by_date[moment]))
+    meta = _annual_meta(inn, annual, conn)
+    return (
+        Inputs(
+            {code: value for code, value in values.items() if value is not None},
+            {},
+            meta.get("issuer_type") or "corporate",
+            months=12,
+        ),
+        dict(rolled),
+    )
+
+
+def _annual_meta(inn: str, annual: date, conn: PgConnection | None) -> dict:
+    """Сведения годового комплекта: тип эмитента, заключение аудитора."""
+    rows = fetch_all(
+        _FACTS,
+        {"inn": inn, "standard": Standard.IFRS.value, "date": annual, "source": ""},
+        conn=conn,
+    )
+    return (rows[0]["meta"] or {}) if rows else {}
+
+
+def compute_ltm_from_facts(
+    inn: str,
+    moment: date,
+    annual: date,
+    conn: PgConnection | None = None,
+    policy: IfrsMetricsPolicy | None = None,
+) -> tuple[MetricValue, ...]:
+    """Показатели МСФО по LTM-базе — та же арифметика, другой вход."""
+    policy = policy or load_ifrs_metrics()
+    inputs, _ = ltm_inputs_of(inn, moment, annual, conn, policy)
+    return compute_all(inputs, policy)
+
+
 def compute_from_facts(
     inn: str,
     report_date: date,

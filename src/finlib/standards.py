@@ -108,8 +108,14 @@ class PeriodPreference(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    basis: str = Field(pattern="^(annual|interim)$")
+    basis: str = Field(pattern="^(annual|interim|ltm)$")
     basis_origin: str = Field(min_length=1)
+    # **Когда промежуточный комплект становится виден** (решение владельца
+    # 25.09.2026): днём появления записи у агрегатора, а срок закона —
+    # только там, где этого дня нет. Годовой по-прежнему виден с даты
+    # раскрытия либо по сроку закона.
+    interim_visible_from: str = Field(pattern="^aggregator_created_at$")
+    interim_visible_origin: str = Field(min_length=1)
     interim_use: str = Field(min_length=1)
     rolling_formula: str = Field(min_length=1)
     rolling_origin: str = Field(min_length=1)

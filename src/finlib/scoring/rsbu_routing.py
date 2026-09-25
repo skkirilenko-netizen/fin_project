@@ -132,6 +132,85 @@ def computed_of(
     return tuple(found)
 
 
+def computed_ltm(
+    inn: str, moment: date, conn: PgConnection
+) -> tuple[tuple[MetricValue, ...], dict[str, Decimal | None]]:
+    """Показатели РСБУ на промежуточную дату по LTM-базе и величины этой базы.
+
+    **Тот же расчёт показателя, другой вход** (`standards.yaml`,
+    `period_preference.basis: ltm`): потоки — за скользящие двенадцать месяцев
+    тождеством, баланс — на дату. Показатель считает та же функция, что
+    и боевой расчёт (`metrics.engine.compute_metric`): второй арифметики
+    здесь нет, только собран вход.
+
+    **Начало периода у потока не берётся**: LTM не сравним ни с полугодием
+    прошлого года, ни с годом, и показатель, которому оно нужно, отказывает
+    с названной причиной. Маршрут динамики не спрашивает.
+    """
+    from dataclasses import replace
+
+    from finlib.metrics.engine import (
+        baseline_of,
+        compute_metric,
+        load_period_values,
+        reporting_type_of,
+    )
+    from finlib.metrics.interim import ltm_values
+    from finlib.normalize.lines import Measure, load_lines
+    from finlib.quality.periods import PeriodConfidence, period_quality
+    from finlib.quality.thresholds import load_thresholds
+
+    catalog = load_metrics()
+    lines = load_lines()
+    periods = load_period_values(inn, conn, Standard.RSBU)
+    if moment not in periods:
+        return (), {}
+    quality = period_quality(inn, conn, Standard.RSBU)
+    kind = reporting_type_of(inn, moment, conn, Standard.RSBU)
+
+    def measure_of(code: str) -> Measure:
+        return lines.measure_of(code, kind)
+
+    flows = {code for code in periods[moment].values if measure_of(code) is Measure.FLOW}
+    values, _ = ltm_values(
+        {day: period.values for day, period in periods.items()}, moment, flows
+    )
+    baseline = replace(
+        baseline_of(moment, periods, quality, lines), flow_date=None, flow={}
+    )
+    standards = dict(periods[moment].standards)
+    if baseline.stock_date is not None:
+        standards |= periods[baseline.stock_date].standards
+    info = quality.get(moment)
+    confidence = info.confidence if info is not None else PeriodConfidence.VERIFIED
+    names = {item.code: item for item in catalog.metrics}
+    found: list[MetricValue] = []
+    for metric in catalog.for_type(kind):
+        result = compute_metric(
+            metric,
+            kind,
+            moment,
+            values,
+            baseline,
+            confidence,
+            load_thresholds(),
+            standards,
+            measure_of,
+        )
+        if result is None:
+            continue
+        found.append(
+            MetricValue(
+                code=metric.code,
+                name=names[metric.code].name,
+                group=metric.group,
+                in_scoring=metric.in_scoring,
+                value=result.value if result.status is MetricStatus.OK else None,
+            )
+        )
+    return tuple(found), values
+
+
 def with_denominator(
     computed: tuple[MetricValue, ...], code: str, value: Decimal | None
 ) -> tuple[MetricValue, ...]:
