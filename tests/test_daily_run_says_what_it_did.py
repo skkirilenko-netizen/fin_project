@@ -12,8 +12,10 @@
 
 import ast
 import io
+import os
 import sys
 from contextlib import redirect_stdout
+from datetime import date
 
 from finlib.config import settings
 
@@ -106,6 +108,56 @@ def test_a_broken_delivery_is_written_to_the_log() -> None:
         and item.func.attr == "exception"
     ]
     assert logged, "исключение доставки не пишется в daily_run.log"
+
+
+def _stage_run(tmp_path, monkeypatch, body: str, marker_exists: bool) -> dict:  # noqa: ANN001
+    """Прогоняет стадию-заглушку и отдаёт её исход."""
+    sys.path.insert(0, str(settings.base_dir / "scripts"))
+    import daily_run
+
+    marker = tmp_path / "result.json"
+    if marker_exists:
+        marker.write_text("{}", encoding="utf-8")
+        old = 1_700_000_000
+        os.utime(marker, (old, old))
+    script = tmp_path / "stage.py"
+    script.write_text(body.replace("MARKER", str(marker)), encoding="utf-8")
+    monkeypatch.setattr(daily_run, "_marker", lambda stage: marker)
+    stage = daily_run.Stage(
+        code="probe", name="проба", script=str(script), every=7,
+        blocking=False, why="тест",
+    )
+    return daily_run._run_stage(stage, dry=False)
+
+
+def test_a_stage_that_left_its_file_untouched_is_not_done(tmp_path, monkeypatch) -> None:
+    """Стадия, не обновившая файл дня, пишет «cached» с датой файла, а не «done».
+
+    С 22.09.2026 стадия выпусков писала «done», не сделав ни одного запроса:
+    ответы брались из кэша, и признаки дефолта застыли.
+    """
+    said = _stage_run(tmp_path, monkeypatch, "pass\n", marker_exists=True)
+    assert said["status"] == "cached"
+    assert said["file_date"] == f"{date.fromtimestamp(1_700_000_000):%Y-%m-%d}"
+
+
+def test_a_stage_without_any_file_is_not_done(tmp_path, monkeypatch) -> None:
+    """Файла доставки нет вовсе — тоже не «done»."""
+    said = _stage_run(tmp_path, monkeypatch, "pass\n", marker_exists=False)
+    assert said["status"] == "cached" and said["file_date"] is None
+
+
+def test_a_stage_that_wrote_its_file_is_done(tmp_path, monkeypatch) -> None:
+    """Стадия, переписавшая файл, — «done», в том числе с частотой раз в неделю."""
+    body = "from pathlib import Path\nPath('MARKER').write_text('{\"new\": 1}')\n"
+    said = _stage_run(tmp_path, monkeypatch, body, marker_exists=True)
+    assert said["status"] == "done"
+
+
+def test_a_failed_stage_stays_failed(tmp_path, monkeypatch) -> None:
+    """Отказ не подменяется «кэшем»: он старше."""
+    said = _stage_run(tmp_path, monkeypatch, "raise RuntimeError('нет')\n", True)
+    assert said["status"] == "failed"
 
 
 def _said(rows: list) -> str:

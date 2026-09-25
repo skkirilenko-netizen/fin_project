@@ -238,17 +238,34 @@ class DefaultEvent:
         return self.when is not None
 
 
+def defaults_path() -> Path | None:
+    """Свежайший перечень дефолтов на диске; None — перечня нет.
+
+    **Перечень доставляется ежедневно и хранится по дням** (`defaults_ru_
+    ГГГГ-ММ-ДД.json`, стадия `defaults` ежедневного прогона), как снимок
+    рейтингов: прежде он лежал одним файлом от 22.09.2026, прогон его
+    не обновлял, и дефолт, случившийся позже, маршрут не увидел бы никогда.
+    Файл без даты — первая, ручная доставка — берётся, пока датированных нет.
+    """
+    dated = sorted(CACHE.glob("defaults_ru_*.json"))
+    if dated:
+        return dated[-1]
+    return DEFAULTS if DEFAULTS.exists() else None
+
+
 def default_records() -> dict[str, tuple[DefaultRecord, ...]]:
     """События дефолтов по выпускам с диска; пусто — перечня нет.
 
     Перечень забирается целиком по стране (`emission_emitent_country_id = 1`):
     3 529 записей в четырёх запросах против одного запроса на выпуск.
+    Берётся свежайшая доставка (`defaults_path`).
     """
-    if not DEFAULTS.exists():
+    path = defaults_path()
+    if path is None:
         logger.warning("перечня дефолтов на диске нет: %s", DEFAULTS)
         return {}
     found: dict[str, list[DefaultRecord]] = {}
-    for item in json.loads(DEFAULTS.read_text(encoding="utf-8")).get("items", []):
+    for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
         emission = str(item.get("emission_id") or "")
         found.setdefault(emission, []).append(
             DefaultRecord(

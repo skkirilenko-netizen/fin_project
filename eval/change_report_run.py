@@ -348,7 +348,9 @@ def _health(kind: str, rows: list) -> None:
     failed = [
         item
         for item in sources
-        if str(item.get("status")) in ("failed", "no_quota", "stopped")
+        # «cached» — стадия прошла, а файл дня не обновила: новых данных
+        # не пришло, и молчать об этом значило бы выдать кэш за доставку.
+        if str(item.get("status")) in ("failed", "no_quota", "stopped", "cached")
     ]
     if failed:
         print("> **Доставка неполна, и список собран на том, что дошло.**\n>")

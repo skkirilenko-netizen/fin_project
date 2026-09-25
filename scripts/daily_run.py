@@ -85,6 +85,21 @@ STAGES: tuple[Stage, ...] = (
             "путь к ней: пропущенный день не восстанавливается ничем."
         ),
     ),
+    # **Перечень дефолтов — ежедневно**: дата события приходит только отсюда,
+    # а весь перечень по стране стоит четырёх запросов. До 25.09.2026 стадии
+    # не было вовсе, и перечень от 22.09 не обновлялся ничем.
+    Stage(
+        code="defaults",
+        name="перечень дефолтов",
+        script="scripts/defaults_fetch.py",
+        every=1,
+        blocking=False,
+        why=(
+            "Дефолт — событие дня с датой, и корзину «Разбор» по нему маршрут "
+            "даёт только по записи перечня: без ежедневной доставки дефолт, "
+            "случившийся после последней, не виден вовсе."
+        ),
+    ),
     Stage(
         code="moex",
         name="сектор повышенного риска биржи",
@@ -166,6 +181,7 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
     if dry:
         said |= {"status": "skipped", "why": "прогон без обращений к источникам"}
         return said
+    written_before = _stamp(_marker(stage))
     argv = sys.argv
     try:
         sys.argv = [stage.script]
@@ -189,7 +205,40 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
         "requests": _spent() - before,
         "seconds": round(time.monotonic() - started, 1),
     }
-    return said
+    return _honest(said, _marker(stage), written_before)
+
+
+def _stamp(path: Path) -> float | None:
+    """Время записи файла; None — файла нет."""
+    return path.stat().st_mtime if path.exists() else None
+
+
+def _honest(said: dict, marker: Path, written_before: float | None) -> dict:
+    """«done» только у доставки, которая действительно положила данные дня.
+
+    **Стадия, не обновившая свой файл, не доставила ничего, что бы ни
+    вернул скрипт.** С 22.09.2026 стадия выпусков писала «done», не сделав
+    ни одного запроса: ответы брались из кэша, и признаки дефолта застыли.
+    Судится по самому файлу-результату, а не по счётчику запросов:
+    у доставок биржи счётчика Cbonds нет вовсе. Файл не переписан —
+    статус «cached» с датой того файла, что лежит.
+    """
+    if said.get("status") != "done":
+        return said
+    if _stamp(marker) is not None and _stamp(marker) != written_before:
+        return said
+    when = _stamp(marker)
+    return said | {
+        "status": "cached",
+        "file_date": (
+            f"{date.fromtimestamp(when):%Y-%m-%d}" if when is not None else None
+        ),
+        "why": (
+            f"файл доставки не обновлён, лежит от {date.fromtimestamp(when):%d.%m.%Y}"
+            if when is not None
+            else "файла доставки нет вовсе"
+        ),
+    }
 
 
 _RUN = """
@@ -424,6 +473,8 @@ def _marker(stage: Stage) -> Path:
     """
     if stage.code == "ratings":
         return ROOT / "data" / "raw" / "cbonds" / "ratings" / f"{date.today():%Y-%m-%d}.json"
+    if stage.code == "defaults":
+        return ROOT / "data" / "raw" / "cbonds" / f"defaults_ru_{date.today():%Y-%m-%d}.json"
     if stage.code == "moex":
         return ROOT / "data" / "raw" / "moex" / "bonds_traded.json"
     # Срез торгов вчерашнего дня: сегодняшнего у биржи ещё нет, и ждать
