@@ -73,6 +73,39 @@ ON CONFLICT (inn, as_of, kind) DO UPDATE SET
 """
 
 
+# **Дни, когда становится виден промежуточный комплект** (фаза 5-бис): с него
+# меняется база маршрута, и точка сетки ставится на этот день — иначе смена
+# базы датировалась бы ближайшей неделей. День — появление записи у агрегатора,
+# срок закона — только там, где его нет; правило то же, что у выборки базы
+# (`routing_store._LATEST_INTERIM`).
+_INTERIM_VISIBLE = """
+SELECT DISTINCT COALESCE(
+    (s.meta->>'disclosed_on')::date,
+    (s.meta->'cbonds'->>'created_at')::date,
+    s.period_end + CASE s.standard WHEN 'ifrs' THEN %(ifrs)s ELSE %(rsbu)s END
+) AS day
+FROM src_file s
+WHERE s.is_actual AND s.status <> 'quarantine' AND s.reporting_kind = 'interim'
+"""
+
+
+def interim_days(start: date, today: date) -> set[date]:
+    """Дни видимости промежуточных комплектов внутри окна пересчёта."""
+    from finlib.standards import Standard
+
+    known = load_routing().history.known_from
+    with connection() as conn:
+        rows = fetch_all(
+            _INTERIM_VISIBLE,
+            {
+                "ifrs": known.days(Standard.IFRS, interim=True),
+                "rsbu": known.days(Standard.RSBU, interim=True),
+            },
+            conn=conn,
+        )
+    return {row["day"] for row in rows if start <= row["day"] <= today}
+
+
 def grid(today: date, step: int, depth: int) -> tuple[tuple[date, ...], int]:
     """Сетка дат пересчёта: неделя плюс точка на каждую дату события.
 
@@ -97,6 +130,7 @@ def grid(today: date, step: int, depth: int) -> tuple[tuple[date, ...], int]:
     for entry in risk_sectors().values():
         if entry.since is not None and start <= entry.since <= today:
             events.add(entry.since)
+    events |= interim_days(start, today)
     # Число точек события считается после сведения: день события, попавший
     # на неделю сетки, второй точкой не становится, и приписывать его
     # событиям значило бы посчитать одну точку дважды.
