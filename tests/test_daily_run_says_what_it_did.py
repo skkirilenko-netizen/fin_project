@@ -64,6 +64,50 @@ def test_the_market_series_is_recomputed_after_delivery() -> None:
     assert "market_series" in called, "ряд не пересчитывается в прогоне"
 
 
+def _function(name: str) -> ast.FunctionDef:
+    """Функция ежедневного прогона по имени."""
+    for node in ast.walk(ast.parse(_source())):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"в прогоне нет функции {name}")
+
+
+def _calls(node: ast.AST) -> list[str]:
+    """Имена вызываемых функций в порядке появления в тексте."""
+    found = [
+        item
+        for item in ast.walk(node)
+        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
+    ]
+    return [item.func.id for item in sorted(found, key=lambda item: item.lineno)]
+
+
+def test_the_run_record_is_opened_before_any_delivery() -> None:
+    """Строка прогона пишется при старте, а не после доставок.
+
+    25.09.2026 прогон оборвался на снимке рейтингов, и будь обрыв вне
+    перехвата стадии, журнал не сказал бы ничего: «прогона не было»
+    и «прогон упал» выглядели бы одинаково.
+    """
+    called = _calls(_function("main"))
+    assert "_open_run" in called and "_deliver_and_route" in called
+    assert called.index("_open_run") < called.index("_deliver_and_route")
+    assert "_close_failed" in called, "оборвавшийся прогон не закрывает свою строку"
+
+
+def test_a_broken_delivery_is_written_to_the_log() -> None:
+    """Обрыв доставки идёт в журнал процесса с трассировкой, а не одной строкой."""
+    stage = _function("_run_stage")
+    logged = [
+        item
+        for item in ast.walk(stage)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == "exception"
+    ]
+    assert logged, "исключение доставки не пишется в daily_run.log"
+
+
 def _said(rows: list) -> str:
     """Что отчёт печатает о здоровье доставок."""
     out = io.StringIO()

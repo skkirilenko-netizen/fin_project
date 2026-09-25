@@ -175,7 +175,14 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
         code = int(stop.code or 0)
         said |= {"status": "done" if code == 0 else "failed", "exit": code}
     except Exception as failure:  # noqa: BLE001
-        said |= {"status": "failed", "error": str(failure)[:200]}
+        # В журнал процесса — целиком, с трассировкой: в `routing_run` идёт
+        # только строка, и 25.09.2026 по ней было не понять, какой запрос
+        # оборвался и где.
+        logger.exception("доставка «%s» оборвалась", stage.name)
+        said |= {
+            "status": "failed",
+            "error": f"{type(failure).__name__}: {failure}"[:200],
+        }
     finally:
         sys.argv = argv
     said |= {
@@ -190,6 +197,48 @@ INSERT INTO routing_run (kind, as_of, status, code_version, methodology, sources
 VALUES ('run', %(as_of)s, 'running', %(code)s, %(methodology)s, %(sources)s)
 RETURNING id
 """
+
+def _open_run(today: date, methodology: str) -> int:
+    """Пишет строку прогона при старте, до первой доставки.
+
+    **Строка появляется в начале, а не в конце.** Прежде она писалась после
+    доставок, и прогон, оборвавшийся на них, не оставлял в журнале ничего —
+    «прогона не было» и «прогон упал» выглядели одинаково.
+    """
+    with connection() as conn:
+        run_id = fetch_all(
+            _RUN,
+            {
+                "as_of": today,
+                "code": code_version(),
+                "methodology": methodology,
+                "sources": json.dumps([]),
+            },
+            conn=conn,
+        )[0]["id"]
+        conn.commit()
+    return int(run_id)
+
+
+def _close_failed(run_id: int, delivered: list[dict], failure: BaseException) -> None:
+    """Закрывает строку оборвавшегося прогона на своём соединении.
+
+    Соединение своё, потому что транзакция маршрута при обрыве откатывается,
+    а запись об обрыве нужна именно тогда.
+    """
+    with connection() as conn:
+        execute(
+            _DONE,
+            {
+                "id": run_id,
+                "status": "failed",
+                "sources": json.dumps(delivered, ensure_ascii=False),
+                "note": f"прогон оборвался: {type(failure).__name__}: {failure}"[:500],
+            },
+            conn=conn,
+        )
+        conn.commit()
+
 
 _DONE = """
 UPDATE routing_run
@@ -225,7 +274,26 @@ def main() -> int:
     routing = load_routing()
     delivered: list[dict] = []
     stopped = ""
+    run_id = _open_run(today, json.dumps({"routing": routing.version}))
+    try:
+        rows, counts, stopped = _deliver_and_route(run_id, today, dry, delivered)
+    except BaseException as failure:
+        logger.exception("прогон %s оборвался", today)
+        _close_failed(run_id, delivered, failure)
+        raise
+    _publish(today, rows, counts, delivered, stopped)
+    return 1 if stopped else 0
 
+
+def _deliver_and_route(
+    run_id: int, today: date, dry: bool, delivered: list[dict]
+) -> tuple[list, dict, str]:
+    """Доставки дня и маршрут; строку прогона закрывает вместе с точками истории.
+
+    `delivered` наполняется по ходу: при обрыве строка прогона закрывается
+    тем, что успело дойти.
+    """
+    stopped = ""
     for stage in STAGES:
         if _fresh(_marker(stage), stage.every, today):
             delivered.append(
@@ -252,17 +320,6 @@ def main() -> int:
     # **Маршрут строится и в день отказа.** Список нужен и тогда; но отказ
     # стоит в отчёте первым, а не молчит.
     with connection() as conn:
-        run_id = fetch_all(
-            _RUN,
-            {
-                "as_of": today,
-                "code": code_version(),
-                "methodology": json.dumps({"routing": routing.version}),
-                "sources": json.dumps(delivered, ensure_ascii=False),
-            },
-            conn=conn,
-        )[0]["id"]
-        conn.commit()
         # **Ряд спредов пересчитывается после доставки, а не читается
         # вчерашний.** Доставка кладёт новый срез, и маршрут, посчитанный
         # по старому ряду, объявил бы вчерашнее состояние сегодняшним.
@@ -304,7 +361,13 @@ def main() -> int:
             conn=conn,
         )
         conn.commit()
+    return rows, counts, stopped
 
+
+def _publish(
+    today: date, rows: list, counts: dict, delivered: list[dict], stopped: str
+) -> None:
+    """Список, выгрузка, карточки и отчёт изменений по записанному маршруту."""
     # Список, выгрузка и карточки — тем же кодом, что руками: второй путь
     # к странице разошёлся бы с первым.
     #
@@ -351,7 +414,6 @@ def main() -> int:
         print(f"  ОСТАНОВКА: {stopped}")
     print(f"  отчёт изменений: {report}")
     print(f"  строк маршрута: {counts.get('эмитентов', 0)}")
-    return 1 if stopped else 0
 
 
 def _marker(stage: Stage) -> Path:

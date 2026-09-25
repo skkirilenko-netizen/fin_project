@@ -130,6 +130,48 @@ def _verify_applied(filters: tuple[dict[str, Any], ...], items: list[dict]) -> N
             )
 
 
+def _post(method: str, body: dict[str, Any]) -> httpx.Response:
+    """Запрос к источнику с повтором при таймауте и ответе 5xx.
+
+    **Сбой одного запроса — не отказ источника.** 25.09.2026 один таймаут
+    на 661-м запросе снимка рейтингов оборвал весь прогон дня. Повторяется
+    только то, что бывает временным: таймаут и ответ 5xx. Ответ 4xx —
+    суждение источника о запросе, и повтор его не изменит. Каждая попытка
+    проходит предел частоты и считается в расходе запросов: суточная норма
+    её тоже считает. Попытки исчерпаны — таймаут поднимается как был,
+    ответ 5xx возвращается вызывающему и становится `CbondsError`.
+    """
+    attempts = max(settings.cbonds_attempts, 1)
+    for attempt in range(1, attempts + 1):
+        pace.wait()
+        pace.requested += 1
+        try:
+            response = httpx.post(
+                f"{settings.cbonds_base_url}/{method}/",
+                json=body,
+                timeout=settings.http_timeout_s,
+            )
+        except httpx.TimeoutException as failure:
+            if attempt == attempts:
+                raise
+            reason = f"таймаут {settings.http_timeout_s} с ({failure})"
+        else:
+            if response.status_code < 500 or attempt == attempts:
+                return response
+            reason = f"ответ {response.status_code}"
+        pause = settings.cbonds_retry_pause_s * attempt
+        logger.warning(
+            "Cbonds %s: %s, попытка %d из %d, повтор через %.0f с",
+            method,
+            reason,
+            attempt,
+            attempts,
+            pause,
+        )
+        time.sleep(pause)
+    raise AssertionError("цикл попыток завершается возвратом или исключением")
+
+
 def fetch(
     method: str,
     name: str,
@@ -165,14 +207,8 @@ def fetch(
             "filters": list(filters),
             "quantity": {"limit": limit, "offset": offset},
         }
-        pace.wait()
-        pace.requested += 1
         logger.info("Cbonds %s: запрос (%s), смещение %d", method, name, offset)
-        response = httpx.post(
-            f"{settings.cbonds_base_url}/{method}/",
-            json=body,
-            timeout=settings.http_timeout_s,
-        )
+        response = _post(method, body)
         raw = response.text
         if response.status_code != 200:
             raise CbondsError(f"Cbonds {method}: {response.status_code} — {raw[:200]}")

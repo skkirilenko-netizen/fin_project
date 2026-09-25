@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     cbonds_base_url: str = "https://ws.cbonds.info/services/json"
     cbonds_login: str = ""
     cbonds_password: str = ""
+    # Попыток на один запрос к Cbonds при таймауте и ответе 5xx, считая
+    # первую, и пауза перед повтором (растёт с номером попытки). 25.09.2026
+    # один таймаут на 661-м запросе оборвал снимок рейтингов и весь прогон
+    # дня; пропущенный день снимка не восстанавливается ничем.
+    cbonds_attempts: int = 3
+    cbonds_retry_pause_s: float = 10.0
 
     http_timeout_s: float = 30.0
     http_retries: int = 3
