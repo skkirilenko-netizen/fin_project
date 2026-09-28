@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from finlib.config import settings
+from finlib.sources import network
 
 logger = logging.getLogger(__name__)
 
@@ -146,10 +147,16 @@ def _post(method: str, body: dict[str, Any]) -> httpx.Response:
         pace.wait()
         pace.requested += 1
         try:
-            response = httpx.post(
-                f"{settings.cbonds_base_url}/{method}/",
-                json=body,
-                timeout=settings.http_timeout_s,
+            # Нет сети у нас — не попытка источника: её пережидают минутами
+            # и называют «нет сети» (`network.send`), а не тратят на неё
+            # попытки, отведённые сбою на той стороне.
+            response = network.send(
+                lambda: httpx.post(
+                    f"{settings.cbonds_base_url}/{method}/",
+                    json=body,
+                    timeout=settings.http_timeout_s,
+                ),
+                f"Cbonds {method}",
             )
         except httpx.TimeoutException as failure:
             if attempt == attempts:

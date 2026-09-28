@@ -37,6 +37,7 @@ from finlib.scoring.routing import load_routing
 from finlib.scoring.routing_store import routing_rows
 from finlib.sources import cbonds
 from finlib.sources.market import series as market_series
+from finlib.sources.network import NetworkDownError
 from finlib.version import code_version
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,12 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
     except SystemExit as stop:
         code = int(stop.code or 0)
         said |= {"status": "done" if code == 0 else "failed", "exit": code}
+    except NetworkDownError as failure:
+        # **Нет сети — не отказ источника**, и в журнале и отчёте это разные
+        # записи: 28.09.2026 пропажа сети у машины была записана
+        # «источник отказал», хотя до источника не дошёл ни один запрос.
+        logger.exception("доставка «%s»: нет сети", stage.name)
+        said |= {"status": "offline", "why": str(failure)[:200]}
     except Exception as failure:  # noqa: BLE001
         # В журнал процесса — целиком, с трассировкой: в `routing_run` идёт
         # только строка, и 25.09.2026 по ней было не понять, какой запрос
@@ -401,6 +408,9 @@ def _deliver_and_route(
             break
         said = _run_stage(stage, dry)
         delivered.append(said)
+        if said["status"] == "offline" and stage.blocking:
+            stopped = f"нет сети на доставке «{stage.name}»"
+            break
         if said["status"] == "failed" and stage.blocking:
             stopped = f"источник отказал на доставке «{stage.name}»"
             break

@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from finlib.sources import network
+
 logger = logging.getLogger(__name__)
 
 CACHE = Path("data/raw/moex")
@@ -96,11 +98,17 @@ def fetch(
         pace.requested += 1
         logger.info("ISS %s (%s)", path, name)
         try:
-            response = httpx.get(
-                f"{BASE}/{path.lstrip('/')}",
-                params=params or {},
-                timeout=30.0,
-                headers={"User-Agent": AGENT},
+            # Нет сети у нас — не обрыв на той стороне: пережидается
+            # минутами и поднимается `NetworkDownError`, которая не
+            # `httpx.HTTPError` и мимо повторов ниже проходит насквозь.
+            response = network.send(
+                lambda: httpx.get(
+                    f"{BASE}/{path.lstrip('/')}",
+                    params=params or {},
+                    timeout=30.0,
+                    headers={"User-Agent": AGENT},
+                ),
+                f"ISS {path}",
             )
             if response.status_code < 500:
                 break

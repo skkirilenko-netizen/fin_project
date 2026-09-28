@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finlib.sources.moex import fetch, rows  # noqa: E402
+from finlib.sources.network import NetworkDownError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         where = snapshot(date.today(), refresh=args.refresh)
         issuers(date.today())
+    except NetworkDownError:
+        # Нет сети у нас — не «источник не ответил»: прогон дня называет
+        # это своим статусом, и код возврата его бы стёр.
+        raise
     except Exception as failure:  # noqa: BLE001 — причина называется словами
         logger.error("снимок не сделан: %s", failure)
         return 1
