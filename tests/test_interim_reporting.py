@@ -136,11 +136,14 @@ def test_the_cutoff_comes_from_the_distribution() -> None:
     её здесь значило бы вернуть магическую величину в другом файле.
     """
     policy = load_interim()
+    moving = [item.code for item in policy.features if item.frozen is None]
+    assert moving, "хоть один признак считается перцентилем"
     assert percentile([], 95) is None
-    assert cutoffs(policy, {item.code: [] for item in policy.features}) == {}
+    empty = cutoffs(policy, {item.code: [] for item in policy.features})
+    assert not set(empty) & set(moving)
     values = [Decimal(number) / 100 for number in range(101)]
     edges = cutoffs(policy, {item.code: values for item in policy.features})
-    assert all(edge == Decimal("0.95") for edge in edges.values())
+    assert all(edges[code] == Decimal("0.95") for code in moving)
 
 
 def test_the_last_pair_decides_not_the_whole_series() -> None:
@@ -182,3 +185,22 @@ def test_the_kind_of_the_set_travels_with_the_finding(kind: str) -> None:
     )
     said = findings(policy, ordered, {"interim_cash_drop": Decimal("0.5")}, date(2025, 7, 1))
     assert said[0].kind == kind
+
+
+def test_the_cash_drop_cutoff_is_frozen_on_the_day_of_measurement() -> None:
+    """Отсечка падения денежных средств не едет вместе с распределением.
+
+    Решение владельца 28.09.2026: заморожена днём замера 27.09.2026, в маршрут
+    признак не идёт, в карточке — справочно.
+    """
+    policy = load_interim()
+    by_code = {item.code: item for item in policy.features}
+    cash = by_code["interim_cash_drop"]
+    assert cash.frozen is not None and cash.frozen.measured_on == date(2026, 9, 27)
+    assert cash.decision is not None
+    assert not cash.decision.in_route and cash.decision.card == "reference"
+    # Какое бы распределение ни пришло, отсечка — замороженная.
+    edges = cutoffs(policy, {"interim_cash_drop": [Decimal("0.1")] * 100})
+    assert edges["interim_cash_drop"] == cash.frozen.value
+    # Незамороженные признаки по-прежнему считаются перцентилем.
+    assert by_code["interim_short_debt_growth"].frozen is None

@@ -75,6 +75,28 @@ class Measure(BaseModel):
     requires_positive_previous: bool
 
 
+class Frozen(BaseModel):
+    """Отсечка, замороженная днём замера: величина, день и откуда она взята."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    value: Decimal
+    measured_on: date
+    origin: str = Field(min_length=1)
+
+
+class Decision(BaseModel):
+    """Решение владельца по признаку: в маршрут ли, где показывается, на каких числах."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    by: str = Field(min_length=1)
+    in_route: bool
+    card: str = Field(pattern="^(reference|none)$")
+    measured: str = Field(min_length=1)
+    review: str = Field(min_length=1)
+
+
 class Feature(BaseModel):
     """Признак изменения: величина, сторона, отсечка, формулировка."""
 
@@ -92,6 +114,10 @@ class Feature(BaseModel):
     subgroup: str = Field(min_length=1)
     escalation: bool
     statement: str = Field(min_length=1)
+    # Отсечка, замороженная днём замера; пусто — считается перцентилем
+    # распределения на каждом вызове.
+    frozen: Frozen | None = None
+    decision: Decision | None = None
 
     @model_validator(mode="after")
     def _line_is_known(self) -> "Feature":
@@ -458,6 +484,13 @@ def cutoffs(
     """
     found: dict[str, Decimal] = {}
     for feature in policy.features:
+        # **Замороженная отсечка не едет вместе с распределением** (решение
+        # владельца 28.09.2026 по падению денежных средств): порог, пересчитанный
+        # на каждом прогоне, отвечал бы каждый раз о другом — то же правило,
+        # что у рыночной лестницы и сверки IV квартала.
+        if feature.frozen is not None:
+            found[feature.code] = feature.frozen.value
+            continue
         edge = percentile(spread.get(feature.code, []), feature.percentile)
         if edge is None:
             logger.warning(
