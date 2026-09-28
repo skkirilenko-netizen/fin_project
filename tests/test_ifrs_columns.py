@@ -227,3 +227,23 @@ def test_page_without_text_layer_inside_the_forms_is_reported() -> None:
     )
     assert document.pages_without_text == (2,)
     assert document.page_at(0) == 1
+
+
+def test_a_separate_note_cell_is_not_glued_to_the_value() -> None:
+    """Отдельная ячейка из номера примечания левее величин — ссылка, а не разряды.
+
+    У Самолёта строка ОДДС «Финансовые расходы 8 106 129 79 979» по координатам —
+    три ячейки; колонки формы не сложились, и разбор по строению числа читал
+    8 106 129 — 795 % валюты баланса.
+    """
+    from finlib.sources.ifrs_extract import _note_cell_split
+
+    cells = {
+        0: [(Decimal(8), 337.0), (Decimal(106129), 449.6), (Decimal(79979), 538.2)],
+        # Три величины при двух периодах, но первая — не номер примечания.
+        1: [(Decimal(1250), 337.0), (Decimal(10), 449.6), (Decimal(20), 538.2)],
+        # Номер вне пределов номеров примечаний — не ссылка.
+        2: [(Decimal(99), 337.0), (Decimal(10), 449.6), (Decimal(20), 538.2)],
+    }
+    texts = {0: ["8", "106 129", "79 979"], 1: ["1 250", "10", "20"], 2: ["99", "10", "20"]}
+    assert _note_cell_split(cells, texts, 2) == {0: (Decimal(106129), Decimal(79979))}

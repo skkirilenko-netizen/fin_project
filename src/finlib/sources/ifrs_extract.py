@@ -1123,27 +1123,34 @@ def _columns_of_form(
         return {}
 
     cells: dict[int, list[tuple[Decimal, float]]] = {}
+    # Текст числовых ячеек строки: по нему узнаётся ячейка-ссылка на примечание.
+    texts: dict[int, list[str]] = {}
     for index, line in enumerate(lines):
         found = [
-            (parsed, right)
+            (parsed, right, text)
             for text, right in columns(line)
             if (parsed := parse_amount(text, grouping)) is not None
         ]
         if found:
-            cells[index] = found
+            cells[index] = [(parsed, right) for parsed, right, _ in found]
+            texts[index] = [text for _, _, text in found]
     if not cells:
         return {}
 
     taken = len(report_dates)
     total = layout.total if layout is not None and layout.wider else taken
     offset = layout.offset if layout is not None and layout.wider else 0
+    # Ячейка примечания стоит отдельной ячейкой и по координатам видна даже
+    # там, где колонки формы не сложились (у Самолёта ОДДС — страницы
+    # без слоя внутри форм).
+    split_off = _note_cell_split(cells, texts, taken) if total == taken else {}
     edges = _column_edges(
         [right for row in cells.values() for _, right in row], total
     )
     if len(edges) < total:
-        return {}
+        return split_off
 
-    placed: dict[int, tuple[Decimal, ...]] = {}
+    placed: dict[int, tuple[Decimal, ...]] = dict(split_off)
     for index, row in cells.items():
         values: list[Decimal | None] = [None] * len(edges)
         for amount, right in row:
@@ -1165,6 +1172,37 @@ def _columns_of_form(
         if all(item is not None for item in window):
             placed[index] = tuple(item for item in window if item is not None)
     return placed
+
+
+def _note_cell_split(
+    cells: dict[int, list[tuple[Decimal, float]]],
+    texts: dict[int, list[str]],
+    taken: int,
+) -> dict[int, tuple[Decimal, ...]]:
+    """Строки, у которых первая числовая ячейка — отдельная ссылка на примечание.
+
+    **Номер примечания склеивался с величиной не в ячейке, а в плоском тексте.**
+    У Самолёта строка ОДДС «Финансовые расходы 8 106 129 79 979» по координатам —
+    три ячейки: «8» на 337-м пункте, «106 129» и «79 979» в колонках периодов.
+    Колонки формы там не сложились (страницы без слоя внутри форм), строка
+    уходила разбору по строению числа, и он читал 8 106 129 — 795 % валюты
+    баланса. Отдельная ячейка — свидетельство строения, а не догадка: ячеек
+    величин ровно столько, сколько периодов, и левее них стоит ячейка из одного
+    номера в пределах номеров примечаний.
+    """
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    # Номер ссылки — в пределах номеров примечаний, объявленных методикой разбора.
+    ceiling = load_parsing_policy().notes.max_number
+    found: dict[int, tuple[Decimal, ...]] = {}
+    for index, row in cells.items():
+        if len(row) != taken + 1:
+            continue
+        first = texts[index][0].strip()
+        if not first.isdigit() or not 1 <= int(first) <= ceiling:
+            continue
+        found[index] = tuple(amount for amount, _ in row[1:])
+    return found
 
 
 def _column_edges(rights: list[float], periods: int) -> tuple[float, ...]:
