@@ -1,9 +1,11 @@
-"""«Срочное»: срок без подтверждения исполнения — не неплатёж, объявленный источником.
+"""«Срочное»: неплатёж — событие дня объявления, и «не исполнено» — три сведения.
 
 23.09.2026 пять купонов стояли в «Срочном» строкой «купон 23.09.2026,
 не исполнено»: платёж был 09.09, неплатёж объявлен 09.09–21.09, 23.09
 истекал льготный срок, а в перечне на день отчёта запись была ещё
 «Технический дефолт». Дефолтом источник объявил их перечнем 25.09.
+А в день объявления неплатежа в «Срочном» их не было вовсе: отбор шёл
+по дате события, то есть по концу льготного срока.
 """
 
 import sys
@@ -16,7 +18,7 @@ sys.path.insert(0, str(settings.base_dir / "eval"))
 
 import change_report_run as report  # noqa: E402
 
-UNTIL = date(2026, 9, 23)
+ANNOUNCED = date(2026, 9, 10)
 
 
 def _record(status: str, met: date | None = None) -> DefaultRecord:
@@ -27,42 +29,63 @@ def _record(status: str, met: date | None = None) -> DefaultRecord:
         status=status,
         due=date(2026, 9, 9),
         when=date(2026, 9, 23),
-        announced=date(2026, 9, 10),
+        announced=ANNOUNCED,
         met=met,
         amount=None,
     )
 
 
-def test_grace_end_today_is_unconfirmed_not_a_default() -> None:
-    """Льготный срок истекает сегодня, дефолта нет — «исполнение не подтверждено»."""
-    order, text = report._record_said(_record("Технический дефолт"), UNTIL)
+def test_urgent_picks_the_day_of_announcement_not_the_grace_end() -> None:
+    """Запись попадает в «Срочное» в день объявления, а в конец льготы — нет."""
+    item = _record("Технический дефолт")
+    assert report._announced_in(item, date(2026, 9, 9), ANNOUNCED)
+    assert not report._announced_in(item, date(2026, 9, 22), date(2026, 9, 23))
+
+
+def test_announced_nonpayment_in_grace_is_unconfirmed_not_a_default() -> None:
+    """Неплатёж объявлен, льгота идёт — «исполнение не подтверждено», не дефолт."""
+    order, text = report._record_said(_record("Технический дефолт"), ANNOUNCED)
     assert order == report.URGENT_UNCONFIRMED
-    assert text.startswith("купон: срок сегодня — конец льготного срока")
+    assert text.startswith("купон: неплатёж, льготный срок до 23.09.2026")
     assert "исполнение не подтверждено" in text
     assert "дефолт источником не объявлен" in text
     assert "плановый срок 09.09.2026" in text and "неплатёж объявлен 10.09.2026" in text
     assert "не исполнено" not in text
 
 
+def test_grace_ending_today_is_said_so() -> None:
+    """Льготный срок истекает в день отчёта — так и сказано."""
+    _, text = report._record_said(_record("Технический дефолт"), date(2026, 9, 23))
+    assert "льготный срок истекает сегодня" in text
+
+
 def test_a_default_declared_by_the_source_is_said_so() -> None:
     """Запись «Дефолт» — объявлен источником, и она первая в очереди."""
-    order, text = report._record_said(_record("Дефолт"), UNTIL)
+    order, text = report._record_said(_record("Дефолт"), ANNOUNCED)
     assert order == report.URGENT_DECLARED
-    assert text.startswith("купон 23.09.2026: дефолт объявлен источником")
+    assert text.startswith("купон: дефолт объявлен источником")
     assert "не подтверждено" not in text
 
 
 def test_a_settled_record_names_the_day_it_was_met() -> None:
-    """Исполнено — с датой исполнения, последним в очереди."""
+    """Исполнено к дню отчёта — с датой исполнения, последним в очереди."""
     order, text = report._record_said(
-        _record("Технический дефолт", met=date(2026, 9, 22)), UNTIL
+        _record("Технический дефолт", met=date(2026, 9, 22)), date(2026, 9, 23)
     )
     assert order == report.URGENT_SETTLED
     assert text == "купон 23.09.2026, исполнено 22.09.2026"
 
 
+def test_a_later_settlement_is_not_known_on_the_day() -> None:
+    """Исполнение позже дня отчёта в этот день ещё не случилось."""
+    order, _ = report._record_said(
+        _record("Технический дефолт", met=date(2026, 9, 22)), ANNOUNCED
+    )
+    assert order == report.URGENT_UNCONFIRMED
+
+
 def test_the_queue_puts_declared_before_unconfirmed_before_ratings() -> None:
-    """Очередь вмешательства: объявленный дефолт, неподтверждённый срок, рейтинг, исполненное."""
+    """Очередь: объявленный дефолт, неплатёж в льготе, рейтинг, исполненное."""
     assert (
         report.URGENT_DECLARED
         < report.URGENT_UNCONFIRMED

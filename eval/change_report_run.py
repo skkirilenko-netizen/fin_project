@@ -113,7 +113,7 @@ def _why(  # noqa: ANN001
         said.append(f"отчётный период: {was} → {now}")
     events = events_of(inn)
     for item in events.records:
-        if item.moment is not None and since < item.moment <= until:
+        if item.moment is not None and _announced_in(item, since, until):
             said.append(_record_said(item, until)[1])
     for item in events.ratings:
         if item.assigned is not None and since < item.assigned <= until:
@@ -207,7 +207,7 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     for inn in now:
         events = events_of(inn)
         for item in events.records:
-            if item.moment is not None and previous < item.moment <= until:
+            if item.moment is not None and _announced_in(item, previous, until):
                 order, text = _record_said(item, until)
                 said.append((order, f"- {_named(inn)}: {text}"))
         # **Срочно не всякое рейтинговое действие, а то, по которому
@@ -262,51 +262,65 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
 
 
 # Очередь вмешательства в «Срочном»: дефолт, объявленный источником, —
-# первым; срок, исполнение по которому не подтверждено, — за ним;
-# рейтинговое действие; исполненное — последним.
+# первым; объявленный неплатёж в льготный срок, исполнение по которому
+# не подтверждено, — за ним; рейтинговое действие; исполненное — последним.
 URGENT_DECLARED, URGENT_UNCONFIRMED, URGENT_RATING, URGENT_SETTLED = 0, 1, 2, 3
+
+
+def _announced_in(item: DefaultRecord, since: date, until: date) -> bool:
+    """Объявлена ли запись в этом окне: по дню объявления, а не по дате события.
+
+    **Неплатёж — событие дня объявления** (решение владельца 28.09.2026; тот же
+    день, с которого его видит маршрут, `DefaultRecord.known_on`). Прежде
+    отбор шёл по дате события, а она у технического дефолта — конец льготного
+    срока: неплатёж, объявленный 10.09, попадал в «Срочное» 23.09, через две
+    недели после того, как корзина по нему уже сменилась.
+    """
+    return item.known_on is not None and since < item.known_on <= until
 
 
 def _record_said(item: DefaultRecord, until: date) -> tuple[int, str]:
     """Строка о записи перечня дефолтов и её место в очереди «Срочного».
 
-    **«Не исполнено» в день срока — не неплатёж, а неизвестность.** Прежде
-    любая неисполненная запись печаталась «не исполнено» с датой события,
-    а дата события у технического дефолта — конец льготного срока
-    (`DefaultRecord.in_grace`). 23.09.2026 пять купонов стояли в «Срочном»
-    «купон 23.09.2026, не исполнено»: платёж был 09.09, неплатёж объявлен
-    09.09–21.09, 23.09 истекал льготный срок, а в перечне на день отчёта
-    запись была ещё «Технический дефолт» — исполнения в последний день срока
-    источник не подтвердил и не опроверг. Дефолтом он объявил их позже,
-    перечнем 25.09. Три сведения — три строки:
+    **«Не исполнено» — не одно сведение, а три.** Прежде любая неисполненная
+    запись печаталась «не исполнено» с датой события, а дата события
+    у технического дефолта — конец льготного срока (`DefaultRecord.in_grace`).
+    23.09.2026 пять купонов стояли «купон 23.09.2026, не исполнено»: платёж был
+    09.09, неплатёж объявлен 09.09–21.09, в перечне на день отчёта запись была
+    ещё «Технический дефолт» — исполнения источник не подтвердил и не
+    опроверг, дефолтом он объявил их перечнем 25.09. Строки:
 
-    - исполнено — с датой исполнения;
-    - дефолт объявлен источником (статус записи не льготный) — с плановым
-      сроком и днём объявления неплатежа;
-    - срок истёк или истекает, дефолта источник не объявил — «исполнение
-      не подтверждено», с плановым сроком и днём объявления неплатежа.
+    - исполнено к дню отчёта — с датой исполнения;
+    - дефолт объявлен источником (статус записи не льготный);
+    - неплатёж объявлен, идёт льготный срок — «исполнение не подтверждено,
+      дефолт источником не объявлен», с концом льготного срока.
+
+    Плановый срок и день объявления неплатежа называются у каждой.
     """
     kind = item.kind.lower() or "обязательство"
     moment = item.moment
     assert moment is not None, "строка печатается только о датированной записи"
-    if item.settled:
+    if item.met is not None and item.met <= until:
         return URGENT_SETTLED, f"{kind} {moment:%d.%m.%Y}, исполнено {item.met:%d.%m.%Y}"
     history = []
-    if item.due is not None and item.due != moment:
+    if item.due is not None:
         history.append(f"плановый срок {item.due:%d.%m.%Y}")
     if item.announced is not None:
         history.append(f"неплатёж объявлен {item.announced:%d.%m.%Y}")
     told = f" ({', '.join(history)})" if history else ""
     if item.declared:
-        return (
-            URGENT_DECLARED,
-            f"{kind} {moment:%d.%m.%Y}: дефолт объявлен источником{told}",
-        )
-    when = "срок сегодня" if moment == until else f"срок {moment:%d.%m.%Y}"
-    what = "конец льготного срока" if item.when is not None else "плановый срок"
+        return URGENT_DECLARED, f"{kind}: дефолт объявлен источником{told}"
+    if item.when is None:
+        grace = "конец льготного срока не назван"
+    elif item.when == until:
+        grace = "льготный срок истекает сегодня"
+    elif item.when < until:
+        grace = f"льготный срок истёк {item.when:%d.%m.%Y}"
+    else:
+        grace = f"льготный срок до {item.when:%d.%m.%Y}"
     return (
         URGENT_UNCONFIRMED,
-        f"{kind}: {when} — {what}, исполнение не подтверждено, "
+        f"{kind}: неплатёж, {grace}, исполнение не подтверждено, "
         f"дефолт источником не объявлен{told}",
     )
 
