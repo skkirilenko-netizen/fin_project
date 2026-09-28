@@ -38,8 +38,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.metrics.display import digits, foreign_units, money  # noqa: E402
+from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.report.market_chart import as_image, charts  # noqa: E402
-from finlib.scoring.interim import load_interim  # noqa: E402
+from finlib.scoring.interim import (  # noqa: E402
+    issuer_series,
+    load_interim,
+    reference_readings,
+)
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import (  # noqa: E402
     SOURCE_NAMES,
@@ -234,6 +239,72 @@ def _trend(item, conn, said: list) -> None:  # noqa: ANN001
             for code in codes
         ]
         add(f"| {point.moment:%d.%m.%Y} | " + " | ".join(ltm + change) + " |")
+
+
+# Почему доли нет: код даёт `scoring.interim.Reading.silence`, слова — здесь.
+_SILENCE = {
+    "no_series": "комплектов отчётности нет — мерить не на чем",
+    "single": "комплект один — пары для сравнения нет",
+    "previous_missing": "в прежнем комплекте величина не раскрыта — мерить нечем",
+    "current_missing": "в последнем комплекте величина не раскрыта — мерить нечем",
+    "previous_not_positive": (
+        "прежняя величина неположительна — доля изменения не выражается"
+    ),
+    "unit_differs": "комплекты составлены в разных единицах — доля не сравнима",
+}
+
+
+def _changes(item, conn, said: list) -> None:  # noqa: ANN001
+    """Признаки изменения, показываемые справочно по решению владельца.
+
+    Ряд, пару и долю даёт боевой путь (`scoring.interim.reference_readings`),
+    отсечка — замороженная днём замера; карточка только печатает. Корзину
+    сказанное здесь не называет и в маршрут не идёт.
+    """
+    policy = load_interim()
+    readings = reference_readings(
+        policy, issuer_series(conn, item.inn), date.today()
+    )
+    if not readings:
+        return
+    units = load_lines().units
+    add = said.append
+    add("\n## Признаки изменения — справочно\n")
+    add(
+        "Корзину не называют и в маршруте не участвуют: признак измерен "
+        "и не заведён. Сравнивается последний комплект с предыдущим.\n"
+    )
+    for entry in readings:
+        feature, frozen = entry.feature, entry.feature.frozen
+        assert frozen is not None and feature.decision is not None
+        edge = (
+            f"отсечка {digits(entry.threshold * 100, 1)} %, заморожена "
+            f"{frozen.measured_on:%d.%m.%Y}"
+        )
+        if entry.silence is not None:
+            add(f"- **{feature.name}**: {_SILENCE[entry.silence]} ({edge}).")
+            continue
+        was, now = entry.was, entry.now
+        assert was is not None and now is not None
+        assert entry.value is not None
+        assert entry.previous is not None and entry.current is not None
+        # Единица у пары одна: комплекты в разных единицах доли не дают
+        # (`unit_differs`) и печатаются строкой выше.
+        unit = units.name_of(now.unit_code) if now.unit_code else "единица не названа"
+        outcome = "**сработал**" if entry.fired else "не сработал"
+        caveat = (
+            f"; {policy.confidence.said(now.kind, now.moment)}" if now.interim else ""
+        )
+        add(
+            f"- **{feature.name}**: {outcome} — доля "
+            f"{digits(entry.value * 100, 1)} %; {edge}. Было "
+            f"{money(entry.previous)} на {was.moment:%d.%m.%Y}, стало "
+            f"{money(entry.current)} {unit} на {now.moment:%d.%m.%Y}{caveat}."
+        )
+        add(
+            f"\n  *Решение владельца ({feature.decision.by}): в маршрут "
+            f"не вводится. {' '.join(feature.decision.measured.split())}*"
+        )
 
 
 def _ratings(item, routing, said: list) -> None:  # noqa: ANN001
@@ -623,6 +694,7 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             f"{money(offered) if offered is not None else '—'}, денежные "
             f"средства {money(cash) if cash is not None else 'не раскрыты'}\n"
         )
+    _changes(item, conn, said)
     _stale(item, said)
     _market(item, said)
     _shares(item, said)

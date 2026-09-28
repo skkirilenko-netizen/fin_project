@@ -43,15 +43,15 @@ from finlib.scoring.interim import (  # noqa: E402
     cutoffs,
     distribution,
     findings,
+    issuer_series,
     load_interim,
     pairs,
-    series,
 )
 from finlib.scoring.routing import load_routing, short_of_cash  # noqa: E402
 from finlib.sources.cbonds_events import in_unit, issues_of  # noqa: E402
 from finlib.sources.cbonds_flows import refinancing  # noqa: E402
 from finlib.sources.market import load_market, universe  # noqa: E402
-from finlib.standards import Standard, load_standards  # noqa: E402
+from finlib.standards import Standard  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -125,22 +125,18 @@ def _load() -> tuple[dict[str, tuple[Observation, ...]], dict[str, date], set[st
     # комплектов разных стандартов не сравниваются: ряды несопоставимы.
     # До 25.09.2026 ряд брался только по РСБУ — промежуточных МСФО в базе
     # не было, потому что их отбраковала загрузка с ключом по году.
-    preference = load_standards().base_standard
+    # Выбор ряда — боевой (`scoring.interim.issuer_series`): его же зовёт
+    # карточка, и второй способ выбрать ряд разошёлся бы с первым.
     with connection() as conn:
         rows = fetch_all(_WITH_INTERIM, {}, conn=conn)
         have = {row["inn"] for row in rows}
         known = sorted(set(universe()) | have)
         found: dict[str, tuple[Observation, ...]] = {}
         for inn in known:
-            by_standard = {
-                standard: series(conn, inn, standard) for standard in Standard
-            }
-            chosen = preference.choose(
-                {standard for standard, obs in by_standard.items() if obs}
-            )
-            if chosen is not None:
-                found[inn] = by_standard[chosen]
-                _CHOSEN[inn] = chosen
+            chosen = issuer_series(conn, inn)
+            if chosen:
+                found[inn] = chosen
+                _CHOSEN[inn] = chosen[0].standard
     return found, events(), have
 
 

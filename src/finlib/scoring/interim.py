@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from finlib.config import settings
 from finlib.db import PgConnection, fetch_all
 from finlib.metrics.interim import Rolling, rolling_flow
-from finlib.standards import Standard
+from finlib.standards import Standard, load_standards
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,24 @@ class Feature(BaseModel):
     # распределения на каждом вызове.
     frozen: Frozen | None = None
     decision: Decision | None = None
+
+    @property
+    def for_card(self) -> bool:
+        """Показывается ли признак в карточке справочно по решению владельца."""
+        return self.decision is not None and self.decision.card == "reference"
+
+    @model_validator(mode="after")
+    def _reference_is_frozen(self) -> "Feature":
+        """Справочный в карточке признак стоит на замороженной отсечке.
+
+        Отсечка, пересчитанная при сборке каждой карточки, отвечала бы каждый
+        раз о другом, а решение владельца принято на числах одного дня.
+        """
+        if self.for_card and self.frozen is None:
+            raise ValueError(
+                f"{self.code}: в карточке справочно, а отсечка не заморожена"
+            )
+        return self
 
     @model_validator(mode="after")
     def _line_is_known(self) -> "Feature":
@@ -335,6 +353,26 @@ def series(
     return tuple(found)
 
 
+def issuer_series(
+    conn: PgConnection, inn: str, as_of: date | None = None
+) -> tuple[Observation, ...]:
+    """Ряд эмитента одного стандарта, выбранного общим правилом предпочтения.
+
+    **Пары комплектов разных стандартов не сравниваются** — ряды несопоставимы,
+    и стандарт выбирается тем же правилом, что база оценки (`standards.yaml`,
+    `base_standard`): у группы с консолидированной отчётностью — МСФО,
+    у прочих — РСБУ. Зовут его и замер, и карточка: второй способ выбрать
+    ряд разошёлся бы с первым. Пусто — комплектов нет ни в одном стандарте.
+    """
+    by_standard = {
+        standard: series(conn, inn, standard, as_of) for standard in Standard
+    }
+    chosen = load_standards().base_standard.choose(
+        {standard for standard, found in by_standard.items() if found}
+    )
+    return by_standard[chosen] if chosen is not None else ()
+
+
 def value_of(item: Observation, feature: Feature) -> Decimal | None:
     """Величина признака у наблюдения: как есть либо за скользящий год."""
     if feature.rolling:
@@ -433,6 +471,92 @@ def findings(
                 previous=before,
                 current=after,
                 kind=now.kind,
+            )
+        )
+    return tuple(found)
+
+
+@dataclass(frozen=True, slots=True)
+class Reading:
+    """Признак, показанный справочно: последняя пара, доля, отсечка и исход.
+
+    **Показывается и несработавший, и неизмеренный.** Строка «признак
+    не сработал» и отсутствие строки читаются одинаково, а значат разное:
+    мерить могло быть нечем. Поэтому причина, по которой доли нет, названа
+    кодом (`silence`), и пустым он бывает только у измеренного.
+    """
+
+    feature: Feature
+    threshold: Decimal
+    was: Observation | None
+    now: Observation | None
+    previous: Decimal | None
+    current: Decimal | None
+    value: Decimal | None
+    # no_series — комплектов нет; single — комплект один, пары нет;
+    # previous_missing / current_missing — величина не раскрыта;
+    # previous_not_positive — прежняя величина неположительна, доли нет;
+    # unit_differs — комплекты в разных единицах, доля не сравнима.
+    silence: str | None
+
+    @property
+    def fired(self) -> bool:
+        """Сработал ли признак на последней паре."""
+        return self.value is not None and self.value >= self.threshold
+
+
+def reference_readings(
+    policy: InterimPolicy, observations: tuple[Observation, ...], today: date
+) -> tuple[Reading, ...]:
+    """Признаки, которые решение владельца велит показать в карточке справочно.
+
+    Правило то же, что у `findings`: последняя пара наблюдений на дату,
+    отсечка — замороженная (`frozen`), а не перцентиль дня сборки. В маршрут
+    сказанное здесь не идёт.
+    """
+    seen = [item for item in observations if item.moment <= today]
+    now = seen[-1] if seen else None
+    was = seen[-2] if len(seen) >= 2 else None
+    found: list[Reading] = []
+    for feature in policy.features:
+        if not feature.for_card:
+            continue
+        assert feature.frozen is not None
+        before = value_of(was, feature) if was is not None else None
+        after = value_of(now, feature) if now is not None else None
+        moved = (
+            change(policy, feature, was, now)
+            if was is not None and now is not None
+            else None
+        )
+        if now is None:
+            silence: str | None = "no_series"
+        elif was is None:
+            silence = "single"
+        elif before is None:
+            silence = "previous_missing"
+        elif after is None:
+            silence = "current_missing"
+        elif was.unit_code != now.unit_code:
+            # **Комплекты в разных единицах долю не дают**: у 3900019850
+            # 250 210 млн руб. против 245,1 млрд руб. читались сокращением
+            # на 99,9 %, а на деле это минус два процента.
+            silence = "unit_differs"
+            moved = None
+        elif moved is None:
+            silence = "previous_not_positive"
+        else:
+            silence = None
+        found.append(
+            Reading(
+                feature=feature,
+                threshold=feature.frozen.value,
+                was=was,
+                now=now,
+                previous=before,
+                current=after,
+                value=moved,
+                silence=silence,
             )
         )
     return tuple(found)

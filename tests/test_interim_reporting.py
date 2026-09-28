@@ -18,6 +18,7 @@ from finlib.scoring.interim import (
     findings,
     load_interim,
     percentile,
+    reference_readings,
 )
 from finlib.standards import Standard
 
@@ -204,3 +205,66 @@ def test_the_cash_drop_cutoff_is_frozen_on_the_day_of_measurement() -> None:
     assert edges["interim_cash_drop"] == cash.frozen.value
     # Незамороженные признаки по-прежнему считаются перцентилем.
     assert by_code["interim_short_debt_growth"].frozen is None
+
+
+def test_the_card_shows_only_what_the_decision_names() -> None:
+    """Справочно в карточке — только признак с решением владельца, по замороженной отсечке."""
+    policy = load_interim()
+    ordered = (
+        _observation(date(2024, 12, 31), cash=100, debt=100, kind="full"),
+        _observation(date(2025, 6, 30), cash=5, debt=300),
+    )
+    said = reference_readings(policy, ordered, date(2025, 7, 1))
+    assert [item.feature.code for item in said] == ["interim_cash_drop"]
+    cash = said[0]
+    assert cash.silence is None and cash.fired
+    assert cash.value == Decimal("0.95")
+    assert cash.threshold == cash.feature.frozen.value  # type: ignore[union-attr]
+    assert (cash.previous, cash.current) == (Decimal(100), Decimal(5))
+
+
+def test_the_card_says_why_it_did_not_measure() -> None:
+    """Неизмеренный признак не исчезает: причина названа, «не сработал» не сказано."""
+    policy = load_interim()
+    one = (_observation(date(2025, 6, 30), cash=10, debt=100),)
+    assert reference_readings(policy, (), date(2025, 7, 1))[0].silence == "no_series"
+    assert reference_readings(policy, one, date(2025, 7, 1))[0].silence == "single"
+    negative = (
+        _observation(date(2024, 12, 31), cash=-1, debt=100, kind="full"),
+        _observation(date(2025, 6, 30), cash=10, debt=100),
+    )
+    said = reference_readings(policy, negative, date(2025, 7, 1))[0]
+    assert said.silence == "previous_not_positive"
+    assert not said.fired
+    # Комплект позже дня карточки наблюдением не был.
+    late = reference_readings(policy, negative, date(2025, 1, 1))[0]
+    assert late.silence == "single"
+
+
+def test_sets_in_different_units_give_no_share() -> None:
+    """Миллионы против миллиардов — не сокращение на 99,9 %, а несравнимая пара.
+
+    Случай 3900019850: 250 210 млн руб. на 31.12.2025 против 245,1 млрд руб.
+    на 31.03.2026 читались срабатыванием.
+    """
+    from dataclasses import replace
+
+    policy = load_interim()
+    annual = _observation(date(2025, 12, 31), cash=250210, debt=1, kind="full")
+    quarter = _observation(date(2026, 3, 31), cash=245, debt=1)
+    ordered = (replace(annual, unit_code="385"), replace(quarter, unit_code="386"))
+    said = reference_readings(policy, ordered, date(2026, 7, 1))[0]
+    assert said.silence == "unit_differs"
+    assert said.value is None and not said.fired
+
+
+def test_a_small_drop_is_shown_as_not_fired() -> None:
+    """Несработавший признак печатается с долей и отсечкой, а не пропадает."""
+    policy = load_interim()
+    ordered = (
+        _observation(date(2024, 12, 31), cash=100, debt=100, kind="full"),
+        _observation(date(2025, 6, 30), cash=90, debt=100),
+    )
+    said = reference_readings(policy, ordered, date(2025, 7, 1))[0]
+    assert said.silence is None and not said.fired
+    assert said.value == Decimal("0.1")
