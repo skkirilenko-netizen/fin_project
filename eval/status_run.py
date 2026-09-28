@@ -1,0 +1,155 @@
+"""Утренняя сводка одной командой: прошёл ли прогон и что он принёс.
+
+    uv run python eval/status_run.py      # make status
+
+**Только чтение.** Всё, что здесь печатается, уже записано другими: журнал
+прогонов (`routing_run`), снимок рейтингов на диске, отчёт изменений дня.
+Сводка ничего не пересчитывает — второй счёт «Срочного» или смен корзины
+разошёлся бы с отчётом, который читает человек.
+
+**Прогон по расписанию отличается от ручного временем старта.** Отметки
+«по расписанию» журнал не несёт; агент launchd запускает прогон в 10:00
+по рабочим дням (`scripts/ru.finanalysis.daily-run.plist`), и прогоном
+по расписанию здесь считается прогон, стартовавший в рабочий день между
+10:00:00 и `SCHEDULED_SLACK` после. Правило объявлено, и его слабость тоже:
+ручной прогон, запущенный ровно в 10:00, будет принят за плановый.
+"""
+
+import json
+import re
+import sys
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+from finlib.db import fetch_all
+
+# Сколько после 10:00 ещё считается стартом по расписанию: launchd стартует
+# в пределах секунд, пробуждение машины добавляет минуты.
+SCHEDULED_AT = time(10, 0)
+SCHEDULED_SLACK = timedelta(minutes=5)
+
+RATINGS = Path("data/raw/cbonds/ratings")
+OUTPUT = Path("data/output")
+
+_RUNS = """
+SELECT id, kind, as_of, status, started_at, finished_at, sources, note, code_version
+FROM routing_run ORDER BY id DESC
+"""
+
+
+def _local(moment: datetime | None) -> datetime | None:
+    """Время журнала в часовом поясе машины."""
+    return moment.astimezone() if moment is not None else None
+
+
+def _scheduled(run: dict) -> bool:
+    """Стартовал ли прогон по расписанию: рабочий день, 10:00 и не позже допуска."""
+    started = _local(run["started_at"])
+    if started is None or run["kind"] != "run" or started.weekday() >= 5:
+        return False
+    edge = datetime.combine(started.date(), SCHEDULED_AT, tzinfo=started.tzinfo)
+    return edge <= started <= edge + SCHEDULED_SLACK
+
+
+def _clean(run: dict) -> bool:
+    """Чистый прогон: завершён и ни одна доставка не отказала."""
+    deliveries = run["sources"] or []
+    return run["status"] == "done" and all(
+        item.get("status") == "done" for item in deliveries
+    )
+
+
+def _streak(runs: list[dict], now: datetime) -> tuple[int, str]:
+    """Сколько рабочих дней подряд, считая назад, был чистый прогон по расписанию.
+
+    Рабочий день без прогона по расписанию обрывает счёт так же, как упавший:
+    отсутствие прогона — тоже не устойчивость. Сегодняшний день в счёт идёт,
+    только если время прогона уже прошло.
+    """
+    by_day: dict[date, list[dict]] = {}
+    for run in runs:
+        if _scheduled(run):
+            by_day.setdefault(_local(run["started_at"]).date(), []).append(run)
+    day = now.date()
+    if now.time() < SCHEDULED_AT or day.weekday() >= 5:
+        day -= timedelta(days=1)
+    count = 0
+    while True:
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        found = by_day.get(day, [])
+        if not found:
+            return count, f"{day:%d.%m.%Y}: прогона по расписанию нет"
+        if not any(_clean(run) for run in found):
+            return count, f"{day:%d.%m.%Y}: прогон по расписанию не чистый"
+        count += 1
+        day -= timedelta(days=1)
+
+
+def _changes() -> tuple[str, str, str]:
+    """Срочное и смены корзины из свежайшего отчёта изменений: файл, два числа."""
+    found = sorted(OUTPUT.glob("changes_????-??-??.md"))
+    if not found:
+        return "отчёта изменений нет", "—", "—"
+    text = found[-1].read_text(encoding="utf-8")
+    urgent = re.search(r"^## Срочное[^:]*:\s*(\d+)", text, re.M)
+    moved = re.search(r"^## Сменили корзину:\s*(\d+)\s*из\s*(\d+)", text, re.M)
+    return (
+        found[-1].name,
+        urgent.group(1) if urgent else "раздела нет",
+        f"{moved.group(1)} из {moved.group(2)}" if moved else "раздела нет",
+    )
+
+
+def main() -> int:
+    """Печатает утреннюю сводку."""
+    today = date.today()
+    runs = fetch_all(_RUNS, {})
+    print(f"# Сводка на {datetime.now():%d.%m.%Y %H:%M}\n")
+    last = next((run for run in runs if run["kind"] == "run"), None)
+    if last is None:
+        print("Прогонов в журнале нет.")
+        return 1
+    started, finished = _local(last["started_at"]), _local(last["finished_at"])
+    deliveries = last["sources"] or []
+    if isinstance(deliveries, str):
+        deliveries = json.loads(deliveries)
+    spent = sum(item.get("requests") or 0 for item in deliveries)
+    print(
+        f"**Последний прогон** № {last['id']} на {last['as_of']:%d.%m.%Y}: "
+        f"{last['status']}, {'по расписанию' if _scheduled(last) else 'ручной'}, "
+        f"{started:%d.%m %H:%M} — "
+        + (f"{finished:%H:%M}" if finished else "не завершён")
+        + f", запросов {spent}. {last['note'] or ''}\n"
+    )
+    if last["as_of"] != today:
+        print(f"Прогона за {today:%d.%m.%Y} нет.\n")
+    print("| Доставка | Состояние | Запросов | Секунд | Причина |")
+    print("|---|---|---|---|---|")
+    for item in deliveries:
+        print(
+            f"| {item.get('name')} | {item.get('status')} | {item.get('requests', '—')} "
+            f"| {item.get('seconds', '—')} | {item.get('error') or ''} |"
+        )
+    snapshot = RATINGS / f"{today:%Y-%m-%d}.json"
+    if snapshot.exists():
+        taken = json.loads(snapshot.read_text(encoding="utf-8"))
+        issuers = taken.get("issuers") or taken.get("snapshot") or {}
+        print(
+            f"\n**Снимок рейтингов за сегодня** есть: эмитентов {len(issuers)}, "
+            f"отказов {len(taken.get('refused') or {})}."
+        )
+    else:
+        print(f"\n**Снимка рейтингов за {today:%d.%m.%Y} нет.**")
+    name, urgent, moved = _changes()
+    print(f"\n**Отчёт изменений** {name}: срочное {urgent}, сменили корзину {moved}.")
+    count, broke = _streak(runs, datetime.now().astimezone())
+    print(
+        f"\n**Чистых прогонов по расписанию подряд: {count}** (ручные не считаются; "
+        f"счёт оборвался — {broke})."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

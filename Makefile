@@ -64,6 +64,9 @@ watchlist:  ## Собрать список наблюдения в data/output/w
 daily:  ## Ежедневный прогон целиком: доставка, маршрут, список, отчёт изменений
 	uv run python scripts/daily_run.py $(ARGS)
 
+status:  ## Утренняя сводка: последний прогон, доставки, снимок рейтингов, устойчивость (только чтение)
+	uv run python eval/status_run.py
+
 backfill:  ## История корзин: пересчёт маршрута назад за год (--write — с записью)
 	uv run python eval/routing_backfill_run.py $(ARGS)
 
