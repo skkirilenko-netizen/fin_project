@@ -134,7 +134,7 @@ def test_the_daily_run_names_no_network_as_such(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(daily_run, "_marker", lambda stage: tmp_path / "нет.json")
     stage = daily_run.Stage(
         code="probe", name="проба", script=str(script), every=1,
-        blocking=False, why="тест",
+        source="cbonds", why="тест",
     )
     said = daily_run._run_stage(stage, dry=False)
     assert said["status"] == "offline" and "нет сети" in said["why"]

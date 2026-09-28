@@ -20,6 +20,7 @@ import pytest
 
 from finlib.config import settings
 from finlib.sources import cbonds, cbonds_events
+from finlib.sources.network import NetworkDownError
 
 sys.path.insert(0, str(settings.base_dir / "scripts"))
 sys.path.insert(0, str(settings.base_dir / "eval"))
@@ -49,18 +50,53 @@ def _network(silent: set[str]):
 def test_a_silent_issuer_goes_to_refused_and_the_snapshot_goes_on(monkeypatch) -> None:
     """Эмитент без ответа уходит в `refused`, остальные сняты."""
     monkeypatch.setattr(ratings_snapshot.cbonds, "fetch", _network({"2"}))
-    got, refused = ratings_snapshot.take(["1", "2", "3"], TODAY)
-    assert set(got) == {"1", "3"}
+    got, refused, stop = ratings_snapshot.take(["1", "2", "3"], TODAY)
+    assert set(got) == {"1", "3"} and stop is None
     assert set(refused) == {"2"} and "ReadTimeout" in refused["2"]
 
 
 def test_many_in_a_row_are_a_refusal_of_the_source(monkeypatch) -> None:
-    """Молчат подряд многие — это отказ источника, снимок прекращается."""
+    """Молчат подряд многие — это отказ источника, снимок прекращается.
+
+    Снятое до обрыва не теряется, а незапрошенные стоят в отказах
+    с пометкой: маршрут возьмёт им последнее наблюдение, агент в 11:30
+    дозапросит ровно их.
+    """
     monkeypatch.setattr(settings, "cbonds_refused_in_row_max", 3)
-    monkeypatch.setattr(ratings_snapshot.cbonds, "fetch", _network({"1", "2", "3"}))
-    with pytest.raises(ratings_snapshot.SourceRefusedError):
-        ratings_snapshot.take(["1", "2", "3", "4"], TODAY)
+    monkeypatch.setattr(ratings_snapshot.cbonds, "fetch", _network({"2", "3", "4"}))
+    got, refused, stop = ratings_snapshot.take(["1", "2", "3", "4", "5"], TODAY)
+    assert isinstance(stop, ratings_snapshot.SourceRefusedError)
     assert issubclass(ratings_snapshot.SourceRefusedError, cbonds.CbondsError)
+    assert set(got) == {"1"}
+    assert set(refused) == {"2", "3", "4", "5"}
+    assert refused["5"].startswith(ratings_snapshot.NOT_ASKED)
+
+
+def test_no_network_stops_the_snapshot_and_keeps_what_was_taken(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Нет сети — снимок прерван, но файл дня лежит со снятым; прогон видит сбой.
+
+    28.09.2026 прерванный снимок не оставил файла вовсе, хотя 474 эмитента
+    были сняты.
+    """
+
+    def fetch(method: str, name: str, filters: tuple, limit: int) -> dict:
+        inn = filters[0]["value"]
+        if inn == "2":
+            raise NetworkDownError("нет сети: проба")
+        return {"items": [dict(RATED, emitent_inn=inn)]}
+
+    monkeypatch.setattr(ratings_snapshot.cbonds, "fetch", fetch)
+    monkeypatch.setattr(ratings_snapshot, "SNAPSHOTS", tmp_path)
+    monkeypatch.setattr(ratings_snapshot, "issuers", lambda: {"1": "А", "2": "Б", "3": "В"})
+    monkeypatch.setattr(sys, "argv", ["ratings_snapshot.py"])
+    with redirect_stdout(io.StringIO()), pytest.raises(NetworkDownError):
+        ratings_snapshot.main()
+    found = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert set(found["issuers"]) == {"1"}
+    assert found["refused"]["2"].startswith("нет сети")
+    assert found["refused"]["3"].startswith(ratings_snapshot.NOT_ASKED)
 
 
 def test_a_repeated_run_asks_only_the_refused(tmp_path: Path, monkeypatch) -> None:
@@ -170,6 +206,25 @@ def test_the_report_says_the_snapshot_is_partial() -> None:
     """Шапка отчёта называет неполноту снимка числами."""
     text = _said({"issuers": {"1": [], "2": []}, "refused": {"3": "ReadTimeout"}})
     assert "Снимок рейтингов неполный: 2 из 3" in text
+
+
+def test_the_report_tells_silence_from_no_network_and_not_asked() -> None:
+    """Молчание источника, отсутствие сети и незапрошенные — разными строками."""
+    text = _said(
+        {
+            "issuers": {"1": []},
+            "refused": {
+                "2": "ReadTimeout: timed out",
+                "3": "нет сети: Cbonds — проба",
+                "4": "не запрошен: снимок прерван — нет сети",
+                "5": "не запрошен: снимок прерван — нет сети",
+            },
+        }
+    )
+    assert "Снимок рейтингов неполный: 1 из 5" in text
+    assert "источник не ответил — 1" in text
+    assert "не было сети у нас — 1" in text
+    assert "не запрошены: снимок прерван — 2" in text
 
 
 def test_the_report_says_the_snapshot_is_missing() -> None:

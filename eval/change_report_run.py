@@ -468,10 +468,26 @@ def _ratings_health(found: dict | None) -> None:
     if not refused:
         return
     total = got + len(refused)
+    # Три причины и три разных сведения: источник промолчал, сети не было
+    # у нас, до эмитента снимок не дошёл, потому что прервался.
+    reasons = [str(why) for why in refused.values()]
+    not_asked = sum(1 for why in reasons if why.startswith("не запрошен"))
+    offline = sum(1 for why in reasons if why.startswith("нет сети"))
+    silent = len(reasons) - not_asked - offline
+    parts = [
+        f"{text} — {count}"
+        for count, text in (
+            (silent, "источник не ответил"),
+            (offline, "не было сети у нас"),
+            (not_asked, "не запрошены: снимок прерван"),
+        )
+        if count
+    ]
     print(
-        f"> **Снимок рейтингов неполный: {got} из {total}.** По {len(refused)} "
-        "эмитентам источник не ответил; для них взято последнее наблюдение, "
-        "и рейтинговых действий дня по ним в отчёте нет.\n"
+        f"> **Снимок рейтингов неполный: {got} из {total}.** Эмитентов без "
+        f"наблюдения дня: {'; '.join(parts)}. Для них взято последнее "
+        "наблюдение, и рейтинговых действий дня по ним в отчёте нет; "
+        "остаток добирает повторный запуск снимка.\n"
     )
 
 

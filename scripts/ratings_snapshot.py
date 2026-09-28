@@ -21,8 +21,11 @@
 только `refused`: наблюдения, уже лежащие в файле, не трогаются, а
 дозапрошенные помечаются временем в `recovered`. Отказ многих подряд
 (`cbonds_refused_in_row_max`) — уже не сбой запроса, а отказ источника,
-и снимок прекращается: ответы по эмитентам лежат на диске, и следующий
-запуск продолжит с места обрыва.
+и снимок прекращается; так же он прекращается, когда нет сети у нас
+(`NetworkDownError`). **Прерванный снимок всё равно пишется** — снятое
+с эмитентами, до которых не дошли, в `refused` с пометкой «не запрошен»:
+маршрут берёт для них последнее наблюдение, а следующий запуск (агент
+в 11:30) дозапрашивает ровно их.
 
 Запросов: один на эмитента. Перечень берётся из карточек справочника, а не
 из базы: снимок нужен и по тем, у кого отчётности у нас пока нет.
@@ -40,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finlib.config import settings  # noqa: E402
 from finlib.sources import cbonds  # noqa: E402
+from finlib.sources.network import NetworkDownError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +96,28 @@ class SourceRefusedError(cbonds.CbondsError):
     """Эмитенты подряд без ответа: это отказ источника, а не сбой запроса."""
 
 
-def take(chosen: list[str], today: date) -> tuple[dict[str, list[dict]], dict[str, str]]:
-    """Записи рейтингов по эмитентам и причины, по которым ответа нет.
+# Причина у эмитента, до которого снимок не дошёл: он в `refused`, чтобы
+# маршрут взял его последнее наблюдение, а повторный запуск — дозапросил.
+NOT_ASKED = "не запрошен"
+
+
+def take(
+    chosen: list[str], today: date
+) -> tuple[dict[str, list[dict]], dict[str, str], Exception | None]:
+    """Записи рейтингов по эмитентам, причины без ответа и то, что снимок прервало.
 
     Эмитент без ответа уходит в перечень отказов, снимок идёт дальше.
-    Отказов подряд больше объявленного — `SourceRefusedError`.
+    Отказов подряд больше объявленного — `SourceRefusedError`, сети нет —
+    `NetworkDownError`: снимок прерывается, но **снятое не теряется** —
+    оно возвращается вместе с причиной, а незапрошенные стоят в отказах
+    с пометкой `NOT_ASKED`. 28.09.2026 прерванный снимок не оставил файла
+    вовсе, хотя 474 эмитента были сняты.
     """
     snapshot: dict[str, list[dict]] = {}
     refused: dict[str, str] = {}
     in_row = 0
-    for inn in chosen:
+    for position, inn in enumerate(chosen):
+        stop: Exception | None = None
         try:
             found = cbonds.fetch(
                 METHOD,
@@ -109,22 +125,30 @@ def take(chosen: list[str], today: date) -> tuple[dict[str, list[dict]], dict[st
                 filters=({"field": "emitent_inn", "operator": "eq", "value": inn},),
                 limit=50,
             )
+        except NetworkDownError as failure:
+            refused[inn] = str(failure)[:120]
+            stop = failure
         except (cbonds.CbondsError, httpx.TransportError) as failure:
             refused[inn] = f"{type(failure).__name__}: {failure}"[:120]
             logger.warning("рейтинги %s: ответа нет — %s", inn, refused[inn])
             in_row += 1
-            if in_row >= settings.cbonds_refused_in_row_max:
-                raise SourceRefusedError(
-                    f"источник не ответил по {in_row} эмитентам подряд, "
-                    f"последний {inn}: {refused[inn]}"
-                ) from failure
-            continue
+            if in_row < settings.cbonds_refused_in_row_max:
+                continue
+            stop = SourceRefusedError(
+                f"источник не ответил по {in_row} эмитентам подряд, "
+                f"последний {inn}: {refused[inn]}"
+            )
+            stop.__cause__ = failure
+        if stop is not None:
+            for rest in chosen[position + 1 :]:
+                refused[rest] = f"{NOT_ASKED}: снимок прерван — {stop}"[:120]
+            return snapshot, refused, stop
         in_row = 0
         snapshot[inn] = [
             {key: value for key, value in item.items() if key not in DROPPED}
             for item in found.get("items", [])
         ]
-    return snapshot, refused
+    return snapshot, refused, None
 
 
 def _complete(path: Path, today: date) -> int:
@@ -142,7 +166,7 @@ def _complete(path: Path, today: date) -> int:
             "не переписывает — файл доказательная база."
         )
         return 0
-    got, still = take(list(missing), today)
+    got, still, stop = take(list(missing), today)
     moment = f"{datetime.now():%H:%M}"
     found["issuers"].update(got)
     found["refused"] = still
@@ -152,6 +176,8 @@ def _complete(path: Path, today: date) -> int:
         f"{path}: дозапрошено {len(missing)}, получено {len(got)}, "
         f"без ответа осталось {len(still)}"
     )
+    if stop is not None:
+        raise stop
     return 0
 
 
@@ -175,8 +201,10 @@ def main() -> int:
         return _complete(path, today)
 
     chosen = list(known)[:limit] if limit else list(known)
-    snapshot, refused = take(chosen, today)
+    snapshot, refused, stop = take(chosen, today)
 
+    # Прерванный снимок пишется тоже: снятое — наблюдения дня, и потерять
+    # их значило бы остаться без дня, в котором их было большинство.
     path.write_text(
         json.dumps(
             {
@@ -196,6 +224,10 @@ def main() -> int:
         f"{path}: эмитентов {len(snapshot)}, из них с рейтингом {with_rating}, "
         f"отказов {len(refused)}, запросов {cbonds.pace.requested}"
     )
+    if stop is not None:
+        # Файл лежит, а доставка всё равно не удалась: прогон дня обязан
+        # это увидеть — отказом источника или отсутствием сети.
+        raise stop
     return 0
 
 

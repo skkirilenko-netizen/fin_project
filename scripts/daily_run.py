@@ -4,9 +4,11 @@
 считается бюджет запросов и так виден отказ: `cbonds.pace.requested` живёт
 в процессе, и разнесённые по скриптам доставки о расходе друг друга не знают.
 
-**При отказе источника — ранняя остановка и запись, а не молчание.** Доставка
-прекращается, прогон помечается неудавшимся, а маршрут всё равно строится
-по тому, что на диске: список нужен и в день отказа. Но отказ при этом стоит
+**Отказ доставки — запись, а не молчание и не остановка остальных.** Отказавшая
+доставка оставляет свой слой вчерашним, остальные идут своим чередом
+(с 28.09.2026; прежде отказ снимка рейтингов прекращал все), прогон
+помечается неудавшимся, а маршрут строится по тому, что на диске: список
+нужен и в день отказа. Но отказ при этом стоит
 **в начале отчёта**, потому что «изменений нет» при недошедшей доставке
 и «изменений нет» при полной — разные сведения, а выглядят одинаково.
 
@@ -59,18 +61,18 @@ OUT = ROOT / "data" / "output"
 
 @dataclass(frozen=True, slots=True)
 class Stage:
-    """Доставка: чем занята, как часто нужна и что значит её отказ.
+    """Доставка: чем занята, как часто нужна и из какого источника.
 
     `every` — через сколько дней доставка нужна снова; 1 — ежедневно.
-    `blocking` — прекращает ли её отказ остальные доставки: отказ источника
-    целиком прекращает, отказ одной доставки из многих — нет.
+    `source` — чью суточную норму она тратит: исчерпанная норма Cbonds
+    прекращает доставки Cbonds, а биржу не касается.
     """
 
     code: str
     name: str
     script: str
     every: int
-    blocking: bool
+    source: str
     why: str
     # Доводы скрипта стадии: у среза торгов — окно в неделю по дням, иначе
     # скрипт спрашивал бы по умолчанию сегодня и каждый седьмой день назад,
@@ -78,13 +80,34 @@ class Stage:
     args: tuple[str, ...] = ()
 
 
+# **Ни одна доставка не останавливает остальные** (28.09.2026). Маршрут
+# строится по диску, и доставка, не дошедшая сегодня, оставляет свой слой
+# вчерашним, а не неверным: остановка остальных маршрут вернее не делает,
+# она только делает вчерашними и их. Остановить стоило бы доставку,
+# после отказа которой следующие записали бы несогласованное — такой нет:
+#
+# - рейтинги — неполный снимок пишется с перечнем незапрошенных, маршрут
+#   берёт для них последнее наблюдение с его датой, остаток добирает агент
+#   в 11:30 (`ratings_snapshot`, `cbonds_events.read_snapshot`);
+# - дефолты, выпуски, графики, отчётность — каждая запись по эмитенту или
+#   выпуску самостоятельна; графики спрашивают источник по дате обновления
+#   сами и от доставки выпусков не зависят (`flows_since.json` сдвигается
+#   только после полного прохода);
+# - биржа — другой источник, от Cbonds не зависит ничем.
+#
+# 28.09.2026 неполный снимок рейтингов (пропала сеть) остановил весь прогон,
+# и без дефолтов, выпусков и отчётности остался день, в котором они могли
+# дойти. Прекращается только то, чему нечем платить: исчерпана суточная
+# норма Cbonds — прекращаются доставки Cbonds, биржа идёт дальше.
+# Недоставка при этом не молчит: прогон закрывается «failed» с перечнем
+# недошедшего, и отчёт изменений ставит его первым.
 STAGES: tuple[Stage, ...] = (
     Stage(
         code="ratings",
         name="снимок рейтингов",
         script="scripts/ratings_snapshot.py",
         every=1,
-        blocking=True,
+        source="cbonds",
         why=(
             "История рейтингов у подписки закрыта, и снимок — единственный "
             "путь к ней: пропущенный день не восстанавливается ничем."
@@ -98,7 +121,7 @@ STAGES: tuple[Stage, ...] = (
         name="перечень дефолтов",
         script="scripts/defaults_fetch.py",
         every=1,
-        blocking=False,
+        source="cbonds",
         why=(
             "Дефолт — событие дня с датой, и корзину «Разбор» по нему маршрут "
             "даёт только по записи перечня: без ежедневной доставки дефолт, "
@@ -113,7 +136,7 @@ STAGES: tuple[Stage, ...] = (
         name="выпуски эмитентов",
         script="scripts/emissions_fetch.py",
         every=1,
-        blocking=False,
+        source="cbonds",
         why=(
             "Статус выпуска, признак дефолта и дата оферты меняются днём; "
             "отбор по дате обновления стоит единиц запросов, а полный обход "
@@ -128,7 +151,7 @@ STAGES: tuple[Stage, ...] = (
         name="графики платежей и оферты",
         script="scripts/flows_fetch.py",
         every=1,
-        blocking=False,
+        source="cbonds",
         why=(
             "Рефинансирование — самое частое основание «Внимания», и считается "
             "оно по графику: новый выпуск без графика и сдвинутая оферта "
@@ -144,7 +167,7 @@ STAGES: tuple[Stage, ...] = (
         name="отчётность агрегатора",
         script="scripts/reporting_fetch.py",
         every=1,
-        blocking=False,
+        source="cbonds",
         why=(
             "Новый комплект меняет основание маршрута, а в сезон раскрытия "
             "комплекты приходят каждый день; отбор по дате стоит единиц "
@@ -156,7 +179,7 @@ STAGES: tuple[Stage, ...] = (
         name="сектор повышенного риска биржи",
         script="scripts/moex_fetch.py",
         every=1,
-        blocking=False,
+        source="moex",
         why=(
             "Перевод в режим «Д» — событие дня с датой; биржа отвечает "
             "без подписки, и на суточную норму Cbonds это не тратится."
@@ -171,7 +194,7 @@ STAGES: tuple[Stage, ...] = (
         name="дневной срез торгов и кривая ОФЗ",
         script="scripts/moex_market_fetch.py",
         every=1,
-        blocking=False,
+        source="moex",
         why=(
             "Рыночные основания маршрута считаются по ряду спредов и цен, "
             "и ряд этот наращивается днями: пропущенный день оставляет "
@@ -190,7 +213,7 @@ STAGES: tuple[Stage, ...] = (
         name="снимок уровня листинга акций",
         script="scripts/listing_snapshot.py",
         every=1,
-        blocking=False,
+        source="moex",
         why=(
             "История смен уровня котировального списка у источника "
             "отсутствует: он отдаёт только сегодняшнее значение. "
@@ -206,11 +229,21 @@ def _spent() -> int:
 
 
 def _fresh(path: Path, every: int, today: date) -> bool:
-    """Свежа ли доставка: моложе ли её файл объявленной частоты."""
+    """Свежа ли доставка: моложе ли её файл объявленной частоты и полон ли он.
+
+    **Неполный снимок дня — не свежая доставка.** Прерванный снимок рейтингов
+    пишется с перечнем недошедших (`refused`), и повторный прогон того же дня
+    обязан его добрать, а не счесть сделанным.
+    """
     if not path.exists():
         return False
     when = date.fromtimestamp(path.stat().st_mtime)
-    return (today - when).days < every
+    if (today - when).days >= every:
+        return False
+    if path.parent.name == "ratings":
+        found = json.loads(path.read_text(encoding="utf-8"))
+        return not found.get("refused")
+    return True
 
 
 def _run_stage(stage: Stage, dry: bool) -> dict:
@@ -368,27 +401,30 @@ def main() -> int:
     today = date.today()
     routing = load_routing()
     delivered: list[dict] = []
-    stopped = ""
+    shortfall = ""
     run_id = _open_run(today, json.dumps({"routing": routing.version}))
     try:
-        rows, counts, stopped = _deliver_and_route(run_id, today, dry, delivered)
+        rows, counts, shortfall = _deliver_and_route(run_id, today, dry, delivered)
     except BaseException as failure:
         logger.exception("прогон %s оборвался", today)
         _close_failed(run_id, delivered, failure)
         raise
-    _publish(today, rows, counts, delivered, stopped)
-    return 1 if stopped else 0
+    _publish(today, rows, counts, delivered, shortfall)
+    return 1 if shortfall else 0
 
 
-def _deliver_and_route(
-    run_id: int, today: date, dry: bool, delivered: list[dict]
-) -> tuple[list, dict, str]:
-    """Доставки дня и маршрут; строку прогона закрывает вместе с точками истории.
+# Исходы стадии, при которых данных дня от неё нет. «cached» сюда не входит:
+# стадия прошла, а нового у источника не было — это отчёт изменений
+# называет сам, но прогон неудавшимся не делает.
+UNDELIVERED: tuple[str, ...] = ("failed", "offline", "no_quota")
 
-    `delivered` наполняется по ходу: при обрыве строка прогона закрывается
-    тем, что успело дойти.
+
+def _deliver(today: date, dry: bool, delivered: list[dict]) -> None:
+    """Доставки дня по очереди; отказ одной остальные не останавливает.
+
+    Исчерпана суточная норма Cbonds — доставки Cbonds дальше не начинаются
+    (`no_quota`), доставки биржи идут: их норма другая.
     """
-    stopped = ""
     for stage in STAGES:
         if _fresh(_marker(stage), stage.every, today):
             delivered.append(
@@ -400,20 +436,40 @@ def _deliver_and_route(
                 }
             )
             continue
-        if _spent() > DAILY_QUOTA - RESERVE:
-            stopped = f"суточная норма запросов исчерпана на доставке «{stage.name}»"
+        if stage.source == "cbonds" and _spent() > DAILY_QUOTA - RESERVE:
             delivered.append(
-                {"code": stage.code, "name": stage.name, "status": "no_quota"}
+                {
+                    "code": stage.code,
+                    "name": stage.name,
+                    "status": "no_quota",
+                    "why": "суточная норма запросов Cbonds исчерпана",
+                }
             )
-            break
-        said = _run_stage(stage, dry)
-        delivered.append(said)
-        if said["status"] == "offline" and stage.blocking:
-            stopped = f"нет сети на доставке «{stage.name}»"
-            break
-        if said["status"] == "failed" and stage.blocking:
-            stopped = f"источник отказал на доставке «{stage.name}»"
-            break
+            continue
+        delivered.append(_run_stage(stage, dry))
+
+
+def _shortfall(delivered: list[dict]) -> str:
+    """Что из доставок дня не дошло — строкой; пусто — дошло всё."""
+    words = {"failed": "отказ", "offline": "нет сети", "no_quota": "нет нормы"}
+    missed = [
+        f"{item['name']} — {words[item['status']]}"
+        for item in delivered
+        if item.get("status") in UNDELIVERED
+    ]
+    return f"доставка неполна: {'; '.join(missed)}" if missed else ""
+
+
+def _deliver_and_route(
+    run_id: int, today: date, dry: bool, delivered: list[dict]
+) -> tuple[list, dict, str]:
+    """Доставки дня и маршрут; строку прогона закрывает вместе с точками истории.
+
+    `delivered` наполняется по ходу: при обрыве строка прогона закрывается
+    тем, что успело дойти.
+    """
+    _deliver(today, dry, delivered)
+    shortfall = _shortfall(delivered)
 
     # **Маршрут строится и в день отказа.** Список нужен и тогда; но отказ
     # стоит в отчёте первым, а не молчит.
@@ -452,18 +508,21 @@ def _deliver_and_route(
             _DONE,
             {
                 "id": run_id,
-                "status": "failed" if stopped else "done",
+                # Недоставка делает прогон неудавшимся, хотя маршрут
+                # построен: день, в котором данные дошли не все, чистым
+                # прогоном не считается.
+                "status": "failed" if shortfall else "done",
                 "sources": json.dumps(delivered, ensure_ascii=False),
-                "note": stopped or f"эмитентов {len(rows)}",
+                "note": shortfall or f"эмитентов {len(rows)}",
             },
             conn=conn,
         )
         conn.commit()
-    return rows, counts, stopped
+    return rows, counts, shortfall
 
 
 def _publish(
-    today: date, rows: list, counts: dict, delivered: list[dict], stopped: str
+    today: date, rows: list, counts: dict, delivered: list[dict], shortfall: str
 ) -> None:
     """Список, выгрузка, карточки и отчёт изменений по записанному маршруту."""
     # Список, выгрузка и карточки — тем же кодом, что руками: второй путь
@@ -508,8 +567,8 @@ def _publish(
         if said.get("requests"):
             print(f", запросов {said['requests']}", end="")
         print()
-    if stopped:
-        print(f"  ОСТАНОВКА: {stopped}")
+    if shortfall:
+        print(f"  НЕДОСТАВКА: {shortfall}")
     print(f"  отчёт изменений: {report}")
     print(f"  строк маршрута: {counts.get('эмитентов', 0)}")
 

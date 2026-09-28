@@ -125,7 +125,7 @@ def _stage_run(tmp_path, monkeypatch, body: str, marker_exists: bool) -> dict:  
     monkeypatch.setattr(daily_run, "_marker", lambda stage: marker)
     stage = daily_run.Stage(
         code="probe", name="проба", script=str(script), every=7,
-        blocking=False, why="тест",
+        source="cbonds", why="тест",
     )
     return daily_run._run_stage(stage, dry=False)
 
