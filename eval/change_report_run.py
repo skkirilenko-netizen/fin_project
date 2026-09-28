@@ -37,7 +37,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
-from finlib.sources.cbonds_events import SNAPSHOTS, events_of  # noqa: E402
+from finlib.sources.cbonds_events import (  # noqa: E402
+    SNAPSHOTS,
+    DefaultRecord,
+    events_of,
+)
 from finlib.sources.moex_risk import risk_sectors  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -110,10 +114,7 @@ def _why(  # noqa: ANN001
     events = events_of(inn)
     for item in events.records:
         if item.moment is not None and since < item.moment <= until:
-            what = "не исполнено" if not item.settled else "исполнено"
-            said.append(
-                f"{item.kind.lower()} {item.moment:%d.%m.%Y}, {what}"
-            )
+            said.append(_record_said(item, until)[1])
     for item in events.ratings:
         if item.assigned is not None and since < item.assigned <= until:
             said.append(f"{item.agency}: {item.point} {item.assigned:%d.%m.%Y}")
@@ -202,16 +203,13 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     Раздел показывается и тогда, когда корзина не изменилась: дефолт
     у эмитента, уже стоящего в «Разборе», — сведение, которое нельзя терять.
     """
-    said: list[str] = []
+    said: list[tuple[int, str]] = []
     for inn in now:
         events = events_of(inn)
         for item in events.records:
             if item.moment is not None and previous < item.moment <= until:
-                what = "не исполнено" if not item.settled else "исполнено"
-                said.append(
-                    f"- {_named(inn)}: {item.kind.lower()} "
-                    f"{item.moment:%d.%m.%Y}, {what}"
-                )
+                order, text = _record_said(item, until)
+                said.append((order, f"- {_named(inn)}: {text}"))
         # **Срочно не всякое рейтинговое действие, а то, по которому
         # действуют.** Подтверждение AAA не событие: агентство сказало
         # то же, что и раньше. Отбираются категории, которые методика
@@ -240,8 +238,11 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
                 continue
             seen.add(key)
             said.append(
-                f"- {_named(inn)}: {item.agency} — {item.point} "
-                f"{item.assigned:%d.%m.%Y}"
+                (
+                    URGENT_RATING,
+                    f"- {_named(inn)}: {item.agency} — {item.point} "
+                    f"{item.assigned:%d.%m.%Y}",
+                )
             )
     # Счётчик считает то, что напечатано: перечень с повторами назвал бы
     # одно событие двумя.
@@ -253,16 +254,61 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
             "без дефолтов и рейтинговых действий — обычное состояние рынка.\n"
         )
         return
-    # Неисполненное обязательство старше рейтингового действия, а исполненное
-    # младше обоих: порядок здесь — очередь вмешательства, а не алфавит.
-    def weight(line: str) -> int:
-        if "не исполнено" in line:
-            return 0
-        return 2 if "исполнено" in line else 1
-
-    for line in sorted(said, key=weight):
+    # Порядок — очередь вмешательства, а не алфавит; очередь объявлена
+    # у `_record_said`. Сортировка устойчива: внутри ступени — как пришло.
+    for _, line in sorted(said, key=lambda pair: pair[0]):
         print(line)
     print()
+
+
+# Очередь вмешательства в «Срочном»: дефолт, объявленный источником, —
+# первым; срок, исполнение по которому не подтверждено, — за ним;
+# рейтинговое действие; исполненное — последним.
+URGENT_DECLARED, URGENT_UNCONFIRMED, URGENT_RATING, URGENT_SETTLED = 0, 1, 2, 3
+
+
+def _record_said(item: DefaultRecord, until: date) -> tuple[int, str]:
+    """Строка о записи перечня дефолтов и её место в очереди «Срочного».
+
+    **«Не исполнено» в день срока — не неплатёж, а неизвестность.** Прежде
+    любая неисполненная запись печаталась «не исполнено» с датой события,
+    а дата события у технического дефолта — конец льготного срока
+    (`DefaultRecord.in_grace`). 23.09.2026 пять купонов стояли в «Срочном»
+    «купон 23.09.2026, не исполнено»: платёж был 09.09, неплатёж объявлен
+    09.09–21.09, 23.09 истекал льготный срок, а в перечне на день отчёта
+    запись была ещё «Технический дефолт» — исполнения в последний день срока
+    источник не подтвердил и не опроверг. Дефолтом он объявил их позже,
+    перечнем 25.09. Три сведения — три строки:
+
+    - исполнено — с датой исполнения;
+    - дефолт объявлен источником (статус записи не льготный) — с плановым
+      сроком и днём объявления неплатежа;
+    - срок истёк или истекает, дефолта источник не объявил — «исполнение
+      не подтверждено», с плановым сроком и днём объявления неплатежа.
+    """
+    kind = item.kind.lower() or "обязательство"
+    moment = item.moment
+    assert moment is not None, "строка печатается только о датированной записи"
+    if item.settled:
+        return URGENT_SETTLED, f"{kind} {moment:%d.%m.%Y}, исполнено {item.met:%d.%m.%Y}"
+    history = []
+    if item.due is not None and item.due != moment:
+        history.append(f"плановый срок {item.due:%d.%m.%Y}")
+    if item.announced is not None:
+        history.append(f"неплатёж объявлен {item.announced:%d.%m.%Y}")
+    told = f" ({', '.join(history)})" if history else ""
+    if item.declared:
+        return (
+            URGENT_DECLARED,
+            f"{kind} {moment:%d.%m.%Y}: дефолт объявлен источником{told}",
+        )
+    when = "срок сегодня" if moment == until else f"срок {moment:%d.%m.%Y}"
+    what = "конец льготного срока" if item.when is not None else "плановый срок"
+    return (
+        URGENT_UNCONFIRMED,
+        f"{kind}: {when} — {what}, исполнение не подтверждено, "
+        f"дефолт источником не объявлен{told}",
+    )
 
 
 def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
