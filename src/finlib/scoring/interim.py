@@ -395,6 +395,12 @@ def change(
     before, after = value_of(was, feature), value_of(now, feature)
     if before is None or after is None:
         return None
+    # **Комплекты в разных единицах доли не дают** — то же правило, что
+    # в карточке (`reference_readings`, `unit_differs`): у 3900019850
+    # 250 210 млн руб. против 245,1 млрд руб. читались сокращением на 99,9 %,
+    # а это минус два процента. Такая пара идёт в «мерить нечем».
+    if was.unit_code != now.unit_code:
+        return None
     if policy.measure.requires_positive_previous and before <= 0:
         return None
     moved = (after - before) / before

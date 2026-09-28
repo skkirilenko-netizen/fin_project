@@ -191,13 +191,14 @@ def test_the_kind_of_the_set_travels_with_the_finding(kind: str) -> None:
 def test_the_cash_drop_cutoff_is_frozen_on_the_day_of_measurement() -> None:
     """Отсечка падения денежных средств не едет вместе с распределением.
 
-    Решение владельца 28.09.2026: заморожена днём замера 27.09.2026, в маршрут
-    признак не идёт, в карточке — справочно.
+    Решение владельца 28.09.2026: заморожена днём замера, в маршрут признак
+    не идёт, в карточке — справочно. Перезаморожена 28.09.2026 после сверки
+    единиц пары комплектов.
     """
     policy = load_interim()
     by_code = {item.code: item for item in policy.features}
     cash = by_code["interim_cash_drop"]
-    assert cash.frozen is not None and cash.frozen.measured_on == date(2026, 9, 27)
+    assert cash.frozen is not None and cash.frozen.measured_on == date(2026, 9, 28)
     assert cash.decision is not None
     assert not cash.decision.in_route and cash.decision.card == "reference"
     # Какое бы распределение ни пришло, отсечка — замороженная.
@@ -256,6 +257,12 @@ def test_sets_in_different_units_give_no_share() -> None:
     said = reference_readings(policy, ordered, date(2026, 7, 1))[0]
     assert said.silence == "unit_differs"
     assert said.value is None and not said.fired
+    # Замер мерит тем же правилом: пара в распределение не идёт.
+    cash = next(item for item in policy.features if item.code == "interim_cash_drop")
+    assert change(policy, cash, *ordered) is None
+    spread, counts = distribution(policy, {"3900019850": ordered})
+    assert spread["interim_cash_drop"] == []
+    assert counts["interim_cash_drop"]["мерить нечем"] == 1
 
 
 def test_a_small_drop_is_shown_as_not_fired() -> None:
