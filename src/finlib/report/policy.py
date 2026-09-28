@@ -366,6 +366,45 @@ class Action(BaseModel):
         return " ".join(self.text.split())
 
 
+class AggregatorSection(BaseModel):
+    """Раздел базового заключения: код раздела и заголовок."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(pattern="^(route|values|trend|refinancing|changes|limits)$")
+    title: str = Field(min_length=1)
+
+
+class AggregatorConclusion(BaseModel):
+    """Состав базового заключения по данным агрегатора (уровень 1, без класса).
+
+    Формулировки предписаны методикой, как у заключения по документу: код
+    их не изобретает. Разделов шесть, и каждый собирается расчётом.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title: str = Field(min_length=1)
+    # Почему класса нет: утверждение документа о себе, а не оговорка мелким
+    # шрифтом (решение владельца 28.09.2026, вариант «без класса»).
+    no_class: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    sections: tuple[AggregatorSection, ...] = Field(min_length=1)
+    limitations: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sections_are_complete(self) -> Self:
+        """Каждый раздел объявлен ровно один раз: пропущенный исчез бы молча."""
+        codes = [item.code for item in self.sections]
+        wanted = {"route", "values", "trend", "refinancing", "changes", "limits"}
+        if len(set(codes)) != len(codes) or set(codes) != wanted:
+            raise ValueError(
+                f"разделы базового заключения объявлены не все либо дважды: {codes}"
+            )
+        return self
+
+
 class ReportPolicy(BaseModel):
     """Справочник правил состава документа."""
 
@@ -383,6 +422,9 @@ class ReportPolicy(BaseModel):
     other_issuers: OtherIssuers
     questions: Questions
     actions: tuple[Action, ...] = Field(min_length=1)
+    # Состав базового заключения по данным агрегатора. Пусто — состав
+    # не утверждён, и заключение уровня 1 не собирается вовсе.
+    aggregator_conclusion: AggregatorConclusion | None = None
 
     def fill(self, text: str, standard: Standard) -> str:
         """Подставляет наименование отчётности стандарта в предписанный текст.
