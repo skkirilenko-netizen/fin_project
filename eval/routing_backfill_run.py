@@ -19,6 +19,7 @@
 
     uv run python eval/routing_backfill_run.py            # без записи
     uv run python eval/routing_backfill_run.py --write    # с записью в историю
+    uv run python eval/routing_backfill_run.py --write --dates=2025-09-24,2025-12-31
 
 **Замер не считает сам**: корзину даёт боевая маршрутизация
 (`scoring.routing_store.routing_rows`) с названной датой.
@@ -175,6 +176,13 @@ def main() -> int:
     rule = routing.history
     today = date.today()
     dates, on_events = grid(today, rule.step_days, rule.depth_days)
+    # **Досчёт названных дат** — для точек, оставшихся от прежнего кода:
+    # 28.09.2026 три точки прогона № 10 (до LTM-базы) не были перезаписаны
+    # прогоном № 19 и расходились с остальной историей (решение владельца).
+    named = [arg.split("=", 1)[1] for arg in sys.argv[1:] if arg.startswith("--dates=")]
+    if named:
+        dates = tuple(sorted(date.fromisoformat(item) for item in named[0].split(",")))
+        on_events = 0
 
     print("# История корзин: пересчёт назад\n")
     print(

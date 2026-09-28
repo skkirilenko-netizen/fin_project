@@ -7,7 +7,7 @@
 """
 
 import sys
-from datetime import date
+from datetime import UTC, date
 from decimal import Decimal
 
 from finlib.config import settings
@@ -102,3 +102,30 @@ def test_too_few_fired_are_not_chosen() -> None:
         run._name(subject, Decimal("99")): run.Score(100, 5, run.MIN_FIRED - 1, 3, (10,)),
     }
     assert run.choose(subject, spread, train) == "прежний"
+
+
+def test_a_threshold_that_never_fired_has_zero_lift() -> None:
+    """Не сработавший ни разу порог не поймал никого: прирост ноль, а не «не определён».
+
+    Решение владельца 28.09.2026: иначе парная разность против такого порога
+    не считалась вовсе, и вариант с 5 из 10 проигрывал ему по правилу.
+    """
+    assert run._lift(100, 5, 0, 0) == Decimal(0)
+    assert run._lift(100, 0, 10, 0) is None
+
+
+def test_a_refetched_card_is_named_not_counted(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """Файл источника, перезабранный после записи точки, объясняет расхождение.
+
+    Датированный снимок (рейтинги дня) перезабором не считается: он новое
+    наблюдение, и иначе перезабранным оказался бы каждый эмитент.
+    """
+    from datetime import datetime
+
+    monkeypatch.setattr(run, "CACHE", tmp_path)
+    (tmp_path / "emissions_7733015025.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ratings_2026-09-28_7733015025.json").write_text("{}", encoding="utf-8")
+    written = datetime(2026, 9, 25, 16, 33, tzinfo=UTC)
+    said = run.refetched("7733015025", written)
+    assert len(said) == 1 and said[0].startswith("emissions_7733015025.json")
+    assert run.refetched("7733015025", datetime.now(tz=UTC)) == ()

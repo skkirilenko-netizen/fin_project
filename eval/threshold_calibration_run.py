@@ -29,12 +29,13 @@ import io
 import json
 import logging
 import random
+import re
 import statistics
 import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -99,7 +100,7 @@ CALIBRATED = LEVEL | LOWER | {
 }
 
 _POINTS = """
-SELECT inn, as_of, standard, basket, grounds_all, inputs
+SELECT inn, as_of, standard, basket, grounds_all, inputs, created_at
 FROM routing_history WHERE kind = 'backfill' ORDER BY as_of, inn
 """
 
@@ -398,10 +399,60 @@ def run_pass(
     return said
 
 
-def control(rows: list[dict], done: Pass, dates: list[date]) -> tuple[int, list[str]]:
-    """«Прежний» вариант против записанной истории: сверено и расхождения."""
+@dataclass
+class Control:
+    """Итог контроля: сверено, необъяснённые расхождения и перезабранные эмитенты."""
+
+    compared: int = 0
+    differ: list[str] = field(default_factory=list)
+    # ИНН → (расхождения, перезабранные после записи точек файлы источника).
+    refetched: dict[str, tuple[list[date], tuple[str, ...]]] = field(default_factory=dict)
+
+    def said(self) -> list[str]:
+        """Строки о перезабранных: эмитент, точки и файлы, отдельно от расхождений."""
+        lines: list[str] = []
+        for inn, (days, files) in sorted(self.refetched.items()):
+            lines.append(
+                f"{inn}: {len(days)} точек ({min(days):%d.%m.%Y} — "
+                f"{max(days):%d.%m.%Y}) — данные источника изменились после "
+                f"перезабора: {', '.join(files)} перезабраны после записи точек"
+            )
+        return lines
+
+
+# Снимок, датированный в имени файла, — новое наблюдение, а не перезабор
+# прежнего: ежедневный снимок рейтингов объявлял бы перезабранным каждого.
+_DATED = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def refetched(inn: str, written: datetime) -> tuple[str, ...]:
+    """Файлы источника по эмитенту, перезабранные после записи точки истории.
+
+    **Пересчёт берёт карточку выпуска такой, какая она на диске сегодня**
+    (`docs/monitoring.md`: признаки карточки истории не имеют). Перезабранная
+    карточка меняет прошлое пересчёта, и расхождение с записанной историей
+    здесь — изменение данных источника, а не дефект пути замера.
+    """
+    found: list[str] = []
+    for path in sorted(CACHE.glob(f"*_{inn}.json")):
+        if _DATED.search(path.name):
+            continue
+        moment = datetime.fromtimestamp(path.stat().st_mtime, tz=written.tzinfo)
+        if moment > written:
+            found.append(f"{path.name} ({moment:%d.%m.%Y %H:%M})")
+    return tuple(found)
+
+
+def control(rows: list[dict], done: Pass, dates: list[date]) -> Control:
+    """«Прежний» вариант против записанной истории: сверено и расхождения.
+
+    Расхождение у эмитента, чьи файлы источника перезабраны после записи
+    точки, печатается отдельно и с причиной (решение владельца 28.09.2026):
+    у Гидромашсервиса 64 точки основания об офертах ушли вместе с карточкой
+    выпусков, перезабранной 28.09.2026 после пересчёта 25.09.
+    """
     wanted = set(dates)
-    compared, differ = 0, []
+    said = Control()
     base = done.base
     for row in rows:
         if row["as_of"] not in wanted or row["inn"] not in base:
@@ -409,15 +460,21 @@ def control(rows: list[dict], done: Pass, dates: list[date]) -> tuple[int, list[
         mine = base[row["inn"]].get(row["as_of"])
         if mine is None:
             continue
-        compared += 1
+        said.compared += 1
         stored = set(row["grounds_all"] or ()) & CALIBRATED
         now = {ground for ground, _ in mine}
-        if stored != now:
-            differ.append(
-                f"{row['inn']} {row['as_of']:%d.%m.%Y}: записано {sorted(stored)}, "
-                f"сейчас {sorted(now)}"
-            )
-    return compared, differ
+        if stored == now:
+            continue
+        files = refetched(row["inn"], row["created_at"])
+        if files:
+            days, _ = said.refetched.setdefault(row["inn"], ([], files))
+            days.append(row["as_of"])
+            continue
+        said.differ.append(
+            f"{row['inn']} {row['as_of']:%d.%m.%Y}: записано {sorted(stored)}, "
+            f"сейчас {sorted(now)}"
+        )
+    return said
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,9 +517,18 @@ class Score:
 
 
 def _lift(population: int, positives: int, fired: int, caught: int) -> Decimal | None:
-    """Прирост по счётчикам; None, если сработавших или событий нет."""
-    if not fired or not positives or not population:
+    """Прирост по счётчикам; None, если событий нет.
+
+    **Порог, не сработавший ни разу, не поймал никого, и прирост у него ноль**
+    (решение владельца 28.09.2026). Прежде он был «не определён», и парная
+    разность против такого порога не считалась вовсе: у ликвидности РСБУ
+    вариант p55 с 5 из 10 на проверке проигрывал «не определённому» прежнему
+    по правилу, а не по числам.
+    """
+    if not positives or not population:
         return None
+    if not fired:
+        return Decimal(0)
     return (Decimal(caught) / fired) / (Decimal(positives) / population)
 
 
@@ -638,14 +704,23 @@ def main() -> int:
     if pilot:
         return _pilot(rows, grid, chosen, owner, found, said, calendar, parts)
     done = run_pass(grid, chosen, owner)
-    compared, differ = control(rows, done, grid)
+    checked = control(rows, done, grid)
+    differ = checked.differ
     print(
         f"**Контроль**: «прежний» вариант против записанной истории — сверено "
-        f"**{compared}** точек, расхождений **{len(differ)}**. Проход "
+        f"**{checked.compared}** точек, расхождений **{len(differ)}**. Проход "
         f"{sum(done.seconds) / 60:.0f} мин.\n"
     )
     for line in differ[:20]:
         print(f"- {line}")
+    if checked.refetched:
+        print(
+            "\n**Отдельно — расхождения у эмитентов, чьи данные источника "
+            "перезабраны после записи точек** (в число расхождений не входят):\n"
+        )
+        for line in checked.said():
+            print(f"- {line}")
+        print()
     if differ:
         print("\n**Расхождения есть — мерам ниже верить нельзя, пока они не объяснены.**\n")
     _measure(rows, _branches(), found, said, done, calendar, parts)
@@ -809,7 +884,8 @@ def _pilot(
     dates = [grid[min(i * step + step // 2, len(grid) - 1)] for i in range(PILOT_DATES)]
     done = run_pass(dates, chosen, owner)
     seconds = done.seconds
-    compared, differ = control(rows, done, dates)
+    checked = control(rows, done, dates)
+    compared, differ = checked.compared, checked.differ
     with contextlib.redirect_stdout(io.StringIO()):
         smoke = _measure(rows, _branches(), found, said, done, calendar, parts)
     print("## Пилот\n")
@@ -820,7 +896,9 @@ def _pilot(
     )
     for line in differ[:20]:
         print(f"- {line}")
-    if differ:
+    for line in checked.said():
+        print(f"- отдельно, не расхождение пути: {line}")
+    if differ or checked.refetched:
         print()
     per_day = statistics.mean(seconds[1:]) if len(seconds) > 1 else seconds[0]
     print(
