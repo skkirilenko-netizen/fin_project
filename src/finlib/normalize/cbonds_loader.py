@@ -319,6 +319,57 @@ def _signed(value: Decimal, target: Target, report: ReportDef) -> Decimal:
     return value
 
 
+def valued(
+    row: dict, report: ReportDef, fields: dict[str, Target]
+) -> list[tuple[str, Target, Decimal]]:
+    """Поля строки с величиной, уже по правилу знака: имя, позиция, величина.
+
+    Один путь от строки источника к величине: им пишет загрузка (`load_row`)
+    и им читает сверка с документом (`read_row`) — второй путь разошёлся бы
+    с первым знаком или единицей.
+    """
+    found: list[tuple[str, Target, Decimal]] = []
+    for name, item in fields.items():
+        value = number(row.get(name))
+        if value is None:
+            continue
+        found.append((name, item, _signed(value, item, report)))
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class RowReading:
+    """Строка источника, прочитанная без записи: величины, единица и отказ приёма."""
+
+    report_date: date | None
+    values: dict[str, Decimal]
+    unit_code: str | None
+    rejection: str | None
+
+
+def read_row(
+    row: dict, mapping: CbondsMapping | None = None, report_name: str = "report_msfo_real"
+) -> RowReading:
+    """Читает строку источника так, как её записала бы загрузка, ничего не записывая.
+
+    **Хранимые факты для сверки не годятся**: ключ факта источника не знает,
+    и на дату, где лежит комплект документа, величины агрегатора в базу
+    не попадают вовсе — у ЛСР за 2025 год записан один факт агрегатора.
+    Поэтому сверка берёт строку из кэша и проводит её тем же путём, что
+    загрузка: те же поля, тот же знак, та же единица, тот же отказ приёма.
+    """
+    report = (mapping or load_cbonds_mapping()).report(report_name)
+    fields, _ = resolve_fields(row, report)
+    forms = sorted({item.form_code for item in fields.values()})
+    rejection = _checked_reason(row, report, forms)
+    return RowReading(
+        report_date=_moment_of(row),
+        values={item.code: value for _, item, value in valued(row, report, fields)},
+        unit_code=_unit_of(row, report, forms),
+        rejection=rejection.reason if rejection is not None else None,
+    )
+
+
 def _unit_of(row: dict, report: ReportDef, forms: Sequence[str]) -> str | None:
     """Код ОКЕИ комплекта: по полю источника либо по правилу форм.
 
@@ -661,11 +712,7 @@ def load_row(
     signs: list[str] = []
     zeros: list[str] = []
     with_value: list[tuple[str, Decimal]] = []
-    for name, item in fields.items():
-        value = number(row.get(name))
-        if value is None:
-            continue
-        value = _signed(value, item, report)
+    for name, item, value in valued(row, report, fields):
         previous = existing.get((item.form_code, item.code))
         clash: tuple[str, str] | None = None
         kind = ""
