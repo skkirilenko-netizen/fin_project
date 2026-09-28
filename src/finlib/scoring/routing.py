@@ -926,8 +926,65 @@ def load_routing(path: Path | None = None) -> RoutingPolicy:
     return policy
 
 
+@dataclass(frozen=True, slots=True)
+class Overrides:
+    """Пороги варианта калибровки: чем заменить отсечки маршрута и у кого.
+
+    **Довод замера, а не режим работы** — как `blind` у `routing_rows`.
+    Калибровка фазы 6 спрашивает историю «а если порог другой», и ответ
+    обязан дать тот же маршрут: пересчитать основание в замере по записанным
+    величинам значило бы завести второй путь к вердикту, без гашения
+    стоп-фактором, без типа эмитента и полосы у края шкалы. Боевой вызов
+    замену не передаёт.
+
+    `review` — величина, за которой основание «за концом шкалы» (замена
+    крайней опорной точки; у показателя, на который опирается граница, —
+    и порог границы). `attention` — величина, за которой «нижняя часть
+    шкалы» (замена балла `bands.lower_below`). Сторона, в которую величина
+    хуже, берётся у шкалы. `cover` — отсечка рефинансирования по коду
+    основания. Замена действует только у эмитентов названного стандарта
+    и отраслей: пусто — у всех.
+    """
+
+    review: Mapping[str, Decimal] = None  # type: ignore[assignment]
+    attention: Mapping[str, Decimal] = None  # type: ignore[assignment]
+    cover: Mapping[str, Decimal] = None  # type: ignore[assignment]
+    standard: Standard | None = None
+    branch_in: frozenset[str] | None = None
+    branch_out: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Пустые перечни создаются у каждого варианта свои."""
+        for name in ("review", "attention", "cover"):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, {})
+
+    def applies(self, standard: Standard | None, branch: str) -> bool:
+        """Действует ли замена у эмитента этого стандарта и отрасли."""
+        if self.standard is not None and standard is not self.standard:
+            return False
+        if self.branch_in is not None and branch not in self.branch_in:
+            return False
+        return branch not in self.branch_out
+
+
+def _beyond(value: Decimal, edge: Decimal, scale: object) -> bool:
+    """Лежит ли величина за отсечкой в ту сторону, где по шкале хуже.
+
+    Сторона — у шкалы: крайняя точка с нулевым баллом стоит на худшем краю,
+    и у долговой нагрузки это верх, у ликвидности и автономии — низ.
+    """
+    points = scale.points  # type: ignore[attr-defined]
+    worst = points[0][0]
+    other = points[-1][0]
+    return value >= edge if worst > other else value <= edge
+
+
 def short_of_cash(
-    routing: "RoutingPolicy", cash: Decimal | None, payments: Decimal | None
+    routing: "RoutingPolicy",
+    cash: Decimal | None,
+    payments: Decimal | None,
+    cover: Decimal | None = None,
 ) -> bool:
     """Не хватает ли денежных средств на названные платежи.
 
@@ -942,7 +999,8 @@ def short_of_cash(
     """
     if cash is None or not payments:
         return False
-    return cash * routing.refinancing.cover_ratio < payments
+    ratio = routing.refinancing.cover_ratio if cover is None else cover
+    return cash * ratio < payments
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,6 +1264,9 @@ def route(
     # бумаги. Считает их `scoring.market` по доставленным срезам биржи,
     # маршрут получает готовыми — тем же правилом, каким получает величины.
     market: "tuple[object, ...]" = (),
+    # Пороги варианта калибровки (`Overrides`): довод замера, боевой вызов
+    # его не передаёт.
+    thresholds: Overrides | None = None,
 ) -> Verdict:
     """Определяет корзину эмитента по посчитанным величинам и обстоятельствам.
 
@@ -1216,6 +1277,11 @@ def route(
     routing = routing or load_routing()
     catalogue = catalogue or catalogue_for(Standard.IFRS)
     rule = catalogue.rule
+    over = (
+        thresholds
+        if thresholds is not None and thresholds.applies(catalogue.standard, branch)
+        else Overrides()
+    )
     fired = stop_factor_values or {}
     caps = {factor.code: factor.cap for factor in catalogue.stop_factors}
     by_code = {item.code: item for item in computed}
@@ -1403,7 +1469,9 @@ def route(
                 ),
             )
         )
-    debt_threshold = catalogue.threshold_of(rule.bound_of)
+    debt_threshold = over.review.get(
+        rule.bound_of, catalogue.threshold_of(rule.bound_of)
+    )
     # **Отчётности нет вовсе — одно обстоятельство, а не перечень пробелов.**
     # Маршрут при этом строится: события и рейтинги от стандарта не зависят.
     # Называть три недостающие величины значило бы перечислять следствия,
@@ -1428,7 +1496,9 @@ def route(
             # Величина платежей есть, знаменателя нет: это пробел данных,
             # а не обстоятельство риска, и поле называется.
             absent.add("денежные средства")
-        elif short_of_cash(routing, refinance.cash, refinance.due):
+        elif short_of_cash(
+            routing, refinance.cash, refinance.due, over.cover.get("refinancing_gap")
+        ):
             attention.append(
                 Finding(
                     "refinancing_gap",
@@ -1449,7 +1519,10 @@ def route(
     # и ошибиться в мягкую сторону здесь дешевле. Отсечка та же, своего
     # числа здесь нет.
     if refinance is not None and short_of_cash(
-        routing, refinance.cash, refinance.offered
+        routing,
+        refinance.cash,
+        refinance.offered,
+        over.cover.get("refinancing_offers"),
     ):
         # **Доля оферт в долге — часть обстоятельства, а не украшение.**
         # «Не хватит» у эмитента, у которого к выкупу предъявляется десятая
@@ -1560,7 +1633,18 @@ def route(
         # опорной точки, и дальше шкала не продолжается. Оба основания сразу
         # не ставятся — величина одна, и говорить о ней дважды значило бы
         # считать одно обстоятельство за два.
-        if score == 0:
+        # Вариант калибровки заменяет отсечку величиной, а не баллом; без
+        # замены решает балл шкалы, как решал.
+        edge = over.review.get(code, scale.points[0][0])
+        off_scale = (
+            _beyond(item.value, edge, scale) if code in over.review else score == 0
+        )
+        in_lower = (
+            _beyond(item.value, over.attention[code], scale)
+            if code in over.attention
+            else score < lower
+        )
+        if off_scale:
             # Формулировка говорит о смысле, а не о механике: «за опорной
             # точкой калибровочной шкалы» — правда об устройстве расчёта
             # и ничего не значит для того, кому эмитента передают. Величина
@@ -1571,7 +1655,6 @@ def route(
             # при точке 5,00 отличается от неё на округление составителя,
             # а корзину меняла с «Внимания» на «Разбор»: в объявленной полосе
             # основание даёт внимание.
-            edge = scale.points[0][0]
             near = routing.tolerance.at_edge(item.value, edge)
             (attention if near else review).append(
                 Finding(
@@ -1586,7 +1669,7 @@ def route(
                     ),
                 )
             )
-        elif score < lower:
+        elif in_lower:
             attention.append(
                 Finding(
                     "metric_in_lower_band",

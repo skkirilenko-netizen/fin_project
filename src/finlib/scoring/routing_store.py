@@ -50,6 +50,7 @@ from finlib.scoring.market import findings as market_findings
 from finlib.scoring.routing import (
     IssuerType,
     ManualFloor,
+    Overrides,
     Refinance,
     RoutingPolicy,
     Verdict,
@@ -534,6 +535,8 @@ def routing_rows(
     blind: frozenset[str] = frozenset(),
     as_of: date | None = None,
     memo: dict | None = None,
+    variants: "Mapping[str, Overrides] | None" = None,
+    verdicts: dict[str, dict[str, Verdict]] | None = None,
 ) -> tuple[list[RoutingRow], dict[str, int]]:
     """Собирает входы и вердикты по всем эмитентам; рядом — счётчики отбора.
 
@@ -561,6 +564,18 @@ def routing_rows(
     Словарь живёт один проход и передаётся снаружи: боевой прогон его
     не передаёт вовсе, и второго пути к величинам не появляется — путь тот же,
     просто ответ не спрашивается дважды об одном.
+
+    **`variants` — пороги вариантов калибровки, `verdicts` — куда положить
+    их ответы** (фаза 6). Входы собираются один раз, и `route` зовётся
+    на них ещё раз на каждый вариант: собрать входы заново стоило бы восьми
+    секунд на дату на вариант, а сам маршрут — сотой доли. Ответ варианта —
+    вердикт первого прохода, а у финансирующей структуры — взятый у её
+    поручителя при том же варианте, как в боевом втором проходе; прочее
+    во втором проходе (поднятие по поручителю, группа) добавляет основания
+    о других эмитентах, а оснований по величинам не трогает. Строки
+    и счётчики остаются боевыми: вариант в них не
+    попадает. Ключ тот же, что у `blind`, — довод замера: боевой вызов
+    его не передаёт.
     """
     memo = memo if memo is not None else {}
     from finlib.metrics.ifrs_store import compute_from_facts, compute_ltm_from_facts
@@ -1028,6 +1043,11 @@ def routing_rows(
         )
         verdict = route(computed, **inputs)
         given[inn] = inputs
+        if variants and verdicts is not None:
+            for name, over in variants.items():
+                verdicts.setdefault(name, {})[inn] = route(
+                    computed, **inputs, thresholds=over
+                )
         counts["эмитентов"] += 1
         # **Рынок открывает эмитента либо поднимает ему тяжесть, и это разные
         # сведения** (решение владельца 24.09.2026). Из 74 пришедших в «Разбор»
@@ -1109,6 +1129,13 @@ def routing_rows(
     # у него снова.
     led: dict[str, RoutingRow] = {}
     secured_rows: list[RoutingRow] = []
+    # Вердикты вариантов первого прохода: поручитель берётся из них, как
+    # боевой проход берёт его из `by_inn`, а не из уже переписанного.
+    first = (
+        {name: dict(found) for name, found in verdicts.items()}
+        if variants and verdicts is not None
+        else {}
+    )
     for item in rows:
         backing = [
             by_inn[entry.inn]
@@ -1129,6 +1156,21 @@ def routing_rows(
             # корзина того, кто отвечает по её долгу.
             counts["из них корзина взята у поручителя"] += 1
             led[item.inn] = heaviest
+            # **У варианта корзина SPV берётся у того же поручителя** — его
+            # собственного вердикта при том же пороге. Иначе основания
+            # финансирующей структуры в варианте были бы её собственными,
+            # а в истории — поручителя, и «прежний» вариант с историей
+            # не сошёлся бы (пилот 28.09.2026: 31 расхождение из 4 497).
+            for name, found in first.items():
+                if item.inn in found and heaviest.inn in found:
+                    verdicts[name][item.inn] = led_by_guarantor(
+                        found[item.inn],
+                        heaviest.name,
+                        found[heaviest.inn],
+                        item.group,
+                        routing,
+                        heaviest.unit,
+                    )
             secured_rows.append(
                 replace(
                     item,

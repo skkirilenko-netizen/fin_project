@@ -93,6 +93,13 @@ layer-matrix:  ## Матрица слоёв: что даёт сочетание 
 	uv run python eval/layer_matrix_run.py > data/output/layer_matrix.md
 	@echo "data/output/layer_matrix.md"
 
+calibration-pilot:  ## Калибровка фазы 6: пилот на пяти датах — контроль и время
+	uv run python eval/threshold_calibration_run.py --pilot
+
+calibration:  ## Калибровка фазы 6: полный проход (около 76 мин), по команде владельца
+	uv run python eval/threshold_calibration_run.py > data/output/threshold_calibration.md
+	@echo "data/output/threshold_calibration.md"
+
 market-lead:  ## Упреждение слоёв: рынок против отчётности и рейтингов (замер)
 	uv run python eval/market_lead_run.py > data/output/market_lead.md
 	@echo "data/output/market_lead.md"

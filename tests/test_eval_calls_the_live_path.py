@@ -133,6 +133,8 @@ def test_the_live_path_is_reachable_from_the_runs() -> None:
     runs = {
         "ifrs_intake_run.py": "accept_ifrs_document",
         "regression_run.py": "analyze",
+        # Калибровка фазы 6 спрашивает «а если порог другой» у маршрута.
+        "threshold_calibration_run.py": "routing_rows",
     }
     for name, entry in runs.items():
         source = (settings.base_dir / "eval" / name).read_text(encoding="utf-8")
