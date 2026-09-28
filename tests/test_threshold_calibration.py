@@ -35,6 +35,17 @@ def _fired(days: dict[date, bool]) -> dict[date, frozenset]:
     }
 
 
+def _flags(history: dict, members: set[str], calendar: dict) -> dict:
+    """Отметки эмитентов по истории «прежнего» варианта — тем же путём, что в замере."""
+    done = run.Pass()
+    for inn, by_day in history.items():
+        done.base[inn].update(by_day)
+    observed = {inn: set(by_day) for inn, by_day in done.base.items()}
+    return run.flags(
+        done.days_of("прежний", _subject()), observed, members, calendar, PART
+    )
+
+
 def test_firing_after_the_event_does_not_catch_it() -> None:
     """Основание, появившееся в день события и позже, событие не ловит."""
     history = {
@@ -42,7 +53,7 @@ def test_firing_after_the_event_does_not_catch_it() -> None:
         "B": _fired({date(2026, 6, 1): False, date(2026, 7, 20): True}),
     }
     calendar = {"A": date(2026, 7, 15), "B": date(2026, 7, 15)}
-    marks = run.flags(history, _subject(), {"A", "B"}, calendar, PART)
+    marks = _flags(history, {"A", "B"}, calendar)
     assert marks["A"].fired and marks["A"].lead == 5
     assert not marks["B"].fired
 
@@ -50,14 +61,14 @@ def test_firing_after_the_event_does_not_catch_it() -> None:
 def test_standing_from_the_first_day_is_not_an_appearance() -> None:
     """Основание, стоявшее с первого дня истории, ничего не предсказало."""
     history = {"A": _fired({date(2025, 9, 24): True, date(2026, 7, 10): True})}
-    marks = run.flags(history, _subject(), {"A"}, {"A": date(2026, 8, 1)}, PART)
+    marks = _flags(history, {"A"}, {"A": date(2026, 8, 1)})
     assert not marks["A"].fired
 
 
 def test_an_event_before_the_part_leaves_the_circle() -> None:
     """Эмитент, чьё событие было до части, в её круг не входит."""
     history = {"A": _fired({date(2026, 6, 1): False})}
-    marks = run.flags(history, _subject(), {"A"}, {"A": date(2026, 3, 1)}, PART)
+    marks = _flags(history, {"A"}, {"A": date(2026, 3, 1)})
     assert marks == {}
 
 

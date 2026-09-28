@@ -55,11 +55,25 @@ logger = logging.getLogger(__name__)
 # --- устройство замера, согласованное владельцем 28.09.2026 ---------------------
 # Точка раздела: обучение — события до неё, проверка — с неё (15 и 13).
 SPLIT = date(2026, 7, 1)
-# Сетка перцентилей объявлена до замера: хвост «больше — хуже» и «меньше — хуже».
-HIGH_GRID = (Decimal("75"), Decimal("80"), Decimal("85"), Decimal("90"),
-             Decimal("95"), Decimal("97.5"), Decimal("99"))
-LOW_GRID = (Decimal("1"), Decimal("2.5"), Decimal("5"), Decimal("10"),
-            Decimal("15"), Decimal("20"), Decimal("25"))
+# Сетка перцентилей объявлена до замера: «больше — хуже» p25–p99,
+# «меньше — хуже» p1–p60, шаг 5 п. п. в середине и прежние точки в хвостах.
+# **Расширена 28.09.2026 по итогам пилота** (решение владельца): пилот
+# смотрел только распределения, не события, — нынешние пороги
+# рефинансирования (≈ p41) и нижней части автономии РСБУ и лизинга
+# (46–55 % по худшую сторону) лежали вне прежней сетки p75–p99 и p1–p25,
+# и замер отвечал бы только на вопрос «помогло бы ужесточение». Перцентиль
+# нынешнего порога входит в сетку отдельным вариантом (`CURRENT_MARK`).
+HIGH_GRID = (
+    *(Decimal(step) for step in range(25, 96, 5)),
+    Decimal("97.5"),
+    Decimal("99"),
+)
+LOW_GRID = (
+    Decimal("1"),
+    Decimal("2.5"),
+    *(Decimal(step) for step in range(5, 61, 5)),
+)
+CURRENT_MARK = "перцентиль нынешнего порога"
 # Вариант на обучении выбирается при числе сработавших не меньше этого:
 # прирост на пяти сработавших — шум, а не свойство порога.
 MIN_FIRED = 10
@@ -238,6 +252,8 @@ class Distribution:
     edges: dict[Decimal, Decimal] = field(default_factory=dict)
     # Где стоит нынешний порог: доля наблюдений по худшую сторону от него.
     current_share: Decimal | None = None
+    # Перцентиль нынешнего порога — отдельный вариант сетки; ключ в `edges`.
+    current_pct: Decimal | None = None
 
 
 def distributions(
@@ -273,17 +289,46 @@ def distributions(
             for value in pooled
             if (value >= subject.current if subject.high_bad else value <= subject.current)
         )
-        said[subject].current_share = Decimal(worse) / len(pooled) * 100
+        share = Decimal(worse) / len(pooled) * 100
+        said[subject].current_share = share
+        # Перцентиль нынешнего порога — точка того же распределения, взятая
+        # тем же правилом, что и сетка: вариант, отличающийся от прежнего
+        # только тем, что он точка распределения, а не опорная точка шкалы.
+        mark = (100 - share if subject.high_bad else share).quantize(Decimal("0.1"))
+        if mark not in said[subject].edges:
+            said[subject].edges[mark] = statistics.median(
+                _rank(values, mark) for values in days.values()
+            )
+        said[subject].current_pct = mark
+        said[subject].edges = dict(sorted(said[subject].edges.items()))
     return said
 
 
-def variants(said: dict[Subject, Distribution]) -> dict[str, Overrides]:
-    """Варианты прохода: «прежний» и по перцентилю сетки у каждой ступени."""
+def variants(
+    said: dict[Subject, Distribution],
+) -> tuple[dict[str, Overrides], dict[str, Subject]]:
+    """Варианты прохода: «прежний» и по перцентилю сетки у каждой ступени.
+
+    Вторым возвращается ступень каждого варианта: у варианта хранится
+    только его основание, иначе 240 вариантов × 900 эмитентов × 280 дат
+    не поместились бы в память.
+    """
     found: dict[str, Overrides] = {"прежний": Overrides()}
+    owner: dict[str, Subject] = {}
     for subject, spread in said.items():
         for share, edge in spread.edges.items():
-            found[_name(subject, share)] = subject.overrides(edge)
-    return found
+            name = _name(subject, share)
+            found[name] = subject.overrides(edge)
+            owner[name] = subject
+    return found, owner
+
+
+def _fires(subject: Subject, found: frozenset) -> bool:
+    """Есть ли в основаниях точки основание ступени о её предмете."""
+    return any(
+        ground in subject.grounds and about == subject.finding_subject
+        for ground, about in found
+    )
 
 
 def _name(subject: Subject, share: Decimal) -> str:
@@ -296,18 +341,38 @@ def _pct(share: Decimal) -> str:
     return format(share.normalize(), "f")
 
 
-def run_pass(
-    dates: list[date], chosen: dict[str, Overrides]
-) -> tuple[dict[str, dict[str, dict[date, frozenset]]], list[float]]:
-    """Проход по датам: основания каждого варианта по эмитенту и дню.
+@dataclass(slots=True)
+class Pass:
+    """Итог прохода: основания «прежнего» по дню и дни срабатывания вариантов.
 
-    Хранятся только коды оснований с предметом — `(код, предмет)`, — остальное
-    вердикта замеру не нужно.
+    У «прежнего» хранятся все основания калибровки — по ним идёт контроль
+    с историей и меры нынешних порогов всех ступеней; у варианта — только
+    дни, когда сработало основание его ступени.
     """
-    fired: dict[str, dict[str, dict[date, frozenset]]] = {
-        name: defaultdict(dict) for name in chosen
-    }
-    seconds: list[float] = []
+
+    base: dict[str, dict[date, frozenset]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
+    hits: dict[str, dict[str, set[date]]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(set))
+    )
+    seconds: list[float] = field(default_factory=list)
+
+    def days_of(self, name: str, subject: Subject) -> dict[str, set[date]]:
+        """Дни срабатывания основания ступени у варианта по эмитенту."""
+        if name != "прежний":
+            return self.hits[name]
+        return {
+            inn: {day for day, found in by_day.items() if _fires(subject, found)}
+            for inn, by_day in self.base.items()
+        }
+
+
+def run_pass(
+    dates: list[date], chosen: dict[str, Overrides], owner: dict[str, Subject]
+) -> Pass:
+    """Проход по датам: боевой маршрут с каждым вариантом порогов."""
+    said = Pass()
     memo: dict = {}
     with connection() as conn:
         for moment in dates:
@@ -318,22 +383,26 @@ def run_pass(
             )
             for name, by_inn in verdicts.items():
                 for inn, verdict in by_inn.items():
-                    fired[name][inn][moment] = frozenset(
+                    found = frozenset(
                         (item.ground, item.subject)
                         for item in verdict.findings
                         if item.ground in CALIBRATED
                     )
-            seconds.append(time.monotonic() - started)
-            logger.warning("%s: %.1f с", moment, seconds[-1])
+                    if name == "прежний":
+                        said.base[inn][moment] = found
+                    elif _fires(owner[name], found):
+                        said.hits[name][inn].add(moment)
+            said.seconds.append(time.monotonic() - started)
+            logger.warning("%s: %.1f с", moment, said.seconds[-1])
         conn.rollback()
-    return fired, seconds
+    return said
 
 
-def control(rows: list[dict], fired: dict, dates: list[date]) -> tuple[int, list[str]]:
+def control(rows: list[dict], done: Pass, dates: list[date]) -> tuple[int, list[str]]:
     """«Прежний» вариант против записанной истории: сверено и расхождения."""
     wanted = set(dates)
     compared, differ = 0, []
-    base = fired["прежний"]
+    base = done.base
     for row in rows:
         if row["as_of"] not in wanted or row["inn"] not in base:
             continue
@@ -411,17 +480,19 @@ def circle(
 
 
 def flags(
-    fired: dict[str, dict[date, frozenset]],
-    subject: Subject,
+    hits: dict[str, set[date]],
+    observed: dict[str, set[date]],
     members: set[str],
     calendar: dict[str, date],
     part: Part,
 ) -> dict[str, Flags]:
     """Появилось ли основание у каждого из круга до своего срока.
 
-    Срок у эмитента с событием части — день до события (сработавшее после
-    события не ловит его), у прочих — конец части. Эмитент, чьё событие
-    было до части, в неё не входит: он уже не предупреждается.
+    `hits` — дни, когда основание ступени стояло; `observed` — все дни,
+    когда эмитент маршрутизировался. Срок у эмитента с событием части — день
+    до события (сработавшее после события не ловит его), у прочих — конец
+    части. Эмитент, чьё событие было до части, в неё не входит: он уже
+    не предупреждается.
     """
     said: dict[str, Flags] = {}
     for inn in members:
@@ -430,14 +501,10 @@ def flags(
             continue
         positive = moment is not None and moment <= part.end
         until = moment - timedelta(days=1) if positive else part.end
+        on = hits.get(inn, set())
         history = {
-            day: {"основание"}
-            if any(
-                ground in subject.grounds and about == subject.finding_subject
-                for ground, about in found
-            )
-            else set()
-            for day, found in fired.get(inn, {}).items()
+            day: {"основание"} if day in on else set()
+            for day in observed.get(inn, set())
         }
         day = first_new_ground(history, lambda _: True, until) if history else None
         said[inn] = Flags(
@@ -533,7 +600,7 @@ def main() -> int:
         rows = fetch_all(_POINTS, {}, conn=conn)
     grid = sorted({row["as_of"] for row in rows})
     said = distributions(rows, _branches(), found)
-    chosen = variants(said)
+    chosen, owner = variants(said)
     calendar = events()
     start, end = grid[0], grid[-1]
     train = sorted(d for d in calendar.values() if start < d < SPLIT)
@@ -545,9 +612,23 @@ def main() -> int:
         f"{SPLIT:%d.%m.%Y}: событий в обучении **{len(train)}**, в проверке "
         f"**{len(test)}** ({len(test) / max(len(train) + len(test), 1):.0%}).\n"
     )
+    high = sum(1 for s in found if s.high_bad)
     print(
-        f"Вариантов прохода **{len(chosen)}**: «прежний» и по {len(HIGH_GRID)} "
-        f"перцентилей у каждой из {len(found)} ступеней.\n"
+        f"Вариантов прохода **{len(chosen)}**: «прежний» и по сетке у каждой "
+        f"из {len(found)} ступеней — {len(HIGH_GRID)} перцентилей у {high} "
+        f"ступеней «больше — хуже» (p25–p99), {len(LOW_GRID)} у "
+        f"{len(found) - high} ступеней «меньше — хуже» (p1–p60), и у каждой "
+        f"ещё {CURRENT_MARK}, если его нет в сетке.\n"
+    )
+    print(
+        "**Сетка расширена 28.09.2026 по итогам пилота, до прохода.** Пилот "
+        "смотрел только распределения, не события. Нынешние пороги "
+        "рефинансирования (≈ p41) и нижней части автономии РСБУ и лизинга "
+        "(46–55 % наблюдений по худшую сторону) лежали вне прежней сетки "
+        "p75–p99 и p1–p25: все её варианты были строже нынешнего, и замер "
+        "отвечал бы только на вопрос «помогло бы ужесточение». Сетка "
+        "расширена для всех 15 ступеней одним правилом, перцентиль нынешнего "
+        "порога входит в неё отдельным вариантом.\n"
     )
     _print_distributions(found, said)
     parts = (
@@ -555,19 +636,19 @@ def main() -> int:
         Part("проверка", SPLIT, end),
     )
     if pilot:
-        return _pilot(rows, grid, chosen, found, said, calendar, parts)
-    fired, seconds = run_pass(grid, chosen)
-    compared, differ = control(rows, fired, grid)
+        return _pilot(rows, grid, chosen, owner, found, said, calendar, parts)
+    done = run_pass(grid, chosen, owner)
+    compared, differ = control(rows, done, grid)
     print(
         f"**Контроль**: «прежний» вариант против записанной истории — сверено "
         f"**{compared}** точек, расхождений **{len(differ)}**. Проход "
-        f"{sum(seconds) / 60:.0f} мин.\n"
+        f"{sum(done.seconds) / 60:.0f} мин.\n"
     )
     for line in differ[:20]:
         print(f"- {line}")
     if differ:
         print("\n**Расхождения есть — мерам ниже верить нельзя, пока они не объяснены.**\n")
-    _measure(rows, _branches(), found, said, fired, calendar, parts)
+    _measure(rows, _branches(), found, said, done, calendar, parts)
     return 0 if not differ else 1
 
 
@@ -576,20 +657,27 @@ def _measure(
     branches: dict[str, str],
     found: tuple[Subject, ...],
     said: dict[Subject, Distribution],
-    fired: dict,
+    done: Pass,
     calendar: dict[str, date],
     parts: tuple["Part", "Part"],
 ) -> list[str]:
     """Меры по ступеням: обучение, выбор, проверка; итог строками сводки."""
     train_part, test_part = parts
     summary: list[str] = []
+    observed = {inn: set(by_day) for inn, by_day in done.base.items()}
     for subject in found:
         spread = said[subject]
         names = ["прежний"] + [_name(subject, share) for share in spread.edges]
         members = {part.name: circle(rows, branches, subject, part) for part in parts}
         marks = {
             name: {
-                part.name: flags(fired[name], subject, members[part.name], calendar, part)
+                part.name: flags(
+                    done.days_of(name, subject),
+                    observed,
+                    members[part.name],
+                    calendar,
+                    part,
+                )
                 for part in parts
             }
             for name in names
@@ -668,9 +756,13 @@ def _table(
     print("| Вариант | Порог | Сработал | Пойман | Выявляемость | Прирост | Упреждение |")
     print("|---|---|---|---|---|---|---|")
     edges = {_name(subject, share): edge for share, edge in spread.edges.items()}
+    current = (
+        _name(subject, spread.current_pct) if spread.current_pct is not None else ""
+    )
     for name, item in train.items():
         edge = edges.get(name, subject.current)
-        mark = " **выбран**" if name == best else ""
+        mark = f" ({CURRENT_MARK})" if name == current else ""
+        mark += " **выбран**" if name == best else ""
         row = _line(name + mark, item)
         head, rest = row.split(" | ", 1)
         print(f"{head} | {edge:.3f} | {rest}")
@@ -702,6 +794,7 @@ def _pilot(
     rows: list[dict],
     grid: list[date],
     chosen: dict[str, Overrides],
+    owner: dict[str, Subject],
     found: tuple[Subject, ...],
     said: dict[Subject, Distribution],
     calendar: dict[str, date],
@@ -714,10 +807,11 @@ def _pilot(
     """
     step = max(len(grid) // PILOT_DATES, 1)
     dates = [grid[min(i * step + step // 2, len(grid) - 1)] for i in range(PILOT_DATES)]
-    fired, seconds = run_pass(dates, chosen)
-    compared, differ = control(rows, fired, dates)
+    done = run_pass(dates, chosen, owner)
+    seconds = done.seconds
+    compared, differ = control(rows, done, dates)
     with contextlib.redirect_stdout(io.StringIO()):
-        smoke = _measure(rows, _branches(), found, said, fired, calendar, parts)
+        smoke = _measure(rows, _branches(), found, said, done, calendar, parts)
     print("## Пилот\n")
     print(f"Даты: {', '.join(f'{d:%d.%m.%Y}' for d in dates)}.\n")
     print(
