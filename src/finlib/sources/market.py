@@ -92,6 +92,11 @@ class Step(BaseModel):
     # Отсутствие поля означает «общее», а не «без подтверждения».
     confirmation: Rule | None = None
     confirmation_status: str = ""
+    # Цена подтверждения основной, поточечной мерой: варианты и интервалы
+    # прироста, на которых оставлено нынешнее (решение владельца 29.09.2026).
+    confirmation_measured_pointwise: dict[str, dict[str, Decimal]] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="after")
     def _route_step_is_named(self) -> "Step":
