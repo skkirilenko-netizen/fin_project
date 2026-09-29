@@ -59,19 +59,38 @@ def _clean(run: dict) -> bool:
     )
 
 
+def _running_today(runs: list[dict], now: datetime) -> dict | None:
+    """Сегодняшний прогон по расписанию, который ещё идёт; None — такого нет.
+
+    **Идущий прогон не чистый и не упавший — он не кончился.** Доставка
+    рейтингов упирается в предел Cbonds и тянется за полдень, и сводка,
+    снятая в это время, обрывала счёт на сегодняшнем дне. Прогон, начатый
+    в другой день и так и не закрытый, сюда не относится: он оборвался.
+    """
+    today = [
+        run
+        for run in runs
+        if _scheduled(run) and _local(run["started_at"]).date() == now.date()
+    ]
+    if any(_clean(run) for run in today):
+        return None
+    return next((run for run in today if run["status"] == "running"), None)
+
+
 def _streak(runs: list[dict], now: datetime) -> tuple[int, str]:
     """Сколько рабочих дней подряд, считая назад, был чистый прогон по расписанию.
 
     Рабочий день без прогона по расписанию обрывает счёт так же, как упавший:
     отсутствие прогона — тоже не устойчивость. Сегодняшний день в счёт идёт,
-    только если время прогона уже прошло.
+    только если время прогона уже прошло и сам прогон завершён: идущий
+    сегодняшний счёт не обрывает, а откладывает.
     """
     by_day: dict[date, list[dict]] = {}
     for run in runs:
         if _scheduled(run):
             by_day.setdefault(_local(run["started_at"]).date(), []).append(run)
     day = now.date()
-    if now.time() < SCHEDULED_AT or day.weekday() >= 5:
+    if now.time() < SCHEDULED_AT or day.weekday() >= 5 or _running_today(runs, now):
         day -= timedelta(days=1)
     count = 0
     while True:
@@ -143,10 +162,17 @@ def main() -> int:
         print(f"\n**Снимка рейтингов за {today:%d.%m.%Y} нет.**")
     name, urgent, moved = _changes()
     print(f"\n**Отчёт изменений** {name}: срочное {urgent}, сменили корзину {moved}.")
-    count, broke = _streak(runs, datetime.now().astimezone())
+    now = datetime.now().astimezone()
+    count, broke = _streak(runs, now)
+    running = _running_today(runs, now)
+    pending = (
+        f"сегодняшний идёт с {_local(running['started_at']):%H:%M}, счёт по завершении; "
+        if running is not None
+        else ""
+    )
     print(
         f"\n**Чистых прогонов по расписанию подряд: {count}** (ручные не считаются; "
-        f"счёт оборвался — {broke})."
+        f"{pending}счёт оборвался — {broke})."
     )
     return 0
 

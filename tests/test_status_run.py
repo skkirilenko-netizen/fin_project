@@ -43,3 +43,25 @@ def test_a_failed_delivery_or_a_missing_day_breaks_the_streak() -> None:
     # Тот же вторник после 10:00 без прогона — обрыв на нём самом.
     count, broke = run._streak(runs, datetime(2026, 9, 29, 11, 0).astimezone())
     assert count == 0 and broke.startswith("29.09.2026")
+
+
+def test_a_running_scheduled_run_defers_the_count() -> None:
+    """Идущий сегодняшний прогон счёт не обрывает: считается со вчерашнего дня.
+
+    Доставка рейтингов упирается в предел Cbonds и тянется за полдень, и сводка
+    в это время объявляла день «не чистым».
+    """
+    runs = [
+        _run(datetime(2026, 9, 29, 10, 0, 2), status="running"),
+        _run(datetime(2026, 9, 28, 10, 0, 2)),
+        _run(datetime(2026, 9, 25, 10, 0, 2)),
+    ]
+    now = datetime(2026, 9, 29, 11, 30).astimezone()
+    count, broke = run._streak(runs, now)
+    assert count == 2 and broke.startswith("24.09.2026")
+    assert run._running_today(runs, now) is runs[0]
+    # Незакрытый прогон прошлого дня — оборвавшийся, а не идущий.
+    stale = [_run(datetime(2026, 9, 28, 10, 0, 2), status="running")]
+    assert run._running_today(stale, datetime(2026, 9, 29, 11, 0).astimezone()) is None
+    count, broke = run._streak(stale, datetime(2026, 9, 29, 11, 0).astimezone())
+    assert count == 0 and broke.startswith("29.09.2026")
