@@ -244,6 +244,14 @@ class WordBreaksPolicy(BaseModel):
 
     single_letter_words: tuple[str, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
+    # Знак сноски, прилипший к последнему слову наименования: сколько цифр
+    # он занимает и после скольких строчных букв подряд стоит.
+    footnote_mark_max_digits: int = Field(gt=0)
+    footnote_mark_after_letters: int = Field(gt=0)
+    # Определённые термины отчётности («Группа», «Компания»): строка
+    # из одного такого слова — окончание перенесённого наименования,
+    # а не заголовок раздела.
+    defined_terms: tuple[str, ...] = Field(min_length=1)
 
 
 class ColumnSpansPolicy(BaseModel):

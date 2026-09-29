@@ -19,23 +19,55 @@ FORM = "ifrs.statement_of_profit_or_loss"
 
 def test_a_confirmed_name_glues_a_capitalised_continuation() -> None:
     """Склеенное подтверждено — строки склеиваются, и это отмечено."""
-    keys = frozenset({match_key(f"{COST} Группы")})
-    assert _join([COST], "Группы", keys) == (f"{COST} Группы", True)
+    keys = frozenset({match_key("Выручка Металлы")})
+    assert _join(["Выручка"], "Металлы", keys) == ("Выручка Металлы", True)
 
 
 def test_without_a_confirmation_the_heading_stays_a_heading() -> None:
     """Без подтверждения — как прежде: «Выручка» над разбивкой не липнет."""
     assert _join(["Выручка"], "Металлы", frozenset()) == ("Металлы", False)
-    assert _join([COST], "Группы", frozenset()) == ("Группы", False)
     # Подтверждено что-то другое — склейки тоже нет.
     other = frozenset({match_key("Выручка Металлы и прочее")})
     assert _join(["Выручка"], "Металлы", other) == ("Металлы", False)
+
+
+def test_a_defined_term_ends_a_carried_name() -> None:
+    """Строка из одного определённого термина — окончание переноса, не заголовок.
+
+    ФосАгро 6м2026: «Повторная выплата ранее возвращенных дивидендов
+    акционерам» / «Компании (2 017) (81)» — строка шла статьёй «Компании»;
+    подтверждения годового комплекта у неё нет, и путь 7б её не склеивал.
+    Склеивает строение: «Компания» и «Группа» пишутся с заглавной как
+    определённые термины. Склейка по строению подтверждением не считается.
+    """
+    head = "Повторная выплата ранее возвращенных дивидендов акционерам"
+    assert _join([head], "Компании", frozenset()) == (f"{head} Компании", False)
+    assert _join([COST], "Группы", frozenset()) == (f"{COST} Группы", False)
+    # Термин склеивается только целой строкой: «Группы компаний» — начало
+    # своего наименования, а не окончание чужого.
+    assert _join(["Выручка"], "Группы компаний", frozenset()) == ("Группы компаний", False)
 
 
 def test_a_confirmed_remainder_is_not_glued() -> None:
     """Остаток подтверждён сам по себе — значит, это своя статья, а не обрывок."""
     keys = frozenset({match_key(f"{COST} Группы"), match_key("Группы")})
     assert _join([COST], "Группы", keys) == ("Группы", False)
+
+
+def test_a_footnote_mark_is_cut_from_the_name() -> None:
+    """Знак сноски, прилипший к последнему слову, не часть наименования."""
+    from finlib.sources.ifrs_extract import cut_footnote_mark, row_name
+
+    name = "Уменьшение торговой и прочей дебиторской задолженности"
+    assert cut_footnote_mark(f"{name}1") == name
+    assert cut_footnote_mark("Возврат дивидендов2") == "Возврат дивидендов"
+    # Число отделено пробелом либо стоит за заглавной — это не сноска.
+    assert cut_footnote_mark("Облигации серии БО-П01") == "Облигации серии БО-П01"
+    assert cut_footnote_mark("Облигации серии 1") == "Облигации серии 1"
+    # Трёхзначный хвост — не знак сноски, а часть наименования.
+    assert cut_footnote_mark("Код строки абв123") == "Код строки абв123"
+    # Тем же правилом читается ключ подтверждения: одно определение имени.
+    assert row_name(f"{name}1  7,047 28,142") == name
 
 
 def test_ordinary_continuation_is_unchanged() -> None:

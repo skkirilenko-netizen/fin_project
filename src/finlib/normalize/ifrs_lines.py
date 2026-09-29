@@ -37,6 +37,20 @@ logger = logging.getLogger(__name__)
 CODE_PATTERN = r"^ifrs\.[a-z][a-z0-9_]*$"
 
 
+def _match_name(name: str) -> str:
+    """Написание справочника так, как его читает нынешний разбор.
+
+    **Синоним приводится тем же правилом, что строка документа** — со знаком
+    сноски, отрезанным по строению (`ifrs_extract.cut_footnote_mark`).
+    Синонимы ФосАгро записаны с прилипшей сноской («…задолженности1»):
+    так их прочитал разбор того дня, и без приведения разбор, научившийся
+    сноску отрезать, перестал бы их опознавать.
+    """
+    from finlib.sources.ifrs_extract import cut_footnote_mark
+
+    return normalize_name(cut_footnote_mark(name))
+
+
 class Alias(BaseModel):
     """Наименование, под которым позиция встречена в отчётности эмитента.
 
@@ -130,7 +144,7 @@ class IfrsPosition(BaseModel):
         оно и есть первое из них.
         """
         names = (self.name, *(item.name for item in self.aliases))
-        return tuple(dict.fromkeys(normalize_name(name) for name in names))
+        return tuple(dict.fromkeys(_match_name(name) for name in names))
 
     def occurs_in(self, form: str) -> bool:
         """Встречается ли позиция в этой форме — своей или объявленной второй.
@@ -187,7 +201,7 @@ class IgnoredSubject(BaseModel):
     @property
     def match_names(self) -> tuple[str, ...]:
         """Нормализованные написания, по которым строка игнорируется."""
-        return tuple(dict.fromkeys(normalize_name(item.name) for item in self.names))
+        return tuple(dict.fromkeys(_match_name(item.name) for item in self.names))
 
 
 class FormDef(BaseModel):

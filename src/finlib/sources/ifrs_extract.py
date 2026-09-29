@@ -536,7 +536,7 @@ def _extract_form(
         # Слово, разорванное извлекателем, склеивается здесь: дальше
         # наименование идёт и в справочник, и в подтверждения, и в очередь
         # разметки, а разорванное не опознаётся ни там, ни там.
-        name = glue_word_breaks(name, letters)
+        name = cut_footnote_mark(glue_word_breaks(name, letters))
         # Координаты старше правил строения числа: они говорят, где кончается
         # колонка, а правила об этом только догадываются. Но величин от этого
         # не убывает: если ячейка не легла ни в одну колонку — у Норникеля
@@ -873,6 +873,41 @@ _LONE_LETTER = re.compile(r"(?<![^\W\d_])([^\W\d_])\s+(?=[^\W\d_])")
 
 
 @lru_cache(maxsize=1)
+def cut_footnote_mark(name: str) -> str:
+    """Отрезает знак сноски, прилипший к последнему слову наименования.
+
+    **По строению, а не по перечню**: цифры вплотную за строчными буквами
+    в конце наименования — знак сноски («задолженности1»), в русском тексте
+    число от слова отделено пробелом. Длина знака и число букв перед ним —
+    параметры разбора (`ifrs_parsing.yaml`, `word_breaks`). Не режется
+    «БО-П01»: перед цифрами заглавная буква.
+    """
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    rule = load_parsing_policy().word_breaks
+    pattern = (
+        rf"(?<=[a-zа-яё]{{{rule.footnote_mark_after_letters}}})"
+        rf"\d{{1,{rule.footnote_mark_max_digits}}}$"
+    )
+    stripped = name.rstrip()
+    cut = re.sub(pattern, "", stripped)
+    return cut if cut != stripped else name
+
+
+def _key(name: str) -> str:
+    """Ключ подтверждения наименования — то же правило, что в журнале подтверждений."""
+    from finlib.sources.ifrs_confirmed import match_key
+
+    return match_key(name)
+
+
+def _defined_terms() -> frozenset[str]:
+    """Определённые термины отчётности: строка из одного — окончание переноса."""
+    from finlib.sources.ifrs_numbers import load_parsing_policy
+
+    return frozenset(load_parsing_policy().word_breaks.defined_terms)
+
+
 def _single_letter_words() -> frozenset[str]:
     """Однобуквенные слова методики — те, что склеивать нельзя."""
     from finlib.sources.ifrs_numbers import load_parsing_policy
@@ -1112,13 +1147,22 @@ def _join(
     confirmed = False
     for item in reversed(pending):
         if not current[:1].islower() and not _CONTINUES.match(item):
+            # **Строка из одного определённого термина — окончание переноса**
+            # («Компании», «Группы»): заглавная у термина — правописание
+            # отчётности, а не начало заголовка. Склеивается с одной
+            # предыдущей строкой, и только когда сама строка — термин целиком
+            # и человек не подтвердил её отдельной статьёй.
+            if not parts and name.strip() in _defined_terms() and not (
+                glued and _key(name) in glued
+            ):
+                parts.append(item)
+                current = item
+                continue
             if not glued:
                 break
-            from finlib.sources.ifrs_confirmed import match_key
-
             now = " ".join([*reversed(parts), name]).strip()
             wider = " ".join([item, *reversed(parts), name]).strip()
-            if match_key(wider) not in glued or match_key(now) in glued:
+            if _key(wider) not in glued or _key(now) in glued:
                 break
             confirmed = True
         parts.append(item)
@@ -1278,7 +1322,7 @@ def row_name(line: str, grouping: Grouping = Grouping.RUSSIAN) -> str:
     и на границу наименования выбор конвенции не влияет — цифры остаются
     цифрами при любой.
     """
-    return _split_row(line, grouping)[0]
+    return cut_footnote_mark(_split_row(line, grouping)[0])
 
 
 def _split_row(
