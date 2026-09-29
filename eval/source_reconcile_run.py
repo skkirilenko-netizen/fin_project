@@ -2,30 +2,35 @@
 
     uv run python eval/source_reconcile_run.py 9703024202 7838360491 ...
     uv run python eval/source_reconcile_run.py --review   # эмитенты «Разбора» с PDF
+    uv run python eval/source_reconcile_run.py --review --write   # и запись
 
-**Только чтение.** Документ проходит приём боевым циклом без записи
+Документ проходит приём боевым циклом без записи
 (`accept_ifrs_document(write=False)`), строка агрегатора читается из кэша
 доставки тем путём, что её грузит загрузка (`cbonds_loader.read_row`), сверку
-делает `quality.reconcile`. Таблицы для записи сверки в базе пока нет: схема
-подана на согласование, и до неё прогон ничего не пишет.
+делает `quality.reconcile`. **Пишет прогон только с `--write`** и только
+в `source_reconciliation` (схема согласована 29.09.2026): строка на величину
+одной даты одного документа, отсутствие стороны — тоже строка. Оттуда
+заключение уровня 1 берёт долю совпавших в отчётной колонке.
 
 **Сверяются все отчётные даты документа**, а не только отчётная: колонка
 прошлого года — та же величина, что строка агрегатора за прошлый год,
 и её расхождение говорит о том же.
 """
 
+import contextlib
 import logging
 import sys
 from collections import Counter
 from pathlib import Path
 
-from finlib.db import fetch_all
+from finlib.db import connection, fetch_all
 from finlib.pipeline import accept_ifrs_document
 from finlib.quality.reconcile import (
     Outcome,
     aggregator_codes,
     aggregator_reading,
     reconcile,
+    record,
 )
 from finlib.sources import cbonds
 from finlib.sources.ifrs_inbox import text_of
@@ -67,6 +72,7 @@ def _document(
     kinds: dict[str, str],
     total: Counter[str],
     by_code: dict[str, Counter[str]],
+    conn=None,  # noqa: ANN001 — соединение для записи; None — прогон без записи
 ) -> None:
     """Сверяет один документ по всем его отчётным датам и печатает итог."""
     codes = tuple(sorted(kinds))
@@ -109,6 +115,15 @@ def _document(
         # за прошлый год взята из прошлогодней отчётности: их расхождение —
         # пересмотр, а не ошибка источника.
         role = "отчётная" if moment == max(profile.report_dates) else "сравнительная"
+        if conn is not None:
+            record(
+                inn,
+                str(path),
+                "reporting" if role == "отчётная" else "comparative",
+                found,
+                kinds,
+                conn,
+            )
         total.update({f"{role}|{name}": count for name, count in counted.items()})
         print(f"### {moment:%d.%m.%Y} — агрегатор в единице {reading.unit_code}\n")
         print(", ".join(f"{name} {count}" for name, count in counted.most_common()) + "\n")
@@ -132,6 +147,7 @@ def main() -> int:
     """Сверяет документы названных эмитентов со строками агрегатора."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     wanted = [item for item in sys.argv[1:] if item.isdigit()]
+    write = "--write" in sys.argv[1:]
     if "--review" in sys.argv[1:]:
         wanted = _review_with_pdf()
     if not wanted:
@@ -145,13 +161,16 @@ def main() -> int:
         f"Эмитентов {len(wanted)}: {', '.join(wanted)}. Кодов агрегатора {len(kinds)}, "
         f"из них агрегатов источника "
         f"{sum(1 for kind in kinds.values() if kind == 'aggregate')}. Допуск — одна "
-        "единица более грубой стороны. Прогон без записи.\n"
+        "единица более грубой стороны. "
+        + ("Сверка записана в `source_reconciliation`.\n" if write else "Прогон без записи.\n")
     )
     # Строки агрегатора — из кэша доставки; сеть не используется.
     rows = cbonds.msfo_universe()
-    for inn in wanted:
-        for path in sorted((ROOT / inn).glob("*.pdf")):
-            _document(inn, path, rows, kinds, total, by_code)
+    with contextlib.ExitStack() as stack:
+        conn = stack.enter_context(connection()) if write else None
+        for inn in wanted:
+            for path in sorted((ROOT / inn).glob("*.pdf")):
+                _document(inn, path, rows, kinds, total, by_code, conn)
     compared = sum(total[item.value] for item in (Outcome.MATCH, *_SHOWN))
     print("## Итог\n")
     print(

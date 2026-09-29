@@ -1009,4 +1009,39 @@ COMMENT ON COLUMN routing_history.grounds_all IS
 COMMENT ON COLUMN routing_history.inputs IS
     'Величины, которыми решение получено: показатели, платежи, денежные средства';
 
+-- Сверка агрегатора с документом (уровень 3 заключений по МСФО, 29.09.2026).
+-- Одна строка — одна величина одной отчётной даты одного документа. Исходов
+-- пять (`quality.reconcile.Outcome`), и отсутствие с одной стороны хранится
+-- исходом, а не пропуском строки: «сверять было нечем» и «не сверяли» —
+-- разные сведения. Строка агрегатора берётся из кэша доставки, а не из
+-- fact_report: на дату, где лежит документ, величины агрегатора в базу
+-- не попадают.
+CREATE TABLE IF NOT EXISTS source_reconciliation (
+    id               bigserial PRIMARY KEY,
+    inn              text NOT NULL,
+    document_file_id bigint REFERENCES src_file(id),
+    document_path    text NOT NULL,
+    report_date      date NOT NULL,
+    period_role      text NOT NULL
+        CHECK (period_role IN ('reporting', 'comparative')),
+    line_code        text NOT NULL,
+    aggregator_kind  text NOT NULL CHECK (aggregator_kind IN ('exact', 'aggregate')),
+    document_value   numeric,
+    document_unit    text,
+    aggregator_value numeric,
+    aggregator_unit  text,
+    outcome          text NOT NULL CHECK (outcome IN (
+        'совпало', 'расходится', 'расходится знаком',
+        'нет у агрегатора', 'нет в документе')),
+    difference_rub   numeric,
+    tolerance_rub    numeric,
+    code_version     text NOT NULL,
+    checked_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT source_reconciliation_uniq
+        UNIQUE (document_path, report_date, line_code)
+);
+
+COMMENT ON TABLE source_reconciliation IS
+    'Сверка величин агрегатора с разобранным документом: мера надёжности агрегатора';
+
 COMMIT;

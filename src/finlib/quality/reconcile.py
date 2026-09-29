@@ -169,3 +169,116 @@ def reconcile(
         )
         for code in codes
     ]
+
+
+# **Строка на величину, и отсутствие стороны — тоже строка.** «Сверять было
+# нечем» и «не сверяли» — разные сведения, и пропуск строки их слил бы.
+# Повторная сверка того же документа переписывает свою строку: сверка —
+# состояние на нынешний разбор, а версия разбора стоит в `code_version`.
+_RECORD = """
+INSERT INTO source_reconciliation (
+    inn, document_file_id, document_path, report_date, period_role, line_code,
+    aggregator_kind, document_value, document_unit, aggregator_value,
+    aggregator_unit, outcome, difference_rub, tolerance_rub, code_version
+) VALUES (
+    %(inn)s, %(file_id)s, %(path)s, %(date)s, %(role)s, %(code)s, %(kind)s,
+    %(doc_value)s, %(doc_unit)s, %(agg_value)s, %(agg_unit)s, %(outcome)s,
+    %(difference)s, %(tolerance)s, %(version)s
+)
+ON CONFLICT (document_path, report_date, line_code) DO UPDATE SET
+    inn = EXCLUDED.inn,
+    document_file_id = EXCLUDED.document_file_id,
+    period_role = EXCLUDED.period_role,
+    aggregator_kind = EXCLUDED.aggregator_kind,
+    document_value = EXCLUDED.document_value,
+    document_unit = EXCLUDED.document_unit,
+    aggregator_value = EXCLUDED.aggregator_value,
+    aggregator_unit = EXCLUDED.aggregator_unit,
+    outcome = EXCLUDED.outcome,
+    difference_rub = EXCLUDED.difference_rub,
+    tolerance_rub = EXCLUDED.tolerance_rub,
+    code_version = EXCLUDED.code_version,
+    checked_at = now()
+"""
+
+# Комплект документа, если он загружен: путь — ключ сверки, а ссылка
+# на комплект позволяет спросить, в каком он статусе.
+_FILE_OF = """
+SELECT id FROM src_file WHERE raw_path = %(path)s AND source = 'file'
+ORDER BY is_actual DESC, id DESC LIMIT 1
+"""
+
+# **Мера надёжности — отчётная колонка.** Сравнительную эмитент бывает
+# пересчитал, и расхождение там — пересмотр, а не ошибка источника.
+_REPORTING_SHARE = """
+SELECT count(*) FILTER (WHERE outcome = 'совпало') AS matched,
+       count(*) FILTER (WHERE outcome IN ('совпало', 'расходится',
+                                          'расходится знаком')) AS compared,
+       count(DISTINCT inn) AS issuers
+FROM source_reconciliation WHERE period_role = 'reporting'
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Share:
+    """Совпавшие в отчётной колонке по записанной сверке и её знаменатели."""
+
+    matched: int
+    compared: int
+    issuers: int
+
+
+def record(
+    inn: str,
+    path: str,
+    role: str,
+    found: list[Comparison],
+    kinds: dict[str, str],
+    conn,  # noqa: ANN001 — соединение psycopg2
+) -> int:
+    """Записывает сверку одной даты одного документа; возвращает число строк."""
+    from finlib.db import execute_many, fetch_one
+    from finlib.version import code_version
+
+    row = fetch_one(_FILE_OF, {"path": path}, conn=conn)
+    version = code_version()
+    return execute_many(
+        _RECORD,
+        [
+            {
+                "inn": inn,
+                "file_id": row["id"] if row else None,
+                "path": path,
+                "date": item.report_date,
+                "role": role,
+                "code": item.code,
+                "kind": kinds[item.code],
+                "doc_value": item.document.value,
+                "doc_unit": item.document.unit_code,
+                "agg_value": item.aggregator.value,
+                "agg_unit": item.aggregator.unit_code,
+                "outcome": item.outcome.value,
+                "difference": item.difference,
+                "tolerance": item.tolerance,
+                "version": version,
+            }
+            for item in found
+        ],
+        conn=conn,
+    )
+
+
+def reporting_share(conn=None) -> Share:  # noqa: ANN001
+    """Доля совпавших в отчётной колонке по записанной сверке.
+
+    **Ноль сверенных — не «ничего не совпало»**, а отсутствие сверки: читающий
+    обязан отличить одно от другого по `compared`, а не по доле.
+    """
+    from finlib.db import fetch_one
+
+    row = fetch_one(_REPORTING_SHARE, {}, conn=conn) or {}
+    return Share(
+        int(row.get("matched") or 0),
+        int(row.get("compared") or 0),
+        int(row.get("issuers") or 0),
+    )
