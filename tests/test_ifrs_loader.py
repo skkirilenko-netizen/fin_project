@@ -881,3 +881,41 @@ def test_ifrs_set_does_not_reach_rsbu_metrics(db_conn) -> None:
     ifrs = load_period_values(INN, db_conn, Standard.IFRS)
     ifrs_codes = {code for period in ifrs.values() for code in period.values}
     assert "ifrs.total_assets" in ifrs_codes
+
+
+def _other_set(db_conn, source: str, period_end: date) -> int:  # noqa: ANN001
+    """Актуальный комплект другого способа получения либо другого периода."""
+    row = fetch_one(
+        "INSERT INTO src_file (inn, standard, report_year, period_end, source, "
+        "form_codes, correction_version, is_actual, reporting_type, unit_code, "
+        "unit_source, status) VALUES (%(i)s, 'ifrs', %(y)s, %(p)s, %(s)s, "
+        "'{}', 0, true, 'full', '385', 'explicit', 'loaded') RETURNING id",
+        {"i": INN, "y": period_end.year, "p": period_end, "s": source},
+        conn=db_conn,
+    )
+    assert row is not None
+    return int(row["id"])
+
+
+def test_document_keeps_the_aggregator_set_and_other_periods_actual(db_conn) -> None:
+    """Документ снимает актуальность только с документов своего периода.
+
+    Прежде снималась актуальность со всех источников года: агрегатор,
+    загруженный 21.09.2026 раньше документов, у 11 эмитентов остался за 2025
+    год без актуальной версии, и то, чего в документе нет, в расчёт не шло.
+    Промежуточный комплект того же года — другой период и тоже остаётся.
+    """
+    aggregator = _other_set(db_conn, "cbonds", DATES[0])
+    interim = _other_set(db_conn, "file", date(DATES[0].year, 6, 30))
+    load_extraction(INN, *prepared(), db_conn, NOT_READ)
+
+    actual = {
+        row["id"]
+        for row in fetch_all(
+            "SELECT id FROM src_file WHERE inn = %(i)s AND standard = 'ifrs' "
+            "AND is_actual",
+            {"i": INN},
+            conn=db_conn,
+        )
+    }
+    assert {aggregator, interim} <= actual

@@ -132,10 +132,20 @@ ON CONFLICT (inn) DO UPDATE SET
     updated_at = now()
 """
 
+# **Актуальность снимается только с комплектов документа и только того же
+# периода** — зеркало правила загрузки агрегатора (`cbonds_loader`,
+# 24.09.2026). Документ и доставка агрегатора — два способа получения одной
+# отчётности, и в расчёт идут оба: величины документа старше по правилу
+# приоритета, агрегатор дописывает то, чего в документе нет. Прежде здесь
+# снималась актуальность со всех источников года, и исход зависел от порядка
+# загрузки: агрегатор, загруженный 21.09.2026 раньше документов, у 11
+# эмитентов остался за 2025 год без актуальной версии, а у восьми из них,
+# чей документ в карантине, маршрут строился по 2024 году. По году, а не
+# по периоду, гасился бы и промежуточный комплект того же года.
 _DROP_ACTUAL = """
 UPDATE src_file SET is_actual = false
-WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(report_year)s
-  AND id <> %(keep)s AND is_actual
+WHERE inn = %(inn)s AND standard = %(standard)s AND period_end = %(period_end)s
+  AND source = 'file' AND id <> %(keep)s AND is_actual
 """
 
 _UPSERT_SRC_FILE = """
@@ -762,7 +772,7 @@ def _write_src_file(
         {
             "inn": inn,
             "standard": Standard.IFRS.value,
-            "report_year": report_year,
+            "period_end": profile.report_dates[0],
             "keep": src_file_id,
         },
         conn=conn,
