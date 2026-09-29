@@ -1685,6 +1685,32 @@ def route(
                 )
             )
 
+    # **Гашение отраслью называется справочно, а не проходит молча** (решение
+    # владельца 29.09.2026). Показатель погашен стоп-фактором того же
+    # обстоятельства (`same_circumstance`), а сам стоп-фактор погашен
+    # отраслевым гасителем: прежде обстоятельство не называл никто — ни
+    # стоп-фактор, ни величина. Корзину справочное основание не называет.
+    if muted:
+        by_active = _spoken_for(
+            tuple(code for code in stop_factors if code not in muted),
+            routing,
+            catalogue,
+            fired,
+        )
+        paired = {pair.metric for pair in routing.same_circumstance}
+        for code in sorted(set(silenced) & paired - by_active):
+            notes.append(
+                Finding(
+                    "muted_by_branch",
+                    code,
+                    routing.say(
+                        "muted_by_branch",
+                        value=catalogue.shown(code, by_code[code].value, unit),
+                        branch=branch,
+                    ),
+                )
+            )
+
     bound = by_code.get(rule.bound) if rule.bound else None
     if _bound_proves(bound, operating_profit) and bound.value > debt_threshold:
         # **Оценка сверху, которая ничего не ограничивает, называется словами.**

@@ -307,6 +307,44 @@ def test_branch_mutes_the_stop_factor_of_its_business_model() -> None:
     assert verdict.muted == ()
 
 
+def test_liquidity_muted_by_branch_is_named_as_a_note() -> None:
+    """Ликвидность, погашенная погашенным стоп-фактором, называется справочно.
+
+    Решение владельца 29.09.2026: у МСФО в 16 765 точках истории
+    обстоятельство не называл никто — ни стоп-фактор (погашен отраслью),
+    ни величина (погашена стоп-фактором). Корзину справка не меняет.
+    """
+    weak = (
+        metric("net_debt_ebitda", "1.0", "Чистый долг / EBITDA"),
+        metric("equity_ratio", "0.6", "Коэффициент автономии"),
+        metric("cur_liq", "0.5", "Текущая ликвидность"),
+    )
+    verdict = route(
+        weak,
+        unit=UNIT,
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        branch="Электроэнергетика",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert verdict.basket == "clear"
+    notes = [item for item in verdict.notes if item.ground == "muted_by_branch"]
+    assert len(notes) == 1
+    assert "Электроэнергетика" in notes[0].text and "0,5" in notes[0].text
+    # Стоп-фактор не погашен — он и называет обстоятельство, справка не нужна.
+    verdict = route(
+        weak,
+        unit=UNIT,
+        quarantined=False,
+        stop_factors=("negative_nwc",),
+        branch="Производство лекарств и биотехнологии",
+        latest_annual=date(2025, 12, 31),
+        today=date(2026, 5, 1),
+    )
+    assert not [item for item in verdict.notes if item.ground == "muted_by_branch"]
+
+
 def test_group_is_a_note_and_not_a_basket_ground() -> None:
     """Группа карточки корзины не называет, но и молчания о ней нет.
 
@@ -849,6 +887,8 @@ def test_reference_ground_is_not_a_basket_ground() -> None:
                 date="02.10.2026",
                 where="купон 03.08.2026",
                 said="автономия 0,03",
+                value="0,72",
+                branch="Электроэнергетика",
             )
 
 
