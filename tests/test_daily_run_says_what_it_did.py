@@ -251,28 +251,49 @@ def test_a_repeat_does_not_overwrite_the_scheduled_point(db_conn) -> None:  # no
     изменений восстановить стало нечем (решение владельца: плановые точки
     хранить отдельно; маршрут дня и отчёт — последняя точка, аудит — плановая).
     """
+    daily = _daily()
+    assert daily.point_kind(scheduled=True) == "run"
+    assert daily.point_kind(scheduled=False) == "repeat"
+    day, inn = date(2000, 1, 3), "0000000001"
+    rows, latest = _write_day(
+        db_conn,
+        daily,
+        day,
+        inn,
+        (("run", "attention"), ("repeat", "review"), ("repeat", "clear")),
+    )
+    assert rows == [("run", "attention"), ("repeat", "review"), ("repeat", "clear")]
+    assert latest == "clear"
+
+
+def test_a_manual_run_before_the_scheduled_one_is_a_repeat(db_conn) -> None:  # noqa: ANN001
+    """Ручной прогон до планового — повтор, и последней точкой дня становится плановый.
+
+    Поправка владельца 29.09.2026: всякий прогон не по расписанию пишет
+    `repeat`, даже первый за день, а последняя точка дня выбирается по номеру
+    прогона, а не по виду: иначе ручной прогон в 9:00 занял бы место плановой
+    точки либо остался бы «последним» после планового в 10:00.
+    """
+    daily = _daily()
+    day, inn = date(2000, 1, 4), "0000000001"
+    rows, latest = _write_day(
+        db_conn, daily, day, inn, (("repeat", "review"), ("run", "attention"))
+    )
+    assert rows == [("repeat", "review"), ("run", "attention")]
+    assert latest == "attention"
+
+
+def _write_day(db_conn, daily, day: date, inn: str, points: tuple) -> tuple:  # noqa: ANN001
+    """Пишет точки дня по порядку прогонов; отдаёт записанное и последнюю корзину."""
     from finlib.db import execute, fetch_all, fetch_one
 
-    daily = _daily()
-    assert daily.point_kind(scheduled=True, day_has_points=True) == "run"
-    assert daily.point_kind(scheduled=False, day_has_points=False) == "run"
-    assert daily.point_kind(scheduled=False, day_has_points=True) == "repeat"
-
-    day, inn = date(2000, 1, 3), "0000000001"
-    runs = [
-        fetch_one(
+    for kind, basket in points:
+        run_id = fetch_one(
             "INSERT INTO routing_run (kind, as_of, status) VALUES ('run', %(d)s, 'done') "
             "RETURNING id",
             {"d": day},
             conn=db_conn,
         )["id"]
-        for _ in range(3)
-    ]
-    for run_id, kind, basket in (
-        (runs[0], "run", "attention"),
-        (runs[1], "repeat", "review"),
-        (runs[2], "repeat", "clear"),
-    ):
         execute(
             daily.point_sql(kind),
             {
@@ -289,14 +310,9 @@ def test_a_repeat_does_not_overwrite_the_scheduled_point(db_conn) -> None:  # no
         {"i": inn, "d": day},
         conn=db_conn,
     )
-    assert [(row["kind"], row["basket"]) for row in rows] == [
-        ("run", "attention"),
-        ("repeat", "review"),
-        ("repeat", "clear"),
-    ]
     latest = fetch_one(
         "SELECT basket FROM routing_day WHERE inn = %(i)s AND as_of = %(d)s",
         {"i": inn, "d": day},
         conn=db_conn,
     )
-    assert latest["basket"] == "clear"
+    return [(row["kind"], row["basket"]) for row in rows], latest["basket"]

@@ -384,9 +384,8 @@ WHERE id = %(id)s
 """
 
 # **Повтор дня пишется рядом с главной точкой, а не поверх неё** (решение
-# владельца 29.09.2026): вид `repeat`, в ключе — прогон. Главная точка
-# (`run`) — прогона по расписанию либо первого прогона дня; её переписывает
-# только прогон по расписанию.
+# владельца 29.09.2026): вид `repeat`, в ключе — прогон. Точку `run` пишет
+# только прогон по расписанию; всякий иной — `repeat`, даже первый за день.
 _POINT = """
 INSERT INTO routing_history
        (run_id, inn, as_of, kind, standard, basket, subgroup, grounds,
@@ -412,23 +411,19 @@ POINT_TARGET = {
     "repeat": "(inn, as_of, run_id) WHERE kind = 'repeat'",
 }
 
-_DAY_HAS_POINTS = """
-SELECT 1 FROM routing_history WHERE kind = 'run' AND as_of = %(as_of)s LIMIT 1
-"""
-
-
 def point_sql(kind: str) -> str:
     """Запрос записи точки маршрута названного вида."""
     return _POINT.format(target=POINT_TARGET[kind])
 
 
-def point_kind(scheduled: bool, day_has_points: bool) -> str:
-    """Вид точки прогона: `run` — главная точка дня, `repeat` — повтор рядом.
+def point_kind(scheduled: bool) -> str:
+    """Вид точки прогона: `run` — прогон по расписанию, `repeat` — всякий иной.
 
-    Прогон по расписанию пишет главную всегда. Иной прогон — главную, только
-    если у дня точек ещё нет: иначе он повтор и главную не трогает.
+    **Иной прогон — повтор, даже первый за день** (поправка владельца
+    29.09.2026): иначе ручной прогон до планового занял бы место плановой
+    точки, а аудит читает именно её.
     """
-    return "run" if scheduled or not day_has_points else "repeat"
+    return "run" if scheduled else "repeat"
 
 
 def main() -> int:
@@ -553,9 +548,7 @@ def _deliver_and_route(
         market_series(refresh=True)
         rows, counts = routing_rows(conn, today)
         # `said` пуст только у прогона по расписанию (`_who`).
-        kind = point_kind(
-            not said, bool(fetch_all(_DAY_HAS_POINTS, {"as_of": today}, conn=conn))
-        )
+        kind = point_kind(not said)
         insert = point_sql(kind)
         for row in rows:
             execute(

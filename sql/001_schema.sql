@@ -1015,9 +1015,11 @@ COMMENT ON COLUMN routing_history.inputs IS
 -- маршрута дня, и утренний отчёт изменений восстановить стало нечем.
 -- Повтор пишется рядом видом `repeat`, и повторов в день бывает несколько —
 -- поэтому у них в ключе прогон, а у `run` и `backfill` ключ прежний:
--- точка дня одна. `run` — главная точка дня: прогона по расписанию, а если
--- его не было — первого прогона дня. Маршрут дня и отчёт изменений читают
--- последнюю точку (`routing_day`), аудит — точку `run`.
+-- точка дня одна. `run` пишет только прогон по расписанию; всякий иной
+-- прогон пишет `repeat`, даже первый за день (поправка владельца
+-- 29.09.2026): иначе ручной прогон до планового занял бы место плановой
+-- точки. Маршрут дня и отчёт изменений читают последнюю точку
+-- (`routing_day`), аудит — точку `run`.
 ALTER TABLE routing_history DROP CONSTRAINT IF EXISTS routing_history_kind_check;
 ALTER TABLE routing_history ADD CONSTRAINT routing_history_kind_check
     CHECK (kind IN ('run', 'backfill', 'repeat'));
@@ -1035,13 +1037,14 @@ COMMENT ON COLUMN routing_history.kind IS
     'того же дня рядом с ней, backfill — пересчёт назад; наблюдение с пересчётом '
     'не сравнивается';
 
--- Последняя точка наблюдения на дату: повтор, если он был, иначе главная.
--- Порядок — по прогону: номер прогона растёт со временем старта.
+-- Последняя точка наблюдения на дату — по прогону, а не по виду (поправка
+-- владельца 29.09.2026): ручной прогон до планового старше не становится
+-- оттого, что он повтор. Номер прогона растёт со временем старта.
 CREATE OR REPLACE VIEW routing_day AS
 SELECT DISTINCT ON (inn, as_of) *
 FROM routing_history
 WHERE kind IN ('run', 'repeat')
-ORDER BY inn, as_of, (kind = 'repeat') DESC, run_id DESC NULLS LAST, id DESC;
+ORDER BY inn, as_of, run_id DESC NULLS LAST, id DESC;
 
 COMMENT ON VIEW routing_day IS
     'Последняя точка наблюдения эмитента на дату: маршрут дня и отчёт изменений';
