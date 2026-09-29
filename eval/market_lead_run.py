@@ -466,7 +466,8 @@ def _appearance(policy, market: Market, history: dict, sources: dict,  # noqa: A
 
     Правило применяется и к рынку — иначе оно мерило бы слои разными мерками.
     """
-    print("\n### Упреждение появления, а не стояния\n")
+    print("\n### Упреждение появления, а не стояния — справочно\n")
+    print(NOTE_OLD + "\n")
     print(
         "Из упреждения исключены основания, стоявшие уже в первый "
         "наблюдавшийся день: они описывают положение, а не предсказывают "
@@ -582,16 +583,31 @@ def _halted(market: Market, inside: dict) -> None:
         print(f"| {inn} | {moment:%d.%m.%Y} | {last:%d.%m.%Y} | {gap} |")
 
 
-# --- новая мера: поточечно (решение владельца 29.09.2026) ----------------------
+# --- основная мера: поточечно (решение владельца 29.09.2026) -------------------
 #
 # **Мера «сработал хоть раз» мерила длину ряда**, и с 29.09.2026 рыночное
 # основание стоит, пока подтверждено недавно (`market.yaml`, `lifetime`).
-# Прирост по эмитентам — «кто хоть раз сработал и у кого было событие» —
-# у стоящего по сроку основания отвечает не на тот вопрос. Поэтому рядом
-# с прежней мерой печатается поточечная: на срезах — первых торговых днях
-# месяцев — кто стоит, и у кого из них событие в следующие `HORIZON` дней.
-# Требование владельца: обе меры рядом, одна другую не заменяет.
+# Основная мера упреждения и прироста — поточечная: на срезах — первых
+# торговых днях месяцев — кто стоит, и у кого из них событие в следующие
+# `HORIZON` дней. Прежняя печатается справочно: для рынка она не годится,
+# потому что не засчитывает основание, стоявшее с начала ряда.
 HORIZON = 90
+
+# **Интервал — бутстрэп по эмитентам, а не по точкам** (требование владельца
+# 29.09.2026): срезы одного эмитента зависимы — основание, стоящее в январе,
+# стоит и в феврале, — и выборка точек считала бы одно наблюдение многими.
+# Число выборок, зерно и доля интервала — те же, что у калибровки фазы 6
+# (`eval/threshold_calibration_run.py`).
+REPLICAS = 2000
+SEED = 20260928
+CONFIDENCE = 90
+
+NOTE_OLD = (
+    "**Справочно, прежняя мера — для рынка не годится**: она не засчитывает "
+    "основание, стоявшее с начала ряда, и после пола ориентира осенние "
+    "срабатывания 2024 года стали у неё «появлением». Основная мера — "
+    "поточечная, ниже."
+)
 
 
 def cutoffs(days: list[date], start: date, last_event_day: date) -> list[date]:
@@ -606,44 +622,108 @@ def cutoffs(days: list[date], start: date, last_event_day: date) -> list[date]:
     return sorted(set(found))
 
 
+Tally = tuple[int, int, int, int]  # стоял, попал, событий в горизонте, наблюдался
+
+
+def _ratios(tallies: list[Tally]) -> tuple[float, float, float]:
+    """Точность, выявляемость и прирост по сумме счётчиков эмитентов."""
+    standing = sum(item[0] for item in tallies)
+    hits = sum(item[1] for item in tallies)
+    events = sum(item[2] for item in tallies)
+    seen = sum(item[3] for item in tallies)
+    precision = hits / standing if standing else 0.0
+    recall = hits / events if events else 0.0
+    base = events / seen if seen else 0.0
+    return precision, recall, precision / base if base else 0.0
+
+
+def bootstrap(tallies: list[Tally]) -> dict[str, tuple[float, float]]:
+    """Интервалы точности, выявляемости и прироста: выборки эмитентов с возвращением."""
+    import random
+
+    if not tallies:
+        return {}
+    rng = random.Random(SEED)
+    drawn = [
+        _ratios([tallies[rng.randrange(len(tallies))] for _ in tallies])
+        for _ in range(REPLICAS)
+    ]
+    tail = (100 - CONFIDENCE) / 200
+    found: dict[str, tuple[float, float]] = {}
+    for place, name in enumerate(("precision", "recall", "lift")):
+        values = sorted(item[place] for item in drawn)
+        found[name] = (
+            values[int(tail * (len(values) - 1))],
+            values[int((1 - tail) * (len(values) - 1))],
+        )
+    return found
+
+
 @dataclass(frozen=True, slots=True)
 class Pointwise:
-    """Поточечная мера слоя: срезы, стоящие, попадания и знаменатели."""
+    """Поточечная мера слоя: срезы, счётчики по эмитентам и интервалы."""
 
     name: str
     cuts: int
-    standing: int
-    hits: int
-    events: int
-    observed: int
+    tallies: tuple[Tally, ...]
+
+    @property
+    def standing(self) -> int:
+        """Сколько раз основание стояло на срезах."""
+        return sum(item[0] for item in self.tallies)
+
+    @property
+    def hits(self) -> int:
+        """Сколько из них — с событием в горизонте."""
+        return sum(item[1] for item in self.tallies)
+
+    @property
+    def events(self) -> int:
+        """Пар «срез — событие в горизонте» у наблюдавшихся."""
+        return sum(item[2] for item in self.tallies)
+
+    @property
+    def base(self) -> float:
+        """Доля событий в горизонте у всех наблюдавшихся на срезах."""
+        seen = sum(item[3] for item in self.tallies)
+        return self.events / seen if seen else 0.0
 
     @property
     def precision(self) -> float:
         """Доля стоящих, у кого событие в горизонте."""
-        return self.hits / self.standing if self.standing else 0.0
+        return _ratios(list(self.tallies))[0]
 
     @property
-    def base(self) -> float:
-        """Та же доля у всех наблюдавшихся на срезах."""
-        return self.events / self.observed if self.observed else 0.0
+    def recall(self) -> float:
+        """Доля пар «срез — событие в горизонте», у которых основание стояло."""
+        return _ratios(list(self.tallies))[1]
 
     @property
     def lift(self) -> float:
         """Прирост: точность к базовой доле."""
-        return self.precision / self.base if self.base else 0.0
+        return _ratios(list(self.tallies))[2]
 
     def row(self) -> str:
-        """Строка таблицы поточечной меры."""
+        """Строка таблицы поточечной меры с интервалами."""
+        said = bootstrap([item for item in self.tallies if item[3]])
+
+        def span(name: str, percent: bool) -> str:
+            low, high = said.get(name, (0.0, 0.0))
+            return f"[{low:.1%}; {high:.1%}]" if percent else f"[{low:.1f}; {high:.1f}]"
+
         return (
             f"| {self.name} | {self.cuts} | {self.standing / max(self.cuts, 1):.1f} "
-            f"| {self.hits} | {self.precision:.1%} | {self.base:.1%} "
-            f"| {self.lift:.1f}× |"
+            f"| {self.hits} | {self.precision:.1%} {span('precision', True)} "
+            f"| {self.recall:.1%} {span('recall', True)} | {self.base:.1%} "
+            f"| **{self.lift:.1f}×** {span('lift', False)} |"
         )
 
 
 POINTWISE_HEAD = (
+    f"Интервалы — {CONFIDENCE} %, бутстрэп по эмитентам ({REPLICAS} выборок): "
+    "срезы одного эмитента зависимы.\n\n"
     "| Слой / основание | Срезов | Стоит в среднем | Попаданий | Точность "
-    "| Базовая доля | Прирост |\n|---|---|---|---|---|---|---|"
+    "| Выявляемость | Базовая доля | Прирост |\n|---|---|---|---|---|---|---|---|"
 )
 
 
@@ -660,22 +740,51 @@ def pointwise(
     Эмитент с событием до среза из среза исключается: о случившемся не
     предупреждают. Знаменатель базовой доли — наблюдавшиеся к срезу.
     """
-    standing = hits = events_total = seen = 0
-    for cut in cuts:
-        edge = cut + timedelta(days=HORIZON)
-        for inn in circle:
-            moment = when.get(inn)
+    tallies: list[Tally] = []
+    for inn in sorted(circle):
+        standing = hits = events_total = seen = 0
+        moment = when.get(inn)
+        for cut in cuts:
             if moment is not None and moment <= cut:
                 continue
             if not observed(inn, cut):
                 continue
             seen += 1
-            ahead = moment is not None and cut < moment <= edge
+            ahead = moment is not None and cut < moment <= cut + timedelta(days=HORIZON)
             events_total += int(ahead)
             if stands(inn, cut):
                 standing += 1
                 hits += int(ahead)
-    return Pointwise(name, len(cuts), standing, hits, events_total, seen)
+        tallies.append((standing, hits, events_total, seen))
+    return Pointwise(name, len(cuts), tuple(tallies))
+
+
+def _eve_intervals(
+    outcomes: list[int | None],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Интервалы доли пойманных накануне и медианы упреждения: выборки событий."""
+    import random
+
+    if not outcomes:
+        return (0.0, 0.0), (0.0, 0.0)
+    rng = random.Random(SEED)
+    shares: list[float] = []
+    medians: list[float] = []
+    for _ in range(REPLICAS):
+        drawn = [outcomes[rng.randrange(len(outcomes))] for _ in outcomes]
+        caught = [item for item in drawn if item is not None]
+        shares.append(len(caught) / len(drawn))
+        if caught:
+            medians.append(statistics.median(caught))
+    tail = (100 - CONFIDENCE) / 200
+
+    def span(values: list[float]) -> tuple[float, float]:
+        if not values:
+            return 0.0, 0.0
+        values = sorted(values)
+        return values[int(tail * (len(values) - 1))], values[int((1 - tail) * (len(values) - 1))]
+
+    return span(shares), span(medians)
 
 
 def systemic_issuers() -> set[str]:
@@ -724,7 +833,7 @@ def _market_pointwise(policy, market: Market, when: dict[str, date]) -> None:  #
     } | {policy.distress_zone.ground}
     last_event = max(days, default=date.min)
     cuts = cutoffs(days, days[0] + timedelta(days=HORIZON), last_event) if days else []
-    print("\n## Новая мера: поточечно\n")
+    print("\n## Основная мера: поточечно\n")
     print(
         f"Срезы — первые торговые дни месяцев ({len(cuts)}: "
         f"{cuts[0]:%m.%Y} — {cuts[-1]:%m.%Y}); событие засчитывается, если "
@@ -772,10 +881,17 @@ def _market_pointwise(policy, market: Market, when: dict[str, date]) -> None:  #
         for inn, moment in when.items()
         if inn in circle and days[0] < moment <= last_event
     }
-    print("| Основание | Стоит накануне | Из событий | Упреждение от начала стояния, медиана |")
-    print("|---|---|---|---|")
+    print(
+        f"Интервалы — {CONFIDENCE} %, бутстрэп по событиям: у эмитента событие "
+        "одно, и выборка событий есть выборка эмитентов.\n"
+    )
+    print(
+        "| Основание | Стоит накануне | Из событий | Доля | "
+        "Упреждение от начала стояния, медиана |"
+    )
+    print("|---|---|---|---|---|")
     for ground, label in list(grounds.items()) + [("review", "рынок в «Разбор»")]:
-        leads: list[int] = []
+        outcomes: list[int | None] = []
         for inn, moment in inside.items():
             before = [day for day in days if day < moment]
             if not before:
@@ -785,10 +901,21 @@ def _market_pointwise(policy, market: Market, when: dict[str, date]) -> None:  #
                 for item in said(inn, before[-1])
                 if (item.ground in review if ground == "review" else item.ground == ground)
             ]
-            if mine:
-                leads.append((moment - min(item.since for item in mine)).days)
-        lead = f"{statistics.median(leads):.0f}" if leads else "—"
-        print(f"| {label} | {len(leads)} | {len(inside)} | {lead} |")
+            outcomes.append(
+                (moment - min(item.since for item in mine)).days if mine else None
+            )
+        leads = [item for item in outcomes if item is not None]
+        share, median_lead = _eve_intervals(outcomes)
+        lead = (
+            f"{statistics.median(leads):.0f} [{median_lead[0]:.0f}; {median_lead[1]:.0f}]"
+            if leads
+            else "—"
+        )
+        print(
+            f"| {label} | {len(leads)} | {len(inside)} "
+            f"| {len(leads) / len(outcomes) if outcomes else 0:.1%} "
+            f"[{share[0]:.1%}; {share[1]:.1%}] | {lead} |"
+        )
 
     # **ВДО называется у держателей p99** (`market.yaml`, `spread.high_yield`):
     # рабочее определение владельца 29.09.2026, и это его первый читатель.
@@ -1064,9 +1191,10 @@ def main() -> int:
     common = {inn: moment for inn, moment in inside.items() if moment >= started}
 
     print(
-        "\n## Признаки: точность, выявляемость, прирост, упреждение "
-        "(прежняя мера — по эмитентам, сработавшим хоть раз)\n"
+        "\n## Справочно: признаки по прежней мере — по эмитентам, "
+        "сработавшим хоть раз\n"
     )
+    print(NOTE_OLD + "\n")
     print(
         f"**В окне доставки — {len(inside)} событий из {len(when)}.** Событие "
         f"раньше {opened:%d.%m.%Y} рынок упредить не мог: истории торгов "

@@ -32,6 +32,7 @@ from market_lead_run import _RATING as _RATINGS  # noqa: E402
 from market_lead_run import (  # noqa: E402
     _REPORTING,
     HORIZON,
+    NOTE_OLD,
     POINTWISE_HEAD,
     _appeared,
     _first_new_day,
@@ -237,7 +238,8 @@ def main() -> int:
         for name in names
     }
 
-    print("## Слои поодиночке\n")
+    print("## Справочно, прежняя мера: слои поодиночке\n")
+    print(NOTE_OLD + "\n")
     print(
         "| Слой | Сработал | Поймал | Точность | Выявляемость | Прирост "
         "| Упреждение, медиана |"
@@ -388,7 +390,7 @@ def _pointwise(history: dict, sources: dict, when: dict,  # noqa: ANN001
             for ground in (at(inn, day) or ())
         )
 
-    print("\n## Новая мера: поточечно, по записанной истории\n")
+    print("\n## Основная мера: поточечно, по записанной истории\n")
     if not cuts:
         print("Срезов нет: история короче горизонта.\n")
         return
@@ -401,13 +403,29 @@ def _pointwise(history: dict, sources: dict, when: dict,  # noqa: ANN001
     )
     print(POINTWISE_HEAD)
     observed = lambda inn, day: at(inn, day) is not None  # noqa: E731
+    measured = {}
     for name, words in (
         ("рынок", ("рынок",)),
         ("отчётность", _REPORTING),
         ("рейтинги", _RATINGS),
         ("все три", ("рынок", *_REPORTING, *_RATINGS)),
     ):
-        print(pointwise(name, layer(words), observed, circle, when, cuts).row())
+        measured[name] = pointwise(name, layer(words), observed, circle, when, cuts)
+        print(measured[name].row())
+    # **Критерий фазы 6 — и по основной мере**: выявляемость и прирост
+    # сочетания против лучшего слоя в одиночку, сравнением, а не словом.
+    whole = measured.pop("все три")
+    best = max(measured.values(), key=lambda item: item.lift)
+    recall_up = whole.recall > best.recall
+    lift_up = whole.lift > best.lift
+    print(
+        f"\n**Критерий фазы 6 по основной мере.** Лучший слой по приросту — "
+        f"{best.name}: выявляемость {best.recall:.1%}, прирост {best.lift:.1f}×. "
+        f"Все три вместе: {whole.recall:.1%} — "
+        f"**{'выше' if recall_up else 'не выше'}**, {whole.lift:.1f}× — "
+        f"**{'выше' if lift_up else 'не выше'}**. Критерий "
+        f"**{'выполнен' if recall_up and lift_up else 'не выполнен'}**.\n"
+    )
 
 
 def _verdict(alone: dict, unions: dict, total: int, fired: dict,  # noqa: ANN001
@@ -469,7 +487,7 @@ def _verdict(alone: dict, unions: dict, total: int, fired: dict,  # noqa: ANN001
     print(
         "Критерий требует обоих условий, и по прежней мере он "
         f"**{'выполнен' if recall_up and lift_up else 'не выполнен'}**. "
-        "Новая мера — ниже, поточечно.\n"
+        "Основная мера — ниже, поточечно.\n"
     )
 
 
