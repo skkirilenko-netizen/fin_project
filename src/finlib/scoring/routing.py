@@ -1438,7 +1438,9 @@ def route(
             said = Finding(
                 item.ground,
                 item.ground,
-                routing.say(item.ground, **item.slots(rules)),
+                # Формулировку выбирает случай: сработавший пол ориентира
+                # и цена, вернувшаяся выше границы, называются своими словами.
+                routing.say(item.ground, item.variant, **item.slots(rules)),
             )
             (review if item.basket == "review" else attention).append(said)
     if events is not None:

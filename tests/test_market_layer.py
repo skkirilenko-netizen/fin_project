@@ -214,3 +214,122 @@ def test_the_price_ground_prints_the_lead_from_the_measurement() -> None:
         }
     )
     assert "на 7 дн." in _price_ground(policy.model_copy(update={"distress_zone": changed}))
+
+
+def _days(count: int) -> list[date]:
+    """Торговые дни подряд."""
+    first = date(2025, 1, 1)
+    return [first + timedelta(days=number) for number in range(count)]
+
+
+def _extreme(policy: MarketPolicy) -> Decimal:
+    """Кратность ступени «Разбора»."""
+    return next(step.multiple for step in policy.route_steps if step.basket == "review")
+
+
+def test_an_old_confirmation_expires() -> None:
+    """Подтверждённое давно не стоит сейчас: мера «хоть раз» мерила длину ряда.
+
+    Основание p99 у 48 из 65 держателей держалось с осени 2024 года, а
+    подтверждено сейчас было у 14. С 29.09.2026 оно стоит, пока подтверждено
+    в последние `lifetime.trading_days` торговых дней.
+    """
+    policy = _policy()
+    lifetime = policy.lifetime.trading_days
+    days = _days(lifetime + 30)
+    high = Decimal(100) * (_extreme(policy) + 1)
+    # Двадцать дней сильного спреда в начале ряда, дальше обычный.
+    points = [
+        _row(day, high if number < 20 else Decimal(100), None)
+        for number, day in enumerate(days)
+    ]
+    market = _market({"7700000000": points})
+    assert findings(policy, market, "7700000000", days[25]), "в пределах срока стоит"
+    assert findings(policy, market, "7700000000", days[-1]) == (), "срок истёк"
+    # Прежняя мера сказала бы «стоит с первых дней ряда» и сейчас.
+    from finlib.scoring.market import confirmed_days, standing_since
+
+    confirmed = confirmed_days(points, holds_level(market, _extreme(policy)), days[-1], 5, 10)
+    assert standing_since(market, confirmed, days[-1], None) is not None
+    assert standing_since(market, confirmed, days[-1], lifetime) is None
+
+
+def test_since_is_the_start_of_the_current_standing() -> None:
+    """«С {since}» — начало нынешнего стояния, а не первый день ряда."""
+    policy = _policy()
+    lifetime = policy.lifetime.trading_days
+    days = _days(2 * lifetime + 40)
+    high = Decimal(100) * (_extreme(policy) + 1)
+    # Первое стояние в начале, долгий перерыв дольше срока, второе в конце.
+    points = [
+        _row(
+            day,
+            high if number < 15 or number >= len(days) - 15 else Decimal(100),
+            None,
+        )
+        for number, day in enumerate(days)
+    ]
+    market = _market({"7700000000": points})
+    level = next(
+        item
+        for item in findings(policy, market, "7700000000", days[-1])
+        if item.ground.endswith("extreme")
+    )
+    assert level.since > days[len(days) - 16]
+
+
+def test_a_floor_keeps_the_multiple_from_exploding() -> None:
+    """Кратность к ориентиру около нуля смысла не имеет: делится на пол.
+
+    Осенью 2024 года ориентир стоял на 74–78 б. п. и бывал отрицательным,
+    и над порогом p99 стояло до 78 % эмитентов.
+    """
+    policy = _policy()
+    assert policy.floor is not None
+    days = _days(20)
+    low_benchmark = policy.floor / 10
+    # Спред выше порога к ориентиру дня, но ниже порога к полу.
+    spread = low_benchmark * (_extreme(policy) + 1)
+    assert spread / policy.floor < _extreme(policy)
+    points = [_row(day, spread, None) for day in days]
+    market = _market({"7700000000": points}, level=low_benchmark)
+    assert not [
+        item
+        for item in findings(policy, market, "7700000000", days[-1])
+        if item.ground.endswith("extreme")
+    ]
+    # Выше порога и к полу: основание стоит, и формулировка называет пол.
+    spread = policy.floor * (_extreme(policy) + 1)
+    points = [_row(day, spread, None) for day in days]
+    market = _market({"7700000000": points}, level=low_benchmark)
+    level = next(
+        item
+        for item in findings(policy, market, "7700000000", days[-1])
+        if item.ground.endswith("extreme")
+    )
+    assert level.variant == "floored"
+    from finlib.scoring.routing import load_routing
+
+    text = load_routing().say(level.ground, level.variant, **level.slots(policy))
+    assert "ниже пола" in text
+
+
+def test_a_recovered_price_names_its_low() -> None:
+    """Цена вернулась выше границы в пределах срока: основание стоит и называет минимум."""
+    policy = _policy()
+    below = policy.distress_zone.price_below_percent
+    days = _days(10)
+    prices = [below - 10 if number == 3 else below + 5 for number in range(10)]
+    points = [_row(day, None, price) for day, price in zip(days, prices, strict=True)]
+    market = _market({"7700000000": points})
+    price = next(
+        item
+        for item in findings(policy, market, "7700000000", days[-1])
+        if item.ground.endswith("distress")
+    )
+    assert price.variant == "recovered"
+    assert price.low == below - 10 and price.low_day == days[3]
+    from finlib.scoring.routing import load_routing
+
+    text = load_routing().say(price.ground, price.variant, **price.slots(policy))
+    assert "опускалась" in text and days[3].strftime("%d.%m.%Y") in text

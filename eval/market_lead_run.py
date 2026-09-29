@@ -34,6 +34,7 @@ import logging
 import statistics
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -313,7 +314,7 @@ def _ladder(policy, market: Market) -> list[tuple]:  # noqa: ANN001
     return found
 
 
-def _signals(market: Market) -> list[tuple]:
+def _signals(market: Market, floor: Decimal | None) -> list[tuple]:
     """Перечень рыночных признаков: имя и признак дня.
 
     **Ступени лестницы стоят на перцентилях распределения**, а не на круглых
@@ -328,7 +329,7 @@ def _signals(market: Market) -> list[tuple]:
             found.append(
                 (
                     f"уровень: кратность ≥ {multiple:.2f}× (p{place})",
-                    holds_level(market, multiple),
+                    holds_level(market, multiple, floor),
                 )
             )
     # Расширение: то же движение, померенное наблюдениями и календарём.
@@ -486,7 +487,7 @@ def _appearance(policy, market: Market, history: dict, sources: dict,  # noqa: A
             f"подтверждение {rule.of} из {rule.out_of})",
             lambda inn, until, s=step, r=rule: _appeared(
                 points_of(market, inn),
-                holds_level(market, s.multiple),
+                holds_level(market, s.multiple, policy.floor),
                 until,
                 r.of,
                 r.out_of,
@@ -581,6 +582,230 @@ def _halted(market: Market, inside: dict) -> None:
         print(f"| {inn} | {moment:%d.%m.%Y} | {last:%d.%m.%Y} | {gap} |")
 
 
+# --- новая мера: поточечно (решение владельца 29.09.2026) ----------------------
+#
+# **Мера «сработал хоть раз» мерила длину ряда**, и с 29.09.2026 рыночное
+# основание стоит, пока подтверждено недавно (`market.yaml`, `lifetime`).
+# Прирост по эмитентам — «кто хоть раз сработал и у кого было событие» —
+# у стоящего по сроку основания отвечает не на тот вопрос. Поэтому рядом
+# с прежней мерой печатается поточечная: на срезах — первых торговых днях
+# месяцев — кто стоит, и у кого из них событие в следующие `HORIZON` дней.
+# Требование владельца: обе меры рядом, одна другую не заменяет.
+HORIZON = 90
+
+
+def cutoffs(days: list[date], start: date, last_event_day: date) -> list[date]:
+    """Первые торговые дни месяцев, у которых весь горизонт уже наблюдён."""
+    found: list[date] = []
+    month = date(start.year, start.month, 1)
+    while month + timedelta(days=HORIZON) <= last_event_day:
+        later = [day for day in days if day >= month]
+        if later and later[0] >= start:
+            found.append(later[0])
+        month = date(month.year + month.month // 12, month.month % 12 + 1, 1)
+    return sorted(set(found))
+
+
+@dataclass(frozen=True, slots=True)
+class Pointwise:
+    """Поточечная мера слоя: срезы, стоящие, попадания и знаменатели."""
+
+    name: str
+    cuts: int
+    standing: int
+    hits: int
+    events: int
+    observed: int
+
+    @property
+    def precision(self) -> float:
+        """Доля стоящих, у кого событие в горизонте."""
+        return self.hits / self.standing if self.standing else 0.0
+
+    @property
+    def base(self) -> float:
+        """Та же доля у всех наблюдавшихся на срезах."""
+        return self.events / self.observed if self.observed else 0.0
+
+    @property
+    def lift(self) -> float:
+        """Прирост: точность к базовой доле."""
+        return self.precision / self.base if self.base else 0.0
+
+    def row(self) -> str:
+        """Строка таблицы поточечной меры."""
+        return (
+            f"| {self.name} | {self.cuts} | {self.standing / max(self.cuts, 1):.1f} "
+            f"| {self.hits} | {self.precision:.1%} | {self.base:.1%} "
+            f"| {self.lift:.1f}× |"
+        )
+
+
+POINTWISE_HEAD = (
+    "| Слой / основание | Срезов | Стоит в среднем | Попаданий | Точность "
+    "| Базовая доля | Прирост |\n|---|---|---|---|---|---|---|"
+)
+
+
+def pointwise(
+    name: str,
+    stands,  # noqa: ANN001 — (inn, день) → стоит ли основание
+    observed,  # noqa: ANN001 — (inn, день) → наблюдался ли эмитент к этому дню
+    circle: set[str],
+    when: dict[str, date],
+    cuts: list[date],
+) -> Pointwise:
+    """Поточечная мера: сводка по срезам, событие — в горизонте после среза.
+
+    Эмитент с событием до среза из среза исключается: о случившемся не
+    предупреждают. Знаменатель базовой доли — наблюдавшиеся к срезу.
+    """
+    standing = hits = events_total = seen = 0
+    for cut in cuts:
+        edge = cut + timedelta(days=HORIZON)
+        for inn in circle:
+            moment = when.get(inn)
+            if moment is not None and moment <= cut:
+                continue
+            if not observed(inn, cut):
+                continue
+            seen += 1
+            ahead = moment is not None and cut < moment <= edge
+            events_total += int(ahead)
+            if stands(inn, cut):
+                standing += 1
+                hits += int(ahead)
+    return Pointwise(name, len(cuts), standing, hits, events_total, seen)
+
+
+def systemic_issuers() -> set[str]:
+    """Системно значимые — тем же правилом, что в маршруте: у них подтверждение длиннее."""
+    from finlib.scoring.routing import load_routing
+    from finlib.scoring.routing_store import _outstanding, _top_share
+
+    volumes = {
+        inn: total
+        for inn in universe()
+        if (total := _outstanding(inn)) is not None and total > 0
+    }
+    return set(_top_share(volumes, load_routing().systemic.top_share))
+
+
+def _market_pointwise(policy, market: Market, when: dict[str, date]) -> None:  # noqa: ANN001
+    """Новая мера рыночных оснований: боевой расчёт на срезах и накануне события.
+
+    **Замер не считает сам**: стоит ли основание на дату, отвечает
+    `scoring.market.findings` — с полом ориентира, сроком жизни и системным
+    подтверждением, как в маршруте.
+    """
+    from finlib.scoring.market import findings
+
+    systemic = systemic_issuers()
+    days = market.calendar()
+    circle = set(market.issuers)
+    cache: dict[tuple[str, date], tuple] = {}
+
+    def said(inn: str, day: date) -> tuple:
+        key = (inn, day)
+        if key not in cache:
+            cache[key] = findings(policy, market, inn, day, systemic=inn in systemic)
+        return cache[key]
+
+    def observed(inn: str, day: date) -> bool:
+        own = market.ordered(inn)
+        return bool(own) and own[0].day <= day
+
+    grounds = {step.ground: f"p{step.percentile}" for step in policy.route_steps}
+    grounds[policy.distress_zone.ground] = (
+        f"цена ниже {policy.distress_zone.price_below_percent:.0f} %"
+    )
+    review = {
+        step.ground for step in policy.route_steps if step.basket == "review"
+    } | {policy.distress_zone.ground}
+    last_event = max(days, default=date.min)
+    cuts = cutoffs(days, days[0] + timedelta(days=HORIZON), last_event) if days else []
+    print("\n## Новая мера: поточечно\n")
+    print(
+        f"Срезы — первые торговые дни месяцев ({len(cuts)}: "
+        f"{cuts[0]:%m.%Y} — {cuts[-1]:%m.%Y}); событие засчитывается, если "
+        f"случилось в следующие {HORIZON} дней после среза. Стоит ли основание, "
+        "отвечает боевой расчёт — с полом ориентира "
+        f"{policy.floor} б. п. и сроком жизни {policy.lifetime.trading_days} "
+        "торговых дней. Прежняя мера — таблицы выше: прирост по эмитентам, "
+        "сработавшим хоть раз.\n"
+        if cuts
+        else "Срезов нет: ряд короче горизонта.\n"
+    )
+    if not cuts:
+        return
+    print(POINTWISE_HEAD)
+    for ground, label in grounds.items():
+        print(
+            pointwise(
+                label,
+                lambda inn, day, g=ground: any(
+                    item.ground == g for item in said(inn, day)
+                ),
+                observed,
+                circle,
+                when,
+                cuts,
+            ).row()
+        )
+    print(
+        pointwise(
+            "рынок в «Разбор» (p99 либо цена)",
+            lambda inn, day: any(item.ground in review for item in said(inn, day)),
+            observed,
+            circle,
+            when,
+            cuts,
+        ).row()
+    )
+
+    # **Накануне события**: стоит ли основание в последний торговый день перед
+    # ним, и с какого дня стоит непрерывно. Это вопрос «был ли эмитент
+    # в корзине, когда событие пришло», а не «срабатывал ли когда-нибудь».
+    print("\n### Накануне события\n")
+    inside = {
+        inn: moment
+        for inn, moment in when.items()
+        if inn in circle and days[0] < moment <= last_event
+    }
+    print("| Основание | Стоит накануне | Из событий | Упреждение от начала стояния, медиана |")
+    print("|---|---|---|---|")
+    for ground, label in list(grounds.items()) + [("review", "рынок в «Разбор»")]:
+        leads: list[int] = []
+        for inn, moment in inside.items():
+            before = [day for day in days if day < moment]
+            if not before:
+                continue
+            mine = [
+                item
+                for item in said(inn, before[-1])
+                if (item.ground in review if ground == "review" else item.ground == ground)
+            ]
+            if mine:
+                leads.append((moment - min(item.since for item in mine)).days)
+        lead = f"{statistics.median(leads):.0f}" if leads else "—"
+        print(f"| {label} | {len(leads)} | {len(inside)} | {lead} |")
+
+    # **ВДО называется у держателей p99** (`market.yaml`, `spread.high_yield`):
+    # рабочее определение владельца 29.09.2026, и это его первый читатель.
+    edge = Decimal(str(policy.spread["high_yield"]["from_bp"]))
+    top = next(step.ground for step in policy.route_steps if step.basket == "review")
+    holders = [inn for inn in circle if any(item.ground == top for item in said(inn, last_event))]
+    high = [
+        inn
+        for inn in holders
+        if (own := market.ordered(inn)) and own[-1].spread is not None and own[-1].spread >= edge
+    ]
+    print(
+        f"\nДержателей p99 на {last_event:%d.%m.%Y}: **{len(holders)}**, из них ВДО "
+        f"(G-спред последнего дня от {edge:.0f} б. п.) — **{len(high)}**.\n"
+    )
+
+
 def _overlap(policy, market: Market, history: dict, sources: dict,  # noqa: ANN001
              inside: dict, common: dict, started: date) -> None:
     """Кто ловит событие: только отчётность, только рейтинги, только рынок.
@@ -610,7 +835,8 @@ def _overlap(policy, market: Market, history: dict, sources: dict,  # noqa: ANN0
         if by_price(points, moment):
             return True
         return bool(points) and first_day_when(
-            points, holds_level(market, extreme), moment, rule.of, rule.out_of
+            points, holds_level(market, extreme, policy.floor), moment, rule.of,
+            rule.out_of,
         ) is not None
 
     for title, market_said in (
@@ -837,7 +1063,10 @@ def main() -> int:
     started = min((min(days) for days in history.values() if days), default=date.max)
     common = {inn: moment for inn, moment in inside.items() if moment >= started}
 
-    print("\n## Признаки: точность, выявляемость, прирост, упреждение\n")
+    print(
+        "\n## Признаки: точность, выявляемость, прирост, упреждение "
+        "(прежняя мера — по эмитентам, сработавшим хоть раз)\n"
+    )
     print(
         f"**В окне доставки — {len(inside)} событий из {len(when)}.** Событие "
         f"раньше {opened:%d.%m.%Y} рынок упредить не мог: истории торгов "
@@ -862,7 +1091,7 @@ def main() -> int:
             "Выявляемость | Прирост | Упреждение |"
         )
         print("|---|---|---|---|---|---|---|---|")
-        for name, holds in _signals(market):
+        for name, holds in _signals(market, policy.floor):
             _row(
                 name,
                 lambda inn, until, h=holds, a=of, b=out_of: first_day_when(
@@ -918,7 +1147,8 @@ def main() -> int:
         _row(
             f"{of} из {out_of}",
             lambda inn, until, a=of, b=out_of: first_day_when(
-                points_of(market, inn), holds_level(market, extreme), until, a, b
+                points_of(market, inn), holds_level(market, extreme, policy.floor),
+                until, a, b,
             ),
             known,
             inside,
@@ -926,6 +1156,7 @@ def main() -> int:
         )
 
     _appearance(policy, market, history, sources, inside, common, started, base)
+    _market_pointwise(policy, market, when)
     _halted(market, inside)
 
     print("\n## Пересечение слоёв на событиях в окне\n")

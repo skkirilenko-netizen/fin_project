@@ -49,6 +49,21 @@ class MarketFinding:
     threshold: Decimal
     since: date
     benchmark: Decimal | None = None
+    # Пол ориентира, если кратность посчитана к нему, а не к ориентиру дня.
+    floor: Decimal | None = None
+    # Наименьшая цена срока жизни и её день — у ценового основания, когда
+    # последняя цена уже выше границы, а основание ещё стоит.
+    low: Decimal | None = None
+    low_day: date | None = None
+
+    @property
+    def variant(self) -> str:
+        """Какая формулировка основания называет этот случай; пусто — обычная."""
+        if self.floor is not None:
+            return "floored"
+        if self.low is not None and self.value >= self.threshold:
+            return "recovered"
+        return ""
 
     def slots(self, policy: MarketPolicy) -> dict[str, str]:
         """Величины основания так, как они печатаются читателю.
@@ -66,10 +81,20 @@ class MarketFinding:
             "since": f"{self.since:%d.%m.%Y}",
             "benchmark": "",
             "multiple": "",
+            "floor": "",
+            "low": "",
+            "low_day": "",
         }
         if self.benchmark:
             said["benchmark"] = digits(self.benchmark, spread)
-            said["multiple"] = digits(self.value / self.benchmark, ratio)
+            # Кратность делится на то же, на что её делил признак: на пол,
+            # когда ориентир дня ниже него.
+            said["multiple"] = digits(self.value / (self.floor or self.benchmark), ratio)
+        if self.floor is not None:
+            said["floor"] = digits(self.floor, spread)
+        if self.low is not None and self.low_day is not None:
+            said["low"] = digits(self.low, price)
+            said["low_day"] = f"{self.low_day:%d.%m.%Y}"
         # **Упреждение, которое формулировка называет, берётся из замера,
         # а не пишется строкой** (решение владельца 25.09.2026): «43 дня»
         # в тексте основания пережили перемер, давший 61, и читатель получал
@@ -83,15 +108,26 @@ class MarketFinding:
         return said
 
 
-def holds_level(market: Market, multiple: Decimal) -> Holds:
-    """Признак дня: кратность спреда к ориентиру не ниже названной."""
+def holds_level(
+    market: Market, multiple: Decimal, floor: Decimal | None = None
+) -> Holds:
+    """Признак дня: кратность спреда к ориентиру не ниже названной.
+
+    **Ориентир берётся не ниже пола** (`market.yaml`, `benchmark.floor_bp`):
+    кратность к ориентиру около нуля смысла не имеет, а осенью 2024 года
+    ориентир стоял на 74–78 б. п. и бывал отрицательным. Без пола — как
+    прежде: день с неположительным ориентиром признака не даёт.
+    """
 
     def holds(points: list[Point], number: int) -> bool:
         item = points[number]
         level = market.benchmark.get(item.day)
-        if item.spread is None or level is None or level <= 0:
+        if item.spread is None or level is None:
             return False
-        return item.spread / level >= multiple
+        base = level if floor is None else max(level, floor)
+        if base <= 0:
+            return False
+        return item.spread / base >= multiple
 
     return holds
 
@@ -195,23 +231,89 @@ def first_day_when(
     return None
 
 
+def confirmed_days(
+    points: list[Point],
+    holds: Holds,
+    until: date,
+    of: int = 1,
+    out_of: int = 1,
+) -> list[date]:
+    """Все дни, когда признак держался в K точках из последних N.
+
+    То же правило, что у `first_day_when`, только дни перечисляются все:
+    срок жизни основания спрашивает о последнем подтверждении, а не о первом.
+    """
+    seen: list[bool] = []
+    found: list[date] = []
+    for number, item in enumerate(points):
+        if item.day > until:
+            break
+        seen.append(bool(holds(points, number)))
+        window = seen[-out_of:]
+        if len(window) >= of and sum(window) >= of:
+            found.append(item.day)
+    return found
+
+
+def standing_since(
+    market: Market, days: list[date], today: date, lifetime: int | None
+) -> date | None:
+    """Начало нынешнего стояния основания; None — основание не стоит.
+
+    **Основание стоит, пока подтверждено в последние `lifetime` торговых
+    дней** (решение владельца 29.09.2026): мера «сработал хоть раз за ряд»
+    мерила длину ряда — у 48 из 65 держателей p99 основание держалось
+    с осени 2024 года. Стояние непрерывно, пока между подтверждениями
+    не больше срока; начало — первое подтверждение этой непрерывной полосы,
+    а не ряда. `None` вместо срока — прежняя мера, право вызывающего замера.
+    """
+    if not days:
+        return None
+    if lifetime is None:
+        return days[0]
+    last = market.day_number(days[-1])
+    if market.day_number(today) - last >= lifetime:
+        return None
+    start = days[-1]
+    for day in reversed(days[:-1]):
+        if market.day_number(start) - market.day_number(day) > lifetime:
+            break
+        start = day
+    return start
+
+
 def _ordered(market: Market, inn: str, until: date) -> list[Point]:
     """Ряд эмитента по возрастанию дня, не позже названного."""
     return [item for item in market.ordered(inn) if item.day <= until]
 
 
+def _lifetime(policy: MarketPolicy, code: str) -> int | None:
+    """Срок жизни основания в торговых днях; None — срок к нему не относится."""
+    rule = policy.lifetime
+    return rule.trading_days if code in rule.applies_to else None
+
+
 def _level_finding(
-    step: Step, market: Market, points: list[Point], today: date, of: int, out_of: int
+    policy: MarketPolicy,
+    step: Step,
+    market: Market,
+    points: list[Point],
+    today: date,
+    of: int,
+    out_of: int,
 ) -> MarketFinding | None:
     """Сработавшая ступень лестницы: величина берётся у последнего дня."""
-    since = first_day_when(
-        points, holds_level(market, step.multiple), today, of, out_of
+    floor = policy.floor
+    days = confirmed_days(
+        points, holds_level(market, step.multiple, floor), today, of, out_of
     )
+    since = standing_since(market, days, today, _lifetime(policy, step.code))
     if since is None:
         return None
     last = points[-1]
     level = market.benchmark.get(last.day)
-    if last.spread is None or level is None or level <= 0:
+    base = None if level is None else (level if floor is None else max(level, floor))
+    if last.spread is None or base is None or base <= 0:
         # Признак держался раньше, а последний день спреда не даёт: величину
         # брать неоткуда, и печатать её было бы выдумкой.
         return None
@@ -228,6 +330,61 @@ def _level_finding(
         threshold=step.multiple,
         since=since,
         benchmark=level,
+        floor=floor if floor is not None and level < floor else None,
+    )
+
+
+def _price_finding(
+    policy: MarketPolicy, market: Market, points: list[Point], today: date
+) -> MarketFinding | None:
+    """Ценовое основание: цена ниже границы в пределах срока жизни.
+
+    **Правило срока объявлено методикой** (`lifetime.price_rule`): `any_within`
+    — цена была ниже границы хоть раз за срок, `last` — последняя цена ниже
+    границы и не старше срока. Последняя цена у бумаги около 60 % пересекает
+    границу туда и обратно, и основание по ней входило бы в корзину 2,7 раза
+    за год на эмитента против 1,2.
+    """
+    zone = policy.distress_zone
+    below = zone.price_below_percent
+    priced = [item for item in points if item.price is not None]
+    if not priced:
+        return None
+    hits = confirmed_days(points, holds_price(below), today)
+    lifetime = _lifetime(policy, "price_distress")
+    since = standing_since(market, hits, today, lifetime)
+    if since is None:
+        return None
+    last = priced[-1]
+    low: Point | None = None
+    if lifetime is not None:
+        if policy.lifetime.price_rule == "last":
+            if last.price is None or last.price >= below:
+                return None
+        else:
+            # Наименьшая цена срока называется, когда последняя уже выше
+            # границы: «цена 63 %, ниже 60 % с 01.09» читалось бы противоречием.
+            edge = market.day_number(today) - lifetime
+            inside = [
+                item
+                for item in priced
+                if market.day_number(item.day) > edge and item.price is not None
+            ]
+            low = min(inside, key=lambda item: (item.price, item.day), default=None)
+    elif points[-1].price is None:
+        # Прежняя мера: цена последнего дня обязательна.
+        return None
+    assert last.price is not None
+    return MarketFinding(
+        ground=zone.ground,
+        basket=zone.basket,
+        subgroup="",
+        escalation=False,
+        value=last.price,
+        threshold=below,
+        since=since,
+        low=low.price if low is not None and last.price >= below else None,
+        low_day=low.day if low is not None and last.price >= below else None,
     )
 
 
@@ -268,25 +425,12 @@ def findings(
         of, out_of = (
             (rule.of, rule.out_of) if policy.ladder.requires_confirmation else (1, 1)
         )
-        said = _level_finding(step, market, points, today, of, out_of)
+        said = _level_finding(policy, step, market, points, today, of, out_of)
         if said is not None:
             found.append(said)
             break
-    zone = policy.distress_zone
-    if zone.in_route:
-        below = zone.price_below_percent
-        since = first_day_when(points, holds_price(below), today)
-        price = points[-1].price
-        if since is not None and price is not None:
-            found.append(
-                MarketFinding(
-                    ground=zone.ground,
-                    basket=zone.basket,
-                    subgroup="",
-                    escalation=False,
-                    value=price,
-                    threshold=below,
-                    since=since,
-                )
-            )
+    if policy.distress_zone.in_route:
+        price = _price_finding(policy, market, points, today)
+        if price is not None:
+            found.append(price)
     return tuple(found)

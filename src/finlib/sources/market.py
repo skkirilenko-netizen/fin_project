@@ -18,6 +18,7 @@
 у 484 эмитентов, спредовый — у 431.
 """
 
+import bisect
 import json
 import logging
 from collections import defaultdict
@@ -26,6 +27,7 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -178,6 +180,30 @@ class Distress(BaseModel):
     yield_is_meaningless: bool
 
 
+class Lifetime(BaseModel):
+    """Срок жизни рыночного основания: сколько торговых дней стоит подтверждённое.
+
+    **Основание стоит, пока подтверждено недавно** (решение владельца
+    29.09.2026): мера «сработал хоть раз за ряд» мерила длину ряда.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trading_days: int = Field(gt=0)
+    status: str = Field(min_length=1)
+    origin: str = Field(min_length=1)
+    applies_to: tuple[str, ...] = Field(min_length=1)
+    # `any_within` — цена ниже границы хоть раз за срок; `last` — последняя
+    # цена ниже границы и не старше срока. Умолчания нет: оба правила
+    # измерены, и молчание читалось бы как решение методики.
+    price_rule: Literal["any_within", "last"]
+    since: Literal["episode_start"]
+    measured_on: date
+    measured_origin: str = Field(min_length=1)
+    measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
+    lost_against_ever: tuple[str, ...] = ()
+
+
 class MarketPolicy(BaseModel):
     """Методика рыночного слоя целиком: числа только отсюда."""
 
@@ -195,6 +221,7 @@ class MarketPolicy(BaseModel):
     widening: dict
     own_norm: dict
     confirmation: Confirmation
+    lifetime: Lifetime
     distress_zone: Distress
     display: dict
     storage: dict
@@ -218,6 +245,12 @@ class MarketPolicy(BaseModel):
     def route_steps(self) -> tuple[Step, ...]:
         """Ступени, которые называют корзину."""
         return tuple(step for step in self.ladder.steps if step.in_route)
+
+    @property
+    def floor(self) -> Decimal | None:
+        """Пол ориентира: ниже него кратность делится на пол; None — пола нет."""
+        value = self.benchmark.get("floor_bp")
+        return None if value is None else Decimal(str(value))
 
 
 @lru_cache(maxsize=2)
@@ -259,6 +292,28 @@ class Market:
     # спрашивает об одном эмитенте двести раз, и сортировать заново каждый
     # раз значило бы платить за один и тот же ответ.
     sorted_by_day: dict[str, list[Point]] = field(default_factory=dict, repr=False)
+    # Торговые дни биржи по возрастанию и их номера — календарь срока жизни.
+    days_cache: list[date] = field(default_factory=list, repr=False)
+    number_cache: dict[date, int] = field(default_factory=dict, repr=False)
+
+    def calendar(self) -> list[date]:
+        """Торговые дни ряда по возрастанию: дни, у которых есть ориентир.
+
+        **Срок считается днями биржи, а не наблюдениями эмитента**: день без
+        ядра в ряд не идёт ни у кого (`build`), и календарь тот же, что у всех
+        точек.
+        """
+        if not self.days_cache:
+            self.days_cache.extend(sorted(self.benchmark))
+            self.number_cache.update({day: n for n, day in enumerate(self.days_cache)})
+        return self.days_cache
+
+    def day_number(self, day: date) -> int:
+        """Номер торгового дня не позже названного; −1 — раньше ряда."""
+        days = self.calendar()
+        if day in self.number_cache:
+            return self.number_cache[day]
+        return bisect.bisect_right(days, day) - 1
 
     def points(self, inn: str) -> dict[date, Point]:
         """Ряд эмитента; пусто — рынок о нём не высказывался."""

@@ -31,12 +31,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from market_lead_run import _RATING as _RATINGS  # noqa: E402
 from market_lead_run import (  # noqa: E402
     _REPORTING,
+    HORIZON,
+    POINTWISE_HEAD,
     _appeared,
     _first_new_day,
+    cutoffs,
     events,
     first_new_ground,
     layers,
     points_of,
+    pointwise,
 )
 
 from finlib.scoring.market import holds_level, holds_price  # noqa: E402
@@ -73,7 +77,11 @@ def _market_day(policy, market, inn: str, until: date) -> date | None:  # noqa: 
     for step in policy.route_steps:
         rule = step.confirmation or policy.confirmation.default
         day = _appeared(
-            points, holds_level(market, step.multiple), until, rule.of, rule.out_of
+            points,
+            holds_level(market, step.multiple, policy.floor),
+            until,
+            rule.of,
+            rule.out_of,
         )
         if day is not None:
             said.append(day)
@@ -347,8 +355,59 @@ def main() -> int:
             _measure(" + ".join(pair), caught, len(both), len(inside), base)
 
     _verdict(alone, unions, len(inside), fired, base)
+    _pointwise(history, sources, when, circle, max(opened, started))
     _by_issuer(spoke, names)
     return 0
+
+
+def _pointwise(history: dict, sources: dict, when: dict,  # noqa: ANN001
+               circle: set[str], start: date) -> None:
+    """Новая мера рядом с прежней: кто стоит на срезе и у кого событие следом.
+
+    **Прежняя мера — прирост по эмитентам, сработавшим хоть раз** — у рынка
+    мерила длину ряда (решение владельца 29.09.2026). Здесь все слои мерятся
+    одинаково и по записанной истории корзин: стоит ли основание слоя
+    на срезе, отвечает боевой маршрут того дня, а не пересчёт замера.
+    """
+    grid = {inn: sorted(days) for inn, days in history.items()}
+    all_days = sorted({day for days in grid.values() for day in days})
+    last = max((moment for moment in when.values()), default=date.min)
+    last = min(last, max(all_days, default=date.min))
+    cuts = cutoffs(all_days, start, last)
+
+    def at(inn: str, day: date) -> set[str] | None:
+        days = grid.get(inn)
+        if not days:
+            return None
+        before = [item for item in days if item <= day]
+        return history[inn][before[-1]] if before else None
+
+    def layer(words: tuple[str, ...]):  # noqa: ANN202
+        return lambda inn, day: any(
+            any(word in sources.get(ground, "") for word in words)
+            for ground in (at(inn, day) or ())
+        )
+
+    print("\n## Новая мера: поточечно, по записанной истории\n")
+    if not cuts:
+        print("Срезов нет: история короче горизонта.\n")
+        return
+    print(
+        f"Срезы — первые торговые дни месяцев ({len(cuts)}: {cuts[0]:%m.%Y} — "
+        f"{cuts[-1]:%m.%Y}); событие — в следующие {HORIZON} дней. Стоит ли "
+        "основание слоя, отвечает записанная история корзин того дня — "
+        "с рыночными основаниями по сроку жизни и полу ориентира. Прежняя мера "
+        "— таблицы выше.\n"
+    )
+    print(POINTWISE_HEAD)
+    observed = lambda inn, day: at(inn, day) is not None  # noqa: E731
+    for name, words in (
+        ("рынок", ("рынок",)),
+        ("отчётность", _REPORTING),
+        ("рейтинги", _RATINGS),
+        ("все три", ("рынок", *_REPORTING, *_RATINGS)),
+    ):
+        print(pointwise(name, layer(words), observed, circle, when, cuts).row())
 
 
 def _verdict(alone: dict, unions: dict, total: int, fired: dict,  # noqa: ANN001
@@ -394,18 +453,23 @@ def _verdict(alone: dict, unions: dict, total: int, fired: dict,  # noqa: ANN001
     best_lift = (len(alone[best]) / best_fired / base) if best_fired and base else 0
     whole_fired = len(set().union(*fired.values()))
     whole_lift = (len(whole) / whole_fired / base) if whole_fired and base else 0
+    # Исход печатается сравнением, а не словом: прежний текст «выше / ниже /
+    # не выполнен» был вписан по замеру 24.09.2026 и пережил бы перемер.
+    recall_up = whole_recall > best_recall
+    lift_up = whole_lift > best_lift
     print(
         f"\n**Критерий фазы 6** — «выявляемость и прирост матрицы выше, чем "
         f"у любого слоя отдельно». Выявляемость: {whole_recall:.1%} против "
-        f"{best_recall:.1%} — **выше**. Прирост: {whole_lift:.1f}× против "
-        f"{best_lift:.1f}× — **ниже**.\n"
+        f"{best_recall:.1%} — **{'выше' if recall_up else 'не выше'}**. "
+        f"Прирост: {whole_lift:.1f}× против {best_lift:.1f}× — "
+        f"**{'выше' if lift_up else 'не выше'}**. Сработавших {whole_fired} "
+        f"против {best_fired} у лучшего слоя, поймано "
+        f"{len(whole) - len(alone[best]):+d}.\n"
     )
     print(
-        "Критерий требует обоих условий, и он **не выполнен**: объединение "
-        "тянет за собой ложные срабатывания слабого слоя — сработавших "
-        f"{whole_fired} против {best_fired} у лучшего, а поймано на одного "
-        "больше. Пересечение слоёв точности тоже не даёт: лучшая пара даёт "
-        "13,8 % против 17,8 % у рынка в одиночку.\n"
+        "Критерий требует обоих условий, и по прежней мере он "
+        f"**{'выполнен' if recall_up and lift_up else 'не выполнен'}**. "
+        "Новая мера — ниже, поточечно.\n"
     )
 
 
