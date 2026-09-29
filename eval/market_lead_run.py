@@ -800,6 +800,98 @@ def systemic_issuers() -> set[str]:
     return set(_top_share(volumes, load_routing().systemic.top_share))
 
 
+def _confirmation_pointwise(policy, market: Market, when: dict[str, date]) -> None:  # noqa: ANN001
+    """Цена подтверждения ступени p99 основной мерой: без него, «5 из 10», «7 из 10».
+
+    **Порог не меняется, меряется только подтверждение** (решение владельца
+    29.09.2026): прежний замер (`ladder.confirmation_measured`) — мерой
+    «хоть раз», для рынка негодной. Каждый вариант — боевой расчёт
+    с заменённым подтверждением ступени; системное правило старше, как
+    в маршруте, и у системно значимых остаётся «14 из 20».
+    """
+    from finlib.scoring.market import findings
+    from finlib.sources.market import Rule
+
+    systemic = systemic_issuers()
+    days = market.calendar()
+    circle = set(market.issuers)
+    top = next(step for step in policy.route_steps if step.basket == "review")
+    last_event = max(days, default=date.min)
+    cuts = cutoffs(days, days[0] + timedelta(days=HORIZON), last_event) if days else []
+    inside = {
+        inn: moment
+        for inn, moment in when.items()
+        if inn in circle and days and days[0] < moment <= last_event
+    }
+
+    def observed(inn: str, day: date) -> bool:
+        own = market.ordered(inn)
+        return bool(own) and own[0].day <= day
+
+    print(f"\n### Цена подтверждения на ступени p{top.percentile} — основная мера\n")
+    print(
+        f"Порог {top.multiple}× не меняется; меняется только подтверждение "
+        "ступени. Остальное — как в маршруте: пол ориентира, срок жизни, "
+        "системное подтверждение.\n"
+    )
+    print(POINTWISE_HEAD)
+    eve: list[str] = []
+    for of, out_of in ((1, 1), (5, 10), (7, 10)):
+        steps = tuple(
+            step.model_copy(update={"confirmation": Rule(of=of, out_of=out_of)})
+            if step.code == top.code
+            else step
+            for step in policy.ladder.steps
+        )
+        variant = policy.model_copy(
+            update={"ladder": policy.ladder.model_copy(update={"steps": steps})}
+        )
+        cache: dict[tuple[str, date], bool] = {}
+
+        def stands(inn: str, day: date, v=variant, c=cache) -> bool:  # noqa: ANN001
+            if (inn, day) not in c:
+                c[(inn, day)] = any(
+                    item.ground == top.ground
+                    for item in findings(v, market, inn, day, systemic=inn in systemic)
+                )
+            return c[(inn, day)]
+
+        label = "без подтверждения" if of == 1 else f"«{of} из {out_of}»"
+        print(pointwise(label, stands, observed, circle, when, cuts).row())
+        outcomes: list[int | None] = []
+        for inn, moment in inside.items():
+            before = [day for day in days if day < moment]
+            if not before:
+                continue
+            mine = [
+                item
+                for item in findings(
+                    variant, market, inn, before[-1], systemic=inn in systemic
+                )
+                if item.ground == top.ground
+            ]
+            outcomes.append((moment - mine[0].since).days if mine else None)
+        leads = [item for item in outcomes if item is not None]
+        share, median_lead = _eve_intervals(outcomes)
+        eve.append(
+            f"| {label} | {len(leads)} из {len(outcomes)} "
+            f"| {len(leads) / len(outcomes) if outcomes else 0:.1%} "
+            f"[{share[0]:.1%}; {share[1]:.1%}] | "
+            + (
+                f"{statistics.median(leads):.0f} [{median_lead[0]:.0f}; "
+                f"{median_lead[1]:.0f}]"
+                if leads
+                else "—"
+            )
+            + " |"
+        )
+    print("\nНакануне события:\n")
+    print("| Подтверждение | Стоит накануне | Доля | Упреждение от начала стояния |")
+    print("|---|---|---|---|")
+    for line in eve:
+        print(line)
+
+
 def _market_pointwise(policy, market: Market, when: dict[str, date]) -> None:  # noqa: ANN001
     """Новая мера рыночных оснований: боевой расчёт на срезах и накануне события.
 
@@ -1285,6 +1377,7 @@ def main() -> int:
 
     _appearance(policy, market, history, sources, inside, common, started, base)
     _market_pointwise(policy, market, when)
+    _confirmation_pointwise(policy, market, when)
     _halted(market, inside)
 
     print("\n## Пересечение слоёв на событиях в окне\n")
