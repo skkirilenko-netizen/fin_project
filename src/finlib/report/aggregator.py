@@ -92,7 +92,7 @@ def build(
             "базовое заключение описывает только агрегатор"
         )
     head = [
-        composition.source,
+        _source(composition, conn),
         composition.no_class,
         _sentence(
             f"Отчётная дата величин {item.report_date:%d.%m.%Y}; дата формирования "
@@ -108,6 +108,31 @@ def build(
         filler(part, item, conn, composition, today, basket_name)
         parts.append(part)
     return BaseConclusion(item.inn, item.name, today, item.report_date, head, parts)
+
+
+class ReconciliationMissingError(ValueError):
+    """Сверки агрегатора с документами не записано: мере надёжности взяться неоткуда."""
+
+
+def _source(composition: AggregatorConclusion, conn: PgConnection) -> str:
+    """Абзац об источнике с долей совпавших из таблицы сверки.
+
+    **Число берётся из записанной сверки, а не из текста методики** (решение
+    владельца 29.09.2026): вписанное строкой «176 из 183» пережило бы перемер.
+    Сверенных ноль — не «ничего не совпало», а отсутствие сверки, и сборка
+    отказывается, а не печатает «0 из 0».
+    """
+    from finlib.quality.reconcile import reporting_share
+
+    share = reporting_share(conn)
+    if not share.compared:
+        raise ReconciliationMissingError(
+            "сверка агрегатора с документами не записана "
+            "(eval/source_reconcile_run.py --review --write)"
+        )
+    return composition.source.format(
+        issuers=share.issuers, matched=share.matched, compared=share.compared
+    )
 
 
 def _sentence(text: str) -> str:

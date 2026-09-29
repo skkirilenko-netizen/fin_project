@@ -80,3 +80,35 @@ def test_every_number_is_printed_with_its_code(tmp_path) -> None:  # noqa: ANN00
         "6,07",
         "net_debt_ebitda",
     ]
+
+
+def test_the_reconciliation_share_comes_from_the_table(db_conn) -> None:  # noqa: ANN001
+    """Доля совпавших берётся из записанной сверки, а без сверки сборка отказывается.
+
+    Решение владельца 29.09.2026: «176 из 183», вписанное строкой в методику,
+    пережило бы перемер сверки.
+    """
+    from finlib.db import execute
+    from finlib.report.aggregator import ReconciliationMissingError, _source
+
+    composition = _composition().model_copy(
+        update={"source": "На {issuers} эмитентах совпало {matched} из {compared}."}
+    )
+    execute("DELETE FROM source_reconciliation", conn=db_conn)
+    with pytest.raises(ReconciliationMissingError):
+        _source(composition, db_conn)
+    for code, outcome, role in (
+        ("ifrs.revenue", "совпало", "reporting"),
+        ("ifrs.cash", "расходится", "reporting"),
+        ("ifrs.ppe", "нет в документе", "reporting"),
+        ("ifrs.inventories", "совпало", "comparative"),
+    ):
+        execute(
+            "INSERT INTO source_reconciliation (inn, document_path, report_date, "
+            "period_role, line_code, aggregator_kind, outcome, code_version) "
+            "VALUES ('7838360491', 'x.pdf', %(d)s, %(r)s, %(c)s, 'exact', %(o)s, 'тест')",
+            {"d": date(2025, 12, 31), "r": role, "c": code, "o": outcome},
+            conn=db_conn,
+        )
+    # Сравнительная колонка и «нет в документе» в меру не идут.
+    assert _source(composition, db_conn) == "На 1 эмитентах совпало 1 из 2."
