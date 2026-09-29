@@ -41,8 +41,8 @@ ROOT = Path("data/raw/ifrs")
 
 # Корзина каждого эмитента на последнюю точку прогона.
 _LATEST = """
-SELECT DISTINCT ON (inn) inn, basket FROM routing_history
-WHERE kind = 'run' ORDER BY inn, as_of DESC, id DESC
+SELECT DISTINCT ON (inn) inn, basket FROM routing_day
+ORDER BY inn, as_of DESC
 """
 
 # Исходы, которые печатаются строкой таблицы: совпадение и отсутствие

@@ -961,7 +961,7 @@ CREATE TABLE IF NOT EXISTS routing_history (
     run_id       bigint REFERENCES routing_run(id),
     inn          text NOT NULL,
     as_of        date NOT NULL,
-    kind         text NOT NULL CHECK (kind IN ('run', 'backfill')),
+    kind         text NOT NULL CHECK (kind IN ('run', 'backfill', 'repeat')),
     -- Стандарт бывает не назван вовсе: маршрут строится и по одним событиям.
     standard     text CHECK (standard IN ('rsbu', 'ifrs')),
     basket       text NOT NULL,
@@ -985,8 +985,9 @@ CREATE TABLE IF NOT EXISTS routing_history (
     -- изменение, то есть дефект недетерминированности.
     fingerprint  text NOT NULL,
     report_date  date,
-    created_at   timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT routing_history_uniq UNIQUE (inn, as_of, kind)
+    created_at   timestamptz NOT NULL DEFAULT now()
+    -- Ключ точки — частичные уникальные индексы ниже: у повтора в ключе
+    -- прогон, у прочих — нет.
 );
 
 CREATE INDEX IF NOT EXISTS routing_history_inn_idx
@@ -1008,6 +1009,42 @@ COMMENT ON COLUMN routing_history.grounds_all IS
     'Все сработавшие основания, а не только называющие корзину';
 COMMENT ON COLUMN routing_history.inputs IS
     'Величины, которыми решение получено: показатели, платежи, денежные средства';
+
+-- **Повторный прогон дня не затирает точку прогона по расписанию** (решение
+-- владельца 29.09.2026). 29.09.2026 ручной повтор в 12:02 переписал точки
+-- маршрута дня, и утренний отчёт изменений восстановить стало нечем.
+-- Повтор пишется рядом видом `repeat`, и повторов в день бывает несколько —
+-- поэтому у них в ключе прогон, а у `run` и `backfill` ключ прежний:
+-- точка дня одна. `run` — главная точка дня: прогона по расписанию, а если
+-- его не было — первого прогона дня. Маршрут дня и отчёт изменений читают
+-- последнюю точку (`routing_day`), аудит — точку `run`.
+ALTER TABLE routing_history DROP CONSTRAINT IF EXISTS routing_history_kind_check;
+ALTER TABLE routing_history ADD CONSTRAINT routing_history_kind_check
+    CHECK (kind IN ('run', 'backfill', 'repeat'));
+ALTER TABLE routing_history DROP CONSTRAINT IF EXISTS routing_history_uniq;
+CREATE UNIQUE INDEX IF NOT EXISTS routing_history_uniq
+    ON routing_history (inn, as_of, kind) WHERE kind <> 'repeat';
+CREATE UNIQUE INDEX IF NOT EXISTS routing_history_repeat_uniq
+    ON routing_history (inn, as_of, run_id) WHERE kind = 'repeat';
+-- У повтора прогон обязателен: без него повторы одного дня неразличимы.
+ALTER TABLE routing_history DROP CONSTRAINT IF EXISTS routing_history_repeat_run;
+ALTER TABLE routing_history ADD CONSTRAINT routing_history_repeat_run
+    CHECK (kind <> 'repeat' OR run_id IS NOT NULL);
+COMMENT ON COLUMN routing_history.kind IS
+    'run — главная точка дня (прогон по расписанию), repeat — повторный прогон '
+    'того же дня рядом с ней, backfill — пересчёт назад; наблюдение с пересчётом '
+    'не сравнивается';
+
+-- Последняя точка наблюдения на дату: повтор, если он был, иначе главная.
+-- Порядок — по прогону: номер прогона растёт со временем старта.
+CREATE OR REPLACE VIEW routing_day AS
+SELECT DISTINCT ON (inn, as_of) *
+FROM routing_history
+WHERE kind IN ('run', 'repeat')
+ORDER BY inn, as_of, (kind = 'repeat') DESC, run_id DESC NULLS LAST, id DESC;
+
+COMMENT ON VIEW routing_day IS
+    'Последняя точка наблюдения эмитента на дату: маршрут дня и отчёт изменений';
 
 -- Сверка агрегатора с документом (уровень 3 заключений по МСФО, 29.09.2026).
 -- Одна строка — одна величина одной отчётной даты одного документа. Исходов

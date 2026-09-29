@@ -383,14 +383,18 @@ SET status = %(status)s, finished_at = now(), sources = %(sources)s, note = %(no
 WHERE id = %(id)s
 """
 
+# **Повтор дня пишется рядом с главной точкой, а не поверх неё** (решение
+# владельца 29.09.2026): вид `repeat`, в ключе — прогон. Главная точка
+# (`run`) — прогона по расписанию либо первого прогона дня; её переписывает
+# только прогон по расписанию.
 _POINT = """
 INSERT INTO routing_history
        (run_id, inn, as_of, kind, standard, basket, subgroup, grounds,
         grounds_all, inputs, fingerprint, report_date)
-VALUES (%(run)s, %(inn)s, %(as_of)s, 'run', %(standard)s, %(basket)s,
+VALUES (%(run)s, %(inn)s, %(as_of)s, %(kind)s, %(standard)s, %(basket)s,
         %(subgroup)s, %(grounds)s, %(grounds_all)s, %(inputs)s,
         %(fingerprint)s, %(report_date)s)
-ON CONFLICT (inn, as_of, kind) DO UPDATE SET
+ON CONFLICT {target} DO UPDATE SET
     run_id = EXCLUDED.run_id,
     standard = EXCLUDED.standard,
     basket = EXCLUDED.basket,
@@ -401,6 +405,30 @@ ON CONFLICT (inn, as_of, kind) DO UPDATE SET
     fingerprint = EXCLUDED.fingerprint,
     report_date = EXCLUDED.report_date
 """
+
+# Ключ конфликта по виду точки: частичные уникальные индексы схемы.
+POINT_TARGET = {
+    "run": "(inn, as_of, kind) WHERE kind <> 'repeat'",
+    "repeat": "(inn, as_of, run_id) WHERE kind = 'repeat'",
+}
+
+_DAY_HAS_POINTS = """
+SELECT 1 FROM routing_history WHERE kind = 'run' AND as_of = %(as_of)s LIMIT 1
+"""
+
+
+def point_sql(kind: str) -> str:
+    """Запрос записи точки маршрута названного вида."""
+    return _POINT.format(target=POINT_TARGET[kind])
+
+
+def point_kind(scheduled: bool, day_has_points: bool) -> str:
+    """Вид точки прогона: `run` — главная точка дня, `repeat` — повтор рядом.
+
+    Прогон по расписанию пишет главную всегда. Иной прогон — главную, только
+    если у дня точек ещё нет: иначе он повтор и главную не трогает.
+    """
+    return "run" if scheduled or not day_has_points else "repeat"
 
 
 def main() -> int:
@@ -524,11 +552,17 @@ def _deliver_and_route(
         # Пересчёт идёт по диску и сети не касается вовсе.
         market_series(refresh=True)
         rows, counts = routing_rows(conn, today)
+        # `said` пуст только у прогона по расписанию (`_who`).
+        kind = point_kind(
+            not said, bool(fetch_all(_DAY_HAS_POINTS, {"as_of": today}, conn=conn))
+        )
+        insert = point_sql(kind)
         for row in rows:
             execute(
-                _POINT,
+                insert,
                 {
                     "run": run_id,
+                    "kind": kind,
                     "inn": row.inn,
                     "as_of": today,
                     "standard": row.standard.value if row.standard else None,

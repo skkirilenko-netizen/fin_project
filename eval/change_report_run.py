@@ -46,15 +46,22 @@ from finlib.sources.moex_risk import risk_sectors  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# **Наблюдение читается последней точкой дня** (`routing_day`): повтор дня
+# пишется рядом с точкой прогона по расписанию, а отчёт говорит о последнем
+# маршруте. Точка по расписанию остаётся для аудита (решение владельца
+# 29.09.2026). Пересчёт повторов не знает и читается как прежде.
+_SOURCE = {"run": "routing_day", "backfill": "routing_history"}
+
 _DATES = """
-SELECT DISTINCT as_of FROM routing_history WHERE kind = %(kind)s ORDER BY as_of
+SELECT DISTINCT as_of FROM {source} WHERE kind = %(kind)s OR %(kind)s = 'run'
+ORDER BY as_of
 """
 
 _POINTS = """
 SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
        h.report_date, r.code_version, r.methodology
-FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
-WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
+FROM {source} h LEFT JOIN routing_run r ON r.id = h.run_id
+WHERE (h.kind = %(kind)s OR %(kind)s = 'run') AND h.as_of = %(as_of)s
 """
 
 # Здоровье доставок того дня, о котором отчёт. Берётся последний прогон дня:
@@ -329,7 +336,11 @@ def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
     """Точки истории на дату: ИНН → вердикт."""
     return {
         row["inn"]: row
-        for row in fetch_all(_POINTS, {"kind": kind, "as_of": moment}, conn=conn)
+        for row in fetch_all(
+            _POINTS.format(source=_SOURCE[kind]),
+            {"kind": kind, "as_of": moment},
+            conn=conn,
+        )
     }
 
 
@@ -341,7 +352,12 @@ def main() -> int:
         kind = sys.argv[sys.argv.index("--kind") + 1]
     routing = load_routing()
     with connection() as conn:
-        dates = [row["as_of"] for row in fetch_all(_DATES, {"kind": kind}, conn=conn)]
+        dates = [
+            row["as_of"]
+            for row in fetch_all(
+                _DATES.format(source=_SOURCE[kind]), {"kind": kind}, conn=conn
+            )
+        ]
         if len(dates) < 2:
             print(
                 "# Отчёт изменений\n\nТочек истории меньше двух: сравнивать "

@@ -61,7 +61,7 @@ INSERT INTO routing_history
 VALUES (%(run)s, %(inn)s, %(as_of)s, 'backfill', %(standard)s, %(basket)s,
         %(subgroup)s, %(grounds)s, %(grounds_all)s, %(inputs)s,
         %(fingerprint)s, %(report_date)s)
-ON CONFLICT (inn, as_of, kind) DO UPDATE SET
+ON CONFLICT (inn, as_of, kind) WHERE kind <> 'repeat' DO UPDATE SET
     run_id = EXCLUDED.run_id,
     standard = EXCLUDED.standard,
     basket = EXCLUDED.basket,

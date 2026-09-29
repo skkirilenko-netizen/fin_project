@@ -74,7 +74,13 @@ LIMITS = OUT / "_границы_метода.md"
 # показывается пересчёт, наблюдение называется числом рядом.
 _HISTORY = """
 SELECT as_of, kind, basket, subgroup, grounds, report_date
-FROM routing_history WHERE inn = %(inn)s ORDER BY as_of
+FROM routing_history WHERE inn = %(inn)s AND kind = 'backfill'
+UNION ALL
+-- Наблюдение — последней точкой дня: повтор пишется рядом с точкой
+-- по расписанию, и считать обе значило бы посчитать день дважды.
+SELECT as_of, 'run' AS kind, basket, subgroup, grounds, report_date
+FROM routing_day WHERE inn = %(inn)s
+ORDER BY as_of
 """
 
 _SETS = """

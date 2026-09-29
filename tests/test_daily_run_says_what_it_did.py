@@ -232,3 +232,71 @@ def test_a_repeated_run_does_not_overwrite_the_scheduled_report() -> None:
     assert again.name == "changes_2026-09-29_1202.md"
     # Шапку повторного печатает сам отчёт по переданной строке.
     assert '"--note", said' in _source()
+
+
+def _daily():  # noqa: ANN202
+    """Модуль ежедневного прогона."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("daily_run", DAILY)
+    daily = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(daily)
+    return daily
+
+
+def test_a_repeat_does_not_overwrite_the_scheduled_point(db_conn) -> None:  # noqa: ANN001
+    """Повтор не затирает плановую точку: пишет рядом, день читается последней.
+
+    29.09.2026 ручной повтор переписал точки маршрута дня, и утренний отчёт
+    изменений восстановить стало нечем (решение владельца: плановые точки
+    хранить отдельно; маршрут дня и отчёт — последняя точка, аудит — плановая).
+    """
+    from finlib.db import execute, fetch_all, fetch_one
+
+    daily = _daily()
+    assert daily.point_kind(scheduled=True, day_has_points=True) == "run"
+    assert daily.point_kind(scheduled=False, day_has_points=False) == "run"
+    assert daily.point_kind(scheduled=False, day_has_points=True) == "repeat"
+
+    day, inn = date(2000, 1, 3), "0000000001"
+    runs = [
+        fetch_one(
+            "INSERT INTO routing_run (kind, as_of, status) VALUES ('run', %(d)s, 'done') "
+            "RETURNING id",
+            {"d": day},
+            conn=db_conn,
+        )["id"]
+        for _ in range(3)
+    ]
+    for run_id, kind, basket in (
+        (runs[0], "run", "attention"),
+        (runs[1], "repeat", "review"),
+        (runs[2], "repeat", "clear"),
+    ):
+        execute(
+            daily.point_sql(kind),
+            {
+                "run": run_id, "kind": kind, "inn": inn, "as_of": day,
+                "standard": None, "basket": basket, "subgroup": "", "grounds": [],
+                "grounds_all": [], "inputs": "{}", "fingerprint": "f",
+                "report_date": None,
+            },
+            conn=db_conn,
+        )
+    rows = fetch_all(
+        "SELECT kind, basket FROM routing_history WHERE inn = %(i)s AND as_of = %(d)s "
+        "ORDER BY id",
+        {"i": inn, "d": day},
+        conn=db_conn,
+    )
+    assert [(row["kind"], row["basket"]) for row in rows] == [
+        ("run", "attention"),
+        ("repeat", "review"),
+        ("repeat", "clear"),
+    ]
+    latest = fetch_one(
+        "SELECT basket FROM routing_day WHERE inn = %(i)s AND as_of = %(d)s",
+        {"i": inn, "d": day},
+        conn=db_conn,
+    )
+    assert latest["basket"] == "clear"
