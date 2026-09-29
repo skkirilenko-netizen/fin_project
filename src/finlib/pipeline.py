@@ -335,12 +335,17 @@ def accept_ifrs_document(
     report(Stage.LOAD, f"документ принят: {profile.describe()}")
 
     columns = getattr(document, "columns_of", None)
+    # Наименования, подтверждённые человеком на годовом комплекте этого
+    # эмитента: по ним склеивается продолжение с заглавной буквы.
+    from finlib.sources.ifrs_confirmed import glue_keys
+
     extraction = extract(
         text,
         profile.dates_by_form,
         profile.grouping,
         columns=columns,
         layouts=profile.columns_by_form,
+        glue_keys=glue_keys(inn),
     )
     report(Stage.LOAD, extraction.describe())
 

@@ -57,6 +57,49 @@ _MATCH_KEYS = """
 SELECT id, source_name, match_key FROM ifrs_line_confirmation WHERE inn = %(inn)s
 """
 
+# Подтверждения, сделанные человеком на **годовом** комплекте: склейку
+# промежуточного разрешает только то, что человек видел в годовом. Комплект
+# узнаётся по отчётной дате подтверждения, а не по `src_file_id`: графа
+# на 29.09.2026 не заполнена ни у одного из 290 подтверждений. Дата, у которой
+# годового комплекта документа нет, в склейку не идёт.
+_ANNUAL_NAMES = """
+SELECT c.form_code, c.source_name, c.match_key
+FROM ifrs_line_confirmation c
+WHERE c.inn = %(inn)s
+  AND EXISTS (
+      SELECT 1 FROM src_file s
+      WHERE s.inn = c.inn AND s.standard = 'ifrs' AND s.source = 'file'
+        AND s.period_end = c.report_date AND s.reporting_kind <> 'interim'
+  )
+"""
+
+
+def glue_keys(inn: str | None, conn=None) -> dict[str, frozenset[str]]:  # noqa: ANN001
+    """Ключи наименований, подтверждённых на годовом комплекте, по формам.
+
+    **Третий путь склейки** (решение владельца 29.09.2026): продолжение
+    с заглавной буквы склеивается разбором только тогда, когда склеенное
+    наименование человек уже подтвердил у этого эмитента в этой форме.
+    Границы те же, что у опознания по подтверждению: тот же эмитент, та же
+    форма, ключ нынешнего разбора. Недоступная база — не ошибка разбора:
+    склейки по подтверждению тогда нет, и разбор остаётся прежним, то есть
+    строже.
+    """
+    if inn is None:
+        return {}
+    from finlib.db import fetch_all
+
+    try:
+        rows = fetch_all(_ANNUAL_NAMES, {"inn": inn}, conn=conn)
+    except Exception as failure:  # noqa: BLE001 — разбор работает и без базы
+        logger.warning("подтверждения для склейки не прочитаны: %s", failure)
+        return {}
+    found: dict[str, set[str]] = {}
+    for row in rows:
+        key = row["match_key"] or match_key(row["source_name"])
+        found.setdefault(row["form_code"], set()).add(key)
+    return {form: frozenset(keys) for form, keys in found.items()}
+
 
 def match_key(source_name: str) -> str:
     """Ключ сопоставления подтверждения со строкой отчётности.

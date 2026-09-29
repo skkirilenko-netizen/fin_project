@@ -270,6 +270,11 @@ class ExtractedForm:
     # поэтому рядом стоит счётчик проверенного.
     dropped_values: list[tuple[str, tuple[Decimal, ...]]] = field(default_factory=list)
     rows_with_values: int = 0
+    # Наименования, склеенные по подтверждению человека на годовом комплекте
+    # того же эмитента (место строки и склеенное наименование). Склейка
+    # по подтверждению — другое основание, чем по строению строки, и число
+    # её печатается отдельно: доверие к ним разное.
+    glued_by_confirmation: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -397,7 +402,9 @@ class Extraction:
             f"{sum(len(form.totals_by_structure) for form in self.forms.values())}, "
             f"строк сложено с другими {len(self.merged)}, "
             f"спорных позиций {len(self.contested)}, "
-            f"сносок под формами {len(self.notes)}"
+            f"сносок под формами {len(self.notes)}, "
+            f"наименований склеено по подтверждению "
+            f"{sum(len(form.glued_by_confirmation) for form in self.forms.values())}"
         )
 
 
@@ -408,8 +415,16 @@ def extract(
     catalog: IfrsCatalog | None = None,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
     layouts: Mapping[str, ColumnLayout] | None = None,
+    glue_keys: Mapping[str, frozenset[str]] | None = None,
 ) -> Extraction:
     """Разбирает документ по формам справочника.
+
+    `glue_keys` — ключи наименований, подтверждённых человеком на годовом
+    комплекте того же эмитента, по формам (`ifrs_confirmed.glue_keys`).
+    Продолжение с заглавной буквы склеивается с предыдущей строкой, только
+    если склеенное подтверждено в той же форме: у промежуточного ФосАгро
+    «Себестоимость реализованной продукции» / «Группы» иначе не склеить,
+    не сломав «Выручку» над разбивкой у Норникеля.
 
     report_dates и grouping приходят от приёма файла: разбирать числа,
     не зная конвенции, нельзя, а раскладывать их по периодам, не зная дат,
@@ -461,6 +476,7 @@ def extract(
             catalog,
             columns,
             layouts.get(form_code) if layouts else None,
+            glue_keys.get(form_code, frozenset()) if glue_keys else frozenset(),
         )
     logger.info("разбор документа: %s", result.describe())
     return result
@@ -491,6 +507,7 @@ def _extract_form(
     catalog: IfrsCatalog,
     columns: Callable[[str], tuple[tuple[str, float], ...]] | None = None,
     layout: ColumnLayout | None = None,
+    glued: frozenset[str] = frozenset(),
 ) -> ExtractedForm:
     """Разбирает один блок формы: величины, неопознанные строки, сноски."""
     form = ExtractedForm(form_code, layout=layout)
@@ -550,7 +567,10 @@ def _extract_form(
             # отсев «не статья»: у шапки таблицы «Млн руб. Прим. 2025 2024»
             # лишнее число есть всегда, и потерей это не является.
             losses[len(rows)] = dropped
-        rows.append((_joined(pending, name), values, index))
+        joined, by_confirmation = _join(pending, name, glued)
+        if by_confirmation:
+            form.glued_by_confirmation.append((index, joined))
+        rows.append((joined, values, index))
         # Знаменатель к числу строк с потерянными величинами: ноль потерь
         # при неизвестном числе строк с величинами ничего не означает.
         form.rows_with_values += 1
@@ -1043,7 +1063,14 @@ def is_table_header(name: str) -> bool:
 
 
 def _joined(pending: list[str], name: str) -> str:
-    """Склеивает наименование, разорванное переносом строки.
+    """Склейка наименования по строению строки — без подтверждений."""
+    return _join(pending, name, frozenset())[0]
+
+
+def _join(
+    pending: list[str], name: str, glued: frozenset[str]
+) -> tuple[str, bool]:
+    """Склеивает наименование, разорванное переносом строки; второе — по подтверждению ли.
 
     Вёрстка переносит длинные наименования, и величины остаются во второй
     части: «Авансы, выданные под строительство и» / «приобретение основных
@@ -1060,11 +1087,20 @@ def _joined(pending: list[str], name: str) -> str:
     основных средств» пришли безымянной строкой 7 083 / 8 818, и статья
     ушла в разметку неопознанной. Проверять там нечего — своего текста
     у строки нет, и взять его больше неоткуда.
+
+    **Продолжение с заглавной склеивается только по подтверждению человека**
+    (решение владельца 29.09.2026, третий путь). По строению строки его
+    не отличить от заголовка раздела: правило «строка без величин с известным
+    наименованием — не заголовок» ловит «Себестоимость реализованной
+    продукции» / «Группы» у промежуточного ФосАгро и ломает «Выручку» над
+    разбивкой у Норникеля. Склеенное принимается, если его ключ человек
+    подтвердил на годовом комплекте того же эмитента в той же форме
+    (`glued`), а несклеенный остаток подтверждён не был.
     """
     if not pending:
-        return name
+        return name, False
     if not name.strip():
-        return pending[-1].strip()
+        return pending[-1].strip(), False
     # Склейка идёт, пока присоединённый кусок сам выглядит продолжением.
     # Прежде бралась одна строка, и наименование в три строки собиралось
     # наполовину: у Сегежи «Убыток от обесценения и другие расходы в связи
@@ -1073,14 +1109,23 @@ def _joined(pending: list[str], name: str) -> str:
     # не опознавал ничего.
     parts: list[str] = []
     current = name
+    confirmed = False
     for item in reversed(pending):
         if not current[:1].islower() and not _CONTINUES.match(item):
-            break
+            if not glued:
+                break
+            from finlib.sources.ifrs_confirmed import match_key
+
+            now = " ".join([*reversed(parts), name]).strip()
+            wider = " ".join([item, *reversed(parts), name]).strip()
+            if match_key(wider) not in glued or match_key(now) in glued:
+                break
+            confirmed = True
         parts.append(item)
         current = item
     if not parts:
-        return name
-    return " ".join([*reversed(parts), name]).strip()
+        return name, False
+    return " ".join([*reversed(parts), name]).strip(), confirmed
 
 
 # Строка выглядит незавершённой: кончается союзом, запятой, предлогом или

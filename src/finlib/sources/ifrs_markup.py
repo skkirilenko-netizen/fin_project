@@ -415,12 +415,15 @@ def load_issuer(
     )
     if isinstance(profile, Rejection):
         return profile
+    from finlib.sources.ifrs_confirmed import glue_keys
+
     extraction = extract(
         document.text,
         profile.dates_by_form,
         profile.grouping,
         columns=document.columns_of,
         layouts=profile.columns_by_form,
+        glue_keys=glue_keys(inn),
     )
     return IssuerMarkup(inn, path, profile, extraction)
 
