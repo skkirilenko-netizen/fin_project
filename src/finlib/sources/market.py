@@ -171,6 +171,11 @@ class Distress(BaseModel):
     narrowing_declined: dict[str, Decimal | str]
     measured: dict[str, dict[str, Decimal]] = Field(min_length=1)
     measured_origin: str = Field(min_length=1)
+    # Прежняя мера — по эмитентам, сработавшим хоть раз: справочно, для рынка
+    # не годится (решение владельца 29.09.2026). Запись о том, на чём
+    # принимались решения, а не число для формулировок.
+    measured_ever: dict[str, dict[str, Decimal]] = Field(default_factory=dict)
+    measured_ever_origin: str = ""
     confirmation_declined: dict[str, Decimal]
     # **Наблюдение — не правило, и место у него своё.** Случай, увиденный
     # однажды, порога не даёт; записанный рядом с правилами, он бы читался
