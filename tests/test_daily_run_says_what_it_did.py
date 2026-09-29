@@ -211,3 +211,24 @@ def test_a_day_without_a_run_record_says_so() -> None:
     text = _said([])
     assert "Записи прогона за этот день нет" in text
     assert "это не «доставки прошли»" in text
+
+
+def test_a_repeated_run_does_not_overwrite_the_scheduled_report() -> None:
+    """Отчёт прогона по расписанию главный; иной прогон пишет свой рядом.
+
+    29.09.2026 ручной повтор в 12:02 переписал утренний отчёт, и восстановить
+    его оказалось нечем.
+    """
+    import importlib.util
+    from datetime import datetime
+
+    spec = importlib.util.spec_from_file_location("daily_run", DAILY)
+    daily = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(daily)
+    day = date(2026, 9, 29)
+    main = daily.report_path(day, datetime(2026, 9, 29, 10, 0, 1), "")
+    again = daily.report_path(day, datetime(2026, 9, 29, 12, 2), "Повторный прогон")
+    assert main.name == "changes_2026-09-29.md"
+    assert again.name == "changes_2026-09-29_1202.md"
+    # Шапку повторного печатает сам отчёт по переданной строке.
+    assert '"--note", said' in _source()

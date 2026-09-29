@@ -590,6 +590,11 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     names = _ground_names(routing)
     order = {basket.code: basket.order for basket in routing.baskets}
     print(f"# Что изменилось: {until:%d.%m.%Y}\n")
+    # **Повторный прогон называет себя в шапке** (решение владельца
+    # 29.09.2026): его отчёт лежит рядом с отчётом прогона по расписанию,
+    # а не вместо него, и читатель обязан знать, какой перед ним.
+    if "--note" in sys.argv:
+        print(f"> **{sys.argv[sys.argv.index('--note') + 1]}**\n")
     _health(kind, health)
     if kind == "run":
         _ratings_health(_snapshot_of(until))

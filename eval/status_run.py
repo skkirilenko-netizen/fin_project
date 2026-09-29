@@ -7,26 +7,27 @@
 Сводка ничего не пересчитывает — второй счёт «Срочного» или смен корзины
 разошёлся бы с отчётом, который читает человек.
 
-**Прогон по расписанию отличается от ручного временем старта.** Отметки
-«по расписанию» журнал не несёт; агент launchd запускает прогон в 10:00
-по рабочим дням (`scripts/ru.finanalysis.daily-run.plist`), и прогоном
-по расписанию здесь считается прогон, стартовавший в рабочий день между
-10:00:00 и `SCHEDULED_SLACK` после. Правило объявлено, и его слабость тоже:
-ручной прогон, запущенный ровно в 10:00, будет принят за плановый.
+**Прогон по расписанию отличается от ручного временем старта**; правило
+одно на сводку и ежедневный прогон — `finlib.schedule`.
+
+**День засчитывается по прогону по расписанию этого дня** (решение владельца
+29.09.2026). Повторные ручные прогоны того же дня счёт не обрывают и не
+засчитываются, но показываются строкой с причиной из журнала: повтор — это
+сведение о дне, а не его исход.
 """
 
 import json
 import re
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from finlib.db import fetch_all
+from finlib.schedule import SCHEDULED_AT, is_scheduled
 
-# Сколько после 10:00 ещё считается стартом по расписанию: launchd стартует
-# в пределах секунд, пробуждение машины добавляет минуты.
-SCHEDULED_AT = time(10, 0)
-SCHEDULED_SLACK = timedelta(minutes=5)
+# За сколько дней назад показывать повторные прогоны: неделя — тот же
+# горизонт, что у отчёта изменений.
+REPEATS_DAYS = 7
 
 RATINGS = Path("data/raw/cbonds/ratings")
 OUTPUT = Path("data/output")
@@ -44,11 +45,34 @@ def _local(moment: datetime | None) -> datetime | None:
 
 def _scheduled(run: dict) -> bool:
     """Стартовал ли прогон по расписанию: рабочий день, 10:00 и не позже допуска."""
-    started = _local(run["started_at"])
-    if started is None or run["kind"] != "run" or started.weekday() >= 5:
-        return False
-    edge = datetime.combine(started.date(), SCHEDULED_AT, tzinfo=started.tzinfo)
-    return edge <= started <= edge + SCHEDULED_SLACK
+    return run["kind"] == "run" and is_scheduled(run["started_at"])
+
+
+def _repeats(runs: list[dict], now: datetime) -> list[str]:
+    """Повторные прогоны дней, у которых есть прогон по расписанию: строками.
+
+    Повторный не засчитывается и счёт не обрывает; причина берётся из журнала
+    (`routing_run.note`), куда её пишет ежедневный прогон с `--reason`.
+    """
+    scheduled_days = {
+        _local(run["started_at"]).date() for run in runs if _scheduled(run)
+    }
+    edge = now.date() - timedelta(days=REPEATS_DAYS)
+    found: list[str] = []
+    for run in sorted(runs, key=lambda item: item["started_at"]):
+        started = _local(run["started_at"])
+        if (
+            run["kind"] != "run"
+            or _scheduled(run)
+            or started.date() not in scheduled_days
+            or started.date() < edge
+        ):
+            continue
+        found.append(
+            f"{started:%d.%m}: повторный прогон {started:%H:%M}, "
+            f"{run['status']} — {run.get('note') or 'причина не названа'}"
+        )
+    return found
 
 
 def _clean(run: dict) -> bool:
@@ -106,15 +130,35 @@ def _streak(runs: list[dict], now: datetime) -> tuple[int, str]:
 
 
 def _changes() -> tuple[str, str, str]:
-    """Срочное и смены корзины из свежайшего отчёта изменений: файл, два числа."""
-    found = sorted(OUTPUT.glob("changes_????-??-??.md"))
+    """Срочное и смены корзины из свежайшего отчёта изменений: файл, два числа.
+
+    **Главный отчёт дня — отчёт прогона по расписанию** (`changes_<дата>.md`);
+    повторный прогон пишет свой рядом (`changes_<дата>_<ЧЧММ>.md`). Берётся
+    свежайшая дата, у неё — главный отчёт, а если его нет — последний
+    повторный, и это сказано в имени.
+    """
+    dated = re.compile(r"changes_(\d{4}-\d{2}-\d{2})(?:_(\d{4}))?\.md$")
+    found = sorted(
+        (match.group(1), match.group(2) is None, match.group(2) or "", path)
+        for path in OUTPUT.glob("changes_*.md")
+        if (match := dated.match(path.name))
+    )
     if not found:
         return "отчёта изменений нет", "—", "—"
-    text = found[-1].read_text(encoding="utf-8")
+    day = found[-1][0]
+    mine = [item for item in found if item[0] == day]
+    main_report = next((item for item in mine if item[1]), None)
+    chosen = main_report or mine[-1]
+    text = chosen[3].read_text(encoding="utf-8")
     urgent = re.search(r"^## Срочное[^:]*:\s*(\d+)", text, re.M)
     moved = re.search(r"^## Сменили корзину:\s*(\d+)\s*из\s*(\d+)", text, re.M)
+    label = chosen[3].name
+    if main_report is None:
+        label += " (повторного прогона: отчёта прогона по расписанию нет)"
+    elif len(mine) > 1:
+        label += f" (и повторных рядом: {len(mine) - 1})"
     return (
-        found[-1].name,
+        label,
         urgent.group(1) if urgent else "раздела нет",
         f"{moved.group(1)} из {moved.group(2)}" if moved else "раздела нет",
     )
@@ -174,6 +218,11 @@ def main() -> int:
         f"\n**Чистых прогонов по расписанию подряд: {count}** (ручные не считаются; "
         f"{pending}счёт оборвался — {broke})."
     )
+    repeats = _repeats(runs, now)
+    if repeats:
+        print("\nПовторные прогоны (не засчитываются и счёт не обрывают):\n")
+        for line in repeats:
+            print(f"- {line}")
     return 0
 
 

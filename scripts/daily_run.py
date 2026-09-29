@@ -19,6 +19,14 @@
 
     uv run python scripts/daily_run.py            # полный прогон
     uv run python scripts/daily_run.py --dry      # без обращений к источникам
+    uv run python scripts/daily_run.py --reason "пересчёт после правки"   # повтор дня
+
+**Отчёт изменений прогона по расписанию не перезаписывается** (решение
+владельца 29.09.2026). Он — `changes_<дата>.md`; всякий иной прогон пишет
+свой рядом, `changes_<дата>_<ЧЧММ>.md`, и называет в шапке, повторный он или
+внеплановый и почему (`--reason`; причина пишется и в журнал прогона).
+29.09.2026 ручной повтор переписал утренний отчёт, и восстановить его
+оказалось нечем: точки маршрута дня повтор тоже переписывает.
 """
 
 import json
@@ -27,7 +35,7 @@ import runpy
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
@@ -35,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
 from routing_backfill_run import decision_values
 
 from finlib.db import connection, execute, fetch_all
+from finlib.schedule import is_scheduled
 from finlib.scoring.routing import load_routing
 from finlib.scoring.routing_store import routing_rows
 from finlib.sources import cbonds
@@ -398,19 +407,54 @@ def main() -> int:
     """Проводит день целиком: доставка, маршрут, история, список, отчёт."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     dry = "--dry" in sys.argv
+    reason = (
+        sys.argv[sys.argv.index("--reason") + 1] if "--reason" in sys.argv else ""
+    )
+    started = datetime.now().astimezone()
     today = date.today()
     routing = load_routing()
     delivered: list[dict] = []
     shortfall = ""
     run_id = _open_run(today, json.dumps({"routing": routing.version}))
+    said = _who(run_id, today, started, reason)
     try:
-        rows, counts, shortfall = _deliver_and_route(run_id, today, dry, delivered)
+        rows, counts, shortfall = _deliver_and_route(
+            run_id, today, dry, delivered, said
+        )
     except BaseException as failure:
         logger.exception("прогон %s оборвался", today)
         _close_failed(run_id, delivered, failure)
         raise
-    _publish(today, rows, counts, delivered, shortfall)
+    _publish(today, rows, counts, delivered, shortfall, started, said)
     return 1 if shortfall else 0
+
+
+_SCHEDULED_TODAY = """
+SELECT started_at FROM routing_run
+WHERE kind = 'run' AND as_of = %(as_of)s AND id <> %(id)s
+"""
+
+
+def _who(run_id: int, today: date, started: datetime, reason: str) -> str:
+    """Кто этот прогон: пусто — прогон по расписанию; иначе строка для журнала и шапки.
+
+    Повторный — если у дня уже есть прогон по расписанию; внеплановый — если
+    нет. Причина называется словами из `--reason`; без неё так и сказано.
+    """
+    if is_scheduled(started):
+        return ""
+    why = reason or "причина не названа"
+    earlier = [
+        row["started_at"]
+        for row in fetch_all(_SCHEDULED_TODAY, {"as_of": today, "id": run_id})
+        if is_scheduled(row["started_at"])
+    ]
+    if earlier:
+        return (
+            f"Повторный прогон дня в {started:%H:%M} (по расписанию был в "
+            f"{min(earlier).astimezone():%H:%M}), причина — {why}"
+        )
+    return f"Внеплановый прогон в {started:%H:%M}, причина — {why}"
 
 
 # Исходы стадии, при которых данных дня от неё нет. «cached» сюда не входит:
@@ -461,7 +505,7 @@ def _shortfall(delivered: list[dict]) -> str:
 
 
 def _deliver_and_route(
-    run_id: int, today: date, dry: bool, delivered: list[dict]
+    run_id: int, today: date, dry: bool, delivered: list[dict], said: str = ""
 ) -> tuple[list, dict, str]:
     """Доставки дня и маршрут; строку прогона закрывает вместе с точками истории.
 
@@ -513,7 +557,10 @@ def _deliver_and_route(
                 # прогоном не считается.
                 "status": "failed" if shortfall else "done",
                 "sources": json.dumps(delivered, ensure_ascii=False),
-                "note": shortfall or f"эмитентов {len(rows)}",
+                # Повтор и его причина — в журнале прогона: сводка читает
+                # их отсюда, а не из имени файла.
+                "note": (f"{said}; " if said else "")
+                + (shortfall or f"эмитентов {len(rows)}"),
             },
             conn=conn,
         )
@@ -521,8 +568,26 @@ def _deliver_and_route(
     return rows, counts, shortfall
 
 
+def report_path(today: date, started: datetime | None, said: str) -> Path:
+    """Файл отчёта изменений: у прогона по расписанию свой, у прочих — со временем.
+
+    **Главный отчёт дня не перезаписывается**: прогон не по расписанию пишет
+    `changes_<дата>_<ЧЧММ>.md` всегда, даже если главного ещё нет, — иначе
+    прогон по расписанию, пришедший позже, затёр бы его отчёт.
+    """
+    if not said or started is None:
+        return OUT / f"changes_{today:%Y-%m-%d}.md"
+    return OUT / f"changes_{today:%Y-%m-%d}_{started:%H%M}.md"
+
+
 def _publish(
-    today: date, rows: list, counts: dict, delivered: list[dict], shortfall: str
+    today: date,
+    rows: list,
+    counts: dict,
+    delivered: list[dict],
+    shortfall: str,
+    started: datetime | None = None,
+    said: str = "",
 ) -> None:
     """Список, выгрузка, карточки и отчёт изменений по записанному маршруту."""
     # Список, выгрузка и карточки — тем же кодом, что руками: второй путь
@@ -547,10 +612,12 @@ def _publish(
         finally:
             sys.argv = argv
 
-    report = OUT / f"changes_{today:%Y-%m-%d}.md"
+    report = report_path(today, started, said)
     argv, out = sys.argv, sys.stdout
     try:
-        sys.argv = ["change_report_run.py", "--kind", "run"]
+        sys.argv = ["change_report_run.py", "--kind", "run"] + (
+            ["--note", said] if said else []
+        )
         with report.open("w", encoding="utf-8") as handle:
             sys.stdout = handle
             runpy.run_path(

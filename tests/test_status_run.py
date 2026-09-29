@@ -45,6 +45,35 @@ def test_a_failed_delivery_or_a_missing_day_breaks_the_streak() -> None:
     assert count == 0 and broke.startswith("29.09.2026")
 
 
+def test_a_repeated_manual_run_neither_counts_nor_breaks() -> None:
+    """День засчитывается по прогону по расписанию; повторный показан строкой.
+
+    29.09.2026: № 25 по расписанию done, затем ручной повтор в 12:02 после
+    исправления актуальности комплектов. Повтор — сведение о дне, а не его
+    исход: засчитанный день остаётся засчитанным, и упавший повтор его
+    не портит.
+    """
+    repeat = _run(datetime(2026, 9, 29, 12, 2), failed=True)
+    repeat["note"] = "повторный прогон: причина — пересчёт после is_actual"
+    runs = [
+        _run(datetime(2026, 9, 29, 10, 0, 1)),
+        repeat,
+        _run(datetime(2026, 9, 28, 10, 0, 1)),
+    ]
+    now = datetime(2026, 9, 29, 13, 0).astimezone()
+    count, broke = run._streak(runs, now)
+    assert count == 2 and broke.startswith("25.09.2026")
+    lines = run._repeats(runs, now)
+    assert len(lines) == 1
+    assert "12:02" in lines[0] and "пересчёт после is_actual" in lines[0]
+    # Ручной прогон дня без прогона по расписанию повтором не назван:
+    # повторять было нечего, и день по-прежнему не засчитан.
+    lonely = [_run(datetime(2026, 9, 28, 15, 0))]
+    assert run._repeats(lonely, now) == []
+    count, broke = run._streak(lonely, now)
+    assert count == 0 and broke.startswith("29.09.2026")
+
+
 def test_a_running_scheduled_run_defers_the_count() -> None:
     """Идущий сегодняшний прогон счёт не обрывает: считается со вчерашнего дня.
 
