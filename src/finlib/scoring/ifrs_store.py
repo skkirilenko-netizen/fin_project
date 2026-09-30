@@ -360,6 +360,25 @@ LIMIT 1
 """
 
 
+_KIND = f"""
+SELECT reporting_kind FROM src_file
+WHERE inn = %(inn)s AND standard = %(standard)s AND report_year = %(year)s
+  AND is_actual
+{SOURCE_PREFERENCE}
+LIMIT 1
+"""
+
+
+def _kind_of(inn: str, report_date: date, conn: PgConnection) -> str | None:
+    """Вид отчётности актуального комплекта года — тем же предпочтением источника."""
+    row = fetch_one(
+        _KIND,
+        {"inn": inn, "standard": Standard.IFRS.value, "year": report_date.year},
+        conn=conn,
+    )
+    return row["reporting_kind"] if row else None
+
+
 def _meta_of(inn: str, report_date: date, conn: PgConnection) -> dict:
     """`src_file.meta` актуального комплекта года; пусто — комплекта нет."""
     row = fetch_one(
@@ -407,6 +426,12 @@ def _audit_confidence(
             grounds.append(rule.text_of("modified_opinion"))
     if audit is not None and "going_concern_uncertainty" in audit.sections:
         grounds.append(rule.text_of("going_concern_uncertainty"))
+    # Раскрываемая отчётность проходит экран сверки с понижением уверенности
+    # вместо стопа (решение владельца 28.09.2026) — если основание объявлено
+    # методикой; экран без него раскрываемую не пропускает.
+    declared = {item.code for item in rule.downgrade_on}
+    if "disclosable_reporting" in declared and _kind_of(inn, report_date, conn) == "disclosable":
+        grounds.append(rule.text_of("disclosable_reporting"))
     accepted = ((meta or {}).get("accepted") or {}).get("grounds") or {}
     if accepted:
         grounds.append(rule.text_of("accepted_ground"))

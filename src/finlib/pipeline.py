@@ -291,6 +291,45 @@ class IfrsIntake:
     loaded: object | None = None
 
 
+# Годовой комплект документа того же эмитента, ближайший до отчётной даты:
+# подтверждён — значит, вышел из карантина (принят экраном или человеком).
+_ANNUAL = """
+SELECT period_end, status FROM src_file
+WHERE inn = %(inn)s AND standard = 'ifrs' AND source = 'file' AND is_actual
+  AND reporting_kind <> 'interim' AND period_end < %(date)s
+ORDER BY period_end DESC LIMIT 1
+"""
+
+
+def _review_context(inn: str | None, profile: object) -> object:
+    """Обстановка экрана сверки из базы и методики (решение владельца 28.09.2026).
+
+    Недоступная база — не ошибка приёма, но обстановки нет: решение остаётся
+    прежним, то есть строже, и причина пишется в журнал — как у ранее
+    подтверждённого опознания.
+    """
+    from finlib.db import fetch_all
+    from finlib.normalize.ifrs_metrics import load_ifrs_metrics
+    from finlib.sources.ifrs_review import ReviewContext
+
+    grounds = {item.code for item in load_ifrs_metrics().confidence.downgrade_on}
+    lowers = "disclosable_reporting" in grounds
+    if inn is None:
+        return ReviewContext(disclosable_lowers_confidence=lowers)
+    try:
+        rows = fetch_all(
+            _ANNUAL, {"inn": inn, "date": max(profile.report_dates)}  # type: ignore[attr-defined]
+        )
+    except Exception as failure:  # noqa: BLE001 — приём работает и без базы
+        logger.warning("годовой комплект эмитента не прочитан: %s", failure)
+        return ReviewContext(disclosable_lowers_confidence=lowers)
+    annual = rows[0] if rows and rows[0]["status"] != "quarantine" else None
+    return ReviewContext(
+        annual_confirmed=annual["period_end"] if annual else None,
+        disclosable_lowers_confidence=lowers,
+    )
+
+
 def accept_ifrs_document(
     text: str,
     on_stage: Callable[[StageResult], None] | None = None,
@@ -370,7 +409,9 @@ def accept_ifrs_document(
     from finlib.sources.ifrs_confirmed import load_confirmed
 
     confirmed = load_confirmed(inn, extraction, profile)
-    decision = review(extraction, profile, confirmed=confirmed)
+    decision = review(
+        extraction, profile, confirmed=confirmed, context=_review_context(inn, profile)
+    )
     report(
         Stage.QUALITY,
         decision.describe(),

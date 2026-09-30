@@ -29,6 +29,11 @@
 Остальные основания это не затрагивает: неполный вид отчётности и страница
 без текстового слоя остаются блокирующими, потому что подтверждением строки
 они не снимаются — там не опознание, а состав раскрытий и потеря содержимого.
+
+**Неполный вид — с двумя исключениями по решению владельца 28.09.2026**
+(`ReviewContext`): промежуточная проходит сама при подтверждённом годовом
+того же эмитента и всех опознанных позициях, раскрываемая — с понижением
+уверенности вместо стопа. Специального назначения решение не касается.
 """
 
 import logging
@@ -128,6 +133,30 @@ class MaterialItem:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewContext:
+    """Обстановка комплекта, которой нет в самом документе (решение 28.09.2026).
+
+    **Неполный вид отчётности перестаёт быть стопом в двух случаях.**
+    Промежуточный комплект проходит сам, если годовой того же эмитента
+    подтверждён и все позиции опознаны: состав раскрытий промежуточной
+    сокращён по устройству (МСФО (IAS) 34), а строки те же, что человек уже
+    видел в годовом. Раскрываемая отчётность проходит с понижением уверенности
+    вместо стопа — но только если основание понижения объявлено методикой
+    (`ifrs_metrics.yaml`, `confidence`): пропустить без понижения значило бы
+    применить половину решения.
+
+    Обстановку собирает вызывающий из базы; `review` без неё держит прежнее
+    строгое правило, и умолчанием это не решается — `pipeline` передаёт её
+    всегда.
+    """
+
+    # Отчётная дата подтверждённого годового того же эмитента; None — нет.
+    annual_confirmed: date | None = None
+    # Объявлено ли методикой основание понижения уверенности для раскрываемой.
+    disclosable_lowers_confidence: bool = False
+
+
 @dataclass
 class ReviewResult:
     """Решение экрана сверки со всеми основаниями.
@@ -164,6 +193,9 @@ class ReviewResult:
     # неотличим от невыполненной проверки.
     rows_with_values: int = 0
     rows_with_dropped: int = 0
+    # Почему неполный вид отчётности не стал основанием (решение 28.09.2026);
+    # пусто — вид полный либо основание стоит.
+    kind_passed: str = ""
 
     @property
     def automatic(self) -> bool:
@@ -200,6 +232,7 @@ def review(
     profile: DocumentProfile,
     catalog: IfrsCatalog | None = None,
     confirmed: Confirmed | None = None,
+    context: ReviewContext | None = None,
 ) -> ReviewResult:
     """Решает, принять извлечение автоматически или отдать человеку.
 
@@ -296,7 +329,8 @@ def review(
                 code.removeprefix("ifrs.") for code in profile.missing_forms
             )
         )
-    if profile.reporting_kind is not ReportingKind.FULL:
+    passed_kind = _kind_passes(profile.reporting_kind, context, bool(unrecognised))
+    if profile.reporting_kind is not ReportingKind.FULL and passed_kind is None:
         reasons.append(ReviewReason.REPORTING_KIND)
         problems.append(
             f"вид отчётности «{profile.reporting_kind.value}»: состав раскрытий "
@@ -319,9 +353,31 @@ def review(
         rows_confirmed=tuple(sorted(known.rows)),
         confirmed_from=known.from_reports,
         rows_ignored=len(extraction.ignored),
+        kind_passed=passed_kind or "",
     )
     logger.info("экран сверки: %s", result.describe())
     return result
+
+
+def _kind_passes(
+    kind: ReportingKind, context: ReviewContext | None, unrecognised: bool
+) -> str | None:
+    """Почему неполный вид отчётности не останавливает; None — останавливает.
+
+    Промежуточная — при подтверждённом годовом того же эмитента и всех
+    опознанных позициях; раскрываемая — когда методика объявила понижение
+    уверенности. Отчётность специального назначения решением не затронута.
+    """
+    if context is None:
+        return None
+    if kind is ReportingKind.INTERIM and context.annual_confirmed and not unrecognised:
+        return (
+            f"промежуточная: годовой на {context.annual_confirmed:%d.%m.%Y} подтверждён, "
+            "все позиции опознаны"
+        )
+    if kind is ReportingKind.DISCLOSABLE and context.disclosable_lowers_confidence:
+        return "раскрываемая: принимается с понижением уверенности"
+    return None
 
 
 def _values_with(

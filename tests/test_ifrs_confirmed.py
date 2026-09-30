@@ -342,3 +342,48 @@ def test_empty_confirmation_changes_nothing() -> None:
         review(extraction, profile, confirmed=Confirmed()).reasons
         == review(extraction, profile).reasons
     )
+
+
+def test_interim_passes_when_the_annual_is_confirmed(clean) -> None:
+    """Решение 28.09.2026: промежуточная проходит при подтверждённом годовом
+    и всех опознанных позициях; без годового или при неопознанной — стоп."""
+    from dataclasses import replace
+    from datetime import date
+
+    from finlib.sources.ifrs_review import ReviewContext
+
+    confirm(clean, INN, "Задолженность Принципала", "ifrs.principal_receivable")
+    extraction, profile = prepared()
+    known = load_confirmed(INN, extraction, profile, conn=clean)
+    interim = replace(profile, reporting_kind=ReportingKind.INTERIM)
+    annual = ReviewContext(annual_confirmed=date(2024, 12, 31))
+
+    passed = review(extraction, interim, confirmed=known, context=annual)
+    assert ReviewReason.REPORTING_KIND not in passed.reasons
+    assert "годовой на 31.12.2024 подтверждён" in passed.kind_passed
+    # Годового нет — прежнее правило.
+    assert ReviewReason.REPORTING_KIND in review(
+        extraction, interim, confirmed=known, context=ReviewContext()
+    ).reasons
+    # Позиция не опознана — годовой не помогает.
+    assert ReviewReason.REPORTING_KIND in review(extraction, interim, context=annual).reasons
+
+
+def test_disclosable_passes_only_with_a_declared_confidence_ground() -> None:
+    """Раскрываемая — с понижением уверенности, а не со стопом; без объявленного
+    основания понижения экран её не пропускает."""
+    from dataclasses import replace
+
+    from finlib.sources.ifrs_review import ReviewContext
+
+    extraction, profile = prepared()
+    disclosable = replace(profile, reporting_kind=ReportingKind.DISCLOSABLE)
+    lowered = ReviewContext(disclosable_lowers_confidence=True)
+    assert ReviewReason.REPORTING_KIND not in review(
+        extraction, disclosable, context=lowered
+    ).reasons
+    assert ReviewReason.REPORTING_KIND in review(
+        extraction, disclosable, context=ReviewContext()
+    ).reasons
+    special = replace(profile, reporting_kind=ReportingKind.SPECIAL_PURPOSE)
+    assert ReviewReason.REPORTING_KIND in review(extraction, special, context=lowered).reasons
