@@ -138,6 +138,31 @@ def test_debt_like_is_printed_as_a_second_value() -> None:
     assert any("debt_like_cf_due" in line.code for line in passed.lines)
 
 
+def test_debt_like_reconciled_with_the_document_balance_is_printed() -> None:
+    """Решение 30.09.2026: у карантина сумма с долгоподобными сверяется
+    с балансом документа; сошлось — вторая величина и её потоки печатаются."""
+    from dataclasses import replace
+
+    named = ("Концессионные соглашения",)
+    extra = Reconciliation(
+        "опора — баланс документа, комплект в карантине", Check.PASSED,
+        Decimal(110), Decimal(110), None, "385", "385", Decimal(100), named,
+    )  # fmt: skip
+    document = replace(_document(Check.LOANS_ONLY, named), debt_like_check=extra)
+    part = Part("debt", "Долг")
+    _debt(part, document, _composition())
+    assert (
+        "Сошлось с опора — баланс документа, комплект в карантине: 110 / 110 млн руб."
+        in part.paragraphs
+    )
+    assert any("debt_like_cf_due" in line.code for line in part.lines)
+    # Без сверки с документом — как прежде: потоков суммы нет.
+    failed = replace(extra, outcome=Check.NO_REFERENCE)
+    part = Part("debt", "Долг")
+    _debt(part, replace(document, debt_like_check=failed), _composition())
+    assert all("debt_like_cf_due" not in line.code for line in part.lines)
+
+
 def test_no_table_names_the_reason() -> None:
     """Таблицы нет — причина словами, чисел нет."""
     part = Part("debt", "Долг")

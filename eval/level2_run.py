@@ -140,6 +140,18 @@ def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN
         debt.table, profile.unit_code, reference, reference_unit, against, method
     )
     result["check"] = check
+    if (quarantined or not stored) and debt.table.of_kind("debt_like"):
+        # Долгоподобные у агрегатора в займы не входят: сумма сверяется ещё
+        # и с займами баланса документа (решение владельца 30.09.2026).
+        own = {
+            item.code: item.value
+            for item in extraction.values
+            if item.report_date == report_date and item.code in codes
+        }
+        result["debt_like_check"] = reconcile_debt(
+            debt.table, profile.unit_code, own, profile.unit_code,
+            "опора — баланс документа, комплект в карантине", method,
+        )  # fmt: skip
     result["buckets"] = printed_buckets(debt.table, method)
     result["buckets_with_debt_like"] = printed_buckets(debt.table, method, ("debt", "debt_like"))
     result["facts"] = stored_facts(debt.table, method)
@@ -173,6 +185,7 @@ def _docx(result: dict, conn, level1, composition, audit_policy, today, found) -
         buckets_with_debt_like=result.get("buckets_with_debt_like", ()),
         carrying_codes=result.get("carrying_codes", ("", "")),
         reference_codes=result.get("reference_codes", ""),
+        debt_like_check=result.get("debt_like_check"),
     )
     basket = load_routing().basket(item.verdict.basket).name
     conclusion = build_level2(item, conn, level1, composition, document, today, basket)
@@ -266,6 +279,9 @@ def main() -> int:
             if check.debt_like:
                 loans = f"{check.loans:,}".replace(",", " ")
                 checked += f"; займы {loans}, долгоподобные: {'; '.join(check.debt_like)}"
+            extra = result.get("debt_like_check")
+            if extra is not None:
+                checked += f"; с «{extra.against}»: {extra.outcome.value}"
         stored = result["stored"] + (f" ({result['reasons']})" if result["reasons"] else "")
         print(
             f"| {result['who']} | {result['file']} ({result['date']:%d.%m.%Y}) | {stored} "

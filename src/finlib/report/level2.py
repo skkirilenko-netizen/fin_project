@@ -55,6 +55,10 @@ class Level2Document:
     carrying_codes: tuple[str, str] = ("", "")
     # Коды займов опоры сверки: «ifrs.long_term_borrowings + …».
     reference_codes: str = ""
+    # Сверка суммы с долгоподобными по займам баланса документа у комплекта
+    # в карантине (решение владельца 30.09.2026): опора агрегатора их
+    # не включает. Пусто — не делалась.
+    debt_like_check: Reconciliation | None = None
 
 
 def build_level2(
@@ -201,7 +205,23 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
             Line(f"Займы — {check.against}", money(check.reference), document.reference_codes)
         )
     loans_shown = check.loans_passed or check.outcome is Check.NO_CARRYING
-    both_shown = check.passed or check.outcome is Check.NO_CARRYING
+    extra = document.debt_like_check
+    if check.debt_like and extra is not None and extra.passed:
+        part.paragraphs.append(
+            _tidy(
+                wording.passed.format(
+                    against=extra.against,
+                    value=_shown(extra.table_value),
+                    reference=_shown(extra.reference),
+                    unit=document.unit,
+                )
+            )
+        )
+    both_shown = (
+        check.passed
+        or check.outcome is Check.NO_CARRYING
+        or (extra is not None and extra.passed)
+    )
     if loans_shown:
         _flows(part, document.buckets, wording.loans_label, document, composition)
     if check.debt_like:
