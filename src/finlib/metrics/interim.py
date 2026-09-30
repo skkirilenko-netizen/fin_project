@@ -31,6 +31,31 @@ from finlib.standards import load_standards
 logger = logging.getLogger(__name__)
 
 
+def in_unit(value: Decimal | None, own: object, target: object) -> Decimal | None:
+    """Величина в единице `target` (коды ОКЕИ); единица не известна — величины нет.
+
+    **Слагаемые тождества LTM приходят из разных комплектов, а единица
+    у эмитента меняется**: у Брусники комплекты агрегатора до 30.06.2024
+    в тысячах, дальше в миллионах; у 3900019850 — год 2025 в миллионах,
+    первый квартал 2026 в миллиардах. Сложенные как есть, они дают величину
+    настоящего вида, которой не соответствует ни один период. Одна точка
+    пересчёта на проект: тренд, база маршрута и операционный результат LTM.
+    """
+    from finlib.sources.cbonds_events import OKEI_MULTIPLIER
+
+    if value is None:
+        return None
+    if str(own) == str(target):
+        # Одна и та же единица, в том числе неназванная у обоих: пересчитывать
+        # нечего, и отказ здесь отнял бы величину без причины.
+        return value
+    mine = OKEI_MULTIPLIER.get(str(own))
+    theirs = OKEI_MULTIPLIER.get(str(target))
+    if mine is None or theirs is None:
+        return None
+    return value if mine == theirs else value * mine / theirs
+
+
 @dataclass(frozen=True, slots=True)
 class Rolling:
     """Скользящие двенадцать месяцев: величина и из чего она сложена.

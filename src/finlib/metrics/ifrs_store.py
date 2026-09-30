@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # не идут — динамика по МСФО появится с вторым годом одного эмитента.
 _FACTS = """
 SELECT f.line_code, f.form_code, f.value, f.recognition, f.note_source_name,
-       s.reporting_kind, s.meta
+       s.reporting_kind, s.meta, s.unit_code
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(date)s
   AND s.status <> 'quarantine' AND s.is_actual
@@ -221,11 +221,15 @@ def ltm_inputs_of(
     у LTM-базы нет: примечания годовые, и сложить их с полугодием нечем.
     Возвращается и состав скользящих величин — для карточки и замера.
     """
-    from finlib.metrics.interim import ltm_values, same_ytd_year_before
+    from finlib.metrics.interim import in_unit, ltm_values, same_ytd_year_before
 
     policy = policy or load_ifrs_metrics()
     by_date: dict[date, dict[str, Decimal | None]] = {}
     flows: set[str] = set()
+    # **Слагаемые приводятся к единице комплекта на дату базы**: у 3900019850
+    # год 2025 в миллионах, первый квартал 2026 в миллиардах, и сложенные
+    # как есть они давали величину, которой не соответствует ни один период.
+    target: object = None
     for day in (moment, date(moment.year - 1, 12, 31), same_ytd_year_before(moment)):
         rows = fetch_all(
             _FACTS,
@@ -235,7 +239,14 @@ def ltm_inputs_of(
         chosen, _ = pick_by_form(
             [row for row in rows if row["recognition"] != "note"], Standard.IFRS
         )
-        by_date[day] = {row["line_code"]: row["value"] for row in chosen}
+        if day == moment:
+            target = rows[0]["unit_code"] if rows else None
+        by_date[day] = {
+            row["line_code"]: in_unit(row["value"], row["unit_code"], target)
+            if row["value"] is not None
+            else None
+            for row in chosen
+        }
         flows |= {row["line_code"] for row in chosen if row["form_code"] != STOCK_FORM}
     values, rolled = ltm_values(by_date, moment, flows & set(by_date[moment]))
     meta = _annual_meta(inn, annual, conn)

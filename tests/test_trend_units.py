@@ -23,6 +23,18 @@ def test_values_are_brought_to_the_latest_unit() -> None:
     assert rolled.value == Decimal(75832) + Decimal(35985) - Decimal("31359.436")
 
 
+def test_in_unit_is_the_one_conversion_of_ltm_terms() -> None:
+    """Яндекс: год 2025 в миллионах, квартал 2026 в миллиардах — к единице базы."""
+    from finlib.metrics.interim import in_unit
+
+    assert in_unit(Decimal(1441000), "385", "386") == Decimal("1441")
+    assert in_unit(Decimal(5), "386", "386") == Decimal(5)
+    # Одна и та же неназванная единица — величина остаётся.
+    assert in_unit(Decimal(5), None, None) == Decimal(5)
+    assert in_unit(Decimal(5), None, "385") is None
+    assert in_unit(None, "385", "386") is None
+
+
 def test_an_unknown_unit_leaves_no_value() -> None:
     """Единица не известна — величина ни с чем не сравнима, и её нет."""
     rows = [

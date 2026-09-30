@@ -169,7 +169,8 @@ WHERE d.status = 'fail' AND d.check_code IN (
 # доводы: у РСБУ денежные средства стоят строкой 1250, у МСФО позицией
 # `ifrs.cash`, и второго запроса на тот же вопрос здесь не заводится.
 _LINE = """
-SELECT f.value, s.source FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
+SELECT f.value, s.source, s.unit_code FROM fact_report f
+JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.report_date = %(d)s
   AND f.line_code = %(code)s AND s.is_actual AND s.status <> 'quarantine'
 ORDER BY source_rank(s.source)
@@ -1642,19 +1643,16 @@ def trend_series(rows: list[dict], codes: list[str]) -> dict[str, dict[date, Dec
     тренд в единице шапки документа, то есть последнего комплекта. Единица
     не известна — величина не сравнима ни с чем, и её нет.
     """
-    from finlib.sources.cbonds_events import OKEI_MULTIPLIER
+    from finlib.metrics.interim import in_unit
 
     series: dict[str, dict[date, Decimal | None]] = {code: {} for code in codes}
     if not rows:
         return series
-    latest = max(rows, key=lambda row: row["report_date"])
-    target = OKEI_MULTIPLIER.get(str(latest["unit_code"]))
+    target = max(rows, key=lambda row: row["report_date"])["unit_code"]
     for row in rows:
-        own = OKEI_MULTIPLIER.get(str(row["unit_code"]))
-        value = row["value"]
-        if value is not None:
-            value = value * own / target if own is not None and target is not None else None
-        series[row["line_code"]][row["report_date"]] = value
+        series[row["line_code"]][row["report_date"]] = in_unit(
+            row["value"], row["unit_code"], target
+        )
     return series
 
 
@@ -1705,11 +1703,23 @@ def _operating_ltm(
     не считается, и слагаемое без величины отменяет сумму целиком.
     На годовую дату — годовая величина как есть.
     """
-    from finlib.metrics.interim import rolling_flow, same_ytd_year_before
+    from finlib.metrics.interim import in_unit, rolling_flow, same_ytd_year_before
 
     days = {moment, date(moment.year - 1, 12, 31), same_ytd_year_before(moment)}
+    code = catalogue_for(standard).rule.operating_line
+    units = {}
+    for day in days:
+        found = fetch_all(
+            _LINE, {"inn": inn, "d": day, "code": code, "standard": standard.value}, conn=conn
+        )
+        units[day] = found[0]["unit_code"] if found else None
+    # Слагаемые — в единице комплекта на дату базы (`metrics.interim.in_unit`).
     return rolling_flow(
-        {day: _operating_profit(inn, day, conn, standard) for day in days}, moment
+        {
+            day: in_unit(_operating_profit(inn, day, conn, standard), units[day], units[moment])
+            for day in days
+        },
+        moment,
     )
 
 
