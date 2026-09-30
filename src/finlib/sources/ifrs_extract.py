@@ -275,6 +275,20 @@ class ExtractedForm:
     # по подтверждению — другое основание, чем по строению строки, и число
     # её печатается отдельно: доверие к ним разное.
     glued_by_confirmation: list[tuple[int, str]] = field(default_factory=list)
+    # Склеенные по определённому термину («…акционерам» / «Компании»): третье
+    # основание склейки, и печатается оно своим числом. Прежде сводка
+    # называла только склейку по подтверждению, и у ФосАгро 6м2026 «склеено
+    # по подтверждению 0» читалось как несработавшая склейка «Компании».
+    glued_by_term: list[tuple[int, str]] = field(default_factory=list)
+
+
+class Glue(StrEnum):
+    """Чем склеено наименование, разорванное переносом."""
+
+    # Не склеено либо склеено по строению строки (строчная буква, союз).
+    NONE = ""
+    CONFIRMATION = "confirmation"
+    TERM = "term"
 
 
 @dataclass
@@ -404,7 +418,9 @@ class Extraction:
             f"спорных позиций {len(self.contested)}, "
             f"сносок под формами {len(self.notes)}, "
             f"наименований склеено по подтверждению "
-            f"{sum(len(form.glued_by_confirmation) for form in self.forms.values())}"
+            f"{sum(len(form.glued_by_confirmation) for form in self.forms.values())}, "
+            f"по определённому термину "
+            f"{sum(len(form.glued_by_term) for form in self.forms.values())}"
         )
 
 
@@ -567,9 +583,11 @@ def _extract_form(
             # отсев «не статья»: у шапки таблицы «Млн руб. Прим. 2025 2024»
             # лишнее число есть всегда, и потерей это не является.
             losses[len(rows)] = dropped
-        joined, by_confirmation = _join(pending, name, glued)
-        if by_confirmation:
+        joined, how = _join(pending, name, glued)
+        if how is Glue.CONFIRMATION:
             form.glued_by_confirmation.append((index, joined))
+        elif how is Glue.TERM:
+            form.glued_by_term.append((index, joined))
         rows.append((joined, values, index))
         # Знаменатель к числу строк с потерянными величинами: ноль потерь
         # при неизвестном числе строк с величинами ничего не означает.
@@ -1104,8 +1122,8 @@ def _joined(pending: list[str], name: str) -> str:
 
 def _join(
     pending: list[str], name: str, glued: frozenset[str]
-) -> tuple[str, bool]:
-    """Склеивает наименование, разорванное переносом строки; второе — по подтверждению ли.
+) -> tuple[str, Glue]:
+    """Склеивает наименование, разорванное переносом строки; второе — чем склеено.
 
     Вёрстка переносит длинные наименования, и величины остаются во второй
     части: «Авансы, выданные под строительство и» / «приобретение основных
@@ -1133,9 +1151,9 @@ def _join(
     (`glued`), а несклеенный остаток подтверждён не был.
     """
     if not pending:
-        return name, False
+        return name, Glue.NONE
     if not name.strip():
-        return pending[-1].strip(), False
+        return pending[-1].strip(), Glue.NONE
     # Склейка идёт, пока присоединённый кусок сам выглядит продолжением.
     # Прежде бралась одна строка, и наименование в три строки собиралось
     # наполовину: у Сегежи «Убыток от обесценения и другие расходы в связи
@@ -1145,6 +1163,7 @@ def _join(
     parts: list[str] = []
     current = name
     confirmed = False
+    by_term = False
     for item in reversed(pending):
         if not current[:1].islower() and not _CONTINUES.match(item):
             # **Строка из одного определённого термина — окончание переноса**
@@ -1157,6 +1176,7 @@ def _join(
             ):
                 parts.append(item)
                 current = item
+                by_term = True
                 continue
             if not glued:
                 break
@@ -1168,8 +1188,9 @@ def _join(
         parts.append(item)
         current = item
     if not parts:
-        return name, False
-    return " ".join([*reversed(parts), name]).strip(), confirmed
+        return name, Glue.NONE
+    how = Glue.CONFIRMATION if confirmed else Glue.TERM if by_term else Glue.NONE
+    return " ".join([*reversed(parts), name]).strip(), how
 
 
 # Строка выглядит незавершённой: кончается союзом, запятой, предлогом или

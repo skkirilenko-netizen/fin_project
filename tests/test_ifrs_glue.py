@@ -11,7 +11,7 @@ from datetime import date
 
 from finlib.db import execute, fetch_one
 from finlib.sources.ifrs_confirmed import glue_keys, match_key
-from finlib.sources.ifrs_extract import _join
+from finlib.sources.ifrs_extract import Glue, _join
 
 COST = "Себестоимость реализованной продукции"
 FORM = "ifrs.statement_of_profit_or_loss"
@@ -20,15 +20,15 @@ FORM = "ifrs.statement_of_profit_or_loss"
 def test_a_confirmed_name_glues_a_capitalised_continuation() -> None:
     """Склеенное подтверждено — строки склеиваются, и это отмечено."""
     keys = frozenset({match_key("Выручка Металлы")})
-    assert _join(["Выручка"], "Металлы", keys) == ("Выручка Металлы", True)
+    assert _join(["Выручка"], "Металлы", keys) == ("Выручка Металлы", Glue.CONFIRMATION)
 
 
 def test_without_a_confirmation_the_heading_stays_a_heading() -> None:
     """Без подтверждения — как прежде: «Выручка» над разбивкой не липнет."""
-    assert _join(["Выручка"], "Металлы", frozenset()) == ("Металлы", False)
+    assert _join(["Выручка"], "Металлы", frozenset()) == ("Металлы", Glue.NONE)
     # Подтверждено что-то другое — склейки тоже нет.
     other = frozenset({match_key("Выручка Металлы и прочее")})
-    assert _join(["Выручка"], "Металлы", other) == ("Металлы", False)
+    assert _join(["Выручка"], "Металлы", other) == ("Металлы", Glue.NONE)
 
 
 def test_a_defined_term_ends_a_carried_name() -> None:
@@ -38,20 +38,20 @@ def test_a_defined_term_ends_a_carried_name() -> None:
     акционерам» / «Компании (2 017) (81)» — строка шла статьёй «Компании»;
     подтверждения годового комплекта у неё нет, и путь 7б её не склеивал.
     Склеивает строение: «Компания» и «Группа» пишутся с заглавной как
-    определённые термины. Склейка по строению подтверждением не считается.
+    определённые термины. Склейка по термину подтверждением не считается и считается своим числом.
     """
     head = "Повторная выплата ранее возвращенных дивидендов акционерам"
-    assert _join([head], "Компании", frozenset()) == (f"{head} Компании", False)
-    assert _join([COST], "Группы", frozenset()) == (f"{COST} Группы", False)
+    assert _join([head], "Компании", frozenset()) == (f"{head} Компании", Glue.TERM)
+    assert _join([COST], "Группы", frozenset()) == (f"{COST} Группы", Glue.TERM)
     # Термин склеивается только целой строкой: «Группы компаний» — начало
     # своего наименования, а не окончание чужого.
-    assert _join(["Выручка"], "Группы компаний", frozenset()) == ("Группы компаний", False)
+    assert _join(["Выручка"], "Группы компаний", frozenset()) == ("Группы компаний", Glue.NONE)
 
 
 def test_a_confirmed_remainder_is_not_glued() -> None:
     """Остаток подтверждён сам по себе — значит, это своя статья, а не обрывок."""
     keys = frozenset({match_key(f"{COST} Группы"), match_key("Группы")})
-    assert _join([COST], "Группы", keys) == ("Группы", False)
+    assert _join([COST], "Группы", keys) == ("Группы", Glue.NONE)
 
 
 def test_a_footnote_mark_is_cut_from_the_name() -> None:
@@ -73,7 +73,7 @@ def test_a_footnote_mark_is_cut_from_the_name() -> None:
 def test_ordinary_continuation_is_unchanged() -> None:
     """Продолжение со строчной склеивается по строению, а не по подтверждению."""
     joined = _join(["Авансы, выданные под строительство и"], "приобретение ОС", frozenset())
-    assert joined == ("Авансы, выданные под строительство и приобретение ОС", False)
+    assert joined == ("Авансы, выданные под строительство и приобретение ОС", Glue.NONE)
 
 
 def _set(conn, inn: str, kind: str, period_end: date) -> int:  # noqa: ANN001
