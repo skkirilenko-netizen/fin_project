@@ -37,6 +37,7 @@ def _composition(codes: tuple[str, ...] = CODES) -> Level2Conclusion:
                 "passed": "Сошлось с {against}: {value} / {reference} {unit}.",
                 "with_lease": "С арендой ({against}).",
                 "loans_only": "Займы сошлись: {loans} / {reference}; не сверены {names}.",
+                "loans_only_note_below": "Займы сошлись: {loans}; {names} — ниже.",
                 "failed": "Не сошлось с {against}: {value} / {reference} {unit}.",
                 "no_carrying": "Графы нет ({against}); потоки как напечатаны.",
                 "no_reference": "Опоры нет ({against}).",
@@ -157,6 +158,14 @@ def test_debt_like_reconciled_with_the_document_balance_is_printed() -> None:
         in part.paragraphs
     )
     assert any("debt_like_cf_due" in line.code for line in part.lines)
+    # Сверка по балансу документа — прежняя формулировка исхода по займам.
+    assert any(text.startswith("Займы сошлись: 100 / 100") for text in part.paragraphs)
+    # Сверка по итогу примечания — исход по займам отсылает к ней, ниже.
+    by_note = replace(document, debt_like_by_note=True)
+    part = Part("debt", "Долг")
+    _debt(part, by_note, _composition())
+    assert "Займы сошлись: 100; Концессионные соглашения — ниже." in part.paragraphs
+    assert not any("не сверены" in text for text in part.paragraphs)
     # Без сверки с документом — как прежде: потоков суммы нет.
     failed = replace(extra, outcome=Check.NO_REFERENCE)
     part = Part("debt", "Долг")

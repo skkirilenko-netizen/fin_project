@@ -173,6 +173,7 @@ def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN
                 debt.table, profile.unit_code, {}, profile.unit_code, against, method,
                 borrowed=total,
             )  # fmt: skip
+            result["debt_like_by_note"] = True
         result["debt_like_check"] = extra
     result["buckets"] = printed_buckets(debt.table, method)
     result["buckets_with_debt_like"] = printed_buckets(debt.table, method, ("debt", "debt_like"))
@@ -208,6 +209,7 @@ def _docx(result: dict, conn, level1, composition, audit_policy, today, found) -
         carrying_codes=result.get("carrying_codes", ("", "")),
         reference_codes=result.get("reference_codes", ""),
         debt_like_check=result.get("debt_like_check"),
+        debt_like_by_note=result.get("debt_like_by_note", False),
     )
     basket = load_routing().basket(item.verdict.basket).name
     conclusion = build_level2(item, conn, level1, composition, document, today, basket)

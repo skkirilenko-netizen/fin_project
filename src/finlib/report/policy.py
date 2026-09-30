@@ -429,6 +429,8 @@ class DebtWording(BaseModel):
     # Сумма не сошлась, займы сошлись: опора долгоподобных не раскрывает.
     # Места подстановки: {against}, {loans}, {reference}, {unit}, {names}.
     loans_only: str = Field(min_length=1)
+    # Тот же исход, когда долгоподобные сверены ниже по итогу примечания.
+    loans_only_note_below: str = Field(min_length=1)
     failed: str = Field(min_length=1)
     # Графы балансовой нет: сверки нет, потоки печатаются с оговоркой
     # (решение владельца 30.09.2026 по ЛСР).

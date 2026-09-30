@@ -59,6 +59,8 @@ class Level2Document:
     # в карантине (решение владельца 30.09.2026): опора агрегатора их
     # не включает. Пусто — не делалась.
     debt_like_check: Reconciliation | None = None
+    # Опора `debt_like_check` — итог примечания (запасная), а не баланс.
+    debt_like_by_note: bool = False
 
 
 def build_level2(
@@ -167,10 +169,12 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
         part.paragraphs.append(wording.no_reference.format(against="опора не названа"))
         return
     names = "; ".join(check.debt_like)
+    extra = document.debt_like_check
+    below = document.debt_like_by_note and extra is not None and extra.passed
     text = {
         Check.PASSED: wording.passed,
         Check.WITH_LEASE: wording.with_lease,
-        Check.LOANS_ONLY: wording.loans_only,
+        Check.LOANS_ONLY: wording.loans_only_note_below if below else wording.loans_only,
         Check.FAILED: wording.failed,
         Check.NO_CARRYING: wording.no_carrying,
         Check.NO_REFERENCE: wording.no_reference,
@@ -205,7 +209,6 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
             Line(f"Займы — {check.against}", money(check.reference), document.reference_codes)
         )
     loans_shown = check.loans_passed or check.outcome is Check.NO_CARRYING
-    extra = document.debt_like_check
     if check.debt_like and extra is not None and extra.passed:
         if extra.reference is not None:
             part.lines.append(
