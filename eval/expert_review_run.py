@@ -10,28 +10,33 @@
 
 Листы:
 
-- «Разбор» и «Без внимания» — все эмитенты корзины с основаниями, величинами
-  и ссылкой на карточку (`cards/<ИНН>.md` рядом с файлом);
-- «Выборка» — 30 случайных из «Без внимания» с крупным долгом, с пустыми
-  графами для вердикта эксперта;
-- «Сводка» — числа отбора, знаменатели и зерно случайной выборки.
+- «Разбор» — все эмитенты корзины с основаниями, величинами и ссылкой
+  на карточку (`cards/<ИНН>.md` рядом с файлом);
+- «Без внимания» — то же, на полный просмотр: у каждой строки графы
+  вердикта эксперта (решение владельца 30.09.2026);
+- «Выборка» — 30 из «Без внимания» на углублённую проверку, с основанием
+  отбора и графами вердикта;
+- «Сводка» — числа отбора, знаменатели и зерно.
 
-**Крупный долг — тот же, что у маршрута**: верхняя доля эмитентов по объёму
-облигаций в обращении (`routing.yaml`, `systemic.top_share`), посчитанная тем
-же кодом (`routing_store._outstanding`, `_top_share`). Второе определение
-крупного долга разошлось бы с правилом `systemic_partial_cover`, которое
-именно им даёт «Без внимания» строже. Если таких в «Без внимания» меньше
-тридцати, выборка берёт всех и называет нехватку, а не расширяет круг.
+**Состав выборки — решение владельца 30.09.2026.** Сперва все эмитенты
+«Без внимания» с крупным долгом по облигациям — тем же, что у маршрута:
+верхняя доля по объёму облигаций в обращении (`routing.yaml`,
+`systemic.top_share`), тем же кодом (`routing_store._outstanding`,
+`_top_share`). Затем до тридцати — эмитенты с наибольшим долгом
+по отчётности: совокупный долг базы маршрута (`debt_total`, займы LTM-базы),
+приведённый к рублям, потому что единица комплекта у эмитентов разная.
+Это отбор для проверки, а не правило маршрута, и в методику он не вносится.
+Эмитент без раскрытого долга в добор не идёт, и их число названо в сводке.
 
-**Зерно выборки печатается** — по умолчанию число из даты (ГГГГММДД):
-повторный прогон того же дня даёт ту же выборку, и эксперт с разработчиком
-смотрят одних и тех же эмитентов.
+**Отбор детерминирован**: добор — по убыванию долга, ничья — по ИНН.
+Зерно (по умолчанию число из даты, ГГГГММДД) печатается в сводке, но
+случайности в этом отборе нет, и сводка говорит это прямо.
 """
 
 import logging
-import random
 import sys
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -48,6 +53,7 @@ from finlib.scoring.routing_store import (  # noqa: E402
     _top_share,
     routing_rows,
 )
+from finlib.sources.cbonds_events import OKEI_MULTIPLIER  # noqa: E402
 from finlib.sources.market import universe  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,9 @@ logger = logging.getLogger(__name__)
 OUT = Path("data/output")
 CARDS = OUT / "cards"
 SAMPLE_SIZE = 30
+# Долг по отчётности — величина маршрута своего стандарта: совокупные
+# заёмные средства базы (LTM на промежуточную дату либо годовая).
+DEBT = "debt_total"
 BASKETS = (("review", "Разбор"), ("clear", "Без внимания"))
 
 HEADER = (
@@ -110,6 +119,15 @@ def _row(item, volume, systemic: bool) -> list:  # noqa: ANN001
     ]
 
 
+def _debt_rub(item) -> Decimal | None:  # noqa: ANN001
+    """Совокупный долг базы маршрута в рублях; не раскрыт или единица неизвестна — None."""
+    found = next((value for value in item.computed if value.code == DEBT), None)
+    if found is None or found.value is None:
+        return None
+    multiplier = OKEI_MULTIPLIER.get(str(item.unit_code))
+    return None if multiplier is None else found.value * multiplier
+
+
 def _sheet(book: Workbook, title: str, rows: list, extra: tuple[str, ...] = ()) -> None:
     """Лист с шапкой, ИНН текстом и ссылкой на карточку, если она на диске."""
     sheet = book.create_sheet(title)
@@ -159,17 +177,33 @@ def main() -> int:
             book,
             title,
             [(item, _row(item, volumes.get(item.inn), item.inn in systemic)) for item in chosen],
+            VERDICT if code == "clear" else (),
         )
     pool = sorted(
         (item for item in by_basket["clear"] if item.inn in systemic), key=lambda item: item.inn
     )
-    picked = random.Random(seed).sample(pool, min(SAMPLE_SIZE, len(pool)))
+    others = [item for item in by_basket["clear"] if item.inn not in systemic]
+    debts = {item.inn: _debt_rub(item) for item in others}
+    ranked = sorted(
+        (item for item in others if debts[item.inn] is not None),
+        key=lambda item: (-debts[item.inn], item.inn),
+    )
+    unranked = len(others) - len(ranked)
+    added = ranked[: max(SAMPLE_SIZE - len(pool), 0)]
+    picked = [*pool, *added]
     _sheet(
         book,
         "Выборка",
-        [(item, _row(item, volumes.get(item.inn), True)) for item in picked],
-        VERDICT,
+        [(item, _row(item, volumes.get(item.inn), item.inn in systemic)) for item in picked],
+        ("основание отбора", *VERDICT),
     )
+    sample = book["Выборка"]
+    for number, item in enumerate(picked, start=2):
+        sample.cell(row=number, column=len(HEADER) + 1).value = (
+            "крупный долг по облигациям"
+            if item.inn in systemic
+            else f"долг по отчётности, место {ranked.index(item) + 1}"
+        )
 
     carded = sum(1 for item in rows if (CARDS / f"{item.inn}.md").exists())
     summary = [
@@ -184,15 +218,20 @@ def main() -> int:
             f"в обращении (routing.yaml, systemic.top_share): {len(systemic)} "
             f"из {len(volumes)} с раскрытым объёмом",
         ),
-        ("«Без внимания» с крупным долгом", len(pool)),
+        ("«Без внимания» с крупным долгом по облигациям", len(pool)),
+        (
+            "Добор по долгу по отчётности",
+            f"{len(added)} с наибольшим совокупным долгом базы маршрута ({DEBT}, "
+            f"в рублях) из {len(ranked)} «Без внимания» без крупного долга "
+            f"по облигациям; долг не раскрыт у {unranked} — в добор не идут",
+        ),
         ("В выборке", len(picked)),
         (
             "Нехватка выборки",
-            f"нужно {SAMPLE_SIZE}, есть {len(pool)} — взяты все"
-            if len(pool) < SAMPLE_SIZE
-            else "нет",
+            f"нужно {SAMPLE_SIZE}, есть {len(picked)}" if len(picked) < SAMPLE_SIZE else "нет",
         ),
-        ("Зерно выборки", seed),
+        ("Отбор", "решение владельца 30.09.2026; отбор для проверки, не правило маршрута"),
+        ("Зерно", f"{seed}; в отборе не участвует — добор по убыванию долга, ничья по ИНН"),
         ("Источник", "routing_rows на дату, только чтение; величины — как на странице наблюдения"),
     ]
     sheet = book.create_sheet("Сводка", 0)
