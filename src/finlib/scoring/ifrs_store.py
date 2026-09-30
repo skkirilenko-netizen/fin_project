@@ -369,7 +369,7 @@ LIMIT 1
 """
 
 
-def _kind_of(inn: str, report_date: date, conn: PgConnection) -> str | None:
+def _reporting_kind_of(inn: str, report_date: date, conn: PgConnection) -> str | None:
     """Вид отчётности актуального комплекта года — тем же предпочтением источника."""
     row = fetch_one(
         _KIND,
@@ -430,7 +430,8 @@ def _audit_confidence(
     # вместо стопа (решение владельца 28.09.2026) — если основание объявлено
     # методикой; экран без него раскрываемую не пропускает.
     declared = {item.code for item in rule.downgrade_on}
-    if "disclosable_reporting" in declared and _kind_of(inn, report_date, conn) == "disclosable":
+    kind = _reporting_kind_of(inn, report_date, conn)
+    if "disclosable_reporting" in declared and kind == "disclosable":
         grounds.append(rule.text_of("disclosable_reporting"))
     accepted = ((meta or {}).get("accepted") or {}).get("grounds") or {}
     if accepted:

@@ -294,6 +294,28 @@ def test_metrics_and_assessment_come_from_the_facts(db_conn) -> None:
     assert any(row["status"] == "not_calculable" for row in values)
 
 
+def test_disclosable_reporting_lowers_confidence(db_conn) -> None:
+    """Решение 28.09.2026: раскрываемая проходит экран с понижением уверенности,
+    и основание объявлено методикой (`ifrs_metrics.yaml`, `confidence`)."""
+    from finlib.scoring.ifrs_store import _audit_confidence
+
+    loaded(db_conn)
+    policy = load_ifrs_metrics()
+    computed = compute_from_facts(INN, DATES[0], db_conn, policy)
+    result = assess(computed, policy, stop_factors_of(INN, DATES[0], computed, db_conn))
+    ground = policy.confidence.text_of("disclosable_reporting")
+    _, before = _audit_confidence(INN, DATES[0], db_conn, policy, result)
+    assert ground not in before
+    execute(
+        "UPDATE src_file SET reporting_kind = 'disclosable' "
+        "WHERE inn = %(i)s AND standard = 'ifrs'",
+        {"i": INN},
+        conn=db_conn,
+    )
+    _, after = _audit_confidence(INN, DATES[0], db_conn, policy, result)
+    assert ground in after
+
+
 def test_document_is_built_from_ifrs_facts(db_conn, tmp_path) -> None:
     """Заключение по МСФО собирается и говорит о своём стандарте.
 
