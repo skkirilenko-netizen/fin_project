@@ -797,6 +797,45 @@ def _fresh_facts(
     )
 
 
+def confirmed_values(
+    confirmed: tuple[ConfirmedFact, ...], profile: DocumentProfile
+) -> dict[tuple[str, date, str], tuple[Decimal, str]]:
+    """Величины подтверждённых строк по форме, дате и коду — с ролью периода.
+
+    **Точные строки одного кода, формы и даты складываются**, как у строк,
+    опознанных справочником, и на экране сверки. Прежде каждая писалась
+    своей записью с перезаписью по ключу факта, и оставалась последняя:
+    у ФосАгро 6м2026 себестоимость — «…реализованной продукции Группы»
+    −194 587 и «…товаров для перепродажи» −8 706, — а факт получал одну
+    из двух, без записи в журнал. Экран сверки при этом складывал обе,
+    то есть одна величина считалась двумя кодами.
+
+    Одна строка комплекта учитывается один раз: подтверждённая прежде
+    и размеченная в этом присесте — это одна строка, и сложить её с собой
+    значило бы удвоить величину.
+    """
+    rows: dict[tuple[str, int], ConfirmedFact] = {}
+    for fact in confirmed:
+        rows[(fact.form, fact.index)] = fact
+    found: dict[tuple[str, date, str], tuple[Decimal, str]] = {}
+    for fact in rows.values():
+        dates = profile.dates_of(fact.form)
+        roles = _roles(dates)
+        for index, value in enumerate(fact.values):
+            if index >= len(dates):
+                # Величин в строке больше, чем отчётных дат формы: лишние
+                # графы — предмет отдельного контроля, а не молчания.
+                break
+            report_date = dates[index]
+            role = roles.get(report_date)
+            if role is None:
+                continue
+            key = (fact.form, report_date, fact.code)
+            before = found.get(key)
+            found[key] = (value if before is None else before[0] + value, role)
+    return found
+
+
 def _write_facts(
     inn: str,
     src_file_id: int,
@@ -889,40 +928,31 @@ def _write_facts(
     # не участие в расчёте, а графа `recognition`: доверие к двум силам
     # опознания разное, и в документе они печатаются порознь.
     by_confirmation = 0
-    for fact in confirmed:
-        roles = _roles(profile.dates_of(fact.form))
-        dates = profile.dates_of(fact.form)
-        for index, value in enumerate(fact.values):
-            if index >= len(dates):
-                # Величин в строке больше, чем отчётных дат формы: лишние
-                # графы — предмет отдельного контроля, а не молчания.
-                break
-            report_date = dates[index]
-            role = roles.get(report_date)
-            if role is None:
-                continue
-            touched = execute(
-                _UPSERT_FACT,
-                {
-                    "src_file_id": src_file_id,
-                    "inn": inn,
-                    "standard": Standard.IFRS.value,
-                    "report_date": report_date,
-                    "form_code": fact.form,
-                    "line_code": fact.code,
-                    "source_line_code": fact.code,
-                    "value": value,
-                    "period_role": role,
-                    "recognition": Recognition.CONFIRMATION.value,
-                    "note_number": None,
-                    "note_source_name": None,
-                },
-                conn=conn,
-            )
-            written += touched
-            by_confirmation += touched
-            unchanged += not touched
-            attempted += 1
+    for (form, report_date, code), (value, role) in confirmed_values(
+        confirmed, profile
+    ).items():
+        touched = execute(
+            _UPSERT_FACT,
+            {
+                "src_file_id": src_file_id,
+                "inn": inn,
+                "standard": Standard.IFRS.value,
+                "report_date": report_date,
+                "form_code": form,
+                "line_code": code,
+                "source_line_code": code,
+                "value": value,
+                "period_role": role,
+                "recognition": Recognition.CONFIRMATION.value,
+                "note_number": None,
+                "note_source_name": None,
+            },
+            conn=conn,
+        )
+        written += touched
+        by_confirmation += touched
+        unchanged += not touched
+        attempted += 1
 
     # **Величина примечания — факт той формы, строка которой на примечание
     # ссылается.** Примечание расшифровывает конкретную строку конкретной
