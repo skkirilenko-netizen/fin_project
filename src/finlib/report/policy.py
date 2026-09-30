@@ -405,6 +405,72 @@ class AggregatorConclusion(BaseModel):
         return self
 
 
+class Level2Section(BaseModel):
+    """Раздел заключения уровня 2: разделы уровня 1 и два своих."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(
+        pattern="^(route|values|trend|refinancing|changes|audit|debt|limits)$"
+    )
+    title: str = Field(min_length=1)
+
+
+class DebtWording(BaseModel):
+    """Формулировки раздела о долге: у каждого исхода разбора и сверки своя."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Места подстановки: {note}, {date}, {unit}.
+    basis: str = Field(min_length=1)
+    # Места подстановки: {against}, {value}, {reference}, {unit}.
+    passed: str = Field(min_length=1)
+    with_lease: str = Field(min_length=1)
+    failed: str = Field(min_length=1)
+    no_carrying: str = Field(min_length=1)
+    no_reference: str = Field(min_length=1)
+    # Место подстановки: {reason}.
+    not_read: str = Field(min_length=1)
+    # Место подстановки: {label}.
+    as_printed: str = Field(min_length=1)
+    # Место подстановки: {names}.
+    unread_rows: str = Field(min_length=1)
+
+
+class Level2Conclusion(BaseModel):
+    """Состав заключения уровня 2: уровень 1 плюс аудиторское заключение и долг.
+
+    Разделы уровня 1 собираются тем же кодом (`report/aggregator.py`),
+    а два своих — по документу эмитента. Класса нет, как у уровня 1.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title: str = Field(min_length=1)
+    # Об источнике величин уровня 1: места подстановки {issuers}, {matched},
+    # {compared} — доля совпавших из таблицы сверки, как у уровня 1.
+    source: str = Field(min_length=1)
+    # Места подстановки: {document}, {date}.
+    document: str = Field(min_length=1)
+    sections: tuple[Level2Section, ...] = Field(min_length=1)
+    # Место подстановки: {reasons}.
+    quarantine: str = Field(min_length=1)
+    debt: DebtWording
+    limitations: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sections_are_complete(self) -> Self:
+        """Каждый раздел объявлен ровно один раз: пропущенный исчез бы молча."""
+        codes = [item.code for item in self.sections]
+        wanted = {
+            "route", "values", "trend", "refinancing", "changes", "audit", "debt", "limits"
+        }  # fmt: skip
+        if len(set(codes)) != len(codes) or set(codes) != wanted:
+            raise ValueError(f"разделы заключения уровня 2 объявлены не все либо дважды: {codes}")
+        return self
+
+
 class ReportPolicy(BaseModel):
     """Справочник правил состава документа."""
 
@@ -425,6 +491,8 @@ class ReportPolicy(BaseModel):
     # Состав базового заключения по данным агрегатора. Пусто — состав
     # не утверждён, и заключение уровня 1 не собирается вовсе.
     aggregator_conclusion: AggregatorConclusion | None = None
+    # Состав заключения уровня 2. Пусто — не утверждён, и сборка отказывается.
+    level2_conclusion: Level2Conclusion | None = None
 
     def fill(self, text: str, standard: Standard) -> str:
         """Подставляет наименование отчётности стандарта в предписанный текст.

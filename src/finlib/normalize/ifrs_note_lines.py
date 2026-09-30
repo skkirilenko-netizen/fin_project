@@ -51,6 +51,71 @@ class InterestCover(BaseModel):
     origin: str = Field(min_length=1)
 
 
+class MaturityBucket(BaseModel):
+    """Корзина печати сроков: границы в месяцах от отчётной даты."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    from_months: int = Field(ge=0)
+    # Пусто — корзина открыта сверху («свыше 5 лет»).
+    to_months: int | None = None
+
+
+class MaturityRows(BaseModel):
+    """Наименования строк таблицы сроков по родам: долг, аренда, прочее.
+
+    Строка, не названная ни в одном роде, не опознана и печатается поимённо:
+    угадать по слову «кредит» нельзя — «кредиторская задолженность» его
+    содержит.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    debt: tuple[Alias, ...] = Field(min_length=1)
+    lease: tuple[Alias, ...] = Field(min_length=1)
+    other: tuple[Alias, ...] = ()
+
+    def kind_of(self, name: str) -> str | None:
+        """Род строки по наименованию; None — наименование не заведено."""
+        wanted = normalize_name(name)
+        for kind in ("debt", "lease", "other"):
+            if any(normalize_name(item.name) == wanted for item in getattr(self, kind)):
+                return kind
+        return None
+
+
+class DebtMaturity(BaseModel):
+    """Сроки погашения долга: основы, корзины печати, роды строк, сверка."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Строки формы, по ссылке которых ищется примечание о долге.
+    found_in: tuple[str, ...] = Field(min_length=1)
+    # Строки аренды: сверка «займы + аренда», решение владельца 29.09.2026.
+    lease_lines: tuple[str, ...] = Field(min_length=1)
+    buckets: tuple[MaturityBucket, ...] = Field(min_length=1)
+    rows: MaturityRows
+    origin: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _buckets_are_contiguous(self) -> Self:
+        """Корзины идут подряд от нуля, последняя открыта сверху."""
+        edge = 0
+        for bucket in self.buckets:
+            if bucket.from_months != edge:
+                raise ValueError(f"корзина {bucket.code} начинается не с {edge} месяцев")
+            if bucket.to_months is None:
+                if bucket is not self.buckets[-1]:
+                    raise ValueError("открытой сверху может быть только последняя корзина")
+                break
+            edge = bucket.to_months
+        if self.buckets[-1].to_months is not None:
+            raise ValueError("последняя корзина должна быть открыта сверху")
+        return self
+
+
 class NoteLineCatalog(BaseModel):
     """Справочник строк примечаний целиком."""
 
@@ -59,6 +124,9 @@ class NoteLineCatalog(BaseModel):
     version: str = Field(min_length=1)
     lines: tuple[NoteLine, ...] = Field(min_length=1)
     interest_cover: InterestCover
+    # Сроки погашения долга (уровень 2). Пусто — состав не утверждён,
+    # и разбор сроков отказывается, а не берёт умолчание.
+    debt_maturity: DebtMaturity | None = None
 
     @model_validator(mode="after")
     def _check_integrity(self) -> Self:

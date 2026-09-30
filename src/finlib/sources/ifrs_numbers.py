@@ -334,6 +334,25 @@ class NotesPolicy(BaseModel):
     origin: str = Field(min_length=1)
 
 
+class MaturityTablePolicy(BaseModel):
+    """Технические признаки таблицы сроков погашения в примечании о рисках."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reference_words: tuple[str, ...] = Field(min_length=1)
+    risk_note_titles: tuple[str, ...] = Field(min_length=1)
+    unit_months: dict[str, Decimal] = Field(min_length=1)
+    number_words: dict[str, int] = {}
+    on_demand_words: tuple[str, ...] = Field(min_length=1)
+    header_words: tuple[str, ...] = Field(min_length=1)
+    rate_words: tuple[str, ...] = ()
+    min_buckets: int = Field(ge=2)
+    prose_min_words: int = Field(ge=2)
+    total_words: tuple[str, ...] = Field(min_length=1)
+    row_total_tolerance: int = Field(ge=0)
+    origin: str = Field(min_length=1)
+
+
 class IssuerNamePolicy(BaseModel):
     """Как опознаётся наименование эмитента в документе.
 
@@ -386,6 +405,7 @@ class ParsingPolicy(BaseModel):
     digit_grouping: GroupingPolicy
     grouping_plausibility: PlausibilityPolicy
     notes: NotesPolicy
+    maturity_table: MaturityTablePolicy
     issuer_name: IssuerNamePolicy
     extraction_completeness: ExtractionCompletenessPolicy
 
