@@ -1613,7 +1613,8 @@ def interim_base(
 
 
 _TREND = """
-SELECT DISTINCT ON (f.report_date, f.line_code) f.report_date, f.line_code, f.value
+SELECT DISTINCT ON (f.report_date, f.line_code) f.report_date, f.line_code, f.value,
+       s.unit_code
 FROM fact_report f JOIN src_file s ON s.id = f.src_file_id
 WHERE f.inn = %(inn)s AND f.standard = %(standard)s AND f.line_code = ANY(%(codes)s)
   AND s.is_actual AND s.status <> 'quarantine'
@@ -1632,6 +1633,31 @@ class TrendPoint:
     ytd_change: dict[str, Decimal | None]
 
 
+def trend_series(rows: list[dict], codes: list[str]) -> dict[str, dict[date, Decimal | None]]:
+    """Ряды строк тренда по датам — в единице последнего комплекта.
+
+    **Единица у одного эмитента меняется**: у Брусники комплекты агрегатора
+    до 30.06.2024 в тысячах, дальше в миллионах, и LTM на 30.06.2025
+    складывал 35 985 млн с 31 359 436 тыс. — выходило −31 247 619. Печатается
+    тренд в единице шапки документа, то есть последнего комплекта. Единица
+    не известна — величина не сравнима ни с чем, и её нет.
+    """
+    from finlib.sources.cbonds_events import OKEI_MULTIPLIER
+
+    series: dict[str, dict[date, Decimal | None]] = {code: {} for code in codes}
+    if not rows:
+        return series
+    latest = max(rows, key=lambda row: row["report_date"])
+    target = OKEI_MULTIPLIER.get(str(latest["unit_code"]))
+    for row in rows:
+        own = OKEI_MULTIPLIER.get(str(row["unit_code"]))
+        value = row["value"]
+        if value is not None:
+            value = value * own / target if own is not None and target is not None else None
+        series[row["line_code"]][row["report_date"]] = value
+    return series
+
+
 def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoint]:
     """Тренд LTM на последние отчётные даты (`interim.yaml`, `trend`).
 
@@ -1645,11 +1671,10 @@ def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoi
     codes = sorted(rule.lines.get(standard.value, {}))
     if not codes:
         return []
-    series: dict[str, dict[date, Decimal | None]] = {code: {} for code in codes}
-    for row in fetch_all(
-        _TREND, {"inn": inn, "standard": standard.value, "codes": codes}, conn=conn
-    ):
-        series[row["line_code"]][row["report_date"]] = row["value"]
+    series = trend_series(
+        fetch_all(_TREND, {"inn": inn, "standard": standard.value, "codes": codes}, conn=conn),
+        codes,
+    )
     dates = sorted({day for values in series.values() for day in values}, reverse=True)
     points: list[TrendPoint] = []
     for moment in dates[: rule.quarters]:
