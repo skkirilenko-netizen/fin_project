@@ -168,16 +168,29 @@ class CovenantDisclosure(BaseModel):
     paragraph_markers: tuple[str, ...] = Field(min_length=1)
     breach_markers: tuple[Alias, ...] = Field(min_length=1)
     reclassification_markers: tuple[Alias, ...] = ()
+    # Абзац ковенанта другим предметам не принадлежит (решение 30.09.2026).
+    exclusive: bool = False
+
+
+class MarkerPair(BaseModel):
+    """Примета из нескольких частей: все в одном абзаце."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+    parts: tuple[str, ...] = Field(alias="all", min_length=2)
+    seen_at: str = ""
 
 
 class PledgeDisclosure(BaseModel):
-    """Залоги: абзацы примечания о долге по примете либо под заголовком."""
+    """Залоги: абзацы примечания о долге и названных по примете либо под заголовком."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     in_debt_note: bool
     paragraph_markers: tuple[str, ...] = Field(min_length=1)
+    paragraph_marker_pairs: tuple[MarkerPair, ...] = ()
     heading_markers: tuple[Alias, ...] = ()
+    note_titles: tuple[Alias, ...] = ()
 
 
 class GuaranteeDisclosure(BaseModel):

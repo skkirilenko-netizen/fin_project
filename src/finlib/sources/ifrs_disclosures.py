@@ -216,7 +216,13 @@ def paragraphs_of(
 
     for number, (line, at) in enumerate(lines):
         following = lines[number + 1][0] if number + 1 < len(lines) else ""
-        if _is_table(line, policy):
+        # Строка прозы, перенесённая после числа («…балансовой стоимостью
+        # 16 723 632» / «тыс. рублей были заложены…»), оканчивается величинами,
+        # как строка таблицы; различает их продолжение со строчной буквы.
+        carried = (
+            following[:1].islower() and _words(line) >= policy.prose_min_words
+        )
+        if _is_table(line, policy) and not carried:
             if state == "open" and current:
                 # Предложение не закончено: строка с хвостом величин — его
                 # продолжение («…на сумму 142 099» у Автодора), а короткая —
@@ -341,6 +347,17 @@ def read_disclosures(
         if markers_found(paragraph.text, rule.paragraph_markers, str.lower)
     ]
     joined = " ".join(item.text for item in quotes)
+    # **Один абзац — один предмет, ковенанты старше** (решение владельца
+    # 30.09.2026): процитированный ковенантом абзац другим предметам
+    # не принадлежит. У Сегежи ограничение на выдачу поручительств — условие
+    # кредитного договора, а не выданное поручительство.
+    covenant_texts = (
+        frozenset((item.note, item.text) for item in quotes) if rule.exclusive else frozenset()
+    )
+
+    def free(note: Note, paragraph: Paragraph) -> bool:
+        return (note.number, paragraph.text) not in covenant_texts
+
     result[Kind.COVENANTS] = DisclosureReading(
         Kind.COVENANTS,
         viewed(notes),
@@ -356,7 +373,16 @@ def read_disclosures(
     )
 
     pledges = method.pledges
-    notes = in_debt if pledges.in_debt_note else ()
+    notes = (in_debt if pledges.in_debt_note else ()) + tuple(
+        note for note in _named(index, pledges.note_titles) if note not in in_debt
+    )
+
+    def pledged(text: str) -> bool:
+        return bool(markers_found(text, pledges.paragraph_markers, str.lower)) or any(
+            len(markers_found(text, pair.parts, str.lower)) == len(pair.parts)
+            for pair in pledges.paragraph_marker_pairs
+        )
+
     result[Kind.PLEDGES] = DisclosureReading(
         Kind.PLEDGES,
         viewed(notes),
@@ -364,15 +390,18 @@ def read_disclosures(
             quote(note, paragraph)
             for note in notes
             for paragraph in paragraphs(note)
-            if markers_found(paragraph.text, pledges.paragraph_markers, str.lower)
-            or (
-                # Заголовок — запасная опора: абзац, который сам называет
-                # другой предмет, ему не принадлежит. У Сегежи под «Активы,
-                # переданные в качестве обеспечения» следом идёт абзац
-                # «Ограничительные условия – …» без своего заголовка.
-                paragraph.heading
-                and _heading_matches(paragraph.heading, pledges.heading_markers, policy)
-                and not markers_found(paragraph.text, rule.paragraph_markers, str.lower)
+            if free(note, paragraph)
+            and (
+                pledged(paragraph.text)
+                or (
+                    # Заголовок — запасная опора: абзац, который сам называет
+                    # другой предмет, ему не принадлежит. У Сегежи под «Активы,
+                    # переданные в качестве обеспечения» следом идёт абзац
+                    # «Ограничительные условия – …» без своего заголовка.
+                    bool(paragraph.heading)
+                    and _heading_matches(paragraph.heading, pledges.heading_markers, policy)
+                    and not markers_found(paragraph.text, rule.paragraph_markers, str.lower)
+                )
             )
         ),
     )
@@ -388,7 +417,8 @@ def read_disclosures(
             quote(note, paragraph)
             for note in notes
             for paragraph in paragraphs(note)
-            if markers_found(paragraph.text, guarantees.paragraph_markers, str.lower)
+            if free(note, paragraph)
+            and markers_found(paragraph.text, guarantees.paragraph_markers, str.lower)
         ),
     )
 

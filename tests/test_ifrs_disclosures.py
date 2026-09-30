@@ -119,3 +119,72 @@ def test_no_debt_note_means_nothing_viewed_not_nothing_found() -> None:
     assert found[Kind.COVENANTS].note_missing and found[Kind.PLEDGES].note_missing
     # Поручительства ищутся и в названных примечаниях; в документе их нет.
     assert found[Kind.GUARANTEES].note_missing
+
+
+def _index(*notes: tuple[int, str, str]) -> tuple[str, NoteIndex]:
+    """Документ из примечаний подряд: номер, наименование, текст."""
+    text, found, start = "", [], 0
+    for number, title, body in notes:
+        found.append(Note(number, title, start, start + len(body), number))
+        text += body
+        start += len(body)
+    contents = tuple(ContentsEntry(note.number, note.title, note.page) for note in found)
+    return text, NoteIndex(tuple(found), contents)
+
+
+SEGEZHA_DEBT = """21 КРЕДИТЫ И ЗАЙМЫ
+Ограничительные условия – в рамках кредитных договоров на Компании Группы
+распространяются определенные ограничительные условия, преимущественно
+поведенческого характера: ограничения по привлечению заемных средств, на предоставление
+займов, гарантий и поручительств третьим сторонам, на распоряжение активами Группы.
+"""
+
+SEGEZHA_RELATED = """27 СДЕЛКИ СО СВЯЗАННЫМИ СТОРОНАМИ
+Операции со связанными сторонами совершаются на условиях, согласованных сторонами
+сделок, и раскрываются в настоящем примечании в соответствии с требованиями МСФО.
+"""
+
+
+def test_segezha_covenant_restriction_is_not_a_guarantee() -> None:
+    """Сегежа: ограничение на выдачу поручительств — ковенант, а не поручительство."""
+    text, index = _index(
+        (21, "Кредиты и займы", SEGEZHA_DEBT),
+        (27, "Сделки со связанными сторонами", SEGEZHA_RELATED),
+    )
+    found = read_disclosures(
+        text, index, _page, index.get(21),
+        load_note_lines().disclosures, load_parsing_policy().disclosure_text,
+    )  # fmt: skip
+    assert len(found[Kind.COVENANTS].quotes) == 1
+    guarantees = found[Kind.GUARANTEES]
+    assert [number for number, _ in guarantees.viewed] == [21, 27]
+    assert guarantees.quotes == ()
+
+
+OKEY_DEBT = """25 Кредиты и займы
+Обеспеченные банковские кредиты и облигационные займы обеспечены основными средствами
+АО «ДОРИНДА», ООО «О’КЕЙ» и предоставленным АО «ДОРИНДА» поручительством (Примечание 31).
+"""
+
+OKEY_ASSETS = """16 Основные средства и незавершенное строительство
+(b) Активы в залоге
+По состоянию на 31 декабря 2025 года торговые магазины балансовой стоимостью 16 723 632
+тыс. рублей были заложены третьим лицам в качестве залога по банковским кредитам.
+"""
+
+
+def test_okey_pledge_by_assets_and_in_the_fixed_assets_note() -> None:
+    """О'КЕЙ: «обеспечены основными средствами» — залог; заложенное — в прим. 16."""
+    text, index = _index(
+        (16, "Основные средства и незавершенное строительство", OKEY_ASSETS),
+        (25, "Кредиты и займы", OKEY_DEBT),
+    )
+    found = read_disclosures(
+        text, index, _page, index.get(25),
+        load_note_lines().disclosures, load_parsing_policy().disclosure_text,
+    )  # fmt: skip
+    pledges = found[Kind.PLEDGES]
+    assert [item.note for item in pledges.quotes] == [25, 16]
+    assert "16 723 632" in pledges.quotes[1].text
+    # Один абзац — залог и поручительство сразу: старше здесь только ковенанты.
+    assert [item.note for item in found[Kind.GUARANTEES].quotes] == [25]
