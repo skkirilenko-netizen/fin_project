@@ -797,6 +797,15 @@ def _fresh_facts(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Incoming:
+    """Входящая величина подтверждённой строки — для записи о перезаписи."""
+
+    code: str
+    value: Decimal
+    report_date: date
+
+
 def confirmed_values(
     confirmed: tuple[ConfirmedFact, ...], profile: DocumentProfile
 ) -> dict[tuple[str, date, str], tuple[Decimal, str]]:
@@ -931,6 +940,18 @@ def _write_facts(
     for (form, report_date, code), (value, role) in confirmed_values(
         confirmed, profile
     ).items():
+        previous = existing.get((report_date, form, code))
+        if (
+            previous is not None
+            and previous["src_file_id"] == src_file_id
+            and previous["value"] != value
+        ):
+            # Перезапись своего факта пишется в журнал и у подтверждённых
+            # строк: прежде правило действовало только у опознанных
+            # справочником, и исправленная разметка затирала число молча.
+            overwritten.append(
+                Clash(_Incoming(code, value, report_date), previous, role, form)
+            )
         touched = execute(
             _UPSERT_FACT,
             {

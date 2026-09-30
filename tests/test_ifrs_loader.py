@@ -729,6 +729,31 @@ def test_confirmed_value_becomes_a_fact_with_its_recognition(db_conn) -> None:
     # сравнительная, и правило приоритета к ней применяется наравне.
     assert [row["period_role"] for row in rows] == ["current", "previous"]
 
+
+def test_changed_confirmed_value_is_logged_as_an_overwrite(db_conn) -> None:
+    """Исправленная разметка меняет подтверждённый факт — и это в журнале.
+
+    Правило перезаписи действовало только у строк справочника: у ФосАгро
+    6м2026 исправление себестоимости с −194 587 на −203 293 затёрло бы
+    число молча.
+    """
+    names = {"Задолженность Принципала": "ifrs.principal_receivable"}
+    text = BALANCE + "\nЗадолженность Принципала                 400 000    380 000\n"
+    load_extraction(INN, *prepared(text), db_conn, NOT_READ,
+                    confirmed_by="аналитик", confirmations=names)  # fmt: skip
+    changed = text.replace("400 000    380 000", "410 000    380 000")
+    result = load_extraction(INN, *prepared(changed), db_conn, NOT_READ,
+                             confirmed_by="аналитик", confirmations=names)  # fmt: skip
+    rows = fetch_all(
+        "SELECT previous_value, new_value FROM dq_log WHERE src_file_id = %(id)s "
+        "AND check_code = 'fact_overwrite' AND line_code = 'ifrs.principal_receivable'",
+        {"id": result.src_file_id},
+        conn=db_conn,
+    )
+    assert [(row["previous_value"], row["new_value"]) for row in rows] == [
+        (Decimal(400_000), Decimal(410_000))
+    ]
+
     # Опознанное справочником помечено своей силой опознания, и графа считает
     # то, как называется.
     catalog = fetch_all(
