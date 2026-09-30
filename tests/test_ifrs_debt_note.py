@@ -357,6 +357,66 @@ def test_debt_like_is_a_second_value_and_the_sum_is_reconciled() -> None:
     assert combined[-1].value == Decimal(851150 + 83371)
 
 
+AVTODOR_NOTE_20 = """20 Заемные средства и обязательства по долгосрочным инвестиционным и
+концессионным соглашениям
+млн руб.
+31 декабря
+2025 года
+31 декабря
+2024 года
+Долгосрочные обязательства
+Облигационные займы  687 451 778 293
+Всего долгосрочных обязательств  748 326 847 678
+Всего краткосрочных обязательств  128 880 62 521
+Итого заемных средств  877 206 910 199
+"""
+
+
+def test_note_total_is_the_fallback_reference() -> None:
+    """Решение 30.09.2026: баланс не прочитан — опора сверки итог примечания,
+    опознанного полным наименованием из оглавления."""
+    from finlib.normalize.ifrs_note_lines import BalanceFallback
+    from finlib.sources.ifrs_debt_note import note_total
+    from finlib.sources.ifrs_notes import ContentsEntry
+    from finlib.sources.ifrs_numbers import Grouping
+
+    fallback = BalanceFallback.model_validate(
+        {
+            "note_titles": [
+                {"name": "Заемные средства и обязательства по долгосрочным инвестиционным "
+                 "и концессионным соглашениям", "seen_at": "Автодор"}
+            ],
+            "total_names": [{"name": "Итого заемных средств", "seen_at": "Автодор"}],
+        }
+    )  # fmt: skip
+    method = _method().model_copy(update={"balance_fallback": fallback})
+    note = Note(
+        20, "Заемные средства и обязательства по долгосрочным инвестиционным и",
+        0, len(AVTODOR_NOTE_20),
+    )  # fmt: skip
+    full = ContentsEntry(
+        20, "Заемные средства и обязательства по долгосрочным инвестиционным "
+        "и концессионным соглашениям", 38,
+    )  # fmt: skip
+    index = NoteIndex(notes=(note,), contents=(full,))
+    found = note_total(AVTODOR_NOTE_20, index, method, Grouping.RUSSIAN, 2)
+    assert found is not None
+    assert (found[0].number, found[1]) == (20, Decimal(877206))
+    # Заголовок из указателя обрезан переносом: без оглавления совпадения нет.
+    bare = NoteIndex(notes=(note,))
+    assert note_total(AVTODOR_NOTE_20, bare, method, Grouping.RUSSIAN, 2) is None
+    # Без запасной опоры в методике — нет и опоры.
+    assert note_total(AVTODOR_NOTE_20, index, _method(), Grouping.RUSSIAN, 2) is None
+
+    (table,) = read_tables(
+        _note(AVTODOR, 27), AVTODOR, (date(2025, 12, 31),), method.rows, POLICY
+    )
+    check = reconcile_debt(
+        table, "385", {}, "385", "итог примечания 20", method, borrowed=Decimal(852322)
+    )
+    assert check.outcome is Check.PASSED
+
+
 def test_without_the_approved_composition_the_reading_refuses() -> None:
     """Состава сроков в методике нет — отказ, а не умолчание."""
     found = read_debt_note(

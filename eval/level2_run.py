@@ -31,8 +31,10 @@ from finlib.normalize.ifrs_note_lines import load_note_lines
 from finlib.normalize.lines import load_lines
 from finlib.pipeline import accept_ifrs_document
 from finlib.quality.codes import check_name
+from finlib.report.policy import load_policy
 from finlib.sources.ifrs_debt_note import (
     Check,
+    note_total,
     printed_buckets,
     read_debt_note,
     reconcile_debt,
@@ -148,10 +150,30 @@ def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN
             for item in extraction.values
             if item.report_date == report_date and item.code in codes
         }
-        result["debt_like_check"] = reconcile_debt(
+        extra = reconcile_debt(
             debt.table, profile.unit_code, own, profile.unit_code,
             "опора — баланс документа, комплект в карантине", method,
         )  # fmt: skip
+        found = (
+            note_total(document.text, index, method, profile.grouping, len(profile.report_dates))
+            if extra.outcome is Check.NO_REFERENCE and profile.pages_without_text
+            else None
+        )
+        if found is not None:
+            # Баланс не прочитан: запасная опора — итог примечания,
+            # расшифровывающего строку займов (решение владельца 30.09.2026).
+            note, total, _ = found
+            wording = load_policy().level2_conclusion
+            against = (
+                wording.debt.note_total_against.format(note=note.number)
+                if wording is not None
+                else f"итог примечания {note.number}"
+            )
+            extra = reconcile_debt(
+                debt.table, profile.unit_code, {}, profile.unit_code, against, method,
+                borrowed=total,
+            )  # fmt: skip
+        result["debt_like_check"] = extra
     result["buckets"] = printed_buckets(debt.table, method)
     result["buckets_with_debt_like"] = printed_buckets(debt.table, method, ("debt", "debt_like"))
     result["facts"] = stored_facts(debt.table, method)
@@ -225,7 +247,6 @@ def main() -> int:
         written: dict[str, str] = {}
         if args.docx:
             from finlib.normalize.ifrs_audit import load_audit_policy
-            from finlib.report.policy import load_policy
             from finlib.scoring.routing_store import routing_rows
 
             report_path = args.methodology / "report.yaml" if args.methodology else None

@@ -446,6 +446,9 @@ class DebtWording(BaseModel):
     with_debt_like_label: str = Field(min_length=1)
     # Потоки по займам с долгоподобными не печатаются, пока сумма не сверена.
     debt_like_not_reconciled: str = Field(min_length=1)
+    # Запасная опора — итог примечания, когда баланс не прочитан (решение
+    # 30.09.2026). Место подстановки: {note} — номер примечания.
+    note_total_against: str = Field(min_length=1)
 
 
 class Level2Conclusion(BaseModel):

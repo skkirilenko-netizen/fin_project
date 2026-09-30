@@ -46,6 +46,7 @@ def _composition(codes: tuple[str, ...] = CODES) -> Level2Conclusion:
                 "loans_label": "Займы",
                 "with_debt_like_label": "Займы и долгоподобные ({names})",
                 "debt_like_not_reconciled": "С долгоподобными ({names}) не приводятся.",
+                "note_total_against": "итог примечания {note}",
             },
             "limitations": ["Класса нет."],
             "origin": "тест",

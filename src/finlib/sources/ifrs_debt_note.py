@@ -791,15 +791,18 @@ def reconcile_debt(
     reference_unit: str | None,
     against: str,
     method: DebtMaturity,
+    borrowed: Decimal | None = None,
 ) -> Reconciliation:
     """Сумма балансовой стоимости «займы + долгоподобные» против займов опоры.
 
     Опора — баланс документа у принятого комплекта, займы агрегатора
     у комплекта в карантине (решение владельца 29.09.2026); какая — называет
-    `against`. Сверяется сумма обеих величин (решение 30.09.2026); не сошлась,
-    но сходится с «займы + аренда» — пройдено с оговоркой. Сумма не сошлась,
-    а займы сами по себе сошлись — опора долгоподобных не включает, и это
-    называется, а не выдаётся за расхождение. Допуск — одна единица более
+    `against`. `borrowed` — займы опоры одной величиной, когда опора не строки
+    баланса, а итог примечания (`note_total`). Сверяется сумма обеих величин
+    (решение 30.09.2026); не сошлась, но сходится с «займы + аренда» —
+    пройдено с оговоркой. Сумма не сошлась, а займы сами по себе сошлись —
+    опора долгоподобных не включает, и это называется, а не выдаётся
+    за расхождение. Допуск — одна единица более
     грубой стороны (`quality.reconcile.compare`).
     """
     from finlib.quality.reconcile import Outcome, Side, compare
@@ -812,7 +815,7 @@ def reconcile_debt(
             against, Check.NO_CARRYING, table_unit=table_unit, debt_like=names
         )
     ours = loans + (like or Decimal(0))
-    borrowed = _total(reference, method.found_in)
+    borrowed = borrowed if borrowed is not None else _total(reference, method.found_in)
     if borrowed is None:
         return Reconciliation(
             against, Check.NO_REFERENCE, ours, table_unit=table_unit,
@@ -840,3 +843,36 @@ def reconcile_debt(
         against, outcome, ours, borrowed, with_lease, table_unit, reference_unit,
         loans, names,
     )  # fmt: skip
+
+
+def note_total(
+    text: str,
+    index: NoteIndex,
+    method: DebtMaturity,
+    grouping: object,
+    periods: int,
+) -> tuple[Note, Decimal, str] | None:
+    """Итог примечания, расшифровывающего займы, — запасная опора сверки.
+
+    Решение владельца 30.09.2026: когда баланс не прочитан, опорой служит
+    итог примечания, расшифровывающего балансовую строку. Ссылки из формы
+    нет — нет самой формы, — поэтому примечание опознаётся наименованием
+    из методики (`debt_maturity.balance_fallback`), полным: из оглавления,
+    а без него — из заголовка. Итог — первая строка с наименованием итога;
+    первая графа — отчётная дата, как у величин примечаний.
+    """
+    from finlib.sources.ifrs_notes import rows_of_note
+
+    fallback = method.balance_fallback
+    if fallback is None:
+        return None
+    titles = {normalize_name(item.name) for item in fallback.note_titles}
+    totals = {normalize_name(item.name) for item in fallback.total_names}
+    full = {entry.number: entry.title for entry in index.contents}
+    for note in index.notes:
+        if normalize_name(full.get(note.number, note.title)) not in titles:
+            continue
+        for name, values in rows_of_note(note, text, grouping, periods):  # type: ignore[arg-type]
+            if normalize_name(name) in totals and values:
+                return note, values[0], name
+    return None

@@ -113,6 +113,20 @@ class MaturityStorage(BaseModel):
         return f"{head}_m{start:0{self.digits}d}_{tail}"
 
 
+class BalanceFallback(BaseModel):
+    """Запасная опора сверки, когда баланс не прочитан (решение 30.09.2026).
+
+    Итог примечания, расшифровывающего балансовую строку займов. Примечание
+    опознаётся наименованием по указателю и оглавлению, итог — наименованием
+    строки: ссылки из формы нет, потому что нет самой формы.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    note_titles: tuple[Alias, ...] = Field(min_length=1)
+    total_names: tuple[Alias, ...] = Field(min_length=1)
+
+
 class DebtMaturity(BaseModel):
     """Сроки погашения долга: основы, корзины печати, роды строк, сверка."""
 
@@ -125,6 +139,7 @@ class DebtMaturity(BaseModel):
     buckets: tuple[MaturityBucket, ...] = Field(min_length=1)
     rows: MaturityRows
     storage: MaturityStorage
+    balance_fallback: BalanceFallback | None = None
     origin: str = Field(min_length=1)
 
     @model_validator(mode="after")

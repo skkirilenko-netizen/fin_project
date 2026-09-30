@@ -207,6 +207,14 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
     loans_shown = check.loans_passed or check.outcome is Check.NO_CARRYING
     extra = document.debt_like_check
     if check.debt_like and extra is not None and extra.passed:
+        if extra.reference is not None:
+            part.lines.append(
+                Line(
+                    f"Займы — {extra.against}",
+                    money(extra.reference),
+                    document.reference_codes,
+                )
+            )
         part.paragraphs.append(
             _tidy(
                 wording.passed.format(
