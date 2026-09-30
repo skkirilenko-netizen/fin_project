@@ -140,7 +140,8 @@ class PrintedBucket:
     """Корзина печати: сумма граф внутри неё либо графа, пересекающая корзины."""
 
     name: str
-    value: Decimal
+    # Пусто — у всех строк графы прочерк.
+    value: Decimal | None
     # Графа пересекает границу корзин и печатается как напечатана
     # (решение владельца 29.09.2026: «от 1 до 5 лет» не раскладывать).
     as_printed: bool = False
@@ -613,47 +614,111 @@ def read_debt_note(
 
 
 def printed_buckets(
-    table: MaturityTable, buckets: tuple[MaturityBucket, ...], kind: str = "debt"
+    table: MaturityTable, method: DebtMaturity, kinds: tuple[str, ...] = ("debt",)
 ) -> tuple[PrintedBucket, ...]:
-    """Корзины печати по строкам рода: графа внутри корзины складывается в неё,
-    пересекающая границу печатается как напечатана."""
-    rows = table.of_kind(kind)
-    printed: list[PrintedBucket] = []
+    """Корзины печати по строкам названных родов.
+
+    Графы хранятся как напечатаны; в корзину методики они сводятся только
+    при печати и только если лежат в ней целиком **и покрывают её целиком**:
+    у Брусники «2–3 года» лежит внутри «от 2 до 5 лет», но под именем корзины
+    была бы её часть, а «3 и более» пересекает границу — обе графы
+    печатаются как есть. Код строки — тот же, что у хранимой графы: основа,
+    род и границы в месяцах; у корзины — её границы.
+    """
+    rows = [row for row in table.rows if row.kind in kinds]
+    printed: list[tuple[int, PrintedBucket]] = []
     taken: set[int] = set()
-    for bucket in buckets:
+
+    def summed(numbers: list[int]) -> Decimal | None:
+        # Прочерк не ноль (инвариант 4): графа, у всех строк которой прочерк,
+        # печатается прочерком, а не нулём.
+        values = [
+            row.buckets[number]
+            for row in rows
+            for number in numbers
+            if row.buckets[number] is not None
+        ]
+        return sum(values, Decimal(0)) if values else None
+
+    def code(start: int, end: int | None) -> str:
+        # Сумма родов — сумма хранимых кодов: своего кода у неё нет.
+        return " + ".join(
+            method.storage.code("undiscounted", kind, start, end) for kind in kinds
+        )
+
+    for bucket in method.buckets:
         inside = [
             number
             for number, interval in enumerate(table.intervals)
             if interval.within(bucket) and number not in taken
         ]
         if not inside or not _covers([table.intervals[i] for i in inside], bucket):
-            # Графы внутри корзины покрывают её не целиком (у Брусники «2–3
-            # года» внутри «от 2 до 5 лет», остальное в «3 и более»): под
-            # именем корзины была бы часть её, и графы печатаются как есть.
             continue
         taken.update(inside)
-        value = sum(
-            (row.buckets[number] or Decimal(0) for row in rows for number in inside),
-            Decimal(0),
-        )
-        printed.append(PrintedBucket(bucket.name, value, code=bucket.code))
+        printed.append(
+            (
+                bucket.from_months,
+                PrintedBucket(
+                    bucket.name, summed(inside),
+                    code=code(bucket.from_months, bucket.to_months),
+                ),
+            )
+        )  # fmt: skip
     for number, interval in enumerate(table.intervals):
         if number in taken:
             continue
-        value = sum((row.buckets[number] or Decimal(0) for row in rows), Decimal(0))
-        edge = interval.end if interval.end is not None else "open"
         printed.append(
-            PrintedBucket(
-                interval.label, value, as_printed=True, code=f"m{interval.start}_{edge}"
+            (
+                interval.start,
+                PrintedBucket(
+                    interval.label, summed([number]), as_printed=True,
+                    code=code(interval.start, interval.end),
+                ),
             )
-        )
-    order = {interval.label: interval.start for interval in table.intervals}
-    return tuple(
-        sorted(
-            printed,
-            key=lambda item: order.get(item.name, _start_of(item.name, buckets)),
-        )
-    )
+        )  # fmt: skip
+    return tuple(item for _, item in sorted(printed, key=lambda pair: pair[0]))
+
+
+@dataclass(frozen=True, slots=True)
+class StoredFact:
+    """Величина к хранению: код (основа, род, границы) и величина графы."""
+
+    code: str
+    value: Decimal
+    label: str
+
+
+def stored_facts(table: MaturityTable, method: DebtMaturity) -> tuple[StoredFact, ...]:
+    """Графы таблицы как напечатаны — по родам «займы» и «долгоподобные».
+
+    Прочерк — не ноль (инвариант 4): графа, у всех строк рода которой стоит
+    прочерк, к хранению не идёт. Балансовая стоимость строк рода хранится
+    кодом всей шкалы — от нуля, открытой сверху.
+    """
+    found: list[StoredFact] = []
+    for kind in ("debt", "debt_like"):
+        rows = table.of_kind(kind)
+        if not rows:
+            continue
+        for number, interval in enumerate(table.intervals):
+            values = [row.buckets[number] for row in rows if row.buckets[number] is not None]
+            if not values:
+                continue
+            found.append(
+                StoredFact(
+                    method.storage.code("undiscounted", kind, interval.start, interval.end),
+                    sum(values, Decimal(0)),
+                    interval.label,
+                )
+            )
+        carrying = table.carrying_of(kind)
+        if carrying is not None:
+            found.append(
+                StoredFact(
+                    method.storage.code("carrying", kind, 0, None), carrying, "балансовая"
+                )
+            )
+    return tuple(found)
 
 
 def _covers(intervals: list[Interval], bucket: MaturityBucket) -> bool:
@@ -668,16 +733,15 @@ def _covers(intervals: list[Interval], bucket: MaturityBucket) -> bool:
     return bucket.to_months is not None and edge == bucket.to_months
 
 
-def _start_of(name: str, buckets: tuple[MaturityBucket, ...]) -> int:
-    """Начало корзины печати по наименованию — для порядка вывода."""
-    return next((bucket.from_months for bucket in buckets if bucket.name == name), 0)
-
-
 class Check(StrEnum):
-    """Исход сверки суммы строк долга таблицы с займами опоры."""
+    """Исход сверки суммы строк таблицы с займами опоры."""
 
     PASSED = "сошлось"
     WITH_LEASE = "сошлось с займами и арендой"
+    # Долгоподобные у опоры в займы не входят (агрегатор у Автодора: займы
+    # 798 411 — ровно облигации), и сумма обеих величин сверена быть
+    # не может; займы при этом сошлись.
+    LOANS_ONLY = "сошлись займы; долгоподобные опорой не раскрыты"
     FAILED = "не сошлось"
     NO_CARRYING = "графы балансовой стоимости в таблице нет"
     NO_REFERENCE = "займов у опоры нет"
@@ -685,7 +749,11 @@ class Check(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Reconciliation:
-    """Сверка: с чем, исход и обе стороны в своих единицах."""
+    """Сверка: с чем, исход и обе стороны в своих единицах.
+
+    `table_value` — сумма обеих величин таблицы («займы + долгоподобные»),
+    `loans` — одни займы; без долгоподобных строк они равны.
+    """
 
     against: str
     outcome: Check
@@ -694,11 +762,18 @@ class Reconciliation:
     reference_with_lease: Decimal | None = None
     table_unit: str | None = None
     reference_unit: str | None = None
+    loans: Decimal | None = None
+    debt_like: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
-        """Прошла ли проверка — с оговоркой об аренде или без."""
+        """Сошлась ли сумма обеих величин — с оговоркой об аренде или без."""
         return self.outcome in (Check.PASSED, Check.WITH_LEASE)
+
+    @property
+    def loans_passed(self) -> bool:
+        """Сошлись ли займы — суммой обеих величин либо сами по себе."""
+        return self.passed or self.outcome is Check.LOANS_ONLY
 
 
 def _total(values: dict[str, Decimal | None], codes: tuple[str, ...]) -> Decimal | None:
@@ -717,39 +792,51 @@ def reconcile_debt(
     against: str,
     method: DebtMaturity,
 ) -> Reconciliation:
-    """Сумма балансовой стоимости строк долга против займов опоры.
+    """Сумма балансовой стоимости «займы + долгоподобные» против займов опоры.
 
     Опора — баланс документа у принятого комплекта, займы агрегатора
     у комплекта в карантине (решение владельца 29.09.2026); какая — называет
-    `against`. Не сошлось с займами, но сходится с «займы + аренда» — проверка
-    пройдена с оговоркой: таблица сроков включает аренду. Допуск — одна
-    единица более грубой стороны (`quality.reconcile.compare`).
+    `against`. Сверяется сумма обеих величин (решение 30.09.2026); не сошлась,
+    но сходится с «займы + аренда» — пройдено с оговоркой. Сумма не сошлась,
+    а займы сами по себе сошлись — опора долгоподобных не включает, и это
+    называется, а не выдаётся за расхождение. Допуск — одна единица более
+    грубой стороны (`quality.reconcile.compare`).
     """
     from finlib.quality.reconcile import Outcome, Side, compare
 
-    ours = table.carrying_of("debt")
-    if ours is None:
-        return Reconciliation(against, Check.NO_CARRYING, table_unit=table_unit)
+    loans = table.carrying_of("debt")
+    like = table.carrying_of("debt_like")
+    names = tuple(row.name for row in table.of_kind("debt_like"))
+    if loans is None:
+        return Reconciliation(
+            against, Check.NO_CARRYING, table_unit=table_unit, debt_like=names
+        )
+    ours = loans + (like or Decimal(0))
     borrowed = _total(reference, method.found_in)
     if borrowed is None:
         return Reconciliation(
             against, Check.NO_REFERENCE, ours, table_unit=table_unit,
-            reference_unit=reference_unit,
+            reference_unit=reference_unit, loans=loans, debt_like=names,
         )  # fmt: skip
     leased = _total(reference, method.lease_lines)
     with_lease = borrowed + leased if leased is not None else None
     date_ = table.report_date or date.min
-    side = Side(ours, table_unit)
-    if compare("debt", date_, side, Side(borrowed, reference_unit)).outcome is Outcome.MATCH:
+
+    def matches(value: Decimal, target: Decimal | None) -> bool:
+        if target is None:
+            return False
+        found = compare("debt", date_, Side(value, table_unit), Side(target, reference_unit))
+        return found.outcome is Outcome.MATCH
+
+    if matches(ours, borrowed):
         outcome = Check.PASSED
-    elif (
-        with_lease is not None
-        and compare("debt", date_, side, Side(with_lease, reference_unit)).outcome
-        is Outcome.MATCH
-    ):
+    elif matches(ours, with_lease):
         outcome = Check.WITH_LEASE
+    elif like is not None and matches(loans, borrowed):
+        outcome = Check.LOANS_ONLY
     else:
         outcome = Check.FAILED
     return Reconciliation(
-        against, outcome, ours, borrowed, with_lease, table_unit, reference_unit
-    )
+        against, outcome, ours, borrowed, with_lease, table_unit, reference_unit,
+        loans, names,
+    )  # fmt: skip

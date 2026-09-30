@@ -50,6 +50,11 @@ class Level2Document:
     debt: DebtNoteReading = field(default_factory=DebtNoteReading)
     reconciliation: Reconciliation | None = None
     buckets: tuple[PrintedBucket, ...] = ()
+    buckets_with_debt_like: tuple[PrintedBucket, ...] = ()
+    # Коды хранения балансовой стоимости: займов и долгоподобных.
+    carrying_codes: tuple[str, str] = ("", "")
+    # Коды займов опоры сверки: «ifrs.long_term_borrowings + …».
+    reference_codes: str = ""
 
 
 def build_level2(
@@ -130,7 +135,13 @@ def _opinion(audit: object, policy: object | None) -> str:
 
 
 def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -> None:
-    """Таблица сроков: основа, сверка и корзины — только при прошедшей сверке."""
+    """Таблица сроков: основа, сверка, две величины и потоки.
+
+    Потоки печатаются при сошедшейся сверке, а при отсутствии графы
+    балансовой стоимости — как есть с оговоркой (решение владельца 30.09.2026):
+    сверять там нечем, но и расхождения нет. Сумма с долгоподобными
+    печатается потоками, только если сошлась сама.
+    """
     wording = composition.debt
     reading = document.debt
     table = reading.table
@@ -151,9 +162,11 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
     if check is None:
         part.paragraphs.append(wording.no_reference.format(against="опора не названа"))
         return
+    names = "; ".join(check.debt_like)
     text = {
         Check.PASSED: wording.passed,
         Check.WITH_LEASE: wording.with_lease,
+        Check.LOANS_ONLY: wording.loans_only,
         Check.FAILED: wording.failed,
         Check.NO_CARRYING: wording.no_carrying,
         Check.NO_REFERENCE: wording.no_reference,
@@ -162,40 +175,76 @@ def _debt(part: Part, document: Level2Document, composition: Level2Conclusion) -
         _tidy(
             text.format(
                 against=check.against,
-                value=money(check.table_value) if check.table_value is not None else "—",
-                reference=money(check.reference) if check.reference is not None else "—",
+                value=_shown(check.table_value),
+                loans=_shown(check.loans),
+                reference=_shown(check.reference),
                 unit=document.unit,
+                names=names,
             )
         )
     )
-    if check.table_value is not None:
+    codes = document.carrying_codes
+    if check.loans is not None:
+        part.lines.append(
+            Line(f"{wording.loans_label}, {document.unit}", money(check.loans), codes[0])
+        )
+    if check.debt_like and check.table_value is not None:
         part.lines.append(
             Line(
-                f"Строки долга таблицы, балансовая стоимость, {document.unit}",
+                f"{wording.with_debt_like_label.format(names=names)}, {document.unit}",
                 money(check.table_value),
-                "debt_maturity.carrying",
+                " + ".join(codes),
             )
         )
     if check.reference is not None:
         part.lines.append(
-            Line(f"Займы — {check.against}", money(check.reference), "debt_maturity.reference")
+            Line(f"Займы — {check.against}", money(check.reference), document.reference_codes)
         )
-    if not check.passed:
-        return
-    for bucket in document.buckets:
-        if bucket.as_printed:
-            part.paragraphs.append(wording.as_printed.format(label=bucket.name))
-        part.lines.append(
-            Line(
-                f"Потоки по долгу: {bucket.name}, {document.unit}",
-                money(bucket.value),
-                f"debt_maturity.{bucket.code}",
+    loans_shown = check.loans_passed or check.outcome is Check.NO_CARRYING
+    both_shown = check.passed or check.outcome is Check.NO_CARRYING
+    if loans_shown:
+        _flows(part, document.buckets, wording.loans_label, document, composition)
+    if check.debt_like:
+        if both_shown:
+            _flows(
+                part,
+                document.buckets_with_debt_like,
+                wording.with_debt_like_label.format(names=names),
+                document,
+                composition,
             )
-        )
+        else:
+            part.paragraphs.append(wording.debt_like_not_reconciled.format(names=names))
     unread = table.unread + tuple(row.name for row in table.of_kind(None))
     if unread:
         part.paragraphs.append(wording.unread_rows.format(names="; ".join(unread)))
 
+
+def _flows(
+    part: Part,
+    buckets: tuple[PrintedBucket, ...],
+    label: str,
+    document: Level2Document,
+    composition: Level2Conclusion,
+) -> None:
+    """Строки потоков: корзина либо графа как напечатана, с кодом хранения."""
+    for bucket in buckets:
+        if bucket.as_printed:
+            said = composition.debt.as_printed.format(label=bucket.name)
+            if said not in part.paragraphs:
+                part.paragraphs.append(said)
+        part.lines.append(
+            Line(
+                f"Потоки: {label}, {bucket.name}, {document.unit}",
+                _shown(bucket.value),
+                bucket.code,
+            )
+        )
+
+
+def _shown(value: object) -> str:
+    """Величина словами печати; нет величины — прочерк."""
+    return money(value) if value is not None else "—"  # type: ignore[arg-type]
 
 
 def _tidy(text: str) -> str:

@@ -31,7 +31,13 @@ from finlib.normalize.ifrs_note_lines import load_note_lines
 from finlib.normalize.lines import load_lines
 from finlib.pipeline import accept_ifrs_document
 from finlib.quality.codes import check_name
-from finlib.sources.ifrs_debt_note import printed_buckets, read_debt_note, reconcile_debt
+from finlib.sources.ifrs_debt_note import (
+    Check,
+    printed_buckets,
+    read_debt_note,
+    reconcile_debt,
+    stored_facts,
+)
 from finlib.sources.ifrs_inbox import form_headings, text_of
 from finlib.sources.ifrs_notes import index_notes
 from finlib.sources.ifrs_numbers import load_parsing_policy
@@ -134,7 +140,14 @@ def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN
         debt.table, profile.unit_code, reference, reference_unit, against, method
     )
     result["check"] = check
-    result["buckets"] = printed_buckets(debt.table, method.buckets)
+    result["buckets"] = printed_buckets(debt.table, method)
+    result["buckets_with_debt_like"] = printed_buckets(debt.table, method, ("debt", "debt_like"))
+    result["facts"] = stored_facts(debt.table, method)
+    result["reference_codes"] = " + ".join(method.found_in)
+    result["carrying_codes"] = (
+        method.storage.code("carrying", "debt", 0, None),
+        method.storage.code("carrying", "debt_like", 0, None),
+    )
     return result
 
 
@@ -157,6 +170,9 @@ def _docx(result: dict, conn, level1, composition, audit_policy, today, found) -
         debt=result["debt"],
         reconciliation=result.get("check"),
         buckets=result.get("buckets", ()),
+        buckets_with_debt_like=result.get("buckets_with_debt_like", ()),
+        carrying_codes=result.get("carrying_codes", ("", "")),
+        reference_codes=result.get("reference_codes", ""),
     )
     basket = load_routing().basket(item.verdict.basket).name
     conclusion = build_level2(item, conn, level1, composition, document, today, basket)
@@ -247,17 +263,30 @@ def main() -> int:
             value = f"{check.table_value:,}".replace(",", " ") if check.table_value else "—"
             ref = f"{check.reference:,}".replace(",", " ") if check.reference else "—"
             checked = f"с «{check.against}»: {check.outcome.value} ({value} / {ref})"
+            if check.debt_like:
+                loans = f"{check.loans:,}".replace(",", " ")
+                checked += f"; займы {loans}, долгоподобные: {'; '.join(check.debt_like)}"
         stored = result["stored"] + (f" ({result['reasons']})" if result["reasons"] else "")
         print(
             f"| {result['who']} | {result['file']} ({result['date']:%d.%m.%Y}) | {stored} "
             f"| {_audit_state(result['audit'])} | {note} | {terms} | {checked} |"
         )
     for result in results:
-        if "buckets" in result and result.get("check") and result["check"].passed:
-            print(f"\n## {result['who']} — корзины потоков по долгу, {result['unit']}\n")
+        check = result.get("check")
+        if "buckets" in result and check is not None and (
+            check.loans_passed or check.outcome is Check.NO_CARRYING
+        ):
+            print(f"\n## {result['who']} — потоки по займам при печати, {result['unit']}\n")
             for bucket in result["buckets"]:
                 mark = " (как напечатана)" if bucket.as_printed else ""
-                print(f"- {bucket.name}{mark}: {bucket.value:,}".replace(",", " "))
+                print(
+                    f"- {bucket.name}{mark}: "
+                    + (f"{bucket.value:,}".replace(",", " ") if bucket.value is not None else "—")
+                    + f" `{bucket.code}`"
+                )
+            print(f"\nК хранению (графы как напечатаны), {result['unit']}:\n")
+            for fact in result["facts"]:
+                print(f"- `{fact.code}` {fact.value:,} ({fact.label})".replace(",", " "))
         debt = result.get("debt")
         if debt is not None and debt.table is not None:
             odd = debt.table.unread + tuple(row.name for row in debt.table.of_kind(None))

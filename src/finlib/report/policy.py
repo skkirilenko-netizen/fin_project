@@ -426,7 +426,12 @@ class DebtWording(BaseModel):
     # Места подстановки: {against}, {value}, {reference}, {unit}.
     passed: str = Field(min_length=1)
     with_lease: str = Field(min_length=1)
+    # Сумма не сошлась, займы сошлись: опора долгоподобных не раскрывает.
+    # Места подстановки: {against}, {loans}, {reference}, {unit}, {names}.
+    loans_only: str = Field(min_length=1)
     failed: str = Field(min_length=1)
+    # Графы балансовой нет: сверки нет, потоки печатаются с оговоркой
+    # (решение владельца 30.09.2026 по ЛСР).
     no_carrying: str = Field(min_length=1)
     no_reference: str = Field(min_length=1)
     # Место подстановки: {reason}.
@@ -435,6 +440,12 @@ class DebtWording(BaseModel):
     as_printed: str = Field(min_length=1)
     # Место подстановки: {names}.
     unread_rows: str = Field(min_length=1)
+    # Наименования двух величин (решение 30.09.2026); у второй — {names},
+    # перечень добавленных строк.
+    loans_label: str = Field(min_length=1)
+    with_debt_like_label: str = Field(min_length=1)
+    # Потоки по займам с долгоподобными не печатаются, пока сумма не сверена.
+    debt_like_not_reconciled: str = Field(min_length=1)
 
 
 class Level2Conclusion(BaseModel):

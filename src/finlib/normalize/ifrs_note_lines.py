@@ -74,16 +74,43 @@ class MaturityRows(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     debt: tuple[Alias, ...] = Field(min_length=1)
+    # Долгоподобные обязательства: не займы, но долг по существу (решение
+    # владельца 30.09.2026 — концессионные и инвестиционные соглашения
+    # Автодора). Печатаются второй величиной «займы + долгоподобные».
+    debt_like: tuple[Alias, ...] = ()
     lease: tuple[Alias, ...] = Field(min_length=1)
     other: tuple[Alias, ...] = ()
 
     def kind_of(self, name: str) -> str | None:
         """Род строки по наименованию; None — наименование не заведено."""
         wanted = normalize_name(name)
-        for kind in ("debt", "lease", "other"):
+        for kind in ("debt", "debt_like", "lease", "other"):
             if any(normalize_name(item.name) == wanted for item in getattr(self, kind)):
                 return kind
         return None
+
+
+class MaturityStorage(BaseModel):
+    """Коды хранения сроков: основа и род строк + границы графы в месяцах.
+
+    Графа хранится как напечатана (решение владельца 30.09.2026):
+    `ifrs.debt_cf_due_m012_m024` — недисконтированные потоки по займам
+    от 12 до 24 месяцев; открытая сверху — `…_m060_plus`. В корзины печати
+    графы сводятся только при печати.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Префикс кода по основе и роду строк: {основа: {род: префикс}}.
+    prefixes: dict[str, dict[str, str]] = Field(min_length=1)
+    open_end: str = Field(min_length=1)
+    digits: int = Field(ge=1)
+
+    def code(self, basis: str, kind: str, start: int, end: int | None) -> str:
+        """Код факта графы: префикс основы и рода, границы в месяцах."""
+        head = self.prefixes[basis][kind]
+        tail = self.open_end if end is None else f"m{end:0{self.digits}d}"
+        return f"{head}_m{start:0{self.digits}d}_{tail}"
 
 
 class DebtMaturity(BaseModel):
@@ -97,6 +124,7 @@ class DebtMaturity(BaseModel):
     lease_lines: tuple[str, ...] = Field(min_length=1)
     buckets: tuple[MaturityBucket, ...] = Field(min_length=1)
     rows: MaturityRows
+    storage: MaturityStorage
     origin: str = Field(min_length=1)
 
     @model_validator(mode="after")

@@ -17,6 +17,7 @@ from finlib.sources.ifrs_debt_note import (
     read_debt_note,
     read_tables,
     reconcile_debt,
+    stored_facts,
 )
 from finlib.sources.ifrs_notes import Note, NoteIndex
 from finlib.sources.ifrs_numbers import load_parsing_policy
@@ -46,6 +47,7 @@ def _method() -> DebtMaturity:
                     {"name": "Обеспеченные банковские кредиты", "seen_at": "ЛСР"},
                     {"name": "Проектное финансирование", "seen_at": "ЛСР"},
                     {"name": "Кредиты и займы", "seen_at": "Сегежа"},
+                    {"name": "Облигационные займы", "seen_at": "Автодор"},
                 ],
                 "lease": [
                     {"name": "Обязательства по договорам долгосрочной аренды",
@@ -56,6 +58,18 @@ def _method() -> DebtMaturity:
                     {"name": "Торговая и прочая кредиторская задолженность",
                      "seen_at": "Сегежа"},
                 ],
+                "debt_like": [
+                    {"name": "Концессионные соглашения", "seen_at": "Автодор"},
+                ],
+            },
+            "storage": {
+                "prefixes": {
+                    "undiscounted": {"debt": "ifrs.debt_cf_due",
+                                     "debt_like": "ifrs.debt_like_cf_due"},
+                    "carrying": {"debt": "ifrs.debt_due", "debt_like": "ifrs.debt_like_due"},
+                },
+                "open_end": "plus",
+                "digits": 3,
             },
             "origin": "тест",
         }
@@ -269,18 +283,78 @@ def test_a_bucket_is_printed_only_when_covered_whole() -> None:
     """Графы, покрывающие корзину, складываются; пересекающая — как напечатана."""
     method = _method()
     (table,) = read_tables(_note(SAMOLET), SAMOLET, (date(2025, 12, 31),), method.rows, POLICY)
-    printed = printed_buckets(table, method.buckets)
-    assert [(item.name, item.value, item.as_printed) for item in printed] == [
-        ("до 1 года", Decimal(31451 + 15656 + 149931 + 145273), False),
-        ("от 1 до 2 лет", Decimal(35794 + 136944), False),
-        ("от 2 до 10 лет", Decimal(25264 + 421067), True),
-    ]
+    printed = printed_buckets(table, method)
+    assert [(item.name, item.value, item.as_printed, item.code) for item in printed] == [
+        (
+            "до 1 года", Decimal(31451 + 15656 + 149931 + 145273), False,
+            "ifrs.debt_cf_due_m000_m012",
+        ),
+        ("от 1 до 2 лет", Decimal(35794 + 136944), False, "ifrs.debt_cf_due_m012_m024"),
+        ("от 2 до 10 лет", Decimal(25264 + 421067), True, "ifrs.debt_cf_due_m024_m120"),
+    ]  # fmt: skip
     (partial,) = read_tables(
         _note(BRUSNIKA, 25), BRUSNIKA, (date(2025, 12, 31),), method.rows, POLICY
     )
-    names = [item.name for item in printed_buckets(partial, method.buckets)]
+    names = [item.name for item in printed_buckets(partial, method)]
     # «2–3 года» не выдаётся за «от 2 до 5 лет»: корзина покрыта не целиком.
     assert names == ["до 1 года", "от 1 до 2 лет", "2-3 года", "3 и более"]
+
+
+AVTODOR = """Ниже представлена информация об оставшихся договорных сроках погашения
+млн руб.  Денежные потоки по договору
+2025 год Балансовая
+стоимость Итого
+Менее
+2 мес.  2-12 мес.
+от 1 до 2
+лет
+от 2 до 5
+лет
+Свыше
+5 лет
+Облигационные займы 798 411 1 216 284 7 734 103 226 64 549 189 625 851 150
+Концессионные
+соглашения 53 911 135 205 2 194 10 724 7 737 31 179 83 371
+"""
+
+
+def test_graphs_are_stored_as_printed() -> None:
+    """Код хранения — основа, род и границы графы; прочерк к хранению не идёт."""
+    method = _method()
+    (table,) = read_tables(_note(SAMOLET), SAMOLET, (date(2025, 12, 31),), method.rows, POLICY)
+    codes = {fact.code: fact.value for fact in stored_facts(table, method)}
+    # «По требованию» у обеих строк займов — прочерк: не ноль и не хранится.
+    assert "ifrs.debt_cf_due_m000_m000" not in codes
+    assert codes["ifrs.debt_cf_due_m000_m006"] == Decimal(31451 + 149931)
+    assert codes["ifrs.debt_cf_due_m024_m120"] == Decimal(25264 + 421067)
+    assert codes["ifrs.debt_due_m000_plus"] == Decimal(749146)
+
+
+def test_debt_like_is_a_second_value_and_the_sum_is_reconciled() -> None:
+    """Автодор: займы и «займы + долгоподобные»; сверяется сумма обеих."""
+    method = _method()
+    (table,) = read_tables(
+        _note(AVTODOR, 27), AVTODOR, (date(2025, 12, 31),), method.rows, POLICY
+    )
+    both = {
+        "ifrs.long_term_borrowings": Decimal(800000),
+        "ifrs.short_term_borrowings": Decimal(52322),
+    }
+    found = reconcile_debt(table, "385", both, "385", "баланс документа", method)
+    assert found.outcome is Check.PASSED
+    assert (found.loans, found.table_value) == (Decimal(798411), Decimal(852322))
+    assert found.debt_like == ("Концессионные соглашения",)
+    # Опора — только займы (агрегатор у Автодора: ровно облигации).
+    loans = {
+        "ifrs.long_term_borrowings": Decimal(687451),
+        "ifrs.short_term_borrowings": Decimal(110960),
+    }
+    only = reconcile_debt(table, "385", loans, "385", "данные агрегатора", method)
+    assert only.outcome is Check.LOANS_ONLY
+    assert only.loans_passed and not only.passed
+    combined = printed_buckets(table, method, ("debt", "debt_like"))
+    assert combined[-1].code == "ifrs.debt_cf_due_m060_plus + ifrs.debt_like_cf_due_m060_plus"
+    assert combined[-1].value == Decimal(851150 + 83371)
 
 
 def test_without_the_approved_composition_the_reading_refuses() -> None:

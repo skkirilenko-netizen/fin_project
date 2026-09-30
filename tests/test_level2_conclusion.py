@@ -1,4 +1,4 @@
-"""Заключение уровня 2: полный состав разделов, величины сроков — только при сверке."""
+"""Заключение уровня 2: полный состав разделов, величины сроков — по исходу сверки."""
 
 from datetime import date
 from decimal import Decimal
@@ -36,12 +36,16 @@ def _composition(codes: tuple[str, ...] = CODES) -> Level2Conclusion:
                 "basis": "Потоки, примечание {note}, {date}, {unit}.",
                 "passed": "Сошлось с {against}: {value} / {reference} {unit}.",
                 "with_lease": "С арендой ({against}).",
+                "loans_only": "Займы сошлись: {loans} / {reference}; не сверены {names}.",
                 "failed": "Не сошлось с {against}: {value} / {reference} {unit}.",
-                "no_carrying": "Графы нет ({against}).",
+                "no_carrying": "Графы нет ({against}); потоки как напечатаны.",
                 "no_reference": "Опоры нет ({against}).",
                 "not_read": "Сроков нет: {reason}.",
                 "as_printed": "Графа «{label}» как напечатана.",
                 "unread_rows": "Не прочитано: {names}.",
+                "loans_label": "Займы",
+                "with_debt_like_label": "Займы и долгоподобные ({names})",
+                "debt_like_not_reconciled": "С долгоподобными ({names}) не приводятся.",
             },
             "limitations": ["Класса нет."],
             "origin": "тест",
@@ -49,7 +53,7 @@ def _composition(codes: tuple[str, ...] = CODES) -> Level2Conclusion:
     )
 
 
-def _document(outcome: Check) -> Level2Document:
+def _document(outcome: Check, debt_like: tuple[str, ...] = ()) -> Level2Document:
     """Документ с одной строкой долга и сверкой с заданным исходом."""
     table = MaturityTable(
         Note(23, "Управление рисками", 0, 0),
@@ -67,12 +71,22 @@ def _document(outcome: Check) -> Level2Document:
         audit_policy=None,
         debt=DebtNoteReading(table=table),
         reconciliation=Reconciliation(
-            "данные агрегатора", outcome, Decimal(100), Decimal(90), None, "385", "385"
-        ),
+            "данные агрегатора", outcome, Decimal(110), Decimal(100), None, "385", "385",
+            Decimal(100), debt_like,
+        ),  # fmt: skip
         buckets=(
-            PrintedBucket("до 1 года", Decimal(20), code="within_1y"),
-            PrintedBucket("от 1 до 5 лет", Decimal(100), as_printed=True, code="m12_60"),
+            PrintedBucket("до 1 года", Decimal(20), code="ifrs.debt_cf_due_m000_m012"),
+            PrintedBucket(
+                "от 1 до 5 лет", Decimal(100), as_printed=True, code="ifrs.debt_cf_due_m012_m060"
+            ),
         ),
+        buckets_with_debt_like=(
+            PrintedBucket(
+                "до 1 года", Decimal(25),
+                code="ifrs.debt_cf_due_m000_m012 + ifrs.debt_like_cf_due_m000_m012",
+            ),
+        ),  # fmt: skip
+        carrying_codes=("ifrs.debt_due_m000_plus", "ifrs.debt_like_due_m000_plus"),
     )
 
 
@@ -86,17 +100,42 @@ def test_failed_reconciliation_prints_no_maturities() -> None:
     """Не сошлось — величины сроков не приводятся, и документ так и говорит."""
     part = Part("debt", "Долг")
     _debt(part, _document(Check.FAILED), _composition())
-    assert "Не сошлось с данные агрегатора: 100 / 90 млн руб." in part.paragraphs
-    assert all(not line.code.startswith("debt_maturity.within") for line in part.lines)
+    assert "Не сошлось с данные агрегатора: 110 / 100 млн руб." in part.paragraphs
+    assert all("cf_due" not in line.code for line in part.lines)
 
 
-def test_passed_reconciliation_prints_buckets_with_codes() -> None:
-    """Сошлось — корзины печатаются с кодом, пересекающая графа названа."""
+def test_passed_reconciliation_prints_flows_with_storage_codes() -> None:
+    """Сошлось — потоки печатаются с кодом хранения, графа как напечатана названа."""
     part = Part("debt", "Долг")
     _debt(part, _document(Check.PASSED), _composition())
     codes = [line.code for line in part.lines]
-    assert "debt_maturity.within_1y" in codes and "debt_maturity.m12_60" in codes
+    assert "ifrs.debt_cf_due_m000_m012" in codes and "ifrs.debt_cf_due_m012_m060" in codes
+    assert "ifrs.debt_due_m000_plus" in codes
     assert "Графа «от 1 до 5 лет» как напечатана." in part.paragraphs
+
+
+def test_without_carrying_flows_are_printed_with_a_caveat() -> None:
+    """ЛСР: графы балансовой нет — сверки нет, потоки как напечатаны, без отказа."""
+    part = Part("debt", "Долг")
+    _debt(part, _document(Check.NO_CARRYING), _composition())
+    assert "Графы нет (данные агрегатора); потоки как напечатаны." in part.paragraphs
+    assert "ifrs.debt_cf_due_m000_m012" in [line.code for line in part.lines]
+
+
+def test_debt_like_is_printed_as_a_second_value() -> None:
+    """Автодор: две величины с перечнем добавленного; сумма без сверки потоками нет."""
+    named = ("Концессионные соглашения",)
+    part = Part("debt", "Долг")
+    _debt(part, _document(Check.LOANS_ONLY, named), _composition())
+    names = [line.name for line in part.lines]
+    assert "Займы и долгоподобные (Концессионные соглашения), млн руб." in names
+    assert "С долгоподобными (Концессионные соглашения) не приводятся." in part.paragraphs
+    assert "ifrs.debt_cf_due_m000_m012" in [line.code for line in part.lines]
+    assert all("debt_like_cf_due" not in line.code for line in part.lines)
+
+    passed = Part("debt", "Долг")
+    _debt(passed, _document(Check.PASSED, named), _composition())
+    assert any("debt_like_cf_due" in line.code for line in passed.lines)
 
 
 def test_no_table_names_the_reason() -> None:
