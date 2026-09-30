@@ -353,6 +353,23 @@ class MaturityTablePolicy(BaseModel):
     origin: str = Field(min_length=1)
 
 
+class DisclosureTextPolicy(BaseModel):
+    """Как проза примечания делится на абзацы и заголовки — технически."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    prose_min_words: int = Field(ge=1)
+    table_trailing_numbers: int = Field(ge=1)
+    heading_max_words: int = Field(ge=1)
+    full_line_ratio: Decimal = Field(gt=0, le=1)
+    sentence_end: str = Field(min_length=1)
+    bullets: tuple[str, ...] = Field(min_length=1)
+    enumerator: str = Field(min_length=1)
+    colontitle_min_repeats: int = Field(ge=2)
+    end_markers: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
 class IssuerNamePolicy(BaseModel):
     """Как опознаётся наименование эмитента в документе.
 
@@ -406,6 +423,7 @@ class ParsingPolicy(BaseModel):
     grouping_plausibility: PlausibilityPolicy
     notes: NotesPolicy
     maturity_table: MaturityTablePolicy
+    disclosure_text: DisclosureTextPolicy
     issuer_name: IssuerNamePolicy
     extraction_completeness: ExtractionCompletenessPolicy
 

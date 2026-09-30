@@ -159,6 +159,57 @@ class DebtMaturity(BaseModel):
         return self
 
 
+class CovenantDisclosure(BaseModel):
+    """Ковенанты: абзацы примечания о долге и приметы нарушения — не вывод."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    in_debt_note: bool
+    paragraph_markers: tuple[str, ...] = Field(min_length=1)
+    breach_markers: tuple[Alias, ...] = Field(min_length=1)
+    reclassification_markers: tuple[Alias, ...] = ()
+
+
+class PledgeDisclosure(BaseModel):
+    """Залоги: абзацы примечания о долге по примете либо под заголовком."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    in_debt_note: bool
+    paragraph_markers: tuple[str, ...] = Field(min_length=1)
+    heading_markers: tuple[Alias, ...] = ()
+
+
+class GuaranteeDisclosure(BaseModel):
+    """Поручительства и финансовые гарантии: примечание о долге и названные."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    in_debt_note: bool
+    note_titles: tuple[Alias, ...] = Field(min_length=1)
+    paragraph_markers: tuple[str, ...] = Field(min_length=1)
+
+
+class EventsDisclosure(BaseModel):
+    """События после отчётной даты: примечание по наименованию, целиком."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    note_titles: tuple[Alias, ...] = Field(min_length=1)
+
+
+class Disclosures(BaseModel):
+    """Раскрытия уровня 2: приводятся цитатами, величинами не становятся."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    covenants: CovenantDisclosure
+    pledges: PledgeDisclosure
+    guarantees: GuaranteeDisclosure
+    subsequent_events: EventsDisclosure
+    origin: str = Field(min_length=1)
+
+
 class NoteLineCatalog(BaseModel):
     """Справочник строк примечаний целиком."""
 
@@ -170,6 +221,9 @@ class NoteLineCatalog(BaseModel):
     # Сроки погашения долга (уровень 2). Пусто — состав не утверждён,
     # и разбор сроков отказывается, а не берёт умолчание.
     debt_maturity: DebtMaturity | None = None
+    # Раскрытия уровня 2. Пусто — состав не утверждён, и разделы
+    # не собираются, а не берут умолчание.
+    disclosures: Disclosures | None = None
 
     @model_validator(mode="after")
     def _check_integrity(self) -> Self:

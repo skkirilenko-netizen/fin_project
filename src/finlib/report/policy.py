@@ -411,7 +411,10 @@ class Level2Section(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     code: str = Field(
-        pattern="^(route|values|trend|refinancing|changes|audit|debt|limits)$"
+        pattern=(
+            "^(route|values|trend|refinancing|changes|audit|debt|covenants"
+            "|pledges_guarantees|subsequent_events|limits)$"
+        )
     )
     title: str = Field(min_length=1)
 
@@ -453,6 +456,45 @@ class DebtWording(BaseModel):
     note_total_against: str = Field(min_length=1)
 
 
+_DISCLOSURE_KINDS = frozenset({"covenants", "pledges", "guarantees", "subsequent_events"})
+
+
+class DisclosureWording(BaseModel):
+    """Формулировки раскрытий уровня 2: цитата, её предел и исходы поиска."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Места подстановки: {note}, {page}, {text}.
+    quote: str = Field(min_length=1)
+    # Предел цитаты по предмету (решение владельца 30.09.2026).
+    quote_max_chars: dict[str, int] = Field(min_length=1)
+    # Место подстановки: {note}.
+    cut: str = Field(min_length=1)
+    covenants_found: str = Field(min_length=1)
+    # Место подстановки: {markers}.
+    breach_markers: str = Field(min_length=1)
+    reclassification: str = Field(min_length=1)
+    no_breach_markers: str = Field(min_length=1)
+    pledges_found: str = Field(min_length=1)
+    guarantees_found: str = Field(min_length=1)
+    events_found: str = Field(min_length=1)
+    what: dict[str, str] = Field(min_length=1)
+    # Места подстановки: {what}, {where}.
+    not_found: str = Field(min_length=1)
+    # Место подстановки: {what}.
+    note_not_found: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _kinds_are_complete(self) -> Self:
+        """Предел и наименование объявлены у каждого предмета: иначе умолчание."""
+        for name, given in (("quote_max_chars", self.quote_max_chars), ("what", self.what)):
+            if set(given) != _DISCLOSURE_KINDS:
+                raise ValueError(f"{name}: предметы раскрытий объявлены не все: {sorted(given)}")
+        if any(value <= 0 for value in self.quote_max_chars.values()):
+            raise ValueError("предел цитаты должен быть положительным")
+        return self
+
+
 class Level2Conclusion(BaseModel):
     """Состав заключения уровня 2: уровень 1 плюс аудиторское заключение и долг.
 
@@ -471,6 +513,7 @@ class Level2Conclusion(BaseModel):
     sections: tuple[Level2Section, ...] = Field(min_length=1)
     # Место подстановки: {reasons}.
     quarantine: str = Field(min_length=1)
+    disclosures: DisclosureWording
     debt: DebtWording
     limitations: tuple[str, ...] = Field(min_length=1)
     origin: str = Field(min_length=1)
@@ -480,7 +523,8 @@ class Level2Conclusion(BaseModel):
         """Каждый раздел объявлен ровно один раз: пропущенный исчез бы молча."""
         codes = [item.code for item in self.sections]
         wanted = {
-            "route", "values", "trend", "refinancing", "changes", "audit", "debt", "limits"
+            "route", "values", "trend", "refinancing", "changes", "audit", "debt",
+            "covenants", "pledges_guarantees", "subsequent_events", "limits",
         }  # fmt: skip
         if len(set(codes)) != len(codes) or set(codes) != wanted:
             raise ValueError(f"разделы заключения уровня 2 объявлены не все либо дважды: {codes}")

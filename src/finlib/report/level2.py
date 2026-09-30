@@ -17,21 +17,43 @@
 29.09.2026): карантин — об арифметике форм, а не о тексте. Документ так
 и говорит, называя основания. Величины сроков печатаются только при
 прошедшей сверке суммы.
+
+**Раскрытия — цитатами, а не величинами** (решение владельца 30.09.2026):
+ковенанты, залоги и поручительства, события после отчётной даты. Абзац
+эмитента приводится дословно с номером примечания и страницей — это его
+источник, как у цитаты аудитора; числа в нём фактами не пишутся и в расчёт
+не идут. Предел цитаты свой у каждого предмета (`report.yaml`,
+`disclosures.quote_max_chars`), обрезка — по границе предложения с отсылкой
+к примечанию.
 """
 
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
 from finlib.metrics.display import money
 from finlib.report.aggregator import BaseConclusion, Line, Part, build
-from finlib.report.policy import AggregatorConclusion, Level2Conclusion
+from finlib.report.policy import AggregatorConclusion, DisclosureWording, Level2Conclusion
 from finlib.sources.ifrs_debt_note import (
     Check,
     DebtNoteReading,
     PrintedBucket,
     Reconciliation,
 )
+from finlib.sources.ifrs_disclosures import DisclosureReading, Kind, Quote
+
+# Предметы раскрытий по разделам заключения: «Залоги и поручительства» —
+# два предмета, у каждого свой исход поиска.
+_SECTION_KINDS: dict[str, tuple[Kind, ...]] = {
+    "covenants": (Kind.COVENANTS,),
+    "pledges_guarantees": (Kind.PLEDGES, Kind.GUARANTEES),
+    "subsequent_events": (Kind.SUBSEQUENT_EVENTS,),
+}
+# Граница предложения для обрезки цитаты: знак конца, пробел, начало
+# следующего предложения.
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[«(\"A-ZА-ЯЁ0-9•−–-])")
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +83,8 @@ class Level2Document:
     debt_like_check: Reconciliation | None = None
     # Опора `debt_like_check` — итог примечания (запасная), а не баланс.
     debt_like_by_note: bool = False
+    # Раскрытия по предметам (`sources.ifrs_disclosures`); None — не читались.
+    disclosures: Mapping[Kind, DisclosureReading] | None = None
 
 
 def build_level2(
@@ -96,6 +120,9 @@ def build_level2(
         elif section.code == "debt":
             part = Part(section.code, section.title)
             _debt(part, document, composition)
+        elif section.code in _SECTION_KINDS:
+            part = Part(section.code, section.title)
+            _disclosures(part, _SECTION_KINDS[section.code], document, composition.disclosures)
         elif section.code == "limits":
             part = Part(section.code, section.title)
             part.paragraphs.extend(composition.limitations)
@@ -271,6 +298,74 @@ def _flows(
                 bucket.code,
             )
         )
+
+
+def _disclosures(
+    part: Part,
+    kinds: tuple[Kind, ...],
+    document: Level2Document,
+    wording: DisclosureWording,
+) -> None:
+    """Раскрытия цитатами эмитента: найдено, приметы, не найдено — по предмету.
+
+    Нарушение ковенанта не утверждается и не отрицается: приметы названы
+    приметами, а их отсутствие — не утверждение о соблюдении.
+    """
+    if document.disclosures is None:
+        part.paragraphs.append("Раскрытия в примечаниях не читались.")
+        return
+    leads = {
+        Kind.COVENANTS: wording.covenants_found,
+        Kind.PLEDGES: wording.pledges_found,
+        Kind.GUARANTEES: wording.guarantees_found,
+        Kind.SUBSEQUENT_EVENTS: wording.events_found,
+    }
+    for kind in kinds:
+        reading = document.disclosures[kind]
+        what = wording.what[kind.value]
+        if reading.note_missing:
+            part.paragraphs.append(_tidy(wording.note_not_found.format(what=what)))
+            continue
+        if not reading.quotes:
+            where = "; ".join(f"{number} «{title}»" for number, title in reading.viewed)
+            part.paragraphs.append(_tidy(wording.not_found.format(what=what, where=where)))
+            continue
+        part.paragraphs.append(leads[kind])
+        limit = wording.quote_max_chars[kind.value]
+        part.paragraphs.extend(_quote(item, limit, wording) for item in reading.quotes)
+        if kind is not Kind.COVENANTS:
+            continue
+        if reading.breach:
+            markers = ", ".join(f"«{item}»" for item in reading.breach)
+            part.paragraphs.append(wording.breach_markers.format(markers=markers))
+        else:
+            part.paragraphs.append(wording.no_breach_markers)
+        if reading.reclassified:
+            markers = ", ".join(f"«{item}»" for item in reading.reclassified)
+            part.paragraphs.append(wording.reclassification.format(markers=markers))
+
+
+def _quote(item: Quote, limit: int, wording: DisclosureWording) -> str:
+    """Цитата с примечанием и страницей; длиннее предела — по границе предложения."""
+    note = f"{item.note} «{item.title}»"
+    text, cut = _cut(item.text, limit)
+    said = wording.quote.format(note=note, page=item.page, text=text)
+    return f"{said} {wording.cut.format(note=note)}" if cut else said
+
+
+def _cut(text: str, limit: int) -> tuple[str, bool]:
+    """Текст не длиннее предела, обрезанный на границе предложения; обрезан ли.
+
+    Предложение длиннее предела само по себе режется по слову с многоточием:
+    иначе цитата оказалась бы пустой.
+    """
+    if len(text) <= limit:
+        return text, False
+    ends = [match.start() for match in _SENTENCE.finditer(text) if match.start() <= limit]
+    if ends:
+        return text[: ends[-1]].rstrip(), True
+    head = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return f"{head}…", True
 
 
 def _shown(value: object) -> str:

@@ -16,7 +16,9 @@
 
 Таблица итогов печатается в конец: мнение аудитора определено или нет,
 примечание о долге найдено, сроки разобраны (какая основа), сверка суммы
-(с чем, прошла или нет).
+(с чем, прошла или нет). Вторая таблица — раскрытия (ковенанты, залоги,
+поручительства, события после отчётной даты): цитат сколько и откуда,
+приметы нарушения, либо в каких примечаниях искали и не нашли.
 """
 
 import argparse
@@ -40,6 +42,7 @@ from finlib.sources.ifrs_debt_note import (
     reconcile_debt,
     stored_facts,
 )
+from finlib.sources.ifrs_disclosures import Kind, debt_note_of, read_disclosures
 from finlib.sources.ifrs_inbox import form_headings, text_of
 from finlib.sources.ifrs_notes import index_notes
 from finlib.sources.ifrs_numbers import load_parsing_policy
@@ -83,8 +86,8 @@ def _aggregator_rows() -> list[dict] | None:
     return cbonds.msfo_universe()
 
 
-def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN001
-    """Один документ: приём без записи, заключение, сроки, сверка."""
+def _row(inn: str, path: Path, method, disclosures, policy, rows, conn) -> dict:  # noqa: ANN001
+    """Один документ: приём без записи, заключение, сроки, сверка, раскрытия."""
     result: dict = {"inn": inn, "who": ISSUERS[inn], "file": path.name}
     document = text_of(path)
     if not document.readable:
@@ -107,6 +110,11 @@ def _row(inn: str, path: Path, method, policy, rows, conn) -> dict:  # noqa: ANN
         method, policy.maturity_table,
     )  # fmt: skip
     result["debt"] = debt
+    if disclosures is not None:
+        result["disclosures"] = read_disclosures(
+            document.text, index, document.page_at,
+            debt_note_of(debt.debt_note, index, method), disclosures, policy.disclosure_text,
+        )  # fmt: skip
     stored = fetch_all(_STATUS, {"inn": inn, "path": str(path)}, conn=conn)
     quarantined = any(item["status"] == "quarantine" for item in stored)
     reasons = [
@@ -210,6 +218,7 @@ def _docx(result: dict, conn, level1, composition, audit_policy, today, found) -
         reference_codes=result.get("reference_codes", ""),
         debt_like_check=result.get("debt_like_check"),
         debt_like_by_note=result.get("debt_like_by_note", False),
+        disclosures=result.get("disclosures"),
     )
     basket = load_routing().basket(item.verdict.basket).name
     conclusion = build_level2(item, conn, level1, composition, document, today, basket)
@@ -228,6 +237,30 @@ def _audit_state(audit) -> str:  # noqa: ANN001
     return f"нет — {audit.describe()}"
 
 
+def _disclosure_cell(reading) -> str:  # noqa: ANN001
+    """Исход по предмету словами таблицы: откуда цитаты, приметы, где искали."""
+    if reading.note_missing:
+        return "нет — примечания с таким наименованием нет"
+    if not reading.quotes:
+        where = ", ".join(str(number) for number, _ in reading.viewed)
+        return f"нет — абзацев нет (просмотрены прим. {where})"
+    quoted = ", ".join(
+        f"прим. {item.note} стр. {item.page} ({len(item.text)} зн.)" for item in reading.quotes
+    )
+    tail = ""
+    if reading.kind is Kind.COVENANTS:
+        tail = (
+            "; приметы нарушения: " + ", ".join(f"«{item}»" for item in reading.breach)
+            if reading.breach
+            else "; примет нарушения нет"
+        )
+        if reading.reclassified:
+            tail += "; перенос в краткосрочные: " + ", ".join(
+                f"«{item}»" for item in reading.reclassified
+            )
+    return f"цитат {len(reading.quotes)}: {quoted}{tail}"
+
+
 def main() -> int:
     """Прогон по шести эмитентам и таблица итогов."""
     parser = argparse.ArgumentParser()
@@ -236,7 +269,8 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
     notes_path = args.methodology / "ifrs_note_lines.yaml" if args.methodology else None
-    method = load_note_lines(notes_path).debt_maturity
+    catalog = load_note_lines(notes_path)
+    method = catalog.debt_maturity
     policy = load_parsing_policy()
     rows = _aggregator_rows()
     if rows is None:
@@ -245,7 +279,9 @@ def main() -> int:
     with connection() as conn:
         for inn in ISSUERS:
             for path in sorted((ROOT / inn).glob("*.pdf")):
-                results.append(_row(inn, path, method, policy, rows, conn))
+                results.append(
+                    _row(inn, path, method, catalog.disclosures, policy, rows, conn)
+                )
         written: dict[str, str] = {}
         if args.docx:
             from finlib.normalize.ifrs_audit import load_audit_policy
@@ -310,6 +346,23 @@ def main() -> int:
             f"| {result['who']} | {result['file']} ({result['date']:%d.%m.%Y}) | {stored} "
             f"| {_audit_state(result['audit'])} | {note} | {terms} | {checked} |"
         )
+    print("\n## Раскрытия: ковенанты, залоги, поручительства, события после отчётной даты\n")
+    if catalog.disclosures is None:
+        print("Состав раскрытий (`disclosures`) в методике не утверждён.\n")
+    kinds = (
+        (Kind.COVENANTS, "Ковенанты"),
+        (Kind.PLEDGES, "Залоги"),
+        (Kind.GUARANTEES, "Поручительства"),
+        (Kind.SUBSEQUENT_EVENTS, "События после отчётной даты"),
+    )
+    print("| Эмитент | Документ | " + " | ".join(name for _, name in kinds) + " |")
+    print("|---|---|" + "---|" * len(kinds))
+    for result in results:
+        found = result.get("disclosures")
+        if found is None:
+            continue
+        cells = [_disclosure_cell(found[kind]) for kind, _ in kinds]
+        print(f"| {result['who']} | {result['file']} | " + " | ".join(cells) + " |")
     for result in results:
         check = result.get("check")
         if "buckets" in result and check is not None and (
