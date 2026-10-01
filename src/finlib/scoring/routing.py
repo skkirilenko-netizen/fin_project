@@ -944,18 +944,28 @@ class Overrides:
     хуже, берётся у шкалы. `cover` — отсечка рефинансирования по коду
     основания. Замена действует только у эмитентов названного стандарта
     и отраслей: пусто — у всех.
+
+    `metrics` — **замена определения, а не порога**: величина под кодом
+    маршрута берётся у другого показателя того же справочника (замер
+    МСФО (IFRS) 16: чистый долг с арендой вместо одних займов). Шкала,
+    наименование основания и отсечки остаются у кода маршрута — меняется
+    только величина, и сравнение «было/стало» идёт тем же маршрутом.
+    `floors` — оценка снизу того же показателя, встающая на его место,
+    когда точной величины нет (аренда не раскрыта).
     """
 
     review: Mapping[str, Decimal] = None  # type: ignore[assignment]
     attention: Mapping[str, Decimal] = None  # type: ignore[assignment]
     cover: Mapping[str, Decimal] = None  # type: ignore[assignment]
+    metrics: Mapping[str, str] = None  # type: ignore[assignment]
+    floors: Mapping[str, str] = None  # type: ignore[assignment]
     standard: Standard | None = None
     branch_in: frozenset[str] | None = None
     branch_out: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Пустые перечни создаются у каждого варианта свои."""
-        for name in ("review", "attention", "cover"):
+        for name in ("review", "attention", "cover", "metrics", "floors"):
             if getattr(self, name) is None:
                 object.__setattr__(self, name, {})
 
@@ -1285,6 +1295,8 @@ def route(
     fired = stop_factor_values or {}
     caps = {factor.code: factor.cap for factor in catalogue.stop_factors}
     by_code = {item.code: item for item in computed}
+    if over.metrics:
+        by_code = _substituted(by_code, over.metrics, over.floors, catalogue)
     review: list[Finding] = []
     attention: list[Finding] = []
     # Справочные обстоятельства: корзину не называют, но и молчать о них
@@ -2567,6 +2579,48 @@ def _spoken_for(
         and (not item.by_value or fired.get(item.stop_factor) == item.by_value)
     }
     return metrics
+
+
+def _substituted(
+    by_code: dict[str, MetricValue],
+    metrics: Mapping[str, str],
+    floors: Mapping[str, str],
+    catalogue: RoutingCatalogue,
+) -> dict[str, MetricValue]:
+    """Величины маршрута с заменой определения — довод замера, не режим работы.
+
+    Величина заменяющего показателя встаёт под код маршрута, шкала остаётся
+    его. **Оценка снизу встаёт, только если что-то доказывает**: у долга
+    с нераскрытой арендой отношение без аренды не выше настоящего, и балл
+    ниже нижней полосы доказывает нагрузку; выше неё величина не установлена,
+    и маршрут видит её отсутствие, а не благополучие.
+    """
+    found = dict(by_code)
+    lower = load_theses().bands.lower_below
+    for code, other in metrics.items():
+        item = by_code.get(other)
+        floor = by_code.get(floors.get(code, ""))
+        scale = catalogue.scale(code)
+        if (
+            (item is None or not item.calculable)
+            and floor is not None
+            and floor.calculable
+            and scale is not None
+            and level(floor.value, scale) < lower
+        ):
+            item = floor
+        if item is None or not item.calculable:
+            found.pop(code, None)
+            continue
+        own = by_code.get(code)
+        found[code] = replace(
+            item,
+            code=code,
+            name=own.name if own is not None else item.name,
+            bound_for=own.bound_for if own is not None else None,
+            bound_shown=own.bound_shown if own is not None else None,
+        )
+    return found
 
 
 def _bound_proves(bound: MetricValue | None, operating_profit: Decimal | None) -> bool:

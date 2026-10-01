@@ -423,6 +423,75 @@ def run_pass(
     return said
 
 
+# **Замена определения, а не порога** (МСФО (IFRS) 16, решение владельца
+# 01.10.2026): под кодом маршрута — величина с обязательствами по аренде,
+# шкала и отсечки прежние. Аренда не раскрыта — оценка снизу, и встаёт она,
+# только если что-то доказывает (`routing._substituted`). Вариант — довод
+# замера: в маршрут новое определение не включено.
+LEASES = "с арендой"
+LEASES_VARIANT = Overrides(
+    metrics={
+        "net_debt_ebitda": "net_debt_ebitda_leases",
+        "net_debt_op_profit": "net_debt_op_profit_leases",
+    },
+    floors={"net_debt_ebitda": "net_debt_ebitda_leases_floor"},
+    standard=Standard.IFRS,
+)
+
+
+@dataclass(slots=True)
+class DefinitionPass:
+    """Итог прохода двух определений: основания и корзины по дню у обоих."""
+
+    found: dict[str, dict[str, dict[date, frozenset]]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(dict))
+    )
+    baskets: dict[str, dict[str, dict[date, str]]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(dict))
+    )
+    seconds: list[float] = field(default_factory=list)
+
+    def base(self) -> Pass:
+        """«Прежний» в виде прохода порогов — для контроля с историей."""
+        said = Pass()
+        for inn, by_day in self.found["прежний"].items():
+            said.base[inn] = dict(by_day)
+        return said
+
+    def days_of(self, name: str, subject: Subject) -> dict[str, set[date]]:
+        """Дни срабатывания основания ступени у варианта по эмитенту."""
+        return {
+            inn: {day for day, found in by_day.items() if _fires(subject, found)}
+            for inn, by_day in self.found[name].items()
+        }
+
+
+def definition_pass(dates: list[date]) -> DefinitionPass:
+    """Проход по датам: боевой маршрут с прежним определением долга и с арендой."""
+    said = DefinitionPass()
+    memo: dict = {}
+    chosen = {"прежний": Overrides(), LEASES: LEASES_VARIANT}
+    with connection() as conn:
+        for moment in dates:
+            started = time.monotonic()
+            verdicts: dict = {}
+            routing_rows(
+                conn, moment, as_of=moment, memo=memo, variants=chosen, verdicts=verdicts
+            )
+            for name, by_inn in verdicts.items():
+                for inn, verdict in by_inn.items():
+                    said.found[name][inn][moment] = frozenset(
+                        (item.ground, item.subject)
+                        for item in verdict.findings
+                        if item.ground in CALIBRATED
+                    )
+                    said.baskets[name][inn][moment] = verdict.basket
+            said.seconds.append(time.monotonic() - started)
+            logger.warning("%s: %.1f с", moment, said.seconds[-1])
+        conn.rollback()
+    return said
+
+
 @dataclass
 class Control:
     """Итог контроля: сверено, необъяснённые расхождения и перезабранные эмитенты."""
@@ -695,6 +764,12 @@ def main() -> int:
     start, end = grid[0], grid[-1]
     train = sorted(d for d in calendar.values() if start < d < SPLIT)
     test = sorted(d for d in calendar.values() if SPLIT <= d <= end)
+    if "--definition" in sys.argv:
+        parts = (
+            Part("обучение", start, max(d for d in grid if d < SPLIT)),
+            Part("проверка", SPLIT, end),
+        )
+        return _definition(rows, grid, found, calendar, parts, len(train), len(test))
 
     print("# Калибровка порогов отчётности (фаза 6)\n")
     print(
@@ -842,6 +917,107 @@ def _measure(
     for line in summary:
         print(line)
     return summary
+
+
+def _definition(
+    rows: list[dict],
+    grid: list[date],
+    found: tuple[Subject, ...],
+    calendar: dict[str, date],
+    parts: tuple[Part, Part],
+    train_events: int,
+    test_events: int,
+) -> int:
+    """Замер МСФО (IFRS) 16: прежнее определение долга против долга с арендой.
+
+    Мера и бутстрэп те же, что у порогов: прирост на обеих частях календаря
+    и 90 % интервал парной разности на одних и тех же выборках эмитентов.
+    Сверх того — кто сменил корзину на последней дате истории и сколько
+    эмитентов расходились хоть в один день.
+    """
+    done = definition_pass(grid)
+    checked = control(rows, done.base(), grid)
+    print("# Долг с арендой (МСФО (IFRS) 16): замер определения\n")
+    print(
+        f"История: {len(grid)} дат, {grid[0]:%d.%m.%Y} — {grid[-1]:%d.%m.%Y}. "
+        f"Раздел {SPLIT:%d.%m.%Y}: событий в обучении **{train_events}**, "
+        f"в проверке **{test_events}**. Вариант «{LEASES}» — довод замера: "
+        "в маршрут новое определение не включено.\n"
+    )
+    print(
+        f"**Контроль**: «прежний» против записанной истории — сверено "
+        f"**{checked.compared}** точек, расхождений **{len(checked.differ)}**. "
+        f"Проход {sum(done.seconds) / 60:.0f} мин.\n"
+    )
+    for line in checked.differ[:20]:
+        print(f"- {line}")
+    for line in checked.said():
+        print(f"- {line}")
+    if checked.differ:
+        print("\n**Расхождения есть — мерам ниже верить нельзя, пока они не объяснены.**\n")
+    branches = _branches()
+    observed = {inn: set(by_day) for inn, by_day in done.found["прежний"].items()}
+    for subject in found:
+        if subject.standard is not Standard.IFRS or subject.key != "net_debt_ebitda":
+            continue
+        print(f"## {subject.name}\n")
+        for part in parts:
+            members = circle(rows, branches, subject, part)
+            old = flags(done.days_of("прежний", subject), observed, members, calendar, part)
+            new = flags(done.days_of(LEASES, subject), observed, members, calendar, part)
+            print(
+                f"**{part.name.capitalize()}** ({part.start:%d.%m.%Y} — "
+                f"{part.end:%d.%m.%Y}): круг {len(members)}.\n"
+            )
+            print("| Определение | Сработал | Пойман | Выявляемость | Прирост | Упреждение |")
+            print("|---|---|---|---|---|---|")
+            print(_line("прежнее", score(old)))
+            print(_line(LEASES, score(new)))
+            low, high, empty = paired(old, new)
+            interval = (
+                f"[{low:.2f}; {high:.2f}]"
+                if low is not None and high is not None
+                else "не определён"
+            )
+            print(
+                f"\nПарная разность прироста ({LEASES} − прежнее), "
+                f"{CONFIDENCE:.0f} % интервал на {REPLICAS} выборках эмитентов: "
+                f"**{interval}**; выборок без определённого прироста {empty}.\n"
+            )
+    routing = load_routing()
+    last = grid[-1]
+    before, after = done.baskets["прежний"], done.baskets[LEASES]
+    moved = sorted(
+        inn for inn, by_day in before.items()
+        if last in by_day and after.get(inn, {}).get(last) != by_day[last]
+    )
+    ever = sum(
+        1 for inn, by_day in before.items()
+        if any(after.get(inn, {}).get(day) != basket for day, basket in by_day.items())
+    )
+    with connection() as conn:
+        names = {
+            row["inn"]: row["name"]
+            for row in fetch_all(
+                "SELECT inn, name FROM organization WHERE inn = ANY(%(inns)s)",
+                {"inns": moved},
+                conn=conn,
+            )
+        }
+    print(
+        f"## Смена корзины на {last:%d.%m.%Y}: {len(moved)} из {len(before)}\n\n"
+        f"Расходились хоть в один день истории: **{ever}**.\n"
+    )
+    if moved:
+        print("| Эмитент | Прежнее определение | С арендой |")
+        print("|---|---|---|")
+        for inn in moved:
+            print(
+                f"| {names.get(inn) or inn} ({inn}) "
+                f"| {routing.basket(before[inn][last]).name} "
+                f"| {routing.basket(after[inn][last]).name} |"
+            )
+    return 0 if not checked.differ else 1
 
 
 def _line(label: str, item: Score) -> str:

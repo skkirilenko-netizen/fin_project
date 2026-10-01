@@ -100,6 +100,9 @@ class StandardRule(BaseModel):
     # то есть как довод в пользу эмитента, полученный из нераскрытого.
     debt_lines: tuple[str, ...] = Field(min_length=1)
     debt_metrics: tuple[str, ...] = Field(min_length=1)
+    # Величины, которые строка печатает рядом с решающими, но корзины
+    # не решающие: другой состав той же меры, до решения о переключении.
+    alongside: tuple[str, ...] = ()
     why: str = Field(min_length=1)
 
     @model_validator(mode="after")

@@ -167,6 +167,160 @@ metrics:
       ни налогов, и у ЛСР расхождение между двумя мерами оказалось
       наибольшим из наблюдавшихся.
 
+  # --- Долг с обязательствами по аренде (МСФО (IFRS) 16) -----------------------
+  #
+  # **EBITDA и FFO — «после аренды», а долг был без неё** (разбор 30.09.2026,
+  # решение владельца 01.10.2026). EBITDA считается как операционная прибыль
+  # плюс амортизация из отчёта о движении денежных средств, а там после
+  # МСФО (IFRS) 16 и амортизация активов в форме права пользования; FFO
+  # не несёт арендных платежей, ушедших в финансовую деятельность. Долг же
+  # состоял из одних займов, и отношение сравнивало несравнимое: у Росинтера
+  # займы 3 008 795, аренда 4 421 747 тыс. руб., чистый долг / EBITDA 1,34
+  # без аренды и 3,36 с ней. «Обе без аренды» агрегатор не даёт: амортизации
+  # права пользования и процентов по аренде отдельно у него нет.
+  #
+  # **Прежние показатели остаются, новые стоят рядом.** Документ печатает
+  # обе величины — займы и займы с арендой; балл и маршрут остаются
+  # на прежнем составе, пока замер не покажет, кто сменит корзину,
+  # и переключение не решит владелец. Поэтому новые вне балла с видом
+  # «дублирует другой показатель».
+  #
+  # **Аренда не раскрыта — оценка снизу, а не ноль** (инвариант 4). Аренда
+  # неотрицательна, и отношение без неё не выше настоящего: выше порога
+  # нагрузка высокая доказанно, ниже — не установлена. Оценка сверху
+  # через операционную прибыль при нераскрытой аренде не считается вовсе:
+  # она ограничивала бы сверху величину, у которой неизвестен числитель.
+  # Нераскрыта аренда у 92 из 316 эмитентов МСФО с долгом; у всех 224
+  # раскрывших она больше нуля, так что среди нераскрывших могут быть
+  # и настоящие нули — различить их нечем.
+  - code: net_debt_ebitda_leases
+    name: Чистый долг с арендой / EBITDA
+    group: debt_burden
+    unit: ratio
+    direction: lower_better
+    in_scoring: false
+    exclusion_kind: duplicate
+    exclusion_reason: &leases_pending >-
+      Состав долга с обязательствами по аренде приводится рядом с прежним;
+      в балл и маршрут он переходит только решением владельца по замеру.
+    numerator: net_debt_with_leases
+    denominator: ebitda
+    denominator_must_be_positive: true
+    note: >-
+      Долг — заёмные средства и обязательства по аренде за вычетом денежных
+      средств: EBITDA включает амортизацию активов в форме права пользования,
+      и долг берётся в том же составе. Кредиторская задолженность и оценочные
+      обязательства в долг не входят.
+
+  - code: net_debt_ebitda_leases_floor
+    name: Чистый долг с арендой / EBITDA, оценка снизу
+    group: debt_burden
+    unit: ratio
+    direction: lower_better
+    in_scoring: false
+    exclusion_kind: no_level_scale
+    exclusion_reason: &floor_reason >-
+      Граница, а не величина: обязательства по аренде не раскрыты, и балл
+      по оценке снизу означал бы точность, которой нет.
+    numerator: net_debt
+    denominator: ebitda
+    denominator_must_be_positive: true
+    bound_for: net_debt_ebitda_leases
+    bound_shown: "не ниже {value} (оценка снизу: аренда не раскрыта)"
+    note: >-
+      Оценка снизу: обязательства по аренде не раскрыты, а они неотрицательны,
+      поэтому отношение с арендой не ниже приведённого.
+
+  - code: net_debt_op_profit_leases
+    name: Чистый долг с арендой / EBITDA, оценка сверху
+    group: debt_burden
+    unit: ratio
+    direction: lower_better
+    in_scoring: false
+    exclusion_kind: no_level_scale
+    exclusion_reason: >-
+      Граница, а не величина: шкала уровня объявлена для отношения к EBITDA,
+      и балл по оценке сверху означал бы точность, которой нет.
+    # Числитель тот же, что у точной величины: граница обязана ограничивать
+    # тот же показатель. Аренда не раскрыта — числителя нет, и границы нет.
+    numerator: net_debt_with_leases
+    denominator: ifrs.operating_profit
+    denominator_must_be_positive: true
+    bound_for: net_debt_ebitda_leases
+    bound_shown: "не выше {value} (оценка сверху)"
+    note: >-
+      Оценка сверху для отношения чистого долга с арендой к EBITDA: амортизация
+      неотрицательна, поэтому при положительной операционной прибыли отношение
+      к EBITDA не выше приведённого. Точная величина не рассчитана, потому что
+      амортизация не раскрыта.
+
+  - code: debt_ebitda_leases
+    name: Долг с арендой / EBITDA
+    group: debt_burden
+    unit: ratio
+    direction: lower_better
+    in_scoring: false
+    exclusion_kind: duplicate
+    exclusion_reason: *leases_pending
+    numerator: debt_with_leases
+    denominator: ebitda
+    denominator_must_be_positive: true
+    note: >-
+      Долг — заёмные средства и обязательства по аренде, без вычета денежных
+      средств.
+
+  - code: debt_ebitda_leases_floor
+    name: Долг с арендой / EBITDA, оценка снизу
+    group: debt_burden
+    unit: ratio
+    direction: lower_better
+    in_scoring: false
+    exclusion_kind: no_level_scale
+    exclusion_reason: *floor_reason
+    numerator: debt_total
+    denominator: ebitda
+    denominator_must_be_positive: true
+    bound_for: debt_ebitda_leases
+    bound_shown: "не ниже {value} (оценка снизу: аренда не раскрыта)"
+    note: >-
+      Оценка снизу: обязательства по аренде не раскрыты, а они неотрицательны,
+      поэтому отношение с арендой не ниже приведённого.
+
+  - code: ffo_to_debt_leases
+    name: FFO / Долг с арендой
+    group: debt_burden
+    unit: ratio
+    direction: higher_better
+    in_scoring: false
+    exclusion_kind: duplicate
+    exclusion_reason: *leases_pending
+    numerator: ffo
+    denominator: debt_with_leases
+    note: >-
+      Долг — заёмные средства и обязательства по аренде: FFO не несёт арендных
+      платежей, отнесённых к финансовой деятельности, и долг берётся в том же
+      составе.
+
+  # У показателя «больше — лучше» отношение без аренды не ниже настоящего:
+  # граница та же по смыслу — нагрузка не ниже, — а словом она «не выше».
+  - code: ffo_to_debt_leases_ceiling
+    name: FFO / Долг с арендой, оценка сверху
+    group: debt_burden
+    unit: ratio
+    direction: higher_better
+    in_scoring: false
+    exclusion_kind: no_level_scale
+    exclusion_reason: >-
+      Граница, а не величина: обязательства по аренде не раскрыты, и балл
+      по оценке сверху означал бы точность, которой нет.
+    numerator: ffo
+    denominator: debt_total
+    bound_for: ffo_to_debt_leases
+    bound_shown: "не выше {value} (оценка сверху: аренда не раскрыта)"
+    note: >-
+      Оценка сверху: обязательства по аренде не раскрыты, а они неотрицательны,
+      поэтому отношение FFO к долгу с арендой не выше приведённого.
+
   - code: interest_cover_accrued
     name: Покрытие процентов по начисленным
     group: debt_service
@@ -340,6 +494,33 @@ metrics:
     exclusion_reason: >-
       Абсолютная величина: шкалы уровня у неё нет. Приводится как знаменатель
       отношения Чистый долг / EBITDA и как основание рентабельности по EBITDA.
+
+  # Долг в составе с арендой — знаменатель и числитель отношений рядом
+  # с прежними. Аренда не раскрыта — величины нет: ноль вместо нераскрытого
+  # сделал бы её равной займам (инвариант 4).
+  - code: debt_with_leases
+    name: Совокупный долг с арендой
+    group: debt_burden
+    unit: currency
+    direction: lower_better
+    in_scoring: false
+    numerator: debt_with_leases
+    exclusion_kind: no_level_scale
+    exclusion_reason: >-
+      Абсолютная величина: шкалы уровня у неё нет. Приводится как знаменатель
+      отношения FFO / Долг с арендой.
+
+  - code: net_debt_with_leases
+    name: Чистый долг с арендой
+    group: debt_burden
+    unit: currency
+    direction: lower_better
+    in_scoring: false
+    numerator: net_debt_with_leases
+    exclusion_kind: no_level_scale
+    exclusion_reason: >-
+      Абсолютная величина, бесспорного ориентира у неё быть не может.
+      Приводится как числитель отношения Чистый долг с арендой / EBITDA.
 
   # Величины стоп-факторов объявлены показателями — справочными, вне балла.
   # **Стоп-фактор проверяется по показателю, а не по статье**: у эмитента,

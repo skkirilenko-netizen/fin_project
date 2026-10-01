@@ -144,6 +144,10 @@ DERIVED_NAMES: dict[str, str] = {
     "(таблица сроков в примечании о заёмных средствах)",
     "net_debt": "чистый долг: заёмные средства за вычетом денежных",
     "debt_total": "совокупный долг: долгосрочные и краткосрочные заёмные средства",
+    "debt_with_leases": "совокупный долг с арендой: заёмные средства и обязательства "
+    "по аренде",
+    "net_debt_with_leases": "чистый долг с арендой: заёмные средства и обязательства "
+    "по аренде за вычетом денежных",
     "ebitda": "EBITDA: операционная прибыль и амортизация",
     "nwc": "чистый оборотный капитал: итог оборотных активов за вычетом итога "
     "краткосрочных обязательств",
@@ -252,6 +256,14 @@ def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | N
     if long_debt is not None or short_debt is not None:
         debt = (long_debt or Decimal(0)) + (short_debt or Decimal(0))
     cash = get("ifrs.cash")
+    # **Аренда не раскрыта — долга с арендой нет**, а не долг без неё:
+    # ноль вместо нераскрытого сделал бы величину равной займам (инвариант 4).
+    # Раскрыта одна из двух строк — вторая нулём, как у заёмных средств.
+    long_lease = get("ifrs.long_term_lease_liabilities")
+    short_lease = get("ifrs.short_term_lease_liabilities")
+    with_leases = None
+    if debt is not None and (long_lease is not None or short_lease is not None):
+        with_leases = debt + (long_lease or Decimal(0)) + (short_lease or Decimal(0))
     profit, depreciation = get("ifrs.operating_profit"), get("ifrs.depreciation")
     before = get("ifrs.cash_before_working_capital_changes")
     interest_paid, taxes_paid = get("ifrs.interest_paid"), get("ifrs.income_taxes_paid")
@@ -298,6 +310,10 @@ def _derived(inputs: Inputs, policy: IfrsMetricsPolicy) -> dict[str, Decimal | N
         "current_assets_ex_inventories": ex_inventories,
         "current_assets_ex_escrow_claims": ex_escrow,
         "net_debt": debt - cash if debt is not None and cash is not None else None,
+        "debt_with_leases": with_leases,
+        "net_debt_with_leases": (
+            with_leases - cash if with_leases is not None and cash is not None else None
+        ),
         "ebitda": ebitda,
         "ffo": ffo,
         "interest_accrued": _annualised(

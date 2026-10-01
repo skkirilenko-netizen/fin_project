@@ -138,7 +138,32 @@ standards:
       # нераскрытие (`cbonds_mapping.yaml`, `debt_zero_with_bonds`), и тогда
       # ни одна из этих величин не считается раскрытой.
       debt_lines: [ifrs.long_term_borrowings, ifrs.short_term_borrowings]
-      debt_metrics: [net_debt, debt_total, net_debt_ebitda, net_debt_op_profit]
+      debt_metrics:
+        - net_debt
+        - debt_total
+        - net_debt_ebitda
+        - net_debt_op_profit
+        # Долг с арендой стоит на тех же займах: нераскрытые займы
+        # с арендой сверху дали бы долг, равный одной аренде.
+        - debt_with_leases
+        - net_debt_with_leases
+        - net_debt_ebitda_leases
+        - net_debt_ebitda_leases_floor
+        - net_debt_op_profit_leases
+        - debt_ebitda_leases
+        - debt_ebitda_leases_floor
+        - ffo_to_debt_leases
+        - ffo_to_debt_leases_ceiling
+      # **Величины рядом с решающими, но не решающие** (решение владельца
+      # 01.10.2026, МСФО (IFRS) 16): строка печатает долг и нагрузку
+      # в обоих составах — займы и займы с арендой. Корзину решает прежний
+      # состав, пока переключение не решит владелец по замеру.
+      alongside:
+        - debt_with_leases
+        - net_debt_with_leases
+        - net_debt_ebitda_leases
+        - net_debt_ebitda_leases_floor
+        - net_debt_op_profit_leases
       why: >-
         Периметр консолидированной отчётности описывает деятельность группы,
         и база оценки у группы — она (`standards.yaml`, base_standard).

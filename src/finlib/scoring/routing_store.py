@@ -489,6 +489,7 @@ def _row_metrics(catalogue: "RoutingCatalogue") -> tuple[str, ...]:
         rule.burden,
         rule.bound,
         *rule.metrics,
+        *rule.alongside,
     )
     return tuple(dict.fromkeys(code for code in named if code))
 
