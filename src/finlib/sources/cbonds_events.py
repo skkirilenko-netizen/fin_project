@@ -48,6 +48,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,10 @@ class DefaultRecord:
     announced: date | None
     met: date | None
     amount: Decimal | None
+    # **День первого появления записи в нашем перечне** — по ежедневным
+    # снимкам перечня (`first_seen`); None — запись старше снимков, и когда
+    # она появилась, мы не наблюдали.
+    seen: date | None = None
 
     @property
     def settled(self) -> bool:
@@ -241,13 +246,19 @@ class DefaultRecord:
 
     @property
     def known_on(self) -> date | None:
-        """День, с которого о событии известно: объявление, иначе дата события.
+        """День, с которого о событии известно: объявление, иначе первое появление, иначе дата.
 
         **Неплатёж виден с объявления, а не с планового срока** (решение
         владельца 25.09.2026): пересчёт истории не вправе знать о неплатеже
         раньше, чем о нём сказано публично.
+
+        **Без даты объявления — с первого появления в перечне** (решение
+        владельца 01.10.2026). Прежде такая запись датировалась датой
+        дефолта — концом льготного срока, на 14 дней позже неплатежа: из
+        26 записей, появившихся в снимках 28.09–01.10.2026, у 8 объявления
+        нет, и они были видны на 8–14 дней позже, чем пришли.
         """
-        return self.announced or self.moment
+        return self.announced or self.seen or self.moment
 
     def in_grace(self, today: date) -> bool:
         """Неплатёж объявлен, льготный срок ещё идёт, обязательство не исполнено.
@@ -303,6 +314,39 @@ def defaults_path() -> Path | None:
     return DEFAULTS if DEFAULTS.exists() else None
 
 
+@lru_cache(maxsize=1)
+def first_seen() -> dict[str, date]:
+    """Запись перечня → день первого снимка, в котором она есть, если в прежнем её не было.
+
+    Снимок — ежедневная доставка перечня (`defaults_ru_ГГГГ-ММ-ДД.json`);
+    первая, ручная доставка без даты в имени — снимок дня своего файла.
+    Запись, которая есть уже в первом снимке, дня появления не получает:
+    когда она появилась, мы не видели.
+    """
+    snapshots: list[tuple[date, Path]] = []
+    if DEFAULTS.exists():
+        snapshots.append((date.fromtimestamp(DEFAULTS.stat().st_mtime), DEFAULTS))
+    for path in sorted(CACHE.glob("defaults_ru_*.json")):
+        try:
+            snapshots.append((date.fromisoformat(path.stem[len("defaults_ru_") :]), path))
+        except ValueError:
+            continue
+    snapshots.sort()
+    found: dict[str, date] = {}
+    known: set[str] = set()
+    for number, (day, path) in enumerate(snapshots):
+        ids = {
+            str(item.get("id") or "")
+            for item in json.loads(path.read_text(encoding="utf-8")).get("items", [])
+        }
+        if number:
+            for record in ids - known:
+                found.setdefault(record, day)
+        known |= ids
+    found.pop("", None)
+    return found
+
+
 def default_records() -> dict[str, tuple[DefaultRecord, ...]]:
     """События дефолтов по выпускам с диска; пусто — перечня нет.
 
@@ -315,6 +359,7 @@ def default_records() -> dict[str, tuple[DefaultRecord, ...]]:
         logger.warning("перечня дефолтов на диске нет: %s", DEFAULTS)
         return {}
     found: dict[str, list[DefaultRecord]] = {}
+    seen = first_seen()
     for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
         emission = str(item.get("emission_id") or "")
         found.setdefault(emission, []).append(
@@ -327,6 +372,7 @@ def default_records() -> dict[str, tuple[DefaultRecord, ...]]:
                 announced=_as_date(item.get("announcement_date")),
                 met=_as_date(item.get("actual_date")),
                 amount=_as_number(item.get("unsettled_amount")),
+                seen=seen.get(str(item.get("id") or "")),
             )
         )
     return {key: tuple(rows) for key, rows in found.items()}

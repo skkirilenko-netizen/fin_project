@@ -46,9 +46,8 @@ def test_announced_nonpayment_in_grace_is_unconfirmed_not_a_default() -> None:
     """Неплатёж объявлен, льгота идёт — «исполнение не подтверждено», не дефолт."""
     order, text = report._record_said(_record("Технический дефолт"), ANNOUNCED)
     assert order == report.URGENT_UNCONFIRMED
-    assert text.startswith("купон: неплатёж, льготный срок до 23.09.2026")
+    assert text.startswith("купон: технический дефолт; льготный срок до 23.09.2026")
     assert "исполнение не подтверждено" in text
-    assert "дефолт источником не объявлен" in text
     assert "плановый срок 09.09.2026" in text and "неплатёж объявлен 10.09.2026" in text
     assert "не исполнено" not in text
 
@@ -99,3 +98,27 @@ def test_the_offer_delay_is_a_grace_status_too() -> None:
     assert not _record("Просрочка исполнения оферты").declared
     assert _record("Неисполнение оферты").declared
     assert not _record("Технический дефолт").declared
+
+
+def test_without_an_announcement_the_record_is_known_from_first_seen() -> None:
+    """Объявления нет — запись видна с первого появления в перечне, а не с конца льготы.
+
+    01.10.2026: у 8 из 26 записей, появившихся в снимках 28.09–01.10,
+    объявления нет, и прежде они датировались датой дефолта — на 8–14 дней
+    позже, чем пришли.
+    """
+    item = DefaultRecord(
+        emission_id="1822321",
+        kind="Купон",
+        status="Технический дефолт",
+        due=date(2026, 9, 18),
+        when=date(2026, 10, 2),
+        announced=None,
+        met=None,
+        amount=None,
+        seen=date(2026, 9, 29),
+    )
+    assert item.known_on == date(2026, 9, 29)
+    assert report._announced_in(item, date(2026, 9, 28), date(2026, 9, 29))
+    _, text = report._record_said(item, date(2026, 9, 29))
+    assert "в перечне с 29.09.2026" in text

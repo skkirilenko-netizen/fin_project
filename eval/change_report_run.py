@@ -338,6 +338,10 @@ def _record_said(item: DefaultRecord, until: date) -> tuple[int, str]:
         history.append(f"плановый срок {item.due:%d.%m.%Y}")
     if item.announced is not None:
         history.append(f"неплатёж объявлен {item.announced:%d.%m.%Y}")
+    elif item.seen is not None:
+        # **Без объявления — с первого появления в перечне** (решение
+        # владельца 01.10.2026), и день появления называется прямо.
+        history.append(f"объявления нет, в перечне с {item.seen:%d.%m.%Y}")
     told = f" ({', '.join(history)})" if history else ""
     if item.declared:
         return URGENT_DECLARED, f"{kind}: дефолт объявлен источником{told}"
@@ -349,10 +353,12 @@ def _record_said(item: DefaultRecord, until: date) -> tuple[int, str]:
         grace = f"льготный срок истёк {item.when:%d.%m.%Y}"
     else:
         grace = f"льготный срок до {item.when:%d.%m.%Y}"
+    # **Формулировка — по статусу источника** (решение владельца 01.10.2026):
+    # «технический дефолт; льготный срок до ДД.ММ», а не наше «неплатёж».
+    status = item.status.strip().lower() or "неплатёж"
     return (
         URGENT_UNCONFIRMED,
-        f"{kind}: неплатёж, {grace}, исполнение не подтверждено, "
-        f"дефолт источником не объявлен{told}",
+        f"{kind}: {status}; {grace}, исполнение не подтверждено{told}",
     )
 
 
