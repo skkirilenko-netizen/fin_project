@@ -1633,6 +1633,9 @@ class TrendPoint:
     # Изменение с начала года к тому же периоду прошлого года, долей;
     # None — нет прошлогодней величины либо она неположительна.
     ytd_change: dict[str, Decimal | None]
+    # Единица рядов (код ОКЕИ): последнего комплекта, к которой приведены
+    # все слагаемые (`trend_series`). Печатающий переводит из неё.
+    unit_code: str | None = None
 
 
 def trend_series(rows: list[dict], codes: list[str]) -> dict[str, dict[date, Decimal | None]]:
@@ -1649,12 +1652,19 @@ def trend_series(rows: list[dict], codes: list[str]) -> dict[str, dict[date, Dec
     series: dict[str, dict[date, Decimal | None]] = {code: {} for code in codes}
     if not rows:
         return series
-    target = max(rows, key=lambda row: row["report_date"])["unit_code"]
+    target = trend_unit(rows)
     for row in rows:
         series[row["line_code"]][row["report_date"]] = in_unit(
             row["value"], row["unit_code"], target
         )
     return series
+
+
+def trend_unit(rows: list[dict]) -> str | None:
+    """Единица рядов тренда: последнего комплекта; рядов нет — единицы нет."""
+    if not rows:
+        return None
+    return str(max(rows, key=lambda row: row["report_date"])["unit_code"])
 
 
 def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoint]:
@@ -1670,10 +1680,11 @@ def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoi
     codes = sorted(rule.lines.get(standard.value, {}))
     if not codes:
         return []
-    series = trend_series(
-        fetch_all(_TREND, {"inn": inn, "standard": standard.value, "codes": codes}, conn=conn),
-        codes,
+    found = fetch_all(
+        _TREND, {"inn": inn, "standard": standard.value, "codes": codes}, conn=conn
     )
+    unit_code = trend_unit(found)
+    series = trend_series(found, codes)
     dates = sorted({day for values in series.values() for day in values}, reverse=True)
     points: list[TrendPoint] = []
     for moment in dates[: rule.quarters]:
@@ -1689,6 +1700,7 @@ def ltm_trend(inn: str, standard: Standard, conn: PgConnection) -> list[TrendPoi
                 moment,
                 {code: rolling_flow(series[code], moment) for code in codes},
                 change,
+                unit_code,
             )
         )
     return points

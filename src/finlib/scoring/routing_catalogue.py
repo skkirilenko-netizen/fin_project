@@ -180,6 +180,7 @@ class RoutingCatalogue:
         names: dict[str, str],
         shown: Callable[[str, Decimal, str], str],
         stops: tuple[StopFactorView, ...],
+        money: frozenset[str] = frozenset(),
     ) -> None:
         self.standard = standard
         self.rule = rule
@@ -187,6 +188,9 @@ class RoutingCatalogue:
         self._names = names
         self._shown = shown
         self.stop_factors = stops
+        # Денежные величины справочника: в формулировке основания они
+        # переводятся в единицу печати, отношения — нет.
+        self.money = money
 
     @property
     def label(self) -> str:
@@ -298,6 +302,9 @@ def catalogue_for(standard: Standard) -> RoutingCatalogue:
         names = {item.code: item.name for item in view.metrics}
         shown = view.shown
         stops = _ifrs_stops()
+        money = frozenset(
+            item.code for item in view.metrics if item.unit is Unit.THOUSAND_RUB
+        )
     else:
         catalog = load_metrics()
         names = {item.code: item.name for item in catalog.metrics}
@@ -311,6 +318,9 @@ def catalogue_for(standard: Standard) -> RoutingCatalogue:
             )
 
         stops = _rsbu_stops()
+        money = frozenset(
+            code for code, kind in units.items() if kind is Unit.THOUSAND_RUB
+        )
     logger.info(
         "величины маршрута %s: решают %s, граница %s, стоп-факторов %d",
         standard.value,
@@ -318,4 +328,4 @@ def catalogue_for(standard: Standard) -> RoutingCatalogue:
         rule.bound or "нет",
         len(stops),
     )
-    return RoutingCatalogue(standard, rule, scales, names, shown, stops)
+    return RoutingCatalogue(standard, rule, scales, names, shown, stops, money)

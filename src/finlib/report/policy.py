@@ -375,6 +375,46 @@ class AggregatorSection(BaseModel):
     title: str = Field(min_length=1)
 
 
+class PrintUnit(BaseModel):
+    """Единица печати денежных величин документа: код ОКЕИ и разрядность."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    okei: str = Field(pattern="^38[3-6]$")
+    digits: int = Field(ge=0, le=3)
+
+
+class ReferenceOutcomes(BaseModel):
+    """Исход справочного признака словами."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    fired: str = Field(min_length=1)
+    quiet: str = Field(min_length=1)
+
+
+class AggregatorWording(BaseModel):
+    """Формулировки базового заключения, прежде набранные в коде сборки.
+
+    Места подстановки: {basket}, {senior}, {others} — у корзины; {name},
+    {outcome} — у справочного признака; {issue}, {settled_on}, {point},
+    {agency}, {rated_on} — у рейтинга после урегулирования; {reason} —
+    у несложившегося LTM.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    basket_senior: str = Field(min_length=1)
+    basket_single: str = Field(min_length=1)
+    basket_plain: str = Field(min_length=1)
+    reference_feature: str = Field(min_length=1)
+    reference_outcomes: ReferenceOutcomes
+    rating_after_settlement: str = Field(min_length=1)
+    rating_revised_after_settlement: str = Field(min_length=1)
+    bound_meaningless: str = Field(min_length=1)
+    ltm_missing: str = Field(min_length=1)
+
+
 class AggregatorConclusion(BaseModel):
     """Состав базового заключения по данным агрегатора (уровень 1, без класса).
 
@@ -391,6 +431,10 @@ class AggregatorConclusion(BaseModel):
     source: str = Field(min_length=1)
     sections: tuple[AggregatorSection, ...] = Field(min_length=1)
     limitations: tuple[str, ...] = Field(min_length=1)
+    # Единица печати денежных величин на весь документ, включая формулировки
+    # оснований (решение владельца 30.09.2026); хранение — в единице эмитента.
+    print_unit: PrintUnit
+    wording: AggregatorWording
     origin: str = Field(min_length=1)
 
     @model_validator(mode="after")

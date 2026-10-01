@@ -48,7 +48,7 @@ approved`); величины остаются непроверенными (`thr
 """
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -1070,6 +1070,85 @@ class ManualFloor:
 
 
 @dataclass(frozen=True, slots=True)
+class Amount:
+    """Денежная величина формулировки: число, единица и напечатанное маршрутом.
+
+    **Величина основания хранится числом, а переводится в точке печати**
+    (решение владельца 01.10.2026). Формулировка, набранная строкой, уже
+    несёт единицу комплекта, и документ в миллионах печатал бы рядом с ней
+    тысячи. `text` — то, что маршрут печатает сам, ровно как прежде: список
+    наблюдения и выгрузка остаются в единице комплекта.
+    """
+
+    value: Decimal
+    unit: str
+    text: str
+    # Единица печатается отдельным местом формулировки ({unit}), а не здесь.
+    bare: bool = False
+
+    def __format__(self, spec: str) -> str:
+        """Печать маршрута: как прежде."""
+        return self.text
+
+    def printed(self, to: "Callable[[Decimal, str], tuple[str, str]]") -> str:
+        """Печать в единице того, кто печатает."""
+        number, unit = to(self.value, self.unit)
+        return number if self.bare else f"{number} {unit}"
+
+
+@dataclass(frozen=True, slots=True)
+class UnitName:
+    """Наименование единицы отдельным местом формулировки: при переводе — новой."""
+
+    unit: str
+
+    def __format__(self, spec: str) -> str:
+        """Печать маршрута: наименование единицы комплекта."""
+        return self.unit
+
+    def printed(self, to: "Callable[[Decimal, str], tuple[str, str]]") -> str:
+        """Наименование единицы печати."""
+        return to(Decimal(0), self.unit)[1]
+
+
+@dataclass(frozen=True, slots=True)
+class Phrase:
+    """Часть формулировки из текста и денежных величин вперемешку."""
+
+    parts: tuple[object, ...]
+
+    def __format__(self, spec: str) -> str:
+        """Печать маршрута: как прежде."""
+        return "".join(format(part, "") for part in self.parts)
+
+    def printed(self, to: "Callable[[Decimal, str], tuple[str, str]]") -> str:
+        """Печать в единице того, кто печатает."""
+        return "".join(
+            part.printed(to) if hasattr(part, "printed") else str(part)
+            for part in self.parts
+        )
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Said:
+    """Основание внутри формулировки другого: печатается своими словами.
+
+    Сравнивается тождеством: справочник маршрута при нём — не величина.
+    """
+
+    finding: "Finding"
+    routing: "RoutingPolicy"
+
+    def __format__(self, spec: str) -> str:
+        """Печать маршрута: текст основания как есть."""
+        return self.finding.text
+
+    def printed(self, to: "Callable[[Decimal, str], tuple[str, str]]") -> str:
+        """Печать в единице того, кто печатает."""
+        return self.finding.worded(self.routing, to)
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """Одно сработавшее основание: код, предмет и текст.
 
@@ -1090,6 +1169,28 @@ class Finding:
     # миллионы поручителя как единицу строки — то есть ровно как ошибку
     # в тысячу раз, против которой она и заведена.
     unit: str = ""
+    # **Формулировка разобранной**: ключ и места подстановки, денежные — числом
+    # (`Amount`). Пусто — основание денежных величин не несёт, и текст
+    # печатается как есть. Приставка и хвост — то, что маршрут дописывает
+    # к формулировке после (поручитель, оговорка о базе).
+    key: str = ""
+    slots: tuple[tuple[str, object], ...] = ()
+    prefix: str = ""
+    suffix: str = ""
+
+    def worded(
+        self,
+        routing: "RoutingPolicy",
+        to: "Callable[[Decimal, str], tuple[str, str]]",
+    ) -> str:
+        """Текст основания с денежными величинами в единице того, кто печатает."""
+        if not self.slots:
+            return self.text
+        slots = {
+            name: value.printed(to) if hasattr(value, "printed") else value
+            for name, value in self.slots
+        }
+        return f"{self.prefix}{routing.say(self.ground, self.key, **slots)}{self.suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1354,7 +1455,7 @@ def route(
     # не говорит ничего; код остаётся предметом основания, по нему считают.
     by_factor = {factor.code: factor for factor in catalogue.stop_factors}
 
-    def about(code: str) -> str:
+    def about(code: str) -> Finding:
         # Формулировка стоп-фактора: наименование и его величина в скобках.
         # «Стоп-фактор: отрицательный собственный капитал» без величины
         # заставляет читателя искать её в других графах.
@@ -1365,24 +1466,33 @@ def route(
         # значило бы назвать величину, основанием не ставшую.
         factor = by_factor.get(code)
         metric = fired.get(code) or (factor.metric if factor is not None else "")
-        extra = ""
+        extra: object = ""
         if metric:
             item = by_code.get(metric)
             if item is not None and item.calculable:
-                extra = (
-                    f" ({catalogue.name_of(metric).lower()} "
-                    f"{catalogue.shown(metric, item.value, unit)})"
+                text = catalogue.shown(metric, item.value, unit)
+                extra = Phrase(
+                    (
+                        f" ({catalogue.name_of(metric).lower()} ",
+                        Amount(item.value, unit, text)
+                        if metric in catalogue.money
+                        else text,
+                        ")",
+                    )
                 )
-        return routing.say(
-            "stop_factor_severe" if code in severe else "stop_factor_capped",
+        ground = "stop_factor_severe" if code in severe else "stop_factor_capped"
+        return _said(
+            routing,
+            ground,
+            code,
             name=(factor.name if factor is not None else code),
             extra=extra,
         )
 
     for code in severe:
-        review.append(Finding("stop_factor_severe", code, about(code)))
+        review.append(about(code))
     for code in capped:
-        attention.append(Finding("stop_factor_capped", code, about(code)))
+        attention.append(about(code))
     # **Группа карточки — справочное обстоятельство, а не основание корзины.**
     # Поле источника отражает бенефициара, и проверка семи названных пар
     # не нашла ни одной финансовой связи: ассоциированное общество (Озон
@@ -1514,15 +1624,15 @@ def route(
             routing, refinance.cash, refinance.due, over.cover.get("refinancing_gap")
         ):
             attention.append(
-                Finding(
+                _said(
+                    routing,
                     "refinancing_gap",
                     "refinancing",
-                    routing.say(
-                        "refinancing_gap",
-                        due=money(refinance.due),
-                        cash=money(refinance.cash),
-                        unit=refinance.unit,
+                    due=Amount(refinance.due, refinance.unit, money(refinance.due), True),
+                    cash=Amount(
+                        refinance.cash, refinance.unit, money(refinance.cash), True
                     ),
+                    unit=UnitName(refinance.unit),
                 )
             )
     # **Вторая мера рефинансирования — основание внимания** (решение человека
@@ -1550,17 +1660,17 @@ def route(
             else None
         )
         attention.append(
-            Finding(
+            _said(
+                routing,
                 "refinancing_offers",
                 "refinancing",
-                routing.say(
-                    "refinancing_offers",
-                    "" if share is not None else "unknown_debt",
-                    offered=money(refinance.offered),
-                    cash=money(refinance.cash),
-                    unit=refinance.unit,
-                    share=percent(share * 100) if share is not None else "",
+                "" if share is not None else "unknown_debt",
+                offered=Amount(
+                    refinance.offered, refinance.unit, money(refinance.offered), True
                 ),
+                cash=Amount(refinance.cash, refinance.unit, money(refinance.cash), True),
+                unit=UnitName(refinance.unit),
+                share=percent(share * 100) if share is not None else "",
             )
         )
     # **Крупному долгу «Без внимания» даётся строже.** Оценка сверху
@@ -1579,15 +1689,13 @@ def route(
         ]
         if thin:
             attention.append(
-                Finding(
+                _said(
+                    routing,
                     "systemic_partial_cover",
                     "systemic",
-                    routing.say(
-                        "systemic_partial_cover",
-                        volume=money(systemic_volume),
-                        unit="руб.",
-                        missing="не рассчитано — " + ", ".join(sorted(thin)),
-                    ),
+                    volume=Amount(systemic_volume, "руб.", money(systemic_volume), True),
+                    unit=UnitName("руб."),
+                    missing="не рассчитано — " + ", ".join(sorted(thin)),
                 )
             )
     # **Недостающие величины — один пробел, а не пробел на каждую.** Прежде
@@ -1617,12 +1725,14 @@ def route(
     ebitda = by_code.get(rule.earnings) if rule.earnings else None
     if ebitda is not None and ebitda.calculable and ebitda.value <= 0:
         attention.append(
-            Finding(
+            _said(
+                routing,
                 "negative_ebitda",
                 rule.earnings,
-                routing.say(
-                    "negative_ebitda",
-                    value=catalogue.shown(rule.earnings, ebitda.value, unit),
+                value=Amount(
+                    ebitda.value,
+                    unit,
+                    catalogue.shown(rule.earnings, ebitda.value, unit),
                 ),
             )
         )
@@ -1753,12 +1863,12 @@ def route(
         # целиком, и никто её не объявлял: строка списка читалась в тысячах
         # у эмитента, отчитавшегося в миллионах.
         attention.append(
-            Finding(
+            _said(
+                routing,
                 "operating_loss",
                 rule.operating_line,
-                routing.say(
-                    "operating_loss", value=money(operating_profit), unit=unit
-                ),
+                value=Amount(operating_profit, unit, money(operating_profit), True),
+                unit=UnitName(unit),
             )
         )
 
@@ -1855,14 +1965,17 @@ def route(
         for item in dropped:
             by_unit.setdefault(item.unit, []).append(item)
         for where, items in by_unit.items():
+            parts: list[object] = []
+            for entry in items:
+                parts += ["; ", Said(entry, routing)] if parts else [Said(entry, routing)]
             notes.append(
-                Finding(
-                    "inapplicable_here",
-                    issuer_type.code,
-                    routing.say(
+                replace(
+                    _said(
+                        routing,
                         "inapplicable_here",
                         issuer_type.code,
-                        said="; ".join(entry.text for entry in items),
+                        issuer_type.code,
+                        said=Phrase(tuple(parts)),
                     ),
                     unit=where,
                 )
@@ -1940,7 +2053,7 @@ def _with_basis(
 
     sources = set(load_interim().confidence.applies_to_sources)
     return [
-        replace(item, text=f"{item.text} ({note})")
+        replace(item, text=f"{item.text} ({note})", suffix=f"{item.suffix} ({note})")
         if routing.ground_sources.get(item.ground, "") in sources
         else item
         for item in findings
@@ -1989,7 +2102,12 @@ def led_by_guarantor(
     # с текстом: у поручителя отчётность бывает в миллионах там, где строка
     # печатает тысячи.
     borrowed = tuple(
-        replace(item, text=f"Поручитель {guarantor}: {item.text}", unit=unit)
+        replace(
+            item,
+            text=f"Поручитель {guarantor}: {item.text}",
+            unit=unit,
+            prefix=f"Поручитель {guarantor}: {item.prefix}",
+        )
         for item in guaranteed.findings
     )
     return Verdict(
@@ -2082,33 +2200,36 @@ def _default_findings(
             None,
         )
         review.append(
-            Finding(
+            _said(
+                routing,
                 "payment_missed",
                 record.emission_id,
-                routing.say(
-                    "payment_missed",
-                    what=record.kind.lower() or "обязательство",
-                    kind=(
-                        _kind(issue, routing).dative
-                        if issue is not None
-                        else routing.instruments.default.dative
-                    ),
-                    issue=(
-                        _named(issue, routing)
-                        if issue is not None
-                        else _issue_name(events, record.emission_id)
-                        or "источник не называет"
-                    ),
-                    reg=_reg(issue, routing) if issue is not None else "",
-                    amount=(
-                        f", не исполнено {money(record.amount)} руб."
-                        if record.amount is not None
-                        else ""
-                    ),
-                    due=f"{record.due:%d.%m.%Y}" if record.due else "не назван",
-                    announced=f"{record.known_on:%d.%m.%Y}",
-                    until=f"{record.when:%d.%m.%Y}",
+                what=record.kind.lower() or "обязательство",
+                kind=(
+                    _kind(issue, routing).dative
+                    if issue is not None
+                    else routing.instruments.default.dative
                 ),
+                issue=(
+                    _named(issue, routing)
+                    if issue is not None
+                    else _issue_name(events, record.emission_id)
+                    or "источник не называет"
+                ),
+                reg=_reg(issue, routing) if issue is not None else "",
+                amount=(
+                    Phrase(
+                        (
+                            ", не исполнено ",
+                            Amount(record.amount, "руб.", f"{money(record.amount)} руб."),
+                        )
+                    )
+                    if record.amount is not None
+                    else ""
+                ),
+                due=f"{record.due:%d.%m.%Y}" if record.due else "не назван",
+                announced=f"{record.known_on:%d.%m.%Y}",
+                until=f"{record.when:%d.%m.%Y}",
             )
         )
 
@@ -2166,16 +2287,14 @@ def _default_findings(
             # остаётся один: как эмитент вёл себя в прошлом.
             if issue.status in routing.events.repaid_statuses:
                 attention.append(
-                    Finding(
+                    _said(
+                        routing,
                         "default_on_repaid_issue",
                         issue.name,
-                        routing.say(
-                            "default_on_repaid_issue",
-                            issue=_named(issue, routing),
-                            kind=_kind(issue, routing).dative,
-                            reg=_reg(issue, routing),
-                            where=where,
-                        ),
+                        issue=_named(issue, routing),
+                        kind=_kind(issue, routing).dative,
+                        reg=_reg(issue, routing),
+                        where=where,
                     )
                 )
                 continue
@@ -2188,12 +2307,12 @@ def _default_findings(
                 and issue.emission_id not in open_ones
             ):
                 notes.append(
-                    Finding(
+                    _said(
+                        routing,
                         "default_flag_undated",
                         issue.name,
-                        routing.say(
-                            "default_flag_undated", issue=issue.name, where=where
-                        ),
+                        issue=issue.name,
+                        where=where,
                     )
                 )
                 continue
@@ -2211,17 +2330,15 @@ def _default_findings(
                 )
             )
             review.append(
-                Finding(
+                _said(
+                    routing,
                     "emission_default",
                     issue.name,
-                    routing.say(
-                        "emission_default",
-                        what=what,
-                        issue=_named(issue, routing),
-                        kind=word.dative,
-                        reg=_reg(issue, routing),
-                        where=where,
-                    ),
+                    what=what,
+                    issue=_named(issue, routing),
+                    kind=word.dative,
+                    reg=_reg(issue, routing),
+                    where=where,
                 )
             )
         if not getattr(events, "defaulted", ()):
@@ -2330,7 +2447,7 @@ def _issue_name(events: object, emission_id: str) -> str:
     return ""
 
 
-def _where_of(events: object, issue: object) -> str:
+def _where_of(events: object, issue: object) -> "str | Phrase":
     """Чем подтверждён дефолт выпуска: событие с суммой либо срок погашения.
 
     **Неисполненная сумма — сведение, которого нет больше нигде.** «Дефолт
@@ -2354,7 +2471,12 @@ def _where_of(events: object, issue: object) -> str:
             # **Единица называется.** Величина события приходит в рублях,
             # а не в единице комплекта, и число без единицы читатель прочтёт
             # в той, которую предположит сам.
-            text += f", не исполнено {money(latest.amount)} руб."
+            return Phrase(
+                (
+                    f"{text}, не исполнено ",
+                    Amount(latest.amount, "руб.", f"{money(latest.amount)} руб."),
+                )
+            )
         return text
     # **«Перечня нет» и «события не датированы» — разные сведения.** Первое
     # о нашей доставке, второе об источнике, и путать их значило бы выдать
@@ -2579,6 +2701,19 @@ def _spoken_for(
         and (not item.by_value or fired.get(item.stop_factor) == item.by_value)
     }
     return metrics
+
+
+def _said(
+    routing: "RoutingPolicy", ground: str, subject: str, key: str = "", **slots: object
+) -> Finding:
+    """Основание с формулировкой, разобранной на места подстановки."""
+    return Finding(
+        ground,
+        subject,
+        routing.say(ground, key, **slots),
+        key=key,
+        slots=tuple(slots.items()),
+    )
 
 
 def _substituted(

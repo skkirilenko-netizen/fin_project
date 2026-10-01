@@ -5,6 +5,7 @@ from datetime import date
 import pytest
 from docx import Document
 
+from finlib.metrics.display import DIGIT_SPACE
 from finlib.report.aggregator import (
     BaseConclusion,
     Line,
@@ -23,6 +24,25 @@ SECTIONS = [
 ]
 
 
+WORDING = {
+    "basket_senior": "Корзина: {basket}. Старшее основание — {senior}; также: {others}.",
+    "basket_single": "Корзина: {basket}. Основание — {senior}.",
+    "basket_plain": "Корзина: {basket}.",
+    "reference_feature": "{name}: {outcome} — справочно, в маршрут не входит.",
+    "reference_outcomes": {"fired": "сработал", "quiet": "не сработал"},
+    "rating_after_settlement": (
+        "Дефолт по выпуску {issue} урегулирован {settled_on}; рейтинг {point} "
+        "({agency}) присвоен {rated_on} — после урегулирования не пересматривался."
+    ),
+    "rating_revised_after_settlement": (
+        "Дефолт по выпуску {issue} урегулирован {settled_on}; рейтинг {point} "
+        "({agency}) присвоен {rated_on}, после урегулирования."
+    ),
+    "bound_meaningless": "долговая нагрузка не определена: прибыль от продаж близка к нулю",
+    "ltm_missing": "не сложился: {reason}",
+}
+
+
 def _composition(sections: list[dict] = SECTIONS) -> AggregatorConclusion:
     """Состав из теста, а не из справочника: состав справочника на согласовании."""
     return AggregatorConclusion.model_validate(
@@ -32,6 +52,8 @@ def _composition(sections: list[dict] = SECTIONS) -> AggregatorConclusion:
             "source": "Величины агрегатора.",
             "sections": sections,
             "limitations": ["Примечания не рассматривались."],
+            "print_unit": {"okei": "385", "digits": 1},
+            "wording": WORDING,
             "origin": "тест",
         }
     )
@@ -112,3 +134,80 @@ def test_the_reconciliation_share_comes_from_the_table(db_conn) -> None:  # noqa
         )
     # Сравнительная колонка и «нет в документе» в меру не идут.
     assert _source(composition, db_conn) == "На 1 эмитентах совпало 1 из 2."
+
+
+def _row(verdict, **kwargs) -> RoutingRow:  # noqa: ANN001
+    """Строка маршрута МСФО в тысячах рублей."""
+    from finlib.standards import Standard
+
+    return RoutingRow(
+        inn="7722514880",
+        name="Росинтер",
+        report_date=date(2025, 12, 31),
+        verdict=verdict,
+        computed=(),
+        sources=("Cbonds",),
+        standard=Standard.IFRS,
+        unit="тыс. руб.",
+        unit_code="384",
+        **kwargs,
+    )
+
+
+def test_basket_names_the_senior_ground_and_the_rest() -> None:
+    """«Разбор (рынок)» молчал о величинах; теперь — старшее и остальные."""
+    from finlib.report.aggregator import _route
+
+    verdict = Verdict(
+        "review", "Разбор", (), "approved",
+        subgroup_names=("рынок", "риск по величинам"),
+    )
+    part = Part("route", "Вывод")
+    _route(part, _row(verdict), None, _composition(), date(2026, 10, 1), "Разбор")
+    assert part.paragraphs[0] == (
+        "Корзина: Разбор. Старшее основание — рынок; также: риск по величинам."
+    )
+
+
+def test_ground_money_is_printed_in_the_document_unit() -> None:
+    """Платежи 127 760 и деньги 1 728 тыс. руб. в основании — 127,8 и 1,7 млн руб."""
+    from decimal import Decimal
+
+    from finlib.report.aggregator import _route
+    from finlib.scoring.routing import Refinance, route
+
+    verdict = route(
+        (),
+        unit="тыс. руб.",
+        quarantined=False,
+        today=date(2026, 10, 1),
+        latest_annual=date(2025, 12, 31),
+        refinance=Refinance(Decimal("127760"), Decimal("1728"), "тыс. руб.", 365),
+    )
+    gap = next(item for item in verdict.findings if item.ground == "refinancing_gap")
+    # Список наблюдения печатает как прежде — в единице комплекта.
+    assert f"127{DIGIT_SPACE}760" in gap.text and "тыс. руб." in gap.text
+    part = Part("route", "Вывод")
+    _route(part, _row(verdict), None, _composition(), date(2026, 10, 1), "Разбор")
+    said = next(text for text in part.paragraphs if "refinancing_gap" in text)
+    assert "127,8" in said and "1,7 млн руб." in said
+    assert "тыс. руб." not in said
+
+
+def test_values_money_in_document_unit_and_ratio_as_is() -> None:
+    """Чистый долг 2 469 795 тыс. руб. — 2 469,8 млн руб.; отношение не переводится."""
+    from decimal import Decimal
+
+    from finlib.report.aggregator import _values
+
+    row = _row(
+        Verdict("review", "Разбор", (), "approved"),
+        shown_values=(
+            ("net_debt", "Чистый долг", "2 469 795 тыс. руб."),
+            ("net_debt_ebitda", "Чистый долг / EBITDA", "1,34"),
+        ),
+        values={"net_debt": Decimal("2469795"), "net_debt_ebitda": Decimal("1.34")},
+    )
+    part = Part("values", "Величины")
+    _values(part, row, None, _composition(), date(2026, 10, 1), "Разбор")
+    assert [line.shown for line in part.lines] == [f"2{DIGIT_SPACE}469,8 млн руб.", "1,34"]
