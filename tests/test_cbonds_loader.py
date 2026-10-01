@@ -15,7 +15,7 @@ from decimal import Decimal
 import pytest
 
 from finlib.db import execute, fetch_all, fetch_one
-from finlib.normalize.cbonds_loader import load_row
+from finlib.normalize.cbonds_loader import load_row, log_rejections
 from finlib.normalize.cbonds_mapping import load_cbonds_mapping
 from finlib.quality.codes import CheckCode
 
@@ -287,12 +287,22 @@ def test_unfit_row_does_not_become_a_set(db_conn, change: dict, reason: str) -> 
         {"i": INN},
         conn=db_conn,
     )
-    journal = fetch_all(
-        "SELECT check_code FROM dq_log WHERE inn = %(i)s AND check_code = %(c)s",
+    # **Отказ пишется одной записью на доставку** (`log_rejections`), а не
+    # в `load_row`. Прежде тест проверял журнал без вызова записи и проходил
+    # на боевой базе за счёт 13 записей прошлых доставок по тому же ИНН —
+    # на пустой тестовой базе это видно сразу.
+    before = fetch_all(
+        "SELECT count(*) AS n FROM dq_log WHERE inn = %(i)s AND check_code = %(c)s",
         {"i": INN, "c": CheckCode.CBONDS_SET_REJECTED.value},
         conn=db_conn,
-    )
-    assert journal, "отказ приёма не попал в журнал"
+    )[0]["n"]
+    log_rejections(INN, [outcome], db_conn)
+    journal = fetch_all(
+        "SELECT count(*) AS n FROM dq_log WHERE inn = %(i)s AND check_code = %(c)s",
+        {"i": INN, "c": CheckCode.CBONDS_SET_REJECTED.value},
+        conn=db_conn,
+    )[0]["n"]
+    assert journal == before + 1, "отказ приёма не попал в журнал"
 
 
 def test_mapping_declares_the_kind_of_every_field() -> None:

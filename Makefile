@@ -1,4 +1,4 @@
-.PHONY: db-schema probes db-reset test lint fmt check check-conclusion llm-stats report analyze ingest pdf-check regression regression-full ifrs-set ifrs-regression ifrs-reference ifrs-scale ifrs-synonyms
+.PHONY: db-schema probes db-reset test-db test lint fmt check check-conclusion llm-stats report analyze ingest pdf-check regression regression-full ifrs-set ifrs-regression ifrs-reference ifrs-scale ifrs-synonyms
 
 db-schema:  ## Применить схему БД
 	psql findb -f sql/001_schema.sql
@@ -7,6 +7,12 @@ probes:  ## Перезалить сохранённые пробы ГИР БО (
 	uv run python scripts/load_probes.py
 
 db-reset: db-schema probes  ## Применить схему и восстановить рабочий набор данных
+
+test-db:  ## Пересоздать тестовую базу findb_test: схема из sql/ и пробы ГИР БО (findb не трогается)
+	dropdb --if-exists findb_test
+	createdb findb_test
+	psql findb_test -q -f sql/001_schema.sql
+	DB_NAME=findb_test uv run python scripts/load_probes.py
 
 test:  ## Прогнать тесты
 	uv run pytest

@@ -1,19 +1,45 @@
 """Общие фикстуры тестов."""
 
+import os
 from collections.abc import Iterator
 
-import psycopg2
-import pytest
+# **Тесты работают в своей базе, а не в боевой** (решение владельца
+# 01.10.2026). База задаётся до первого чтения настроек: переменная
+# окружения старше .env. Создаётся она `make test-db` — схема из sql/
+# и пробы ГИР БО с диска.
+TEST_DB = os.environ.get("TEST_DB_NAME", "findb_test")
+os.environ["DB_NAME"] = TEST_DB
 
-from finlib.config import settings
+import psycopg2  # noqa: E402
+import pytest  # noqa: E402
+
+from finlib.config import settings  # noqa: E402
+
+PRODUCTION_DB = "findb"
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Запрещает параллельный запуск: тесты загрузчика делят одну базу findb."""
+    """Отказ стартовать на боевой базе и при параллельном запуске.
+
+    **Боевая база тестам закрыта.** Тест, проверявший журнал без вызова
+    записи, проходил на findb за счёт 13 записей прошлых доставок — на пустой
+    тестовой базе это стало видно сразу (`test_unfit_row_does_not_become_a_set`).
+    """
+    if settings.db_name == PRODUCTION_DB:
+        raise pytest.UsageError(
+            f"тесты не запускаются на боевой базе {PRODUCTION_DB}: "
+            "задайте TEST_DB_NAME или создайте findb_test — make test-db"
+        )
+    try:
+        psycopg2.connect(**settings.dsn_kwargs).close()
+    except psycopg2.OperationalError as failure:
+        raise pytest.UsageError(
+            f"тестовой базы {settings.db_name} нет: make test-db ({failure})"
+        ) from failure
     workers = config.getoption("numprocesses", default=None)
     if workers:
         raise pytest.UsageError(
-            "тесты загрузчика работают в общей базе findb и на одних и тех же ключах; "
+            "тесты загрузчика работают в общей тестовой базе и на одних и тех же ключах; "
             "параллельный запуск даст взаимные блокировки транзакций"
         )
 
