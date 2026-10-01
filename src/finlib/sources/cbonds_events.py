@@ -135,6 +135,11 @@ class Issue:
     # Государственный регистрационный номер выпуска: им бумага опознаётся
     # в реестре, и наименование его не заменяет.
     reg_number: str = ""
+    # Поле источника `early_redemption_date`. **Смысл не подтверждён**
+    # (решение владельца 01.10.2026): объявленное исполнение call либо
+    # ближайшая возможная дата — неизвестно, и до сверки поле в платежи
+    # и основания не входит, а печатается в карточке справочно.
+    early_redemption: date | None = None
 
     @property
     def defaulted(self) -> bool:
@@ -769,6 +774,7 @@ def issues_of(inn: str) -> tuple[tuple[Issue, ...], bool]:
                 updated=_as_date(item.get("updating_date")),
                 subkind=str(item.get("subkind_name_rus") or "").strip(),
                 reg_number=str(item.get("state_reg_number") or "").strip(),
+                early_redemption=_as_date(item.get("early_redemption_date")),
             )
             for item in items
         ),

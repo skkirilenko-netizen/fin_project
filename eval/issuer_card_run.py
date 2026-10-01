@@ -505,6 +505,26 @@ def _calendar(item, said: list, actions, names: dict[str, str]) -> None:  # noqa
         )
 
 
+def _early_redemption(item, said: list) -> None:  # noqa: ANN001
+    """Возможное досрочное погашение — справочно, со смыслом поля не подтверждённым.
+
+    Решение владельца 01.10.2026: поле источника `early_redemption_date`
+    до сверки с офертами call и условиями выпуска в платежи и основания
+    не входит. Объявленное ли это исполнение или ближайшая возможная дата —
+    неизвестно, и строка говорит это прямо.
+    """
+    events = item.events
+    if events is None:
+        return
+    for issue in events.outstanding:
+        if issue.early_redemption is not None:
+            said.append(
+                f"- {issue.name}: возможное досрочное погашение "
+                f"{issue.early_redemption:%d.%m.%Y} (источник: поле "
+                "early_redemption_date, смысл не подтверждён)"
+            )
+
+
 def _gaps(item, routing, sets: list[dict], said: list) -> None:  # noqa: ANN001
     """Чего мы не знаем **об этом эмитенте**: пробел исправляется доставкой."""
     add = said.append
@@ -700,6 +720,7 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
             f"{money(offered) if offered is not None else '—'}, денежные "
             f"средства {money(cash) if cash is not None else 'не раскрыты'}\n"
         )
+    _early_redemption(item, said)
     _changes(item, conn, said)
     _stale(item, said)
     _market(item, said)
