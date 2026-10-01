@@ -39,7 +39,7 @@ from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 from finlib.sources.cbonds_events import default_records  # noqa: E402
 from finlib.sources.moex_risk import risk_sectors  # noqa: E402
-from finlib.version import code_version  # noqa: E402
+from finlib.version import code_version, route_fingerprint  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,9 @@ def main() -> int:
                 {
                     "as_of": today,
                     "code": code_version(),
-                    "methodology": f'{{"routing": "{routing.version}"}}',
+                    "methodology": json.dumps(
+                        {"routing": routing.version, **route_fingerprint()}
+                    ),
                     "sources": "{}",
                 },
                 conn=conn,

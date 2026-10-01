@@ -94,19 +94,34 @@ def _ground_names(routing) -> dict[str, str]:  # noqa: ANN001
 
 
 def _why(  # noqa: ANN001
-    routing, inn: str, since: date, until: date, appeared: set[str], before, after
+    routing,
+    inn: str,
+    since: date,
+    until: date,
+    appeared: set[str],
+    before,
+    after,
+    layers: set[str] | None = None,
 ) -> str:
     """Чем изменились данные: слой, в котором нашлась датированная запись.
 
     **Слой называется существующим перечнем** `routing.ground_sources` —
     второго не заводится. Причина, не нашедшаяся в слое, так и печатается:
     изменение с неназванной причиной читалось бы как объяснённое.
+
+    `layers` — слои решающего основания: сведения прочих слоёв не печатаются
+    (у Республики Саха рейтинг АКРА стоял рядом с переводом вне периметра
+    и читался причиной).
     """
+
+    def wanted(word: str) -> bool:
+        return layers is None or any(word in item for item in layers)
+
     said: list[str] = []
     # **Раскрытие отчётности датированной записи не имеет**, и видно оно
     # по тому, что сменился отчётный период строки: это и есть причина,
     # а не следствие, и называть её основанием значило бы назвать следствие.
-    if before["report_date"] != after["report_date"]:
+    if before["report_date"] != after["report_date"] and wanted("отчётность"):
         was = (
             f"{before['report_date']:%d.%m.%Y}"
             if before["report_date"]
@@ -120,15 +135,24 @@ def _why(  # noqa: ANN001
         said.append(f"отчётный период: {was} → {now}")
     events = events_of(inn)
     for item in events.records:
-        if item.moment is not None and _announced_in(item, since, until):
+        if (
+            item.moment is not None
+            and _announced_in(item, since, until)
+            and wanted("выпуск")
+        ):
             said.append(_record_said(item, until)[1])
     for item in events.ratings:
-        if item.assigned is not None and since < item.assigned <= until:
+        if item.assigned is not None and since < item.assigned <= until and wanted("рейтинг"):
             said.append(f"{item.agency}: {item.point} {item.assigned:%d.%m.%Y}")
     risky = risk_sectors()
     for issue in events.issues:
         entry = risky.get(issue.isin) if issue.isin else None
-        if entry is not None and entry.since is not None and since < entry.since <= until:
+        if (
+            entry is not None
+            and entry.since is not None
+            and since < entry.since <= until
+            and wanted("биржа")
+        ):
             said.append(
                 f"{issue.name} переведён в {entry.board} {entry.since:%d.%m.%Y}"
             )
@@ -344,6 +368,22 @@ def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
     }
 
 
+_SCHEDULED = """
+SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
+       h.report_date, r.code_version, r.methodology
+FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
+WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
+"""
+
+
+def _read_scheduled(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
+    """Точки прогона по расписанию на дату (без повторов дня): ИНН → вердикт."""
+    return {
+        row["inn"]: row
+        for row in fetch_all(_SCHEDULED, {"kind": kind, "as_of": moment}, conn=conn)
+    }
+
+
 def main() -> int:
     """Печатает отчёт изменений между двумя соседними точками истории."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -393,9 +433,15 @@ def main() -> int:
         # действие показываются в тот же день, когда пришли.
         previous = max((item for item in dates if item < until), default=since)
         was, now = _read(conn, kind, since), _read(conn, kind, until)
+        # **Сутки сравниваются с прогоном по расписанию**, а не с повтором дня
+        # (решение владельца 01.10.2026): повтор — наша правка, и сравнение
+        # с ним прятало бы её в «вчера».
+        was_day = _read_scheduled(conn, kind, previous)
         bonds = set(bond_issuers())
         health = fetch_all(_HEALTH, {"as_of": until, "kind": kind}, conn=conn)
-        _report(routing, kind, since, until, was, now, bonds, previous, health)
+        _report(
+            routing, kind, since, until, was, now, bonds, previous, health, was_day
+        )
     return 0
 
 
@@ -600,9 +646,134 @@ def _off_hour(finished) -> None:  # noqa: ANN001
     )
 
 
+# Причины смены корзины в порядке печати.
+CAUSES = (
+    ("issuer", "у эмитента"),
+    ("ours", "у нас (код или методика)"),
+    ("calendar", "от календаря"),
+    ("causeless", "беспричинные"),
+)
+
+
+def _versions(row: dict) -> tuple:
+    """Чем сделана точка: отпечаток методики и коммит кода маршрута.
+
+    **Объявленная версия справочника правкой не поднималась** («1.0.0»
+    с 22.09.2026), и прежде «наши правки» не срабатывали вовсе. Точки,
+    записанные до отпечатка, сравниваются как прежде — версией кода
+    и объявленной методикой.
+    """
+    said = row.get("methodology") or {}
+    if isinstance(said, str):
+        said = json.loads(said)
+    if said.get("route_code"):
+        return (said.get("content"), said.get("route_code"))
+    return (json.dumps(said, sort_keys=True), row.get("code_version"))
+
+
+def _classify(routing, was: dict, now: dict, since: date, until: date) -> dict:  # noqa: ANN001
+    """Смены корзины по причинам: у эмитента, у нас, от календаря, беспричинные.
+
+    **Смена кода или методики старше смены данных** (решение владельца
+    01.10.2026): при разных версиях причина у эмитента от нашей не
+    отделяется, и смена считается нашей — иначе правка выдавалась бы
+    за движение рынка, как 93 смены 30.09.2026.
+    """
+    found: dict[str, list[str]] = {cause: [] for cause, _ in CAUSES}
+    for inn, row in now.items():
+        if inn not in was or row["basket"] == was[inn]["basket"]:
+            continue
+        before = was[inn]
+        same = row["fingerprint"] == before["fingerprint"]
+        if same and _calendar(routing, before, since) != _calendar(routing, row, until):
+            found["calendar"].append(inn)
+        elif _versions(row) != _versions(before):
+            found["ours"].append(inn)
+        elif not same:
+            found["issuer"].append(inn)
+        else:
+            found["causeless"].append(inn)
+    return found
+
+
+def _decisive(routing, before: dict, after: dict) -> set[str]:  # noqa: ANN001
+    """Основания, сменившие корзину: новые основания новой корзины либо ушедшие старой.
+
+    **Графа «Почему» называет основание, которое сменило корзину**, а не
+    первое датированное событие эмитента (решение владельца 01.10.2026):
+    у Республики Саха (Якутия) стоял рейтинг, а корзину сменил перевод
+    вне периметра по типу эмитента.
+    """
+    def own(row: dict) -> set[str]:
+        return {ground.code for ground in routing.basket(row["basket"]).grounds}
+
+    appeared = set(after["grounds"]) - set(before["grounds"])
+    vanished = set(before["grounds"]) - set(after["grounds"])
+    # Корзину назвало появившееся основание новой корзины — в какую бы
+    # сторону ни шёл переход: перевод вне периметра не «лучше» и не «хуже»
+    # «Внимания», он про тип эмитента.
+    return (
+        (appeared & own(after))
+        or (vanished & own(before))
+        or appeared
+        or vanished
+        or (set(after["grounds"]) & own(after))
+    )
+
+
+def _why_decisive(routing, inn: str, since: date, until: date, before, after) -> str:  # noqa: ANN001
+    """Решающее основание со своим слоем и датированное сведение этого слоя."""
+    decisive = _decisive(routing, before, after)
+    names = _ground_names(routing)
+    if not decisive:
+        return _why(routing, inn, since, until, set(), before, after)
+    layers = {routing.source_of(code) for code in decisive}
+    said = ", ".join(
+        f"{names.get(code, code)} ({routing.source_of(code)})" for code in sorted(decisive)
+    )
+    appeared = set(after["grounds"]) - set(before["grounds"])
+    evidence = _why(
+        routing, inn, since, until, appeared & decisive, before, after, layers
+    )
+    if evidence.startswith("появилось основание") or evidence.startswith("данные"):
+        evidence = ""
+    return f"{said}; {evidence}" if evidence else said
+
+
+def _moves_table(routing, groups: dict, was, now, since, until, order) -> None:  # noqa: ANN001
+    """Таблица смен: эмитент, было, стало, причина, решающее основание."""
+    labels = dict(CAUSES)
+    rows = [(inn, cause) for cause, items in groups.items() for inn in items]
+
+    # Порядок — по тяжести движения: ухудшения прежде улучшений.
+    def weight(item: tuple[str, str]) -> tuple[int, int]:
+        inn = item[0]
+        before, after = order[was[inn]["basket"]], order[now[inn]["basket"]]
+        return (0 if after < before else 1, after)
+
+    print("| Эмитент | Было | Стало | Причина | Почему |")
+    print("|---|---|---|---|---|")
+    # **Отчёт читается за пять минут, и это требование, а не пожелание.**
+    # Двадцать строк — предел, за которым перечень перестают читать
+    # целиком; остальные называются числом, а не прячутся.
+    shown = sorted(rows, key=weight)
+    for inn, cause in shown[:20]:
+        before, after = was[inn], now[inn]
+        print(
+            f"| {_named(inn)} | {_basket_name(routing, before['basket'])} "
+            f"| {_basket_name(routing, after['basket'])} | {labels[cause]} "
+            f"| {_why_decisive(routing, inn, since, until, before, after)} |"
+        )
+    if len(shown) > 20:
+        print(f"\nи ещё {len(shown) - 20} — в истории видны полностью.")
+    print()
+
+
 def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN001
-            health) -> None:
+            health, was_day=None) -> None:
     """Собирает и печатает сам отчёт."""
+    if was_day is None:
+        was_day = was
     names = _ground_names(routing)
     order = {basket.code: basket.order for basket in routing.baskets}
     print(f"# Что изменилось: {until:%d.%m.%Y}\n")
@@ -616,84 +787,50 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         _ratings_health(_snapshot_of(until))
         _new_reporting(_reporting_of(until))
     print(
-        f"Сравнение с {since:%d.%m.%Y} — **неделя, а не сутки**: медиана "
-        "обычного дня ноль, и пустой отчёт каждый день приучает не открывать. "
+        f"**Суточные смены** — против прогона по расписанию {previous:%d.%m.%Y}; "
+        f"**недельная сводка** — против {since:%d.%m.%Y}, отдельным разделом "
+        "(решение владельца 01.10.2026). "
         f"Род точек — {'пересчёт' if kind == 'backfill' else 'наблюдение'}; "
         "наблюдение с пересчётом не сравнивается вовсе.\n"
     )
     _urgent(routing, now, previous, until)
-    # **Беспричинное изменение — остановка, а не строка.** Считается первым:
-    # отчёт, начавшийся с перечня изменений, о нём умолчал бы.
-    same_data = [
-        inn
-        for inn, row in now.items()
-        if inn in was
-        and row["basket"] != was[inn]["basket"]
-        and row["fingerprint"] == was[inn]["fingerprint"]
-    ]
-    # **Календарь — четвёртая причина, и без неё третья лжёт.** Срок сдачи
-    # отчётности наступает 1 июня, давность дефолта истекает через три года:
-    # вердикт меняется при неизменных данных и неизменной методике, и такая
-    # смена — не беспричинная.
-    by_calendar = [
-        inn
-        for inn in same_data
-        if _calendar(routing, was[inn], since) != _calendar(routing, now[inn], until)
-    ]
-    ours = [
-        inn
-        for inn in same_data
-        if inn not in by_calendar
-        and (
-            now[inn]["code_version"] != was[inn]["code_version"]
-            or now[inn]["methodology"] != was[inn]["methodology"]
-        )
-    ]
-    causeless = [
-        inn for inn in same_data if inn not in by_calendar and inn not in ours
-    ]
-    moved = [
-        inn
-        for inn, row in now.items()
-        if inn in was
-        and row["basket"] != was[inn]["basket"]
-        and row["fingerprint"] != was[inn]["fingerprint"]
-    ]
+    daily = _classify(routing, was_day, now, previous, until)
+    weekly = _classify(routing, was, now, since, until)
     logger.info(
-        "смен корзины: у эмитента %d, при тех же данных %d",
-        len(moved),
-        len(same_data),
+        "смен корзины за сутки %d, за неделю %d",
+        sum(len(items) for items in daily.values()),
+        sum(len(items) for items in weekly.values()),
     )
     entered = sorted(set(now) - set(was))
     left = sorted(set(was) - set(now))
+    by_calendar, ours, causeless = (
+        weekly["calendar"],
+        weekly["ours"],
+        sorted(set(weekly["causeless"]) | set(daily["causeless"])),
+    )
 
-    print(f"## Сменили корзину: {len(moved)} из {len(now)}\n")
-    if not moved:
+    changed = sum(len(items) for items in daily.values())
+    print(f"## За сутки сменили корзину: {changed} из {len(now)}\n")
+    if not changed:
         print("ни одного.\n")
     else:
-        print("| Эмитент | Было | Стало | Почему |")
-        print("|---|---|---|---|")
-        # Порядок — по тяжести движения: ухудшения прежде улучшений.
-        def weight(inn: str) -> tuple[int, int]:
-            before, after = order[was[inn]["basket"]], order[now[inn]["basket"]]
-            return (0 if after < before else 1, after)
+        _moves_table(routing, daily, was_day, now, previous, until, order)
 
-        # **Отчёт читается за пять минут, и это требование, а не пожелание.**
-        # Двадцать строк — предел, за которым перечень перестают читать
-        # целиком; остальные называются числом, а не прячутся: «и ещё N»
-        # говорит, что они есть, и по истории их видно полностью.
-        shown = sorted(moved, key=weight)
-        for inn in shown[:20]:
-            before, after = was[inn], now[inn]
-            appeared = set(after["grounds"]) - set(before["grounds"])
-            print(
-                f"| {_named(inn)} | {_basket_name(routing, before['basket'])} "
-                f"| {_basket_name(routing, after['basket'])} "
-                f"| {_why(routing, inn, since, until, appeared, before, after)} |"
-            )
-        if len(shown) > 20:
-            print(f"\nи ещё {len(shown) - 20} — в истории видны полностью.")
-    print()
+    print(f"## За неделю ({since:%d.%m.%Y} → {until:%d.%m.%Y}): сводка\n")
+    print("| Причина | Смен корзины |\n|---|---|")
+    for cause, label in CAUSES:
+        print(f"| {label} | {len(weekly[cause])} |")
+    data_too = [inn for inn in weekly["ours"] if now[inn]["fingerprint"] != was[inn]["fingerprint"]]
+    print(
+        f"\nИз наших правок у {len(data_too)} изменились и данные: при смене "
+        "кода или методики причина у эмитента от нашей не отделяется, и такая "
+        "смена считается нашей — иначе правка выдавалась бы за движение рынка.\n"
+    )
+    if weekly["issuer"]:
+        print("Смены у эмитента за неделю:\n")
+        _moves_table(
+            routing, {"issuer": weekly["issuer"]}, was, now, since, until, order
+        )
 
     # **Новое основание без смены корзины — только старшей подгруппы.**
     # Новый дефолт у эмитента, уже стоящего во «Внимании», терять нельзя;

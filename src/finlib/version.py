@@ -11,6 +11,7 @@
 правки помечаются суффиксом, потому что хеш их не описывает.
 """
 
+import hashlib
 import logging
 import subprocess
 from functools import lru_cache
@@ -60,3 +61,42 @@ def code_version() -> str:
     # сюда не попадает: оно в .gitignore.
     changes = _git("status", "--porcelain")
     return f"{revision}{DIRTY_SUFFIX}" if changes else revision
+
+
+# Код маршрута: правка документа или замера маршрута не меняет, и коммит
+# такой правки не должен объявлять «наши правки» в отчёте изменений.
+ROUTE_CODE = ("src/finlib",)
+
+
+@lru_cache(maxsize=1)
+def methodology_digest() -> str:
+    """Отпечаток содержимого справочников методики: имена и байты всех YAML.
+
+    **Объявленная версия справочника правкой не поднимается** — она «1.0.0»
+    с 22.09.2026 при десятках правок, — и отчёт изменений по ней не видел
+    наших изменений вовсе. Отпечаток содержимого меняется с любой правкой.
+    """
+    found = hashlib.sha256()
+    for path in sorted(settings.methodology_dir.glob("**/*.yaml")):
+        found.update(str(path.relative_to(settings.methodology_dir)).encode("utf-8"))
+        found.update(path.read_bytes())
+    return found.hexdigest()[:12]
+
+
+@lru_cache(maxsize=1)
+def route_code() -> str:
+    """Коммит кода маршрута: последний, менявший `src/finlib`, с суффиксом при правках.
+
+    **Признак «грязного» дерева считается по коду маршрута, а не по всему
+    дереву**: неотслеживаемый каталог вне кода делал «-dirty» каждый прогон.
+    """
+    revision = _git("log", "-1", "--format=%h", "--", *ROUTE_CODE)
+    if not revision:
+        return UNKNOWN
+    changes = _git("status", "--porcelain", "--", *ROUTE_CODE)
+    return f"{revision}{DIRTY_SUFFIX}" if changes else revision
+
+
+def route_fingerprint() -> dict[str, str]:
+    """Чем сделан маршрут: отпечаток методики и коммит кода маршрута."""
+    return {"content": methodology_digest(), "route_code": route_code()}

@@ -49,7 +49,7 @@ from finlib.scoring.routing_store import routing_rows
 from finlib.sources import cbonds
 from finlib.sources.market import series as market_series
 from finlib.sources.network import NetworkDownError
-from finlib.version import code_version
+from finlib.version import code_version, route_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -438,7 +438,12 @@ def main() -> int:
     routing = load_routing()
     delivered: list[dict] = []
     shortfall = ""
-    run_id = _open_run(today, json.dumps({"routing": routing.version}))
+    # **Отпечаток прогона — содержимое методики и коммит кода маршрута**
+    # (решение владельца 01.10.2026): объявленная версия «1.0.0» правкой
+    # не поднималась, и отчёт изменений не видел наших правок.
+    run_id = _open_run(
+        today, json.dumps({"routing": routing.version, **route_fingerprint()})
+    )
     said = _who(run_id, today, started, reason)
     try:
         rows, counts, shortfall = _deliver_and_route(
