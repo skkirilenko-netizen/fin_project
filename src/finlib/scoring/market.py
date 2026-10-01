@@ -55,6 +55,9 @@ class MarketFinding:
     # последняя цена уже выше границы, а основание ещё стоит.
     low: Decimal | None = None
     low_day: date | None = None
+    # День величины спреда, когда он раньше последнего торгового дня биржи:
+    # основание стоит по сроку жизни, а спред дня есть не каждый день.
+    value_day: date | None = None
 
     @property
     def variant(self) -> str:
@@ -84,7 +87,10 @@ class MarketFinding:
             "floor": "",
             "low": "",
             "low_day": "",
+            "value_on": "",
         }
+        if self.value_day is not None:
+            said["value_on"] = f" на {self.value_day:%d.%m.%Y}"
         if self.benchmark:
             said["benchmark"] = digits(self.benchmark, spread)
             # Кратность делится на то же, на что её делил признак: на пол,
@@ -310,13 +316,21 @@ def _level_finding(
     since = standing_since(market, days, today, _lifetime(policy, step.code))
     if since is None:
         return None
-    last = points[-1]
-    level = market.benchmark.get(last.day)
+    # **День без спреда — нет наблюдения, а не снятие основания** (правило
+    # срока жизни, решение владельца 29.09.2026). Основание держится, пока
+    # подтверждение не старше срока, а величина берётся у последнего дня
+    # со спредом и печатается с его датой. До 01.10.2026 точка дня с ценой
+    # без спреда снимала основание целиком: у Парк Сказки p99 «есть / нет /
+    # есть» пять раз за месяц, на истории года — 1 086 точек у 38 эмитентов.
+    last = next((item for item in reversed(points) if item.spread is not None), None)
+    level = None if last is None else market.benchmark.get(last.day)
     base = None if level is None else (level if floor is None else max(level, floor))
-    if last.spread is None or base is None or base <= 0:
-        # Признак держался раньше, а последний день спреда не даёт: величину
-        # брать неоткуда, и печатать её было бы выдумкой.
+    if last is None or last.spread is None or base is None or base <= 0:
+        # Спреда с ориентиром в ряду нет вовсе: величину брать неоткуда,
+        # и печатать её было бы выдумкой.
         return None
+    calendar = market.calendar()
+    trading_day = calendar[market.day_number(today)]
     return MarketFinding(
         ground=step.ground,
         basket=step.basket,
@@ -331,6 +345,7 @@ def _level_finding(
         since=since,
         benchmark=level,
         floor=floor if floor is not None and level < floor else None,
+        value_day=last.day if last.day < trading_day else None,
     )
 
 

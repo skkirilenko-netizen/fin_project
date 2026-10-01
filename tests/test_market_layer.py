@@ -333,3 +333,36 @@ def test_a_recovered_price_names_its_low() -> None:
 
     text = load_routing().say(price.ground, price.variant, **price.slots(policy))
     assert "опускалась" in text and days[3].strftime("%d.%m.%Y") in text
+
+
+def test_a_day_without_spread_does_not_lift_the_ground() -> None:
+    """День без спреда — нет наблюдения, а не снятие основания.
+
+    У Парк Сказки 30.09.2026 точка дня была с ценой и без спреда, и p99
+    снималось, хотя подтверждено было накануне: «есть / нет / есть».
+    Величина берётся у последнего дня со спредом и печатается с его датой.
+    """
+    policy = _policy()
+    days = _days(14)
+    high = Decimal(100) * (_extreme(policy) + 1)
+    points = [_row(day, high, Decimal(95)) for day in days[:12]]
+    points += [_row(day, None, Decimal(95)) for day in days[12:]]
+    market = _market({"7700000000": points})
+    level = next(
+        item
+        for item in findings(policy, market, "7700000000", days[-1])
+        if item.ground.endswith("extreme")
+    )
+    assert level.value == high and level.value_day == days[11]
+    from finlib.scoring.routing import load_routing
+
+    text = load_routing().say(level.ground, level.variant, **level.slots(policy))
+    assert f"б. п. на {days[11]:%d.%m.%Y} при ориентире" in text
+    # Спред сегодняшний — дата не называется.
+    same = next(
+        item
+        for item in findings(policy, market, "7700000000", days[11])
+        if item.ground.endswith("extreme")
+    )
+    assert same.value_day is None
+    assert " на " not in same.slots(policy)["value_on"]
