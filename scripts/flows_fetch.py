@@ -16,8 +16,15 @@
 
 **Файл дня** (`flows_delta_ГГГГ-ММ-ДД.json`) называет, что спрошено и почему,
 и служит результатом стадии ежедневного прогона.
+
+**Обновлённый — не значит изменившийся по существу** (`methodology/delivery.yaml`,
+`flows.substantive_fields`). Запись выпуска обновляется по поводам, графика
+не касающимся; перезабирается выпуск, у которого с прошлой доставки сменилось
+поле перечня. Отпечаток полей на момент доставки хранится рядом
+(`flows_basis.json`); выпуск без отпечатка перезабирается, как прежде.
 """
 
+import hashlib
 import json
 import logging
 import sys
@@ -25,9 +32,11 @@ from datetime import date
 from pathlib import Path
 
 import httpx
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from finlib.config import settings  # noqa: E402
 from finlib.sources import cbonds  # noqa: E402
 from finlib.sources.cbonds_events import issues_of  # noqa: E402
 
@@ -36,14 +45,29 @@ logger = logging.getLogger(__name__)
 CACHE = cbonds.CACHE
 CARDS = CACHE / "emitents.json"
 SINCE = CACHE / "flows_since.json"
+BASIS = CACHE / "flows_basis.json"
+
+
+def substantive_fields() -> tuple[str, ...]:
+    """Поля записи выпуска, смена которых требует перезабрать график."""
+    rules = yaml.safe_load(
+        (settings.methodology_dir / "delivery.yaml").read_text(encoding="utf-8")
+    )
+    return tuple(rules["flows"]["substantive_fields"])
+
+
+def digest(record: dict, fields: tuple[str, ...]) -> str:
+    """Отпечаток существенных полей записи выпуска."""
+    said = json.dumps({key: record.get(key) for key in fields}, sort_keys=True)
+    return hashlib.sha256(said.encode("utf-8")).hexdigest()[:16]
 # Выпуски, по которым нужны платежи: в обращении и размещаемые — для
 # рефинансирования, с дефолтом — для истории событий. То же правило, что
 # у полной доставки (`scripts/events_fetch.py`).
 WANTED_STATUSES = ("в обращении", "размещается")
 
 
-def changed_since(since: str) -> set[str]:
-    """Идентификаторы выпусков российских эмитентов, обновлённых с даты."""
+def changed_since(since: str) -> dict[str, dict]:
+    """Записи выпусков российских эмитентов, обновлённых с даты: выпуск → запись."""
     found = cbonds.fetch(
         "get_emissions",
         f"emissions_changed_{since}",
@@ -62,13 +86,21 @@ def changed_since(since: str) -> set[str]:
         raise cbonds.FilterIgnoredError(
             f"отбор updating_date ≥ {since} не применён: {len(early)} записей раньше"
         )
-    return {str(item.get("id")) for item in items}
+    return {str(item.get("id")): item for item in items}
 
 
-def wanted(changed: set[str]) -> list[tuple[str, str, str]]:
-    """Выпуски справочника, по которым спрашивать: изменившиеся и без графика."""
+def wanted(
+    changed: dict[str, dict], basis: dict[str, str], fields: tuple[str, ...]
+) -> tuple[list[tuple[str, str, str]], int]:
+    """Выпуски справочника, по которым спрашивать, и сколько обновлённых пропущено.
+
+    Спрашиваются изменившиеся по существу и выпуски без графика на диске.
+    Обновлённый выпуск, у которого отпечаток существенных полей тот же,
+    что при прошлой доставке, не спрашивается.
+    """
     cards = json.loads(CARDS.read_text(encoding="utf-8"))
     found: list[tuple[str, str, str]] = []
+    skipped = 0
     for inn in cards:
         issues, known = issues_of(inn)
         if not known:
@@ -77,11 +109,15 @@ def wanted(changed: set[str]) -> list[tuple[str, str, str]]:
             if not (issue.status in WANTED_STATUSES or issue.default or issue.unsettled):
                 continue
             missing = not (CACHE / f"flow_{issue.emission_id}.json").exists()
-            if issue.emission_id in changed:
-                found.append((inn, issue.emission_id, "обновлён"))
-            elif missing:
+            record = changed.get(issue.emission_id)
+            if missing:
                 found.append((inn, issue.emission_id, "графика нет"))
-    return found
+            elif record is not None:
+                if basis.get(issue.emission_id) == digest(record, fields):
+                    skipped += 1
+                    continue
+                found.append((inn, issue.emission_id, "обновлён"))
+    return found, skipped
 
 
 def main() -> int:
@@ -98,10 +134,14 @@ def main() -> int:
         if SINCE.exists()
         else f"{today}"
     )
-    chosen = wanted(changed_since(since))
+    fields = substantive_fields()
+    basis = json.loads(BASIS.read_text(encoding="utf-8")) if BASIS.exists() else {}
+    changed = changed_since(since)
+    chosen, skipped = wanted(changed, basis, fields)
     asked: list[dict] = []
     failed = 0
     for inn, emission, why in chosen:
+        before = failed
         for method, name, limit in (
             ("get_flow_new", f"flow_{emission}", 500),
             ("get_offert", f"offert_{emission}", 100),
@@ -118,9 +158,14 @@ def main() -> int:
                 failed += 1
                 logger.error("%s %s: %s", method, emission, str(failure)[:120])
         asked.append({"inn": inn, "emission_id": emission, "why": why})
+        # Отпечаток пишется только у доставленного целиком: выпуск с отказом
+        # должен перезабраться и завтра.
+        if failed == before and emission in changed:
+            basis[emission] = digest(changed[emission], fields)
+    BASIS.write_text(json.dumps(basis, sort_keys=True), encoding="utf-8")
     (CACHE / f"flows_delta_{today}.json").write_text(
         json.dumps(
-            {"since": since, "asked": asked, "failed": failed},
+            {"since": since, "asked": asked, "skipped": skipped, "failed": failed},
             ensure_ascii=False,
             indent=1,
         ),
@@ -130,8 +175,9 @@ def main() -> int:
         SINCE.write_text(json.dumps({"since": f"{today}"}), encoding="utf-8")
     new = sum(1 for item in asked if item["why"] == "графика нет")
     print(
-        f"графики с {since}: выпусков {len(asked)} (обновлённых {len(asked) - new}, "
-        f"без графика {new}), отказов {failed}, запросов {cbonds.pace.requested}"
+        f"графики с {since}: выпусков {len(asked)} (обновлённых по существу "
+        f"{len(asked) - new}, без графика {new}), обновлённых не по существу "
+        f"{skipped} — не спрошены, отказов {failed}, запросов {cbonds.pace.requested}"
     )
     return 0
 
