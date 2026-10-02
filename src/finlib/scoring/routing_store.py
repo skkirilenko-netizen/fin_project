@@ -929,7 +929,12 @@ def routing_rows(
         # а не движение края: она вносила и выносила целый месяц платежей.
         # Денежные средства при этом остаются на отчётную дату: моменты
         # расходятся намеренно — это предмет меры, а не её изъян.
-        plan = refinancing(events.issues, routing.refinancing.days, today)
+        plan = refinancing(
+            events.issues,
+            routing.refinancing.days,
+            today,
+            routing.refinancing.offer_kinds,
+        )
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
             cash=cash,

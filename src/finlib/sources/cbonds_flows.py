@@ -142,18 +142,26 @@ def schedule_of(emission_id: str) -> Schedule | None:
     )
 
 
-def offers_of(emission_id: str) -> tuple[date, ...] | None:
+def offers_of(
+    emission_id: str, kinds: tuple[str, ...] | None = None
+) -> tuple[date, ...] | None:
     """Даты оферт выпуска с диска; None — ответа источника нет.
 
     Записей на одну оферту бывает две — день предъявления и день приобретения,
     — и различать их здесь незачем: в окно попадают обе или ни одна. `None`
     означает, что доставка до выпуска не дошла, и это не «оферт нет».
+
+    `kinds` — виды оферт (`type_rus` источника), которые берутся; пусто —
+    все. Маршрут передаёт перечень методики: call — право эмитента, и во
+    вторую меру он не идёт.
     """
     path = CACHE / f"offert_{emission_id}.json"
     if not path.exists():
         return None
     found: list[date] = []
     for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
+        if kinds is not None and str(item.get("type_rus") or "") not in kinds:
+            continue
         when = str(item.get("date") or "")[:10]
         try:
             found.append(date.fromisoformat(when))
@@ -189,7 +197,12 @@ class Refinancing:
         return self.issues > self.without_schedule + self.without_volume
 
 
-def refinancing(issues: tuple[object, ...], days: int, today: date) -> Refinancing:
+def refinancing(
+    issues: tuple[object, ...],
+    days: int,
+    today: date,
+    offer_kinds: tuple[str, ...] | None = None,
+) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
     Оферты считаются порознь: предъявление — право владельца, и сложенное
@@ -237,7 +250,7 @@ def refinancing(issues: tuple[object, ...], days: int, today: date) -> Refinanci
         # не всегда ближайшую: у «Русбонд-Удобрения» оно объявляет 29.03.2027
         # при оферте 28.09.2026. Ответа нет — это называется, а не считается
         # отсутствием оферты.
-        offers = offers_of(emission)
+        offers = offers_of(emission, offer_kinds)
         if offers is None:
             no_offers += 1
             continue

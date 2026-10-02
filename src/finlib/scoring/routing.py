@@ -466,6 +466,9 @@ class Refinancing(BaseModel):
     # платёж, до которого оставалось тринадцать месяцев, через неделю в окно
     # попадает. Отчёт изменений называет это причиной, а не следствием.
     window_driven: tuple[str, ...] = Field(min_length=1)
+    # Виды оферт, идущие во вторую меру: только право владельца предъявить.
+    # Call — право эмитента и предстоящим платежом не считается.
+    offer_kinds: tuple[str, ...] = Field(min_length=1)
 
 
 class HoldingFallback(BaseModel):

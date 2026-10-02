@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from finlib.scoring.routing import load_routing
 from finlib.sources import cbonds_flows
 from finlib.sources.cbonds_flows import refinancing, schedule_of
 
@@ -191,3 +192,31 @@ def test_redeemed_issues_are_out_of_the_window(cache: Path) -> None:
     )
     assert plan.issues == 0
     assert plan.scheduled == 0
+
+
+def test_call_is_not_an_offer_to_the_holder(cache: Path) -> None:
+    """Call — право эмитента: во вторую меру идут только put и «доп. оферта»."""
+    put(cache, "1", [coupon("2026-10-05", "10")])
+    put(cache, "2", [coupon("2026-10-05", "10")])
+    (cache / "offert_1.json").write_text(
+        json.dumps({"items": [{"date": "2026-12-01", "type_rus": "call"}]}),
+        encoding="utf-8",
+    )
+    (cache / "offert_2.json").write_text(
+        json.dumps({"items": [{"date": "2026-12-01", "type_rus": "доп. оферта"}]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    kinds = load_routing().refinancing.offer_kinds
+    assert "call" not in kinds
+    plan = refinancing(
+        (
+            FakeIssue(emission_id="1", outstanding=Decimal(1000)),
+            FakeIssue(emission_id="2", outstanding=Decimal(500)),
+        ),
+        365,
+        date(2026, 9, 22),
+        kinds,
+    )
+    assert plan.offered == Decimal(500)
+    assert plan.without_offers == 0

@@ -44,8 +44,14 @@ logger = logging.getLogger(__name__)
 HOLDER_RIGHT = ("put", "доп. оферта")
 
 
-def _offers_without_call(emission_id: str) -> tuple[date, ...] | None:
-    """Даты оферт выпуска, кроме call; None — ответа источника нет."""
+def _offers_without_call(
+    emission_id: str, kinds: tuple[str, ...] | None = None  # noqa: ARG001
+) -> tuple[date, ...] | None:
+    """Даты оферт выпуска, кроме call; None — ответа источника нет.
+
+    С 02.10.2026 шаг 1 в main (`refinancing.offer_kinds`), и замер повторяет
+    базу; подмена оставлена, чтобы прогон ночи воспроизводился.
+    """
     path = cbonds_flows.CACHE / f"offert_{emission_id}.json"
     if not path.exists():
         return None
