@@ -59,6 +59,7 @@ from finlib.scoring.routing import (
     route,
 )
 from finlib.scoring.routing_catalogue import RoutingCatalogue, catalogue_for
+from finlib.sources import floating
 from finlib.sources.cbonds import bond_issuers
 from finlib.sources.cbonds_events import (
     DEFAULT_STATUSES,
@@ -929,11 +930,13 @@ def routing_rows(
         # а не движение края: она вносила и выносила целый месяц платежей.
         # Денежные средства при этом остаются на отчётную дату: моменты
         # расходятся намеренно — это предмет меры, а не её изъян.
+        coupons = routing.refinancing.floating_coupons
         plan = refinancing(
             events.issues,
             routing.refinancing.days,
             today,
-            routing.refinancing.offer_kinds,
+            offer_kinds=routing.refinancing.offer_kinds,
+            estimator=floating.estimator(coupons) if coupons else None,
         )
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
@@ -947,6 +950,11 @@ def routing_rows(
             issues=plan.issues,
             without_schedule=plan.without_schedule,
             without_offers=plan.without_offers,
+            estimated=(in_unit(plan.estimated, unit_code) or Decimal(0))
+            if plan.known
+            else Decimal(0),
+            unknown=plan.unknown,
+            bases=plan.bases,
         )
         # **Доводы маршрута набираются один раз и переиспользуются вторым
         # проходом.** Прежде второй проход собирал перечень доводов заново

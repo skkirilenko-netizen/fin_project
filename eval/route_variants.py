@@ -36,12 +36,41 @@ def patched(policy, market: Market):  # noqa: ANN001, ANN201
         routing_store.load_market, routing_store._market_series = keep
 
 
+class _NoEstimate:
+    """Оценщик неустановленных купонов выключен: пустой купон — ноль, как до 02.10.2026."""
+
+    @staticmethod
+    def estimator(rules: dict) -> None:  # noqa: ARG004
+        """Оценщика нет."""
+        return None
+
+
+@contextmanager
+def _coupons(enabled: bool):  # noqa: ANN202
+    """Оценка купонов только там, где её меряют: прочие замеры — против базы main."""
+    if enabled:
+        yield
+        return
+    original = routing_store.floating
+    routing_store.floating = _NoEstimate
+    try:
+        yield
+    finally:
+        routing_store.floating = original
+
+
 def baskets(
-    moments: list[date], memo: dict
+    moments: list[date], memo: dict, coupons: bool = True
 ) -> dict[date, dict[str, tuple[str, tuple[str, ...]]]]:
-    """Корзина и основания каждого эмитента на даты."""
+    """Корзина и основания каждого эмитента на даты.
+
+    **Каждый замер — против одной базы — main.** С 02.10.2026 оценка
+    неустановленных купонов в main, и по умолчанию она включена; выключает
+    её только замер самих купонов (`coupons=False` — база до них). Ночные
+    замеры 01→02.10.2026 шли с выключенной: тогда main был без купонов.
+    """
     found: dict[date, dict[str, tuple[str, tuple[str, ...]]]] = {}
-    with connection() as conn:
+    with _coupons(coupons), connection() as conn:
         for moment in moments:
             rows, _ = routing_store.routing_rows(conn, moment, as_of=moment, memo=memo)
             found[moment] = {

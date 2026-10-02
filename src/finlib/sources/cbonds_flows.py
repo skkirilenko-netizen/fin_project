@@ -41,6 +41,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -58,6 +59,16 @@ class Payment:
     due: date
     coupon: Decimal
     redemption: Decimal
+    # **Пустой купон — не объявленный, а не нулевой.** Явный ноль — у
+    # бескупонной бумаги; пустое — ставка ещё не определена, и оценивает
+    # его `sources.floating`, а не этот разбор.
+    coupon_known: bool = True
+    start: date | None = None
+    # Ставка купона в процентах, когда источник её назвал.
+    rate: Decimal | None = None
+    # Номер купонного периода источника (`coupon_num`): по нему ставка,
+    # прописанная в тексте условий для диапазона купонов, относится к платежу.
+    number: int | None = None
 
     @property
     def total(self) -> Decimal:
@@ -128,11 +139,22 @@ def schedule_of(emission_id: str) -> Schedule | None:
         if nominal is None:
             value = _number(item.get("emission_nominal_price"))
             nominal = value if value > 0 else None
+        try:
+            start = date.fromisoformat(str(item.get("start_date") or "")[:10])
+        except ValueError:
+            start = None
+        rate = _number(item.get("cupon_rate")) * 100 if item.get("cupon_rate") else None
+        raw_number = str(item.get("coupon_num") or "")
+        number = int(raw_number) if raw_number.isdigit() else None
         payments.append(
             Payment(
                 due=due,
                 coupon=_number(item.get("cupon_sum")),
                 redemption=_number(item.get("redemtion")),
+                coupon_known=item.get("cupon_sum") not in (None, ""),
+                start=start,
+                rate=rate,
+                number=number,
             )
         )
     return Schedule(
@@ -140,6 +162,11 @@ def schedule_of(emission_id: str) -> Schedule | None:
         payments=tuple(sorted(payments, key=lambda item: item.due)),
         nominal=nominal,
     )
+
+
+# Оценщик неустановленного купона: сумма на одну бумагу (None — оценки нет),
+# основание и признак «данные условий выпуска, а не оценка».
+Estimator = Callable[[str, Payment, Schedule, date], tuple[Decimal | None, str, bool]]
 
 
 def offers_of(
@@ -190,6 +217,15 @@ class Refinancing:
     # Выпуски, по которым ответа об офертах нет: «оферт ноль» у них означает
     # недошедшую доставку, а не отсутствие права предъявления.
     without_offers: int = 0
+    # Оценка неустановленных купонов окна (входит в `scheduled`), число
+    # выпусков, у которых купоны окна не оценены вовсе, и основания оценки.
+    estimated: Decimal = Decimal(0)
+    unknown: int = 0
+    bases: tuple[str, ...] = ()
+    # Купоны окна, ставка которых прописана в тексте условий выпуска, а сумма
+    # в графике не проставлена: это данные, а не оценка (решение владельца
+    # 02.10.2026), и в `estimated` они не входят — только в `scheduled`.
+    by_terms: Decimal = Decimal(0)
 
     @property
     def known(self) -> bool:
@@ -202,6 +238,7 @@ def refinancing(
     days: int,
     today: date,
     offer_kinds: tuple[str, ...] | None = None,
+    estimator: Estimator | None = None,
 ) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
@@ -223,8 +260,9 @@ def refinancing(
     Денежные средства при этом остаются на отчётную дату, а платежи всегда
     будущие: моменты расходятся намеренно — это предмет меры, а не её изъян.
     """
-    scheduled = offered = Decimal(0)
-    counted = no_schedule = no_volume = no_offers = 0
+    scheduled = offered = estimated = by_terms = Decimal(0)
+    counted = no_schedule = no_volume = no_offers = unknown = 0
+    bases: list[str] = []
     start = today
     edge = today + timedelta(days=days)
     for issue in issues:
@@ -246,6 +284,27 @@ def refinancing(
             no_volume += 1
             continue
         scheduled += due
+        if estimator is not None and plan.nominal:
+            # **Неустановленный купон окна оценивается, а не читается нулём**
+            # (`sources.floating`); не оценённый — выпуск идёт в счёт
+            # неполных, и сумма становится границей снизу.
+            missed = False
+            for item in plan.payments:
+                if not (start <= item.due < edge) or item.coupon_known:
+                    continue
+                amount, basis, data = estimator(emission, item, plan, today)
+                if amount is None:
+                    missed = True
+                    continue
+                part = amount * outstanding / plan.nominal
+                scheduled += part
+                if data:
+                    by_terms += part
+                    continue
+                estimated += part
+                if basis and basis not in bases:
+                    bases.append(basis)
+            unknown += int(missed)
         # **Ближайшая оферта — у метода оферт.** Поле записи выпуска называет
         # не всегда ближайшую: у «Русбонд-Удобрения» оно объявляет 29.03.2027
         # при оферте 28.09.2026. Ответа нет — это называется, а не считается
@@ -264,4 +323,8 @@ def refinancing(
         without_schedule=no_schedule,
         without_volume=no_volume,
         without_offers=no_offers,
+        estimated=estimated,
+        unknown=unknown,
+        bases=tuple(bases),
+        by_terms=by_terms,
     )

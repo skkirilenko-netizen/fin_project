@@ -469,6 +469,10 @@ class Refinancing(BaseModel):
     # Виды оферт, идущие во вторую меру: только право владельца предъявить.
     # Call — право эмитента и предстоящим платежом не считается.
     offer_kinds: tuple[str, ...] = Field(min_length=1)
+    # **Неустановленные купоны** (`sources.floating`): правило оценки,
+    # индексы и свежесть рядов. Нет блока — пустой купон читается нулём,
+    # как до решения владельца 01.10.2026.
+    floating_coupons: dict | None = None
 
 
 class HoldingFallback(BaseModel):
@@ -1048,6 +1052,11 @@ class Refinance:
     issues: int = 0
     without_schedule: int = 0
     without_offers: int = 0
+    # **Оценка неустановленных купонов окна** (входит в `due`), число выпусков
+    # без оценки и основания оценки — формулировка называет их сама.
+    estimated: Decimal = Decimal(0)
+    unknown: int = 0
+    bases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1626,16 +1635,33 @@ def route(
         elif short_of_cash(
             routing, refinance.cash, refinance.due, over.cover.get("refinancing_gap")
         ):
+            # **Оценка и граница называют себя** (`refinancing.floating_coupons`):
+            # часть платежей — подстановка по ставке, а не график; не оценённые
+            # купоны в сумму не вошли, и основание неполное.
+            key = ("estimated" if refinance.estimated else "") + (
+                "_lower_bound" if refinance.unknown else ""
+            )
+            key = key.lstrip("_")
+            extra: dict[str, object] = {}
+            if refinance.estimated:
+                extra["estimated"] = Amount(
+                    refinance.estimated, refinance.unit, money(refinance.estimated), True
+                )
+                extra["basis"] = "; ".join(refinance.bases)
+            if refinance.unknown:
+                extra["unknown"] = refinance.unknown
             attention.append(
                 _said(
                     routing,
                     "refinancing_gap",
                     "refinancing",
+                    key,
                     due=Amount(refinance.due, refinance.unit, money(refinance.due), True),
                     cash=Amount(
                         refinance.cash, refinance.unit, money(refinance.cash), True
                     ),
                     unit=UnitName(refinance.unit),
+                    **extra,
                 )
             )
     # **Вторая мера рефинансирования — основание внимания** (решение человека
