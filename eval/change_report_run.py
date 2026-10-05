@@ -58,7 +58,7 @@ ORDER BY as_of
 """
 
 _POINTS = """
-SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
+SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
        h.report_date, r.code_version, r.methodology
 FROM {source} h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE (h.kind = %(kind)s OR %(kind)s = 'run') AND h.as_of = %(as_of)s
@@ -170,7 +170,10 @@ def _why(  # noqa: ANN001
     # названное в одну сторону, оно во вторую печаталось «слой не назван» —
     # то есть одно и то же обстоятельство выглядело объяснённым и
     # необъяснённым в зависимости от знака.
-    vanished = set(before["grounds"]) - set(after["grounds"])
+    vanished = {
+        code for code in set(before["grounds"]) - set(after["grounds"])
+        if layers is None or routing.source_of(code) in layers
+    }
     if vanished and vanished <= window:
         return "из окна двенадцати месяцев вышли платежи по графику"
     # Отчётность датированной записи не имеет — её раскрытие видно по тому,
@@ -375,7 +378,7 @@ def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
 
 
 _SCHEDULED = """
-SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
+SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
        h.report_date, r.code_version, r.methodology
 FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
@@ -838,10 +841,17 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     )
 
     changed = sum(len(items) for items in daily.values())
-    print(f"## За сутки сменили корзину: {changed} из {len(now)}\n")
-    if not changed:
-        print("ни одного.\n")
+    if not was_day:
+        print("## Суточные смены не установлены\n")
+        print(
+            f"Точек прогона по расписанию {previous:%d.%m.%Y} нет: "
+            "сравнивать не с чем; это не ноль изменений.\n"
+        )
     else:
+        print(f"## За сутки сменили корзину: {changed} из {len(now)}\n")
+    if was_day and not changed:
+        print("ни одного.\n")
+    elif was_day:
         _moves_table(routing, daily, was_day, now, previous, until, order)
 
     print(f"## За неделю ({since:%d.%m.%Y} → {until:%d.%m.%Y}): сводка\n")
@@ -870,19 +880,33 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         if basket.group_of(ground.code) == "event_risk"
     }
     events_added = []
+    events_removed = []
     other_added = 0
     for inn, row in now.items():
         if inn not in was or row["basket"] != was[inn]["basket"]:
             continue
-        appeared = set(row["grounds"]) - set(was[inn]["grounds"])
+        current_grounds = set(row.get("grounds_all", row["grounds"]))
+        prior_grounds = set(was[inn].get("grounds_all", was[inn]["grounds"]))
+        appeared = current_grounds - prior_grounds
+        vanished = prior_grounds - current_grounds
         if appeared & senior:
             events_added.append((inn, appeared & senior))
-        elif appeared:
+        if vanished & senior:
+            events_removed.append((inn, vanished & senior))
+        if (appeared | vanished) - senior:
             other_added += 1
     print(f"## Новое основание без смены корзины: {len(events_added)}\n")
     for inn, appeared in events_added[:20]:
         said = ", ".join(names.get(code, code) for code in sorted(appeared))
         print(f"- {_named(inn)}: {said}")
+    if len(events_added) > 20:
+        print(f"\nПоказаны первые двадцать из {len(events_added)}; остальные видны в истории.")
+    print(f"\n## Ушло основание без смены корзины: {len(events_removed)}\n")
+    for inn, vanished in events_removed[:20]:
+        said = ", ".join(names.get(code, code) for code in sorted(vanished))
+        print(f"- {_named(inn)}: ушло основание: {said}")
+    if len(events_removed) > 20:
+        print(f"\nПоказаны первые двадцать из {len(events_removed)}; остальные видны в истории.")
     print(f"\nПрочих изменений оснований {other_added} — показаны числом.\n")
 
     print(f"## Вошли в периметр: {len(entered)}   Вышли: {len(left)}\n")
@@ -890,7 +914,10 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         mark = " (с выпусками в обращении)" if inn in bonds else ""
         print(f"- вошёл {_named(inn)}{mark}: {_basket_name(routing, now[inn]['basket'])}")
     for inn in left[:10]:
-        print(f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}")
+        print(
+            f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}; "
+            "причина выхода из истории не установлена — проверить журнал исключений"
+        )
     print()
 
     print(f"## От календаря: {len(by_calendar)}\n")
