@@ -759,8 +759,11 @@ def latest_snapshot() -> tuple[date | None, dict[str, list[dict]]]:
     return found.on, found.issuers
 
 
-def read_snapshot() -> Snapshot:
+def read_snapshot(until: date | None = None) -> Snapshot:
     """Свежий снимок рейтингов: его дата, записи по ИНН и перенесённые наблюдения.
+
+    `until` ограничивает снимки датой отчёта, включая перенос наблюдений.
+    Без ограничения читается последнее доступное наблюдение.
 
     **Отсутствие ответа — не отсутствие рейтинга.** Эмитент, по которому
     источник в день снимка не ответил (`refused`), в `issuers` не стоит,
@@ -776,7 +779,12 @@ def read_snapshot() -> Snapshot:
     """
     if not SNAPSHOTS.exists():
         return Snapshot(None, {}, {})
-    files = sorted(SNAPSHOTS.glob("*.json"), reverse=True)
+    files = sorted(
+        (path for path in SNAPSHOTS.glob("*.json")
+         if until is None or (_as_date(path.stem) is not None
+                              and _as_date(path.stem) <= until)),
+        reverse=True,
+    )
     if not files:
         return Snapshot(None, {}, {})
     found = json.loads(files[0].read_text(encoding="utf-8"))

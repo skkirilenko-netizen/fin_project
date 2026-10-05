@@ -135,7 +135,8 @@ def _why(  # noqa: ANN001
             else "отчётность исчезла"
         )
         said.append(f"отчётный период: {was} → {now}")
-    events = events_of(inn)
+    snapshot = cbonds_events.read_snapshot(until)
+    events = events_of(inn, snapshot=snapshot.issuers, observed=snapshot.observed)
     if wanted("выпуск"):
         emissions = {item.emission_id for item in events.issues} | {
             item.emission_id for item in events.records}
@@ -245,8 +246,10 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     snapshots = default_notifications.snapshots_at(cbonds_events.CACHE, until)
     notices, corrections, latest = default_notifications.timeline(snapshots, until)
     updates: list[str] = []
+    ratings_snapshot = cbonds_events.read_snapshot(until)
     for inn in now:
-        events = events_of(inn)
+        events = events_of(inn, snapshot=ratings_snapshot.issuers,
+                           observed=ratings_snapshot.observed)
         emissions = {item.emission_id for item in events.issues} | {
             item.emission_id for item in events.records}
         for item in notices:

@@ -53,7 +53,7 @@ def test_history_to_report_keeps_senior_changes_and_perimeter(
     was = {inn: row for inn, row in report._read(db_conn, "backfill", BEFORE).items()
            if inn in inns}
     now = {inn: row for inn, row in report._read(db_conn, "backfill", AFTER).items() if inn in inns}
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    monkeypatch.setattr(report, "events_of", lambda inn, **kwargs: IssuerEvents(inn=inn))
     monkeypatch.setattr(report, "risk_sectors", lambda: {})
     monkeypatch.setattr(report, "_named", lambda inn: f"Тест ({inn})")
     report._report(load_routing(), "backfill", BEFORE, AFTER, was, now, set(), BEFORE, [])
@@ -82,7 +82,7 @@ def test_removed_payment_does_not_explain_a_removed_market_ground(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ушедшие платежи не становятся причиной снятия рыночного основания."""
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    monkeypatch.setattr(report, "events_of", lambda inn, **kwargs: IssuerEvents(inn=inn))
     monkeypatch.setattr(report, "risk_sectors", lambda: {})
     before = {"basket": "review", "report_date": BEFORE,
               "grounds": ["market_spread_extreme", "refinancing_gap"]}
@@ -97,7 +97,7 @@ def test_missing_daily_baseline_is_not_printed_as_zero_changes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Отсутствующая точка расписания явно блокирует суточное сравнение."""
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    monkeypatch.setattr(report, "events_of", lambda inn, **kwargs: IssuerEvents(inn=inn))
     monkeypatch.setattr(report, "_named", lambda inn: inn)
     row = {"basket": "clear", "grounds": [], "grounds_all": [],
            "fingerprint": "same", "report_date": BEFORE}

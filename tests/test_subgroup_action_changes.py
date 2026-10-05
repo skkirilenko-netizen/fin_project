@@ -114,7 +114,7 @@ def test_route_to_history_to_report_preserves_action(
     was = {inn: report._read(db_conn, "backfill", days[0])[inn]}
     now = {inn: report._read(db_conn, "backfill", days[1])[inn]}
     monkeypatch.setattr(report.cbonds_events, "CACHE", tmp_path)
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    monkeypatch.setattr(report, "events_of", lambda inn, **kwargs: IssuerEvents(inn=inn))
     monkeypatch.setattr(report, "_named", lambda inn: "Тест")
     report._report(policy, "backfill", days[0], days[1], was, now, set(), days[0], [], was)
     text = capsys.readouterr().out

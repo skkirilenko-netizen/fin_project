@@ -162,7 +162,8 @@ def test_report_rebuild_keeps_as_of_status_and_separate_corrections(
     _write(tmp_path, "2026-10-02", [_row()])
     monkeypatch.setattr(cbonds_events, "CACHE", tmp_path)
     record = DefaultRecord("issue-1", "Купон", "Дефолт", None, None, None, None, None)
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn, records=(record,)))
+    monkeypatch.setattr(report, "events_of",
+                        lambda inn, **kwargs: IssuerEvents(inn=inn, records=(record,)))
     monkeypatch.setattr(report, "_named", lambda inn: "Тест")
     report._urgent(load_routing(), {"test": {}}, date(2026, 10, 1), date(2026, 10, 2))
     original = capsys.readouterr().out
@@ -192,7 +193,7 @@ def test_report_does_not_call_unknown_events_an_empty_day(
     if coverage == "no_baseline":
         _write(tmp_path, "2026-10-02", [])
     monkeypatch.setattr(cbonds_events, "CACHE", tmp_path)
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    monkeypatch.setattr(report, "events_of", lambda inn, **kwargs: IssuerEvents(inn=inn))
     report._urgent(load_routing(), {"test": {}}, date(2026, 10, 1), date(2026, 10, 2))
     text = capsys.readouterr().out
     assert "По доступным сведениям срочных событий не выявлено" in text
@@ -214,7 +215,8 @@ def test_stale_snapshot_still_reports_a_known_grace_deadline(
     _write(tmp_path, "2026-10-01", [_row()])
     monkeypatch.setattr(cbonds_events, "CACHE", tmp_path)
     row = DefaultRecord("issue-1", "Купон", "Технический дефолт", None, None, None, None, None)
-    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn, records=(row,)))
+    monkeypatch.setattr(report, "events_of",
+                        lambda inn, **kwargs: IssuerEvents(inn=inn, records=(row,)))
     monkeypatch.setattr(report, "_named", lambda inn: "Тест")
     report._urgent(load_routing(), {"test": {}}, date(2026, 10, 1), date(2026, 10, 2))
     text = capsys.readouterr().out
