@@ -117,35 +117,43 @@ SHA-256 для проверки неизменности копий:
    локально в `/private/tmp/fin-night-measures-6-8/`, вместе с выводом.
 2. Скопировать три скрипта в этот каталог. `ifrs16_pairs.pkl` пишется рядом
    со скриптом, поэтому запуск оригинала из `data/output/` запрещён.
-3. Рабочий каталог — корень проверенной рабочей копии: импорты `Path.cwd()/eval`.
-   Входы — отдельный неизменный каталог вне `data/` основного проекта;
-   `Settings.data_dir` направить туда только в памяти процесса до импорта
-   модулей замеров. Никаких симлинков с разрешением записи в исходные данные.
+3. Рабочий каталог процесса — изолированный `INPUT_ROOT`, содержащий
+   `data/` с неизменным снимком входов и `eval/` с проверенной копией кода
+   того же SHA. Это каталог вне основного проекта. `Settings.data_dir`
+   направить в `INPUT_ROOT/data` до импорта модулей замеров.
+   Одного изменения свойства недостаточно: `cbonds.CACHE` и
+   `routing_store.CARDS` заданы относительными путями `data/raw/...`,
+   а старые скрипты импортируют `Path.cwd()/eval`. Смена cwd согласует
+   обе группы путей. Симлинки с разрешением записи в исходные данные запрещены.
 4. В каждом процессе задать явно `DB_NAME` согласованной базы снимка,
    `PGOPTIONS='-c default_transaction_read_only=on'`, `PYTHONPATH` рабочей
    копии и `LLM_MODEL=local-unused`. Перед чтением подтвердить имя базы.
    Ограничение READ ONLY обязательно: откат в конце не заменяет запрета записи.
 5. Для команды с перенаправлением входов использовать оболочку ниже.
-   `INPUT_ROOT` содержит неизменный снимок содержимого исходного `data/`,
+   `INPUT_ROOT` содержит структуру `data/` и `eval/`, описанную выше;
    `MEASUREMENT_DB` — имя согласованной базы снимка. Эти входы сейчас
    не созданы; подставлять текущую findb без разрешения нельзя.
 
    ```sh
    export RUN_DIR=/private/tmp/fin-night-measures-6-8
    export INPUT_ROOT=/private/tmp/fin-night-measure-inputs
+   export CODE_ROOT="$PWD"
    export DB_NAME="${MEASUREMENT_DB:?нужна согласованная база снимка}"
    export PGOPTIONS='-c default_transaction_read_only=on'
    export LLM_MODEL=local-unused
    export PYTHONPATH="$PWD/src"
    run_measure() {
      uv run --no-sync python - "$INPUT_ROOT" "$@" <<'PY'
+   import os
    import runpy
    import sys
    from pathlib import Path
    from finlib.config import Settings, settings
    from finlib.db import connection, fetch_one
    root, script, *args = sys.argv[1:]
-   Settings.data_dir = property(lambda self: Path(root))
+   os.chdir(root)
+   assert Path("data").is_dir() and Path("eval").is_dir()
+   Settings.data_dir = property(lambda self: Path(root) / "data")
    with connection() as conn:
        got = fetch_one("SELECT current_database() AS db, current_setting('transaction_read_only') AS ro", conn=conn)
        assert got == {"db": settings.db_name, "ro": "on"}, got
@@ -159,8 +167,8 @@ SHA-256 для проверки неизменности копий:
 
    ```sh
    run_measure "$RUN_DIR/paired_67.py" > "$RUN_DIR/paired_6_7.md" 2> "$RUN_DIR/paired_6_7.log"
-   run_measure eval/price_ratio_run.py > "$RUN_DIR/price_6.md" 2> "$RUN_DIR/price_6.log"
-   run_measure eval/zspread_run.py > "$RUN_DIR/z_7.md" 2> "$RUN_DIR/z_7.log"
+   run_measure "$CODE_ROOT/eval/price_ratio_run.py" > "$RUN_DIR/price_6.md" 2> "$RUN_DIR/price_6.log"
+   run_measure "$CODE_ROOT/eval/zspread_run.py" > "$RUN_DIR/z_7.md" 2> "$RUN_DIR/z_7.log"
    run_measure "$RUN_DIR/ifrs16_quantile.py" --values > "$RUN_DIR/ifrs16_values.log" 2>&1
    run_measure "$RUN_DIR/ifrs16_stage2.py" > "$RUN_DIR/ifrs16_8.md" 2> "$RUN_DIR/ifrs16_8.log"
    ```
