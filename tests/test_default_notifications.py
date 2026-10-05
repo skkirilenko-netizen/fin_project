@@ -90,13 +90,17 @@ def test_timely_known_settlement_suppresses_grace_notice(tmp_path: Path) -> None
     assert _events(tmp_path, "2026-10-02") == []
 
 
-def test_corrected_date_does_not_move_or_repeat_an_existing_event(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", ["Технический дефолт", "Дефолт"])
+def test_corrected_date_does_not_move_or_repeat_an_existing_event(
+    tmp_path: Path, status: str,
+) -> None:
     """Позднее исправление даты сохраняет первоначальную дату и единственный ключ."""
     _write(tmp_path, "2026-09-29", [_row()])
     original = _events(tmp_path, "2026-10-02")
-    _write(tmp_path, "2026-10-03", [_row(default_date="2026-10-05")])
+    _write(tmp_path, "2026-10-03", [_row(default_date="2026-10-05", status_name_rus=status)])
     assert _events(tmp_path, "2026-10-02") == original
-    assert _events(tmp_path, "2026-10-06") == original
+    expected = original + ([("status_default", date(2026, 10, 3))] if status == "Дефолт" else [])
+    assert _events(tmp_path, "2026-10-06") == expected
     assert len(timeline(snapshots_at(tmp_path, date(2026, 10, 6)), date(2026, 10, 6))[1]) == 1
 
 
@@ -106,6 +110,21 @@ def test_correction_before_event_uses_only_the_then_known_deadline(tmp_path: Pat
     _write(tmp_path, "2026-10-01", [_row(default_date="2026-10-05")])
     assert _events(tmp_path, "2026-10-02") == []
     assert _events(tmp_path, "2026-10-05") == [("grace_end", date(2026, 10, 5))]
+
+
+@pytest.mark.parametrize("deadline", ["2026-10-05", None])
+def test_status_transition_does_not_keep_a_replaced_grace_deadline(
+    tmp_path: Path, deadline: str | None,
+) -> None:
+    """Новый статус и исправление срока одним снимком не оставляют старую дату льготы."""
+    _write(tmp_path, "2026-09-29", [_row()])
+    _write(tmp_path, "2026-10-01", [_row(status_name_rus="Дефолт", default_date=deadline)])
+    transition = ("status_default", date(2026, 10, 1))
+    assert _events(tmp_path, "2026-10-02") == [transition]
+    expected = [transition] + ([("grace_end", date(2026, 10, 5))] if deadline else [])
+    assert _events(tmp_path, "2026-10-06") == expected
+    corrections = timeline(snapshots_at(tmp_path, date(2026, 10, 6)), date(2026, 10, 6))[1]
+    assert [(item.field, item.day) for item in corrections] == [("when", date(2026, 10, 1))]
 
 
 def test_status_and_grace_are_independent_and_each_is_once(tmp_path: Path) -> None:

@@ -112,7 +112,9 @@ def timeline(
                             corrections.append(Correction(
                                 key, row.emission_id, day, field, before, after))
                 latest[key] = (day, row)
-                if row.status.strip().lower() in GRACE_STATUSES:
+                # Уже известный срок исправляется независимо от нового статуса:
+                # переход в «Дефолт» не должен сохранять отменённую дату льготы.
+                if key in deadlines or row.status.strip().lower() in GRACE_STATUSES:
                     if row.when is not None:
                         deadlines[key] = row.when
                     else:
