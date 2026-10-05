@@ -158,3 +158,47 @@ def test_report_rebuild_keeps_as_of_status_and_separate_corrections(
     assert "Срочное за сутки (02.10.2026 → 03.10.2026): 0" in updated
     assert "Уточнения сведений источника" in updated
     assert "дата первоначального уведомления сохраняется" in updated
+
+
+@pytest.mark.parametrize("coverage", ["missing", "stale", "failed_today", "no_baseline"])
+def test_report_does_not_call_unknown_events_an_empty_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    coverage: str,
+) -> None:
+    """Недоставленный снимок или отсутствующая база не превращаются в сутки без событий."""
+    if coverage in {"stale", "failed_today"}:
+        _write(tmp_path, "2026-10-01", [])
+    if coverage == "failed_today":
+        _write(tmp_path, "2026-10-02", [], success=False)
+    if coverage == "no_baseline":
+        _write(tmp_path, "2026-10-02", [])
+    monkeypatch.setattr(cbonds_events, "CACHE", tmp_path)
+    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn))
+    report._urgent(load_routing(), {"test": {}}, date(2026, 10, 1), date(2026, 10, 2))
+    text = capsys.readouterr().out
+    assert "По доступным сведениям срочных событий не выявлено" in text
+    assert "ни одного события" not in text
+    assert "сутки без дефолтов" not in text
+    if coverage == "missing":
+        assert "их события не установлены" in text
+    elif coverage == "no_baseline":
+        assert "до начала окна нет" in text
+    else:
+        assert "Полного снимка обязательств за 02.10.2026 нет" in text
+        assert "последний полный снимок — 01.10.2026" in text
+
+
+def test_stale_snapshot_still_reports_a_known_grace_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Пробел доставки не скрывает ранее известный срок и не подтверждает свежесть статуса."""
+    _write(tmp_path, "2026-10-01", [_row()])
+    monkeypatch.setattr(cbonds_events, "CACHE", tmp_path)
+    row = DefaultRecord("issue-1", "Купон", "Технический дефолт", None, None, None, None, None)
+    monkeypatch.setattr(report, "events_of", lambda inn: IssuerEvents(inn=inn, records=(row,)))
+    monkeypatch.setattr(report, "_named", lambda inn: "Тест")
+    report._urgent(load_routing(), {"test": {}}, date(2026, 10, 1), date(2026, 10, 2))
+    text = capsys.readouterr().out
+    assert "льготный срок закончился 02.10.2026" in text
+    assert "последний доступный снимок записи 01.10.2026" in text
+    assert "Полного снимка обязательств за 02.10.2026 нет" in text
