@@ -11,8 +11,11 @@
 import sys
 from datetime import date
 
+import pytest
+
 from finlib.config import settings
-from finlib.sources.cbonds_events import DefaultRecord
+from finlib.scoring.routing import load_routing
+from finlib.sources.cbonds_events import DefaultRecord, IssuerEvents
 
 sys.path.insert(0, str(settings.base_dir / "eval"))
 
@@ -122,3 +125,24 @@ def test_without_an_announcement_the_record_is_known_from_first_seen() -> None:
     assert report._announced_in(item, date(2026, 9, 28), date(2026, 9, 29))
     _, text = report._record_said(item, date(2026, 9, 29))
     assert "в перечне с 29.09.2026" in text
+
+
+@pytest.mark.parametrize("status", ["Технический дефолт", "Дефолт"])
+def test_first_seen_record_is_not_repeated_on_grace_end_or_status_change(
+    status: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Срочное печатает первое появление, не повторяя запись по концу льготы или статусу."""
+    item = DefaultRecord("synthetic", "Купон", status, date(2026, 9, 18),
+                         date(2026, 10, 2), None, None, None, date(2026, 9, 29))
+    monkeypatch.setattr(report, "events_of",
+                        lambda inn: IssuerEvents(inn=inn, records=(item,)))
+    monkeypatch.setattr(report, "_named", lambda inn: "Тестовый эмитент")
+    report._urgent(load_routing(), {"synthetic": {}}, date(2026, 9, 28), date(2026, 9, 29))
+    first = capsys.readouterr().out
+    assert "Тестовый эмитент" in first and "в перечне с 29.09.2026" in first
+    report._urgent(load_routing(), {"synthetic": {}}, date(2026, 10, 1), date(2026, 10, 2))
+    last = capsys.readouterr().out
+    assert "Тестовый эмитент" not in last and "ни одного события" in last
+    # Формулировка конца льготы есть, но сама по себе не запускает отбор.
+    if status == "Технический дефолт":
+        assert "льготный срок истекает сегодня" in report._record_said(item, date(2026, 10, 2))[1]
