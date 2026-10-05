@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.sources import cbonds_events, default_notifications  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
 from finlib.sources.cbonds_events import (  # noqa: E402
     SNAPSHOTS,
@@ -135,13 +136,15 @@ def _why(  # noqa: ANN001
         )
         said.append(f"отчётный период: {was} → {now}")
     events = events_of(inn)
-    for item in events.records:
-        if (
-            item.moment is not None
-            and _announced_in(item, since, until)
-            and wanted("выпуск")
-        ):
-            said.append(_record_said(item, until)[1])
+    if wanted("выпуск"):
+        emissions = {item.emission_id for item in events.issues} | {
+            item.emission_id for item in events.records}
+        snapshots = default_notifications.snapshots_at(cbonds_events.CACHE, until)
+        notices, _, latest = default_notifications.timeline(snapshots, until)
+        for item in notices:
+            if item.emission_id in emissions and since < item.day <= until:
+                said.append(default_notifications.said(item, latest[item.record_id],
+                                                        snapshots[-1] if snapshots else None))
     for item in events.ratings:
         if item.assigned is not None and since < item.assigned <= until and wanted("рейтинг"):
             said.append(f"{item.agency}: {item.point} {item.assigned:%d.%m.%Y}")
@@ -239,12 +242,23 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     у эмитента, уже стоящего в «Разборе», — сведение, которое нельзя терять.
     """
     said: list[tuple[int, str]] = []
+    snapshots = default_notifications.snapshots_at(cbonds_events.CACHE, until)
+    notices, corrections, latest = default_notifications.timeline(snapshots, until)
+    updates: list[str] = []
     for inn in now:
         events = events_of(inn)
-        for item in events.records:
-            if item.moment is not None and _announced_in(item, previous, until):
-                order, text = _record_said(item, until)
+        emissions = {item.emission_id for item in events.issues} | {
+            item.emission_id for item in events.records}
+        for item in notices:
+            if item.emission_id in emissions and previous < item.day <= until:
+                order = (URGENT_DECLARED if item.kind == "status_default"
+                         else URGENT_UNCONFIRMED)
+                text = default_notifications.said(item, latest[item.record_id],
+                                                   snapshots[-1] if snapshots else None)
                 said.append((order, f"- {_named(inn)}: {text}"))
+        for item in corrections:
+            if item.emission_id in emissions and previous < item.day <= until:
+                updates.append(f"- {_named(inn)}: {default_notifications.correction_said(item)}")
         # **Срочно не всякое рейтинговое действие, а то, по которому
         # действуют.** Подтверждение AAA не событие: агентство сказало
         # то же, что и раньше. Отбираются категории, которые методика
@@ -283,16 +297,20 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     # одно событие двумя.
     said = list(dict.fromkeys(said))
     print(f"## Срочное за сутки ({previous:%d.%m.%Y} → {until:%d.%m.%Y}): {len(said)}\n")
+    if not snapshots:
+        print("Полных снимков обязательств на дату отчёта нет: их события не установлены.\n")
     if not said:
         print(
             "ни одного события. Это сведение, а не пустая строка: сутки "
             "без дефолтов и рейтинговых действий — обычное состояние рынка.\n"
         )
-        return
     # Порядок — очередь вмешательства, а не алфавит; очередь объявлена
     # у `_record_said`. Сортировка устойчива: внутри ступени — как пришло.
     for _, line in sorted(said, key=lambda pair: pair[0]):
         print(line)
+    if updates:
+        print("\nУточнения сведений источника — отдельно от срочных событий:\n")
+        print("\n".join(dict.fromkeys(updates)))
     print()
 
 
