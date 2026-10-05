@@ -956,6 +956,9 @@ def routing_rows(
             else Decimal(0),
             unknown=plan.unknown,
             bases=plan.bases,
+            by_terms=(in_unit(plan.by_terms, unit_code) or Decimal(0))
+            if plan.known
+            else Decimal(0),
         )
         # **Доводы маршрута набираются один раз и переиспользуются вторым
         # проходом.** Прежде второй проход собирал перечень доводов заново

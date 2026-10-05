@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from finlib.scoring.routing import load_routing
-from finlib.sources import cbonds_flows
+from finlib.sources import cbonds_flows, floating
 from finlib.sources.cbonds_flows import refinancing, schedule_of
 
 
@@ -220,3 +220,22 @@ def test_call_is_not_an_offer_to_the_holder(cache: Path) -> None:
     )
     assert plan.offered == Decimal(500)
     assert plan.without_offers == 0
+
+
+def test_coupon_by_terms_is_in_data_total_and_not_in_estimates(
+    cache: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Купон из условий проходит разбор и масштабирование как данные."""
+    # Явный синтетический ответ: реальный кэш и сеть тесту не нужны.
+    payment = {**coupon("2026-10-01", ""), "start_date": "2025-10-01", "coupon_num": "12"}
+    put(cache, "1", [payment])
+    monkeypatch.setattr(floating, "record_of", lambda emission: {
+        "floating_rate": "0", "cupon_rus": "10-129 купоны - 10.5% годовых",
+    })
+    plan = refinancing(
+        (FakeIssue(emission_id="1", outstanding=Decimal(2000)),),
+        365, date(2026, 9, 1),
+        estimator=floating.estimator(load_routing().refinancing.floating_coupons),
+    )
+    assert plan.scheduled == plan.by_terms == Decimal(210)
+    assert plan.estimated == 0 and plan.unknown == 0 and plan.bases == ()

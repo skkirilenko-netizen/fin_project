@@ -1057,6 +1057,8 @@ class Refinance:
     estimated: Decimal = Decimal(0)
     unknown: int = 0
     bases: tuple[str, ...] = ()
+    # Ставка из условий — данные; сумма сохраняется отдельно от оценки.
+    by_terms: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1643,6 +1645,14 @@ def route(
             )
             key = key.lstrip("_")
             extra: dict[str, object] = {}
+            if refinance.by_terms:
+                extra["by_terms"] = Amount(
+                    refinance.by_terms, refinance.unit, money(refinance.by_terms), True
+                )
+                terms_key = f"{key}_by_terms".lstrip("_")
+                # Печать включается только объявленной методической формулировкой.
+                if terms_key in routing.statements.by_ground["refinancing_gap"]:
+                    key = terms_key
             if refinance.estimated:
                 extra["estimated"] = Amount(
                     refinance.estimated, refinance.unit, money(refinance.estimated), True
