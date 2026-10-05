@@ -95,7 +95,8 @@ CARDS = Path("data/raw/cbonds/emitents.json")
 # данных нет — отсрочка берётся сроком закона (`routing.history.known_from`),
 # и это помечается у каждой точки истории.
 _LATEST = """
-SELECT f.inn, max(f.report_date) AS report_date, max(o.name) AS name
+SELECT f.inn, max(f.report_date) AS report_date,
+       max(COALESCE(NULLIF(btrim(o.name), ''), NULLIF(btrim(o.short_name), ''), f.inn)) AS name
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn
