@@ -135,21 +135,31 @@ def test_terms_amount_reaches_printing_without_becoming_an_estimate(
     assert isinstance(slots["by_terms"], Amount)
     assert slots["by_terms"].value == Decimal(50)
     assert ("estimated" in slots) == bool(estimated)
-    # Действующая методика не меняется; проверяется будущая печать
-    # на явно заданном тестовом шаблоне в памяти.
     key = ("estimated" if estimated else "") + ("_lower_bound" if unknown else "")
     key = f"{key.strip('_')}_by_terms".lstrip("_")
-    templates = {**policy.statements.by_ground["refinancing_gap"],
-                 key: "{by_terms} {unit} — купоны по условиям выпуска"}
-    proposed = policy.model_copy(update={"statements": policy.statements.model_copy(
-        update={"by_ground": {**policy.statements.by_ground, "refinancing_gap": templates}})})
+    assert finding.key == key
+    printed = finding.worded(policy, lambda value, unit: (str(value / 1000), "млн руб."))
+    assert "платежи года " + ("не менее " if unknown else "") + "0.1" in printed
+    assert "0.05 — купоны по условиям выпуска" in printed
+    assert "денежные средства 0.001 млн руб." in printed
+    assert "тыс. руб." not in printed
+    assert ("0.01 — оценка неустановленных купонов" in printed) == bool(estimated)
+    assert ("основание неполное" in printed) == bool(unknown)
+    # Без новых шаблонов меняется только представление, не расчёт и решение.
+    old_templates = {
+        name: text for name, text in policy.statements.by_ground["refinancing_gap"].items()
+        if not name.endswith("by_terms")
+    }
+    previous = policy.model_copy(update={"statements": policy.statements.model_copy(
+        update={"by_ground": {**policy.statements.by_ground, "refinancing_gap": old_templates}})})
     rendered = route((), unit=plan.unit, quarantined=False, refinance=plan,
                      latest_annual=date(2025, 12, 31),
-                     today=date(2026, 10, 1), routing=proposed)
+                     today=date(2026, 10, 1), routing=previous)
     found = next(item for item in rendered.findings if item.ground == "refinancing_gap")
-    assert found.key == key
-    printed = found.worded(proposed, lambda value, unit: (str(value / 1000), "млн руб."))
-    assert printed == "0.05 млн руб. — купоны по условиям выпуска"
+    assert rendered.basket == verdict.basket
+    assert rendered.grounds == verdict.grounds
+    assert dict(found.slots) == slots
+    assert plan.due == Decimal(100) and plan.cash == Decimal(1)
 
 
 def test_a_floor_bounds_from_below_by_number() -> None:
