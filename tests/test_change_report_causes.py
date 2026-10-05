@@ -53,3 +53,30 @@ def test_the_decisive_ground_is_the_one_of_the_new_basket() -> None:
     before = _row("attention", ("rating_outlook_adverse",), "a", "c1")
     after = _row("out_of_scope", ("out_of_scope_issuer", "rating_outlook_adverse"), "b", "c1")
     assert report._decisive(routing, before, after) == {"out_of_scope_issuer"}
+
+
+def test_improvement_names_the_departed_review_ground(monkeypatch, capsys) -> None:
+    """Переход Парк Сказки вниз объясняется ушедшим p99, а не новым p95."""
+    routing = load_routing()
+    before = _row("review", ("market_spread_extreme",), "a", "c1")
+    after = _row("attention", ("market_spread_wide",), "b", "c2")
+    assert report._decisive(routing, before, after) == {"market_spread_extreme"}
+    # Изолированный тест печати: сведения источника здесь не проверяются.
+    monkeypatch.setattr(report, "_why", lambda *args: "данные изменились, слой не назван")
+    monkeypatch.setattr(report, "_named", lambda inn: f"Парк Сказка ({inn})")
+    report._moves_table(
+        routing, {"ours": ["7743185160"]}, {"7743185160": before},
+        {"7743185160": after}, DAY, DAY,
+        {basket.code: basket.order for basket in routing.baskets},
+    )
+    text = capsys.readouterr().out
+    assert "ушло основание:" in text and "p99" in text
+    assert "p95" not in text
+    assert "c1 → c2" in text and "точная правка не установлена" in text
+
+
+def test_worsening_prefers_the_arriving_senior_ground() -> None:
+    """Ухудшение объясняется новым основанием старшей корзины."""
+    before = _row("attention", ("market_spread_wide",), "a", "c1")
+    after = _row("review", ("market_spread_extreme",), "b", "c1")
+    assert report._decisive(load_routing(), before, after) == {"market_spread_extreme"}

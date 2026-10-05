@@ -715,6 +715,15 @@ def _decisive(routing, before: dict, after: dict) -> set[str]:  # noqa: ANN001
 
     appeared = set(after["grounds"]) - set(before["grounds"])
     vanished = set(before["grounds"]) - set(after["grounds"])
+    # При улучшении решающим было снятие старшего основания.
+    # Вне периметра — решение о типе, а не улучшение состояния.
+    if (
+        before["basket"] != "out_of_scope"
+        and after["basket"] != "out_of_scope"
+        and routing.basket(after["basket"]).order > routing.basket(before["basket"]).order
+        and vanished & own(before)
+    ):
+        return vanished & own(before)
     # Корзину назвало появившееся основание новой корзины — в какую бы
     # сторону ни шёл переход: перевод вне периметра не «лучше» и не «хуже»
     # «Внимания», он про тип эмитента.
@@ -737,6 +746,8 @@ def _why_decisive(routing, inn: str, since: date, until: date, before, after) ->
     said = ", ".join(
         f"{names.get(code, code)} ({routing.source_of(code)})" for code in sorted(decisive)
     )
+    if decisive <= set(before["grounds"]) - set(after["grounds"]):
+        said = "ушло основание: " + said
     appeared = set(after["grounds"]) - set(before["grounds"])
     evidence = _why(
         routing, inn, since, until, appeared & decisive, before, after, layers
@@ -767,12 +778,23 @@ def _moves_table(routing, groups: dict, was, now, since, until, order) -> None: 
         before, after = was[inn], now[inn]
         print(
             f"| {_named(inn)} | {_basket_name(routing, before['basket'])} "
-            f"| {_basket_name(routing, after['basket'])} | {labels[cause]} "
+            f"| {_basket_name(routing, after['basket'])} | "
+            f"{_our_change(before, after) if cause == 'ours' else labels[cause]} "
             f"| {_why_decisive(routing, inn, since, until, before, after)} |"
         )
     if len(shown) > 20:
         print(f"\nи ещё {len(shown) - 20} — в истории видны полностью.")
     print()
+
+
+def _our_change(before: dict, after: dict) -> str:
+    """Категория причины с наблюдавшимися версиями без недоказанной атрибуции."""
+    old = before.get("code_version") or "не записана"
+    new = after.get("code_version") or "не записана"
+    return (
+        f"у нас (код или методика); версии прогонов: {old} → {new}; "
+        "точная правка не установлена"
+    )
 
 
 def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN001
@@ -900,9 +922,9 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     print(f"## Наши правки: {len(ours)}\n")
     if ours:
         print(
-            "Отпечаток входов тот же, версия кода либо методики изменилась: "
-            "это наша правка, а не изменение эмитента. Причина одна на всех "
-            "и называется версией.\n"
+            "Версия кода либо отпечаток методики изменились; данные могли "
+            "измениться одновременно. Это категория «у нас», а не доказательство "
+            "конкретного коммита: точная правка не установлена.\n"
         )
         print(Counter(now[inn]["basket"] for inn in ours).most_common())
     else:
