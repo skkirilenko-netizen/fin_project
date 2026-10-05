@@ -11,6 +11,8 @@
 import sys
 from datetime import date
 
+import pytest
+
 from finlib.config import settings
 from finlib.sources.cbonds_events import DefaultRecord
 
@@ -122,3 +124,18 @@ def test_without_an_announcement_the_record_is_known_from_first_seen() -> None:
     assert report._announced_in(item, date(2026, 9, 28), date(2026, 9, 29))
     _, text = report._record_said(item, date(2026, 9, 29))
     assert "в перечне с 29.09.2026" in text
+
+
+@pytest.mark.parametrize("status", ["Технический дефолт", "Дефолт"])
+def test_known_on_is_not_changed_by_grace_end_or_current_status(
+    status: str,
+) -> None:
+    """Известность маршрута не меняется от отдельного уведомления о конце льготы."""
+    item = DefaultRecord("synthetic", "Купон", status, date(2026, 9, 18),
+                         date(2026, 10, 2), None, None, None, date(2026, 9, 29))
+    assert item.known_on == date(2026, 9, 29)
+    assert report._announced_in(item, date(2026, 9, 28), date(2026, 9, 29))
+    assert not report._announced_in(item, date(2026, 10, 1), date(2026, 10, 2))
+    # Формулировка конца льготы есть, но сама по себе не запускает отбор.
+    if status == "Технический дефолт":
+        assert "льготный срок истекает сегодня" in report._record_said(item, date(2026, 10, 2))[1]

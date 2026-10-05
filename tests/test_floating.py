@@ -3,7 +3,9 @@
 from datetime import date
 from decimal import Decimal
 
-from finlib.scoring.routing import load_routing
+import pytest
+
+from finlib.scoring.routing import Amount, Refinance, load_routing, route
 from finlib.sources import floating
 
 
@@ -37,7 +39,8 @@ def test_a_multiplier_outside_max_min_is_a_lower_bound() -> None:
     assert floating.terms_of(record, _rules(), None).kind == floating.LOWER
 
 
-def test_a_cap_is_computed_at_the_current_index() -> None:
+@pytest.mark.parametrize("rate", [Decimal("10"), Decimal("20")])
+def test_a_cap_is_computed_at_the_current_index(monkeypatch, rate: Decimal) -> None:
     """Потолок — при текущей ставке: не связывает — индекс + спред, связывает — он (3.2)."""
     record = {
         "floating_rate": "1",
@@ -47,14 +50,16 @@ def test_a_cap_is_computed_at_the_current_index() -> None:
     }
     terms = floating.terms_of(record, _rules(), None)
     assert terms.kind == floating.ESTIMATE and terms.cap == Decimal(18)
+    # Явный вход расчёта: тест не зависит от необязательного локального кэша ЦБ.
+    monkeypatch.setattr(floating, "key_rate", lambda: ((date(2026, 10, 1), rate),))
     found = floating.estimate(terms, Decimal(1000), 365, date(2026, 10, 1), 7)
-    rate, _ = floating.rate_on(terms, date(2026, 10, 1), 7)
     expected = min(rate + Decimal("3.5"), Decimal(18))
     assert found.amount == Decimal(1000) * expected / 100
     assert ("потолок" in found.basis) == (rate + Decimal("3.5") > 18)
 
 
-def test_max_with_a_divided_index_binds_the_floor() -> None:
+@pytest.mark.parametrize("rate", [Decimal("4"), Decimal("20")])
+def test_max_with_a_divided_index_binds_the_floor(monkeypatch, rate: Decimal) -> None:
     """MAX(Cri/2; 4,75 %) — формула внутри MAX линейна по индексу, пол связывает при низкой."""
     record = {
         "floating_rate": "1",
@@ -68,7 +73,7 @@ def test_max_with_a_divided_index_binds_the_floor() -> None:
     low = floating.Terms(
         floating.ESTIMATE, index="key_rate", factor=Decimal("0.5"), floor=Decimal("4.75")
     )
-    rate, _ = floating.rate_on(low, date(2026, 10, 1), 7)
+    monkeypatch.setattr(floating, "key_rate", lambda: ((date(2026, 10, 1), rate),))
     found = floating.estimate(low, Decimal(100), 365, date(2026, 10, 1), 7)
     assert found.amount == max(rate / 2, Decimal("4.75"))
 
@@ -112,6 +117,49 @@ def test_rate_written_in_the_terms_is_data() -> None:
     # Формула после номера купона ставкой не считается.
     assert floating.fixed_rates("2-136 купоны - Кi = (CPI - 100%) + 1%") == ()
     assert floating.fixed_rates("5-6 купон - ставка рефинансирования + 3% годовых") == ()
+
+
+@pytest.mark.parametrize("estimated,unknown", [(0, 0), (10, 0), (0, 1), (10, 1)])
+def test_terms_amount_reaches_printing_without_becoming_an_estimate(
+    estimated: int, unknown: int,
+) -> None:
+    """Данные условий доходят денежным слотом до печати, отдельно от оценки."""
+    policy = load_routing()
+    plan = Refinance(Decimal(100), Decimal(1), "тыс. руб.", 365,
+                     estimated=Decimal(estimated), unknown=unknown, by_terms=Decimal(50))
+    verdict = route((), unit=plan.unit, quarantined=False, refinance=plan,
+                    latest_annual=date(2025, 12, 31),
+                    today=date(2026, 10, 1), routing=policy)
+    finding = next(item for item in verdict.findings if item.ground == "refinancing_gap")
+    slots = dict(finding.slots)
+    assert isinstance(slots["by_terms"], Amount)
+    assert slots["by_terms"].value == Decimal(50)
+    assert ("estimated" in slots) == bool(estimated)
+    key = ("estimated" if estimated else "") + ("_lower_bound" if unknown else "")
+    key = f"{key.strip('_')}_by_terms".lstrip("_")
+    assert finding.key == key
+    printed = finding.worded(policy, lambda value, unit: (str(value / 1000), "млн руб."))
+    assert "платежи года " + ("не менее " if unknown else "") + "0.1" in printed
+    assert "0.05 — купоны по условиям выпуска" in printed
+    assert "денежные средства 0.001 млн руб." in printed
+    assert "тыс. руб." not in printed
+    assert ("0.01 — оценка неустановленных купонов" in printed) == bool(estimated)
+    assert ("основание неполное" in printed) == bool(unknown)
+    # Без новых шаблонов меняется только представление, не расчёт и решение.
+    old_templates = {
+        name: text for name, text in policy.statements.by_ground["refinancing_gap"].items()
+        if not name.endswith("by_terms")
+    }
+    previous = policy.model_copy(update={"statements": policy.statements.model_copy(
+        update={"by_ground": {**policy.statements.by_ground, "refinancing_gap": old_templates}})})
+    rendered = route((), unit=plan.unit, quarantined=False, refinance=plan,
+                     latest_annual=date(2025, 12, 31),
+                     today=date(2026, 10, 1), routing=previous)
+    found = next(item for item in rendered.findings if item.ground == "refinancing_gap")
+    assert rendered.basket == verdict.basket
+    assert rendered.grounds == verdict.grounds
+    assert dict(found.slots) == slots
+    assert plan.due == Decimal(100) and plan.cash == Decimal(1)
 
 
 def test_a_floor_bounds_from_below_by_number() -> None:

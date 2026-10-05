@@ -237,15 +237,18 @@ def test_summary_is_readable(db_conn) -> None:
     assert "расчёт разрешён" in summary
 
 
-def test_decimal_preserved_in_details(db_conn) -> None:
+@pytest.mark.parametrize("sequential_scan", ["on", "off"])
+def test_decimal_preserved_in_details(db_conn, sequential_scan: str) -> None:
     """Числа в журнале не превращаются в float."""
     src_file_id = load(FULL_BFO, FULL_INN, 2025, db_conn)
     run_checks(src_file_id, db_conn)
-    row = fetch_one(
+    execute(f"SET LOCAL enable_seqscan = {sequential_scan}", conn=db_conn)
+    rows = fetch_all(
         "SELECT details FROM dq_log WHERE src_file_id = %(id)s "
-        "AND check_code = 'balance_equality' AND status = 'pass' LIMIT 1",
-        {"id": src_file_id},
+        "AND check_code = 'balance_equality' AND status = 'pass' "
+        "AND report_date = %(period)s",
+        {"id": src_file_id, "period": date(2025, 12, 31)},
         conn=db_conn,
     )
-    assert row is not None
-    assert Decimal(row["details"]["1600"]) == Decimal("25736328136")
+    assert len(rows) == 1
+    assert Decimal(rows[0]["details"]["1600"]) == Decimal("25736328136")

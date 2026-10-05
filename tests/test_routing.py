@@ -1023,6 +1023,7 @@ def test_financing_structure_takes_the_basket_of_its_guarantor() -> None:
     assert led.basket == backer.basket
     assert led.grounds == backer.grounds
     assert led.subgroup_names == backer.subgroup_names
+    assert led.action_codes == backer.action_codes and led.action_codes
     assert led.notes[0].text == "SPV группы Группа: корзина поручителя Головная компания"
 
 

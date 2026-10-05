@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 # что у МСФО (`routing_store._LATEST`), и оно нужно при пересчёте истории
 # назад: отчётность за 2025 год 15 февраля 2026-го ещё не существовала.
 _LATEST = """
-SELECT f.inn, max(f.report_date) AS report_date, max(o.name) AS name
+SELECT f.inn, max(f.report_date) AS report_date,
+       max(COALESCE(NULLIF(btrim(o.name), ''), NULLIF(btrim(o.short_name), ''), f.inn)) AS name
 FROM fact_report f
 JOIN src_file s ON s.id = f.src_file_id
 LEFT JOIN organization o ON o.inn = f.inn

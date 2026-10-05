@@ -8,10 +8,11 @@
 Правка одного слова в методике дала бы 900 «изменений», и отчёт, в котором
 их 900, не читается ни в какой день.
 
-**Три причины изменения разводятся отпечатком входов.** Изменился отпечаток —
-причина у эмитента; тот же при изменившихся версиях кода и методики — причина
-у нас; тот же при тех же версиях — **беспричинное изменение**, то есть дефект
-недетерминированности, и это остановка, а не строка отчёта.
+**Четыре категории причины.** При том же отпечатке переход календарной
+границы проверяется первым; затем разные версии дают категорию «у нас»,
+даже если данные изменились одновременно. При тех же версиях разные входы —
+«у эмитента»; те же входы без календарной причины — беспричинная смена.
+Категория «у нас» не доказывает конкретный коммит.
 
 **Наблюдение и пересчёт между собой не сравниваются.** Пересчёт знает меньше
 по устройству — признаки карточки истории не имеют и в него не идут, — и
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
+from finlib.sources import cbonds_events, default_notifications  # noqa: E402
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
 from finlib.sources.cbonds_events import (  # noqa: E402
     SNAPSHOTS,
@@ -58,8 +60,8 @@ ORDER BY as_of
 """
 
 _POINTS = """
-SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
-       h.report_date, r.code_version, r.methodology
+SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
+       h.report_date, h.inputs, r.code_version, r.methodology
 FROM {source} h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE (h.kind = %(kind)s OR %(kind)s = 'run') AND h.as_of = %(as_of)s
 """
@@ -133,14 +135,17 @@ def _why(  # noqa: ANN001
             else "отчётность исчезла"
         )
         said.append(f"отчётный период: {was} → {now}")
-    events = events_of(inn)
-    for item in events.records:
-        if (
-            item.moment is not None
-            and _announced_in(item, since, until)
-            and wanted("выпуск")
-        ):
-            said.append(_record_said(item, until)[1])
+    snapshot = cbonds_events.read_snapshot(until)
+    events = events_of(inn, snapshot=snapshot.issuers, observed=snapshot.observed)
+    if wanted("выпуск"):
+        emissions = {item.emission_id for item in events.issues} | {
+            item.emission_id for item in events.records}
+        snapshots = default_notifications.snapshots_at(cbonds_events.CACHE, until)
+        notices, _, latest = default_notifications.timeline(snapshots, until)
+        for item in notices:
+            if item.emission_id in emissions and since < item.day <= until:
+                said.append(default_notifications.said(item, latest[item.record_id],
+                                                        snapshots[-1] if snapshots else None))
     for item in events.ratings:
         if item.assigned is not None and since < item.assigned <= until and wanted("рейтинг"):
             said.append(f"{item.agency}: {item.point} {item.assigned:%d.%m.%Y}")
@@ -170,7 +175,10 @@ def _why(  # noqa: ANN001
     # названное в одну сторону, оно во вторую печаталось «слой не назван» —
     # то есть одно и то же обстоятельство выглядело объяснённым и
     # необъяснённым в зависимости от знака.
-    vanished = set(before["grounds"]) - set(after["grounds"])
+    vanished = {
+        code for code in set(before["grounds"]) - set(after["grounds"])
+        if layers is None or routing.source_of(code) in layers
+    }
     if vanished and vanished <= window:
         return "из окна двенадцати месяцев вышли платежи по графику"
     # Отчётность датированной записи не имеет — её раскрытие видно по тому,
@@ -223,7 +231,7 @@ def _calendar(routing, row: dict, when: date) -> tuple:  # noqa: ANN001
 
 
 def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
-    """Срочное: дефолт и рейтинговое действие в тот же день, когда пришли.
+    """Срочное: три вида событий обязательства по полным снимкам и рейтинговые действия.
 
     **Недельный отчёт не должен задерживать событие на неделю.** Корзину
     такой эмитент чаще всего меняет, и он есть в основном перечне, — но там
@@ -235,12 +243,25 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     у эмитента, уже стоящего в «Разборе», — сведение, которое нельзя терять.
     """
     said: list[tuple[int, str]] = []
+    snapshots = default_notifications.snapshots_at(cbonds_events.CACHE, until)
+    notices, corrections, latest = default_notifications.timeline(snapshots, until)
+    updates: list[str] = []
+    ratings_snapshot = cbonds_events.read_snapshot(until)
     for inn in now:
-        events = events_of(inn)
-        for item in events.records:
-            if item.moment is not None and _announced_in(item, previous, until):
-                order, text = _record_said(item, until)
+        events = events_of(inn, snapshot=ratings_snapshot.issuers,
+                           observed=ratings_snapshot.observed)
+        emissions = {item.emission_id for item in events.issues} | {
+            item.emission_id for item in events.records}
+        for item in notices:
+            if item.emission_id in emissions and previous < item.day <= until:
+                order = (URGENT_DECLARED if item.kind == "status_default"
+                         else URGENT_UNCONFIRMED)
+                text = default_notifications.said(item, latest[item.record_id],
+                                                   snapshots[-1] if snapshots else None)
                 said.append((order, f"- {_named(inn)}: {text}"))
+        for item in corrections:
+            if item.emission_id in emissions and previous < item.day <= until:
+                updates.append(f"- {_named(inn)}: {default_notifications.correction_said(item)}")
         # **Срочно не всякое рейтинговое действие, а то, по которому
         # действуют.** Подтверждение AAA не событие: агентство сказало
         # то же, что и раньше. Отбираются категории, которые методика
@@ -279,16 +300,32 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     # одно событие двумя.
     said = list(dict.fromkeys(said))
     print(f"## Срочное за сутки ({previous:%d.%m.%Y} → {until:%d.%m.%Y}): {len(said)}\n")
+    if not snapshots:
+        print("Полных снимков обязательств на дату отчёта нет: их события не установлены.\n")
+    else:
+        if snapshots[-1].day < until:
+            print(
+                f"Полного снимка обязательств за {until:%d.%m.%Y} нет; "
+                f"последний полный снимок — {snapshots[-1].day:%d.%m.%Y}. "
+                "Новые появления и смены статуса после него не установлены.\n"
+            )
+        if not any(snapshot.day <= previous for snapshot in snapshots):
+            print(
+                "Полного снимка обязательств до начала окна нет: "
+                "первое появление и смена статуса для начального снимка не установлены.\n"
+            )
     if not said:
         print(
-            "ни одного события. Это сведение, а не пустая строка: сутки "
-            "без дефолтов и рейтинговых действий — обычное состояние рынка.\n"
+            "По доступным сведениям срочных событий не выявлено. "
+            "Это не подтверждение отсутствия событий при неполной доставке источников.\n"
         )
-        return
     # Порядок — очередь вмешательства, а не алфавит; очередь объявлена
     # у `_record_said`. Сортировка устойчива: внутри ступени — как пришло.
     for _, line in sorted(said, key=lambda pair: pair[0]):
         print(line)
+    if updates:
+        print("\nУточнения сведений источника — отдельно от срочных событий:\n")
+        print("\n".join(dict.fromkeys(updates)))
     print()
 
 
@@ -375,8 +412,8 @@ def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
 
 
 _SCHEDULED = """
-SELECT h.inn, h.basket, h.subgroup, h.grounds, h.fingerprint, h.standard,
-       h.report_date, r.code_version, r.methodology
+SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
+       h.report_date, h.inputs, r.code_version, r.methodology
 FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
 """
@@ -715,6 +752,15 @@ def _decisive(routing, before: dict, after: dict) -> set[str]:  # noqa: ANN001
 
     appeared = set(after["grounds"]) - set(before["grounds"])
     vanished = set(before["grounds"]) - set(after["grounds"])
+    # При улучшении решающим было снятие старшего основания.
+    # Вне периметра — решение о типе, а не улучшение состояния.
+    if (
+        before["basket"] != "out_of_scope"
+        and after["basket"] != "out_of_scope"
+        and routing.basket(after["basket"]).order > routing.basket(before["basket"]).order
+        and vanished & own(before)
+    ):
+        return vanished & own(before)
     # Корзину назвало появившееся основание новой корзины — в какую бы
     # сторону ни шёл переход: перевод вне периметра не «лучше» и не «хуже»
     # «Внимания», он про тип эмитента.
@@ -737,6 +783,8 @@ def _why_decisive(routing, inn: str, since: date, until: date, before, after) ->
     said = ", ".join(
         f"{names.get(code, code)} ({routing.source_of(code)})" for code in sorted(decisive)
     )
+    if decisive <= set(before["grounds"]) - set(after["grounds"]):
+        said = "ушло основание: " + said
     appeared = set(after["grounds"]) - set(before["grounds"])
     evidence = _why(
         routing, inn, since, until, appeared & decisive, before, after, layers
@@ -767,11 +815,60 @@ def _moves_table(routing, groups: dict, was, now, since, until, order) -> None: 
         before, after = was[inn], now[inn]
         print(
             f"| {_named(inn)} | {_basket_name(routing, before['basket'])} "
-            f"| {_basket_name(routing, after['basket'])} | {labels[cause]} "
+            f"| {_basket_name(routing, after['basket'])} | "
+            f"{_our_change(before, after) if cause == 'ours' else labels[cause]} "
             f"| {_why_decisive(routing, inn, since, until, before, after)} |"
         )
     if len(shown) > 20:
         print(f"\nи ещё {len(shown) - 20} — в истории видны полностью.")
+    print()
+
+
+def _our_change(before: dict, after: dict) -> str:
+    """Категория причины с наблюдавшимися версиями без недоказанной атрибуции."""
+    old = before.get("code_version") or "не записана"
+    new = after.get("code_version") or "не записана"
+    return (
+        f"у нас (код или методика); версии прогонов: {old} → {new}; "
+        "точная правка не установлена"
+    )
+
+
+def _action_of(row: dict) -> dict[str, str]:
+    """Сохранённое действие точки; текущая методика не подменяет историческое."""
+    inputs = row.get("inputs") or {}
+    if isinstance(inputs, str):
+        inputs = json.loads(inputs)
+    action = inputs.get("action") or {}
+    return action if isinstance(action, dict) else {}
+
+
+def _subgroup_changes(routing, was: dict, now: dict) -> None:  # noqa: ANN001
+    """Печатает смену действия при прежней корзине, не техническое переименование."""
+    changed: list[tuple[str, dict, dict]] = []
+    unknown: list[str] = []
+    common = set(was) & set(now)
+    for inn in sorted(common):
+        before, after = was[inn], now[inn]
+        if (before["basket"] != after["basket"]
+                or before.get("subgroup", "") == after.get("subgroup", "")):
+            continue
+        old, new = _action_of(before), _action_of(after)
+        if not old.get("code") or not new.get("code"):
+            unknown.append(inn)
+        elif old["code"] != new["code"]:
+            changed.append((inn, old, new))
+    print(f"## За сутки сменилось действие при прежней корзине: {len(changed)} из {len(common)}\n")
+    for inn, old, new in changed:
+        print(
+            f"- {_named(inn)}: корзина «{_basket_name(routing, now[inn]['basket'])}» прежняя; "
+            f"подгруппа «{old.get('subgroup_name') or old.get('subgroup')}» → "
+            f"«{new.get('subgroup_name') or new.get('subgroup')}»; "
+            f"действие «{old.get('text', old['code'])}» → «{new.get('text', new['code'])}»"
+        )
+    if unknown:
+        print("\nСмена действия не установлена: исторический код действия не сохранён:\n")
+        print("\n".join(f"- {_named(inn)}" for inn in unknown))
     print()
 
 
@@ -816,11 +913,20 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     )
 
     changed = sum(len(items) for items in daily.values())
-    print(f"## За сутки сменили корзину: {changed} из {len(now)}\n")
-    if not changed:
-        print("ни одного.\n")
+    if not was_day:
+        print("## Суточные смены не установлены\n")
+        print(
+            f"Точек прогона по расписанию {previous:%d.%m.%Y} нет: "
+            "сравнивать не с чем; это не ноль изменений.\n"
+        )
     else:
+        print(f"## За сутки сменили корзину: {changed} из {len(now)}\n")
+    if was_day and not changed:
+        print("ни одного.\n")
+    elif was_day:
         _moves_table(routing, daily, was_day, now, previous, until, order)
+    if was_day:
+        _subgroup_changes(routing, was_day, now)
 
     print(f"## За неделю ({since:%d.%m.%Y} → {until:%d.%m.%Y}): сводка\n")
     print("| Причина | Смен корзины |\n|---|---|")
@@ -848,19 +954,33 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         if basket.group_of(ground.code) == "event_risk"
     }
     events_added = []
+    events_removed = []
     other_added = 0
     for inn, row in now.items():
         if inn not in was or row["basket"] != was[inn]["basket"]:
             continue
-        appeared = set(row["grounds"]) - set(was[inn]["grounds"])
+        current_grounds = set(row.get("grounds_all", row["grounds"]))
+        prior_grounds = set(was[inn].get("grounds_all", was[inn]["grounds"]))
+        appeared = current_grounds - prior_grounds
+        vanished = prior_grounds - current_grounds
         if appeared & senior:
             events_added.append((inn, appeared & senior))
-        elif appeared:
+        if vanished & senior:
+            events_removed.append((inn, vanished & senior))
+        if (appeared | vanished) - senior:
             other_added += 1
     print(f"## Новое основание без смены корзины: {len(events_added)}\n")
     for inn, appeared in events_added[:20]:
         said = ", ".join(names.get(code, code) for code in sorted(appeared))
         print(f"- {_named(inn)}: {said}")
+    if len(events_added) > 20:
+        print(f"\nПоказаны первые двадцать из {len(events_added)}; остальные видны в истории.")
+    print(f"\n## Ушло основание без смены корзины: {len(events_removed)}\n")
+    for inn, vanished in events_removed[:20]:
+        said = ", ".join(names.get(code, code) for code in sorted(vanished))
+        print(f"- {_named(inn)}: ушло основание: {said}")
+    if len(events_removed) > 20:
+        print(f"\nПоказаны первые двадцать из {len(events_removed)}; остальные видны в истории.")
     print(f"\nПрочих изменений оснований {other_added} — показаны числом.\n")
 
     print(f"## Вошли в периметр: {len(entered)}   Вышли: {len(left)}\n")
@@ -868,7 +988,10 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         mark = " (с выпусками в обращении)" if inn in bonds else ""
         print(f"- вошёл {_named(inn)}{mark}: {_basket_name(routing, now[inn]['basket'])}")
     for inn in left[:10]:
-        print(f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}")
+        print(
+            f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}; "
+            "причина выхода из истории не установлена — проверить журнал исключений"
+        )
     print()
 
     print(f"## От календаря: {len(by_calendar)}\n")
@@ -900,9 +1023,9 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     print(f"## Наши правки: {len(ours)}\n")
     if ours:
         print(
-            "Отпечаток входов тот же, версия кода либо методики изменилась: "
-            "это наша правка, а не изменение эмитента. Причина одна на всех "
-            "и называется версией.\n"
+            "Версия кода либо отпечаток методики изменились; данные могли "
+            "измениться одновременно. Это категория «у нас», а не доказательство "
+            "конкретного коммита: точная правка не установлена.\n"
         )
         print(Counter(now[inn]["basket"] for inn in ours).most_common())
     else:

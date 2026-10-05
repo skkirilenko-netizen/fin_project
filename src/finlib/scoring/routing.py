@@ -102,6 +102,7 @@ class Subgroup(BaseModel):
     name: str = Field(min_length=1)
     order: int = Field(ge=1)
     action: str = Field(min_length=1)
+    action_code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     why: str = Field(min_length=1)
 
 
@@ -1057,6 +1058,8 @@ class Refinance:
     estimated: Decimal = Decimal(0)
     unknown: int = 0
     bases: tuple[str, ...] = ()
+    # Ставка из условий — данные; сумма сохраняется отдельно от оценки.
+    by_terms: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1240,6 +1243,9 @@ class Verdict:
     # со сработавшими — правило, гасящее молча, неотличимо
     # от невыполненного.
     inapplicable: tuple[str, ...] = ()
+
+    # Смысл действия сохраняется отдельно от переименовываемого текста.
+    action_codes: tuple[str, ...] = ()
 
     @property
     def details(self) -> tuple[str, ...]:
@@ -1643,6 +1649,14 @@ def route(
             )
             key = key.lstrip("_")
             extra: dict[str, object] = {}
+            if refinance.by_terms:
+                extra["by_terms"] = Amount(
+                    refinance.by_terms, refinance.unit, money(refinance.by_terms), True
+                )
+                terms_key = f"{key}_by_terms".lstrip("_")
+                # Печать включается только объявленной методической формулировкой.
+                if terms_key in routing.statements.by_ground["refinancing_gap"]:
+                    key = terms_key
             if refinance.estimated:
                 extra["estimated"] = Amount(
                     refinance.estimated, refinance.unit, money(refinance.estimated), True
@@ -2148,6 +2162,7 @@ def led_by_guarantor(
         subgroups=guaranteed.subgroups,
         subgroup_names=guaranteed.subgroup_names,
         actions=guaranteed.actions,
+        action_codes=guaranteed.action_codes,
         muted=verdict.muted,
         spoken_for=verdict.spoken_for,
         thresholds=guaranteed.thresholds,
@@ -2865,6 +2880,11 @@ def _verdict(
         ),
         actions=tuple(
             found.action
+            for code in groups
+            if (found := basket.subgroup(code)) is not None
+        ),
+        action_codes=tuple(
+            found.action_code
             for code in groups
             if (found := basket.subgroup(code)) is not None
         ),
