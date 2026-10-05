@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from finlib.sources.cbonds_events import DefaultRecord, _as_date
+from finlib.sources.cbonds_events import GRACE_STATUSES, DefaultRecord, _as_date
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ def timeline(
                             corrections.append(Correction(
                                 key, row.emission_id, day, field, before, after))
                 latest[key] = (day, row)
-                if row.status.strip().lower() == "технический дефолт":
+                if row.status.strip().lower() in GRACE_STATUSES:
                     if row.when is not None:
                         deadlines[key] = row.when
                     else:

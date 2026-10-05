@@ -127,6 +127,13 @@ def test_records_of_one_issue_are_not_deduplicated_together(tmp_path: Path) -> N
     assert len(_events(tmp_path, "2026-09-29")) == 2
 
 
+def test_offer_grace_end_is_also_not_a_new_nonpayment(tmp_path: Path) -> None:
+    """Льгота просроченной оферты даёт отдельный конец срока, не купонный переход статуса."""
+    _write(tmp_path, "2026-09-29", [_row(type_name_rus="Оферта",
+                                         status_name_rus="Просрочка исполнения оферты")])
+    assert _events(tmp_path, "2026-10-02") == [("grace_end", date(2026, 10, 2))]
+
+
 def test_report_rebuild_keeps_as_of_status_and_separate_corrections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
