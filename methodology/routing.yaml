@@ -1649,6 +1649,7 @@ baskets:
       - code: legal_status
         name: статус в реестре
         order: 1
+        action_code: verify_legal_status
         action: >-
           Установить статус в ЕГРЮЛ и у источника: действует ли эмитент,
           не начата ли ликвидация или банкротство, кто преемник
@@ -1659,6 +1660,7 @@ baskets:
       - code: disclosure_stopped
         name: раскрытие прекращено
         order: 2
+        action_code: verify_disclosure_obligation
         action: >-
           Проверить, есть ли выпуски в обращении и обязан ли эмитент сдавать
           отчётность: величины прошлых лет описывают другой предмет
@@ -1711,6 +1713,7 @@ baskets:
       - code: event_risk
         name: события и решения
         order: 1
+        action_code: review_event_first
         action: разбирать первым — обстоятельство наступило
         why: >-
           Дефолт по выпуску, рейтинг дефолтной категории, перевод биржей
@@ -1720,6 +1723,7 @@ baskets:
       - code: market_risk
         name: рынок
         order: 2
+        action_code: review_market_then_reporting
         action: смотреть котировки и спред, затем отчётность
         why: >-
           Наблюдение сегодняшнего дня: цена ниже 60 % номинала либо спред
@@ -1729,6 +1733,7 @@ baskets:
       - code: value_risk
         name: риск по величинам
         order: 3
+        action_code: review_reporting
         action: разбирать по отчётности
         why: >-
           Стоп-фактор, присвоенный нами класс, величина за концом шкалы
@@ -1886,6 +1891,7 @@ baskets:
       - code: event_risk
         name: события и рейтинги
         order: 1
+        action_code: attention_event_first
         action: смотреть первым
         why: >-
           Обстоятельство наступило, а не следует из величин: дефолт по выпуску,
@@ -1899,6 +1905,7 @@ baskets:
       - code: market_risk
         name: рынок
         order: 2
+        action_code: attention_market
         action: смотреть котировки и спред
         why: >-
           Обстоятельство названо рынком и датировано днём: спред эмитента
@@ -1909,6 +1916,7 @@ baskets:
       - code: value_risk
         name: риск по величинам
         order: 3
+        action_code: attention_values
         action: смотреть
         why: >-
           Величины собраны, и то, что они показывают, требует объяснения.
@@ -1916,6 +1924,7 @@ baskets:
       - code: data_gap
         name: данных для маршрута недостаточно
         order: 4
+        action_code: collect_data
         action: добрать данные
         why: >-
           Об эмитенте нельзя сказать ни хорошего, ни плохого: недостающее поле
@@ -1923,6 +1932,7 @@ baskets:
       - code: disclosure
         name: нарушение срока раскрытия
         order: 5
+        action_code: monitor_disclosure
         action: мониторить раскрытие
         why: >-
           Обстоятельство документа, а не расчёта: ждать следующей отчётности

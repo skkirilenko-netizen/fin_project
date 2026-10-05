@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, execute, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
-from finlib.scoring.routing_store import routing_rows  # noqa: E402
+from finlib.scoring.routing_store import RoutingRow, routing_rows  # noqa: E402
 from finlib.sources.cbonds_events import default_records  # noqa: E402
 from finlib.sources.moex_risk import risk_sectors  # noqa: E402
 from finlib.version import code_version, route_fingerprint  # noqa: E402
@@ -138,7 +138,7 @@ def grid(today: date, step: int, depth: int) -> tuple[tuple[date, ...], int]:
     return tuple(sorted(weekly | events)), len(events - weekly)
 
 
-def decision_values(row) -> dict:  # noqa: ANN001
+def decision_values(row: RoutingRow) -> dict:
     """Величины, которыми решение получено, — строками.
 
     **Исход без величин не отвечает на вопрос «а если порог другой».**
@@ -149,11 +149,21 @@ def decision_values(row) -> dict:  # noqa: ANN001
 
     Величины берутся у строки маршрута, а не считаются здесь заново: второй
     путь к покрытию разошёлся бы с первым.
+    Действие старшей подгруппы сохраняется кодом и текстом на день точки;
+    будущая редакция методики не переименовывает историческое действие.
     """
     found: dict = {
         "metrics": {code: str(value) for code, value in row.values.items()},
         "unit": row.unit,
     }
+    verdict = row.verdict
+    if verdict.action_codes:
+        found["action"] = {
+            "code": verdict.action_codes[0],
+            "text": verdict.actions[0],
+            "subgroup": verdict.subgroup,
+            "subgroup_name": verdict.subgroup_names[0],
+        }
     if row.cash is not None:
         found["cash"] = str(row.cash)
     money = row.refinance

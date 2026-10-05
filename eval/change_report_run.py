@@ -61,7 +61,7 @@ ORDER BY as_of
 
 _POINTS = """
 SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
-       h.report_date, r.code_version, r.methodology
+       h.report_date, h.inputs, r.code_version, r.methodology
 FROM {source} h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE (h.kind = %(kind)s OR %(kind)s = 'run') AND h.as_of = %(as_of)s
 """
@@ -230,7 +230,7 @@ def _calendar(routing, row: dict, when: date) -> tuple:  # noqa: ANN001
 
 
 def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
-    """Срочное: дефолт и рейтинговое действие в тот же день, когда пришли.
+    """Срочное: три вида событий обязательства по полным снимкам и рейтинговые действия.
 
     **Недельный отчёт не должен задерживать событие на неделю.** Корзину
     такой эмитент чаще всего меняет, и он есть в основном перечне, — но там
@@ -398,7 +398,7 @@ def _read(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: ANN001
 
 _SCHEDULED = """
 SELECT h.inn, h.basket, h.subgroup, h.grounds, h.grounds_all, h.fingerprint, h.standard,
-       h.report_date, r.code_version, r.methodology
+       h.report_date, h.inputs, r.code_version, r.methodology
 FROM routing_history h LEFT JOIN routing_run r ON r.id = h.run_id
 WHERE h.kind = %(kind)s AND h.as_of = %(as_of)s
 """
@@ -819,6 +819,44 @@ def _our_change(before: dict, after: dict) -> str:
     )
 
 
+def _action_of(row: dict) -> dict[str, str]:
+    """Сохранённое действие точки; текущая методика не подменяет историческое."""
+    inputs = row.get("inputs") or {}
+    if isinstance(inputs, str):
+        inputs = json.loads(inputs)
+    action = inputs.get("action") or {}
+    return action if isinstance(action, dict) else {}
+
+
+def _subgroup_changes(routing, was: dict, now: dict) -> None:  # noqa: ANN001
+    """Печатает смену действия при прежней корзине, не техническое переименование."""
+    changed: list[tuple[str, dict, dict]] = []
+    unknown: list[str] = []
+    common = set(was) & set(now)
+    for inn in sorted(common):
+        before, after = was[inn], now[inn]
+        if (before["basket"] != after["basket"]
+                or before.get("subgroup", "") == after.get("subgroup", "")):
+            continue
+        old, new = _action_of(before), _action_of(after)
+        if not old.get("code") or not new.get("code"):
+            unknown.append(inn)
+        elif old["code"] != new["code"]:
+            changed.append((inn, old, new))
+    print(f"## За сутки сменилось действие при прежней корзине: {len(changed)} из {len(common)}\n")
+    for inn, old, new in changed:
+        print(
+            f"- {_named(inn)}: корзина «{_basket_name(routing, now[inn]['basket'])}» прежняя; "
+            f"подгруппа «{old.get('subgroup_name') or old.get('subgroup')}» → "
+            f"«{new.get('subgroup_name') or new.get('subgroup')}»; "
+            f"действие «{old.get('text', old['code'])}» → «{new.get('text', new['code'])}»"
+        )
+    if unknown:
+        print("\nСмена действия не установлена: исторический код действия не сохранён:\n")
+        print("\n".join(f"- {_named(inn)}" for inn in unknown))
+    print()
+
+
 def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN001
             health, was_day=None) -> None:
     """Собирает и печатает сам отчёт."""
@@ -872,6 +910,8 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         print("ни одного.\n")
     elif was_day:
         _moves_table(routing, daily, was_day, now, previous, until, order)
+    if was_day:
+        _subgroup_changes(routing, was_day, now)
 
     print(f"## За неделю ({since:%d.%m.%Y} → {until:%d.%m.%Y}): сводка\n")
     print("| Причина | Смен корзины |\n|---|---|")

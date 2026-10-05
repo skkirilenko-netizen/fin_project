@@ -102,6 +102,7 @@ class Subgroup(BaseModel):
     name: str = Field(min_length=1)
     order: int = Field(ge=1)
     action: str = Field(min_length=1)
+    action_code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     why: str = Field(min_length=1)
 
 
@@ -1243,6 +1244,9 @@ class Verdict:
     # от невыполненного.
     inapplicable: tuple[str, ...] = ()
 
+    # Смысл действия сохраняется отдельно от переименовываемого текста.
+    action_codes: tuple[str, ...] = ()
+
     @property
     def details(self) -> tuple[str, ...]:
         """Основания словами — в порядке, в каком сработали."""
@@ -2158,6 +2162,7 @@ def led_by_guarantor(
         subgroups=guaranteed.subgroups,
         subgroup_names=guaranteed.subgroup_names,
         actions=guaranteed.actions,
+        action_codes=guaranteed.action_codes,
         muted=verdict.muted,
         spoken_for=verdict.spoken_for,
         thresholds=guaranteed.thresholds,
@@ -2875,6 +2880,11 @@ def _verdict(
         ),
         actions=tuple(
             found.action
+            for code in groups
+            if (found := basket.subgroup(code)) is not None
+        ),
+        action_codes=tuple(
+            found.action_code
             for code in groups
             if (found := basket.subgroup(code)) is not None
         ),
