@@ -632,6 +632,13 @@ def _publish(
     # тоже получают ссылки, а отказ сборки не выдаётся за готовый список.
     # Отчёт и CSV сохраняются до списка.
     report = report_path(today, started, said)
+    html_out = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(".html")
+    csv_out = html_out.with_suffix(".csv")
+    # Проверка в генераторе HTML остаётся последней защитой. Здесь отказ
+    # нужен до CSV и карточек, иначе спутники уже опубликованного списка
+    # изменятся раньше, чем генератор обнаружит существующую страницу.
+    if html_out.exists():
+        raise ValueError(f"сохранённый HTML не переписывается: {html_out}; выберите новый запуск")
     argv = sys.argv
     try:
         sys.argv = ["change_report_run.py", "--kind", "run", "--output", str(report)] + (
@@ -646,8 +653,6 @@ def _publish(
     finally:
         sys.argv = argv
 
-    html_out = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(".html")
-    csv_out = html_out.with_suffix(".csv")
     for name, args in (
         ("watchlist_csv.py", ("--out", str(csv_out))),
         ("issuer_card_run.py", ("--all", "--watchlist", str(html_out))),

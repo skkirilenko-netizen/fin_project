@@ -15,7 +15,9 @@ import io
 import os
 import sys
 from contextlib import redirect_stdout
-from datetime import date
+from datetime import date, datetime
+
+import pytest
 
 from finlib.config import settings
 
@@ -255,6 +257,45 @@ def _daily():  # noqa: ANN202
     daily = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daily)
     return daily
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_a_published_list_stops_before_changing_companion_files(
+    tmp_path, monkeypatch, manual: bool
+) -> None:  # noqa: ANN001
+    """Готовый HTML защищает свой отчёт, CSV и карточки до первой записи."""
+    daily = _daily()
+    monkeypatch.setattr(daily, "OUT", tmp_path)
+    today = date(2000, 1, 3)
+    started = datetime(2000, 1, 3, 15, 7) if manual else None
+    said = "проверка" if manual else ""
+    report = daily.report_path(today, started, said)
+    html_path = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(
+        ".html"
+    )
+    csv_path = html_path.with_suffix(".csv")
+    card = tmp_path / "cards" / "0000000001.html"
+    card.parent.mkdir()
+    for path in (report, html_path, csv_path, card):
+        path.write_text(f"сохранённое содержимое {path.name}", encoding="utf-8")
+    before = {path: path.read_bytes() for path in (report, html_path, csv_path, card)}
+    called = []
+
+    def publication_stage(path: str, *, run_name: str) -> None:
+        """Имитирует перезапись спутников до отказа генератора HTML."""
+        called.append(path)
+        if path.endswith("watchlist_csv.py"):
+            csv_path.write_text("новый CSV", encoding="utf-8")
+        if path.endswith("issuer_card_run.py"):
+            card.write_text("новая карточка", encoding="utf-8")
+        if path.endswith("watchlist_run.py"):
+            raise ValueError("сохранённый HTML не переписывается")
+
+    monkeypatch.setattr(daily.runpy, "run_path", publication_stage)
+    with pytest.raises(ValueError, match="сохранённый HTML не переписывается"):
+        daily._publish(today, [], {}, [], "", started, said)
+    assert called == []
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_a_repeat_does_not_overwrite_the_scheduled_point(db_conn) -> None:  # noqa: ANN001
