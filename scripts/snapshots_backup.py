@@ -22,6 +22,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from finlib.sources import notification_journal
+
 logger = logging.getLogger(__name__)
 DATA = Path("data")
 MANIFEST = "manifest.json"
@@ -106,7 +108,7 @@ def inventory(data: Path) -> tuple[dict[str, Path], int]:
 
 
 def verify(where: Path, manifest: Manifest) -> tuple[int, int]:
-    """Проверяет все записи описи независимо от наличия исходных файлов."""
+    """Проверяет байты описи и восстановимость журнала без исходных файлов."""
     matched = errors = 0
     for key, expected in manifest.items():
         try:
@@ -118,6 +120,18 @@ def verify(where: Path, manifest: Manifest) -> tuple[int, int]:
                 matched += 1
         except (OSError, ValueError) as failure:
             logger.error("не проверен %s: %s", key, failure)
+            errors += 1
+    if not errors:
+        try:
+            output = where / "output"
+            artifacts = set(output.glob("*.md")) | set(output.glob(notification_journal.JOURNAL))
+            unlisted = sorted(path.relative_to(where).as_posix() for path in artifacts
+                              if path.relative_to(where).as_posix() not in manifest)
+            if unlisted:
+                raise ValueError(f"артефакты уведомлений вне описи: {', '.join(unlisted)}")
+            notification_journal.load(output)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as failure:
+            logger.error("журнал уведомлений не восстановим из копии: %s", failure)
             errors += 1
     return matched, errors
 
