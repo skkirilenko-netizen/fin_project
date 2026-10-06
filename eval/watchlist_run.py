@@ -1,6 +1,6 @@
 """Список наблюдения: один HTML-файл со всеми эмитентами и их корзинами.
 
-    uv run python eval/watchlist_run.py            # data/output/watchlist_<дата>.html
+    uv run python eval/watchlist_run.py    # data/output/watchlist_<дата>_manual_<ЧЧММСС>.html
     uv run python eval/watchlist_run.py --out ПУТЬ
 
 **Это чтение, и ничего кроме.** Из интерфейса нельзя ни исправить корзину,
@@ -26,7 +26,7 @@ import json
 import logging
 import sys
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,7 +42,7 @@ from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 from finlib.sources.market import load_market as _market_rules  # noqa: E402
 from finlib.sources.market import series as _market_series  # noqa: E402
-from finlib.sources.notification_journal import atomic_write  # noqa: E402
+from finlib.sources.notification_journal import MOSCOW, atomic_write  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +479,21 @@ def _journal(where: Path, today: date) -> None:
     where.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _now() -> datetime:
+    """Текущее московское время ручного запуска."""
+    return datetime.now(MOSCOW)
+
+
+# **Ручной запуск не занимает имя планового.** Плановый прогон передаёт
+# `--out` с `watchlist_<дата>.html` и отказывается публиковать, если файл уже
+# лежит: страница, собранная руками до 10:00, оставила бы день без планового
+# списка. Без `--out` имя помечено как ручное и несёт время до секунды —
+# два ручных запуска тоже не сталкиваются.
+def manual_stamp(today: date, now: datetime) -> str:
+    """Метка имён ручного запуска: дата отчёта, пометка и время запуска."""
+    return f"{today:%Y-%m-%d}_manual_{now:%H%M%S}"
+
+
 def main() -> int:
     """Сохраняет новую страницу; отдельная проба CSV не обращается к БД и сети."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
@@ -493,7 +508,8 @@ def main() -> int:
     parser.add_argument("--cards", type=Path)
     args = parser.parse_args()
     today = args.as_of
-    out = args.out or Path(f"data/output/watchlist_{today:%Y-%m-%d}.html")
+    stamp = f"{today:%Y-%m-%d}" if args.out else manual_stamp(today, _now())
+    out = args.out or Path(f"data/output/watchlist_{stamp}.html")
     if out.exists():
         raise ValueError(f"сохранённый HTML не переписывается: {out}; выберите другой --out")
     coverage = None
@@ -522,7 +538,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(out, text, exclusive=True)
     if not args.from_csv:
-        _journal(out.with_name(f"watchlist_exclusions_{today:%Y-%m-%d}.md"), today)
+        _journal(out.with_name(f"watchlist_exclusions_{stamp}.md"), today)
     print(f"{out}: эмитентов {len(rows)}")
     return 0
 

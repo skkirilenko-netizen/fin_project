@@ -167,6 +167,48 @@ def test_offline_csv_command_does_not_read_database_or_replace_output(
     assert out.read_bytes() == saved
 
 
+def test_manual_run_without_out_leaves_scheduled_name_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ручной запуск без --out не занимает имя, которое ждёт плановый прогон."""
+    from contextlib import nullcontext
+
+    journals: list[Path] = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(watchlist_run, "connection", lambda: nullcontext(None))
+    monkeypatch.setattr(watchlist_run, "rows_of", lambda conn, today: (_rows(), {}))
+    monkeypatch.setattr(watchlist_run, "_coverage_line", lambda summary: "Охват")
+    monkeypatch.setattr(watchlist_run, "_journal", lambda where, today: journals.append(where))
+    monkeypatch.setattr(
+        watchlist_run, "_now", lambda: datetime(2090, 1, 3, 9, 5, 7, tzinfo=MOSCOW)
+    )
+    monkeypatch.setattr(sys, "argv", ["watchlist_run.py", "--as-of", "2090-01-03"])
+    monkeypatch.setattr(daily_run, "OUT", Path("data/output"))
+    report = daily_run.report_path(date(2090, 1, 3), None, "")
+    scheduled = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(".html")
+    assert scheduled == Path("data/output/watchlist_2090-01-03.html")
+
+    assert watchlist_run.main() == 0
+    manual = Path("data/output/watchlist_2090-01-03_manual_090507.html")
+    assert manual.exists()
+    assert not scheduled.exists()
+    assert journals == [Path("data/output/watchlist_exclusions_2090-01-03_manual_090507.md")]
+
+    monkeypatch.setattr(
+        watchlist_run, "_now", lambda: datetime(2090, 1, 3, 9, 5, 8, tzinfo=MOSCOW)
+    )
+    assert watchlist_run.main() == 0
+    assert Path("data/output/watchlist_2090-01-03_manual_090508.html").exists()
+    assert not scheduled.exists()
+
+    monkeypatch.setattr(sys, "argv", ["watchlist_run.py", "--as-of", "2090-01-03",
+                                      "--out", str(scheduled)])
+    assert watchlist_run.main() == 0
+    assert scheduled.exists()
+    assert journals[-1] == Path("data/output/watchlist_exclusions_2090-01-03.md")
+
+
 def test_publication_uses_its_report_and_csv_before_list(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
