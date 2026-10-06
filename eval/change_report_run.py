@@ -969,21 +969,22 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
             events_removed.append((inn, vanished & senior))
         if (appeared | vanished) - senior:
             other_added += 1
-    print(f"## Новое основание без смены корзины: {len(events_added)}\n")
+    period = f"за неделю {since:%d.%m.%Y} → {until:%d.%m.%Y}"
+    print(f"## Новое основание без смены корзины: {len(events_added)} ({period})\n")
     for inn, appeared in events_added[:20]:
         said = ", ".join(names.get(code, code) for code in sorted(appeared))
         print(f"- {_named(inn)}: {said}")
     if len(events_added) > 20:
         print(f"\nПоказаны первые двадцать из {len(events_added)}; остальные видны в истории.")
-    print(f"\n## Ушло основание без смены корзины: {len(events_removed)}\n")
+    print(f"\n## Ушло основание без смены корзины: {len(events_removed)} ({period})\n")
     for inn, vanished in events_removed[:20]:
         said = ", ".join(names.get(code, code) for code in sorted(vanished))
         print(f"- {_named(inn)}: ушло основание: {said}")
     if len(events_removed) > 20:
         print(f"\nПоказаны первые двадцать из {len(events_removed)}; остальные видны в истории.")
-    print(f"\nПрочих изменений оснований {other_added} — показаны числом.\n")
+    print(f"\nПрочих изменений оснований {other_added} ({period}) — показаны числом.\n")
 
-    print(f"## Вошли в периметр: {len(entered)}   Вышли: {len(left)}\n")
+    print(f"## Вошли в периметр: {len(entered)}   Вышли: {len(left)} ({period})\n")
     for inn in entered[:10]:
         mark = " (с выпусками в обращении)" if inn in bonds else ""
         print(f"- вошёл {_named(inn)}{mark}: {_basket_name(routing, now[inn]['basket'])}")
@@ -994,7 +995,7 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         )
     print()
 
-    print(f"## От календаря: {len(by_calendar)}\n")
+    print(f"## От календаря: {len(by_calendar)} ({period})\n")
     if by_calendar:
         print(
             "Данные те же и методика та же, а день другой: наступил срок сдачи "
@@ -1020,18 +1021,19 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
     else:
         print("ни одного.\n")
 
-    print(f"## Наши правки: {len(ours)}\n")
+    print(f"## Наши правки: {len(ours)} ({period})\n")
     if ours:
         print(
             "Версия кода либо отпечаток методики изменились; данные могли "
             "измениться одновременно. Это категория «у нас», а не доказательство "
             "конкретного коммита: точная правка не установлена.\n"
         )
-        print(Counter(now[inn]["basket"] for inn in ours).most_common())
+        for basket, count in Counter(now[inn]["basket"] for inn in ours).most_common():
+            print(f"- {_basket_name(routing, basket)}: {count}")
     else:
         print("ни одной.\n")
 
-    print(f"\n## Беспричинных изменений: {len(causeless)}\n")
+    print(f"\n## Беспричинных изменений: {len(causeless)} (суточное и недельное окна)\n")
     if causeless:
         print(
             "**Остановка.** Вердикт изменился при том же отпечатке входов "
