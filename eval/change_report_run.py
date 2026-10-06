@@ -26,18 +26,25 @@
 маршрутизацией, и своей арифметики не имеет.
 """
 
+import io
 import json
 import logging
 import sys
 from collections import Counter
-from datetime import date, timedelta
+from contextlib import redirect_stdout
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finlib.db import connection, fetch_all  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
-from finlib.sources import cbonds_events, default_notifications  # noqa: E402
+from finlib.sources import (  # noqa: E402
+    cbonds_events,
+    default_deliveries,
+    default_notifications,
+    notification_journal,
+)
 from finlib.sources.cbonds import bond_issuers  # noqa: E402
 from finlib.sources.cbonds_events import (  # noqa: E402
     SNAPSHOTS,
@@ -230,7 +237,9 @@ def _calendar(routing, row: dict, when: date) -> tuple:  # noqa: ANN001
     )
 
 
-def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
+def _urgent(routing, now, previous: date, until: date,  # noqa: ANN001
+            notice_context: notification_journal.Context | None = None,
+            delivery_evidence: Path | None = None) -> None:
     """Срочное: три вида событий обязательства по полным снимкам и рейтинговые действия.
 
     **Недельный отчёт не должен задерживать событие на неделю.** Корзину
@@ -247,18 +256,23 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     notices, corrections, latest = default_notifications.timeline(snapshots, until)
     updates: list[str] = []
     ratings_snapshot = cbonds_events.read_snapshot(until)
+    owners: dict[str, set[str]] = {}
     for inn in now:
         events = events_of(inn, snapshot=ratings_snapshot.issuers,
                            observed=ratings_snapshot.observed)
         emissions = {item.emission_id for item in events.issues} | {
             item.emission_id for item in events.records}
+        for emission in emissions:
+            owners.setdefault(emission, set()).add(_named(inn))
         for item in notices:
             if item.emission_id in emissions and previous < item.day <= until:
                 order = (URGENT_DECLARED if item.kind == "status_default"
                          else URGENT_UNCONFIRMED)
                 text = default_notifications.said(item, latest[item.record_id],
                                                    snapshots[-1] if snapshots else None)
-                said.append((order, f"- {_named(inn)}: {text}"))
+                line = f"- {_named(inn)}: {text}"
+                if notice_context is None or notice_context.claim(item, line):
+                    said.append((order, line))
         for item in corrections:
             if item.emission_id in emissions and previous < item.day <= until:
                 updates.append(f"- {_named(inn)}: {default_notifications.correction_said(item)}")
@@ -296,6 +310,16 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
                     f"{item.assigned:%d.%m.%Y}",
                 )
             )
+    if notice_context is not None:
+        for item in notices:
+            if previous < item.day <= until and item.emission_id not in owners:
+                text = default_notifications.said(item, latest[item.record_id],
+                                                   snapshots[-1] if snapshots else None)
+                line = f"- эмитент не установлен: {text}"
+                if notice_context.claim(item, line):
+                    order = (URGENT_DECLARED if item.kind == "status_default"
+                             else URGENT_UNCONFIRMED)
+                    said.append((order, line))
     # Счётчик считает то, что напечатано: перечень с повторами назвал бы
     # одно событие двумя.
     said = list(dict.fromkeys(said))
@@ -326,6 +350,50 @@ def _urgent(routing, now, previous: date, until: date) -> None:  # noqa: ANN001
     if updates:
         print("\nУточнения сведений источника — отдельно от срочных событий:\n")
         print("\n".join(dict.fromkeys(updates)))
+    print()
+    if notice_context is not None:
+        _late_notifications(notice_context, notices, snapshots, owners,
+                            previous, delivery_evidence)
+
+
+def _late_notifications(
+    context: notification_journal.Context,
+    notices: tuple[default_notifications.Notice, ...],
+    snapshots: tuple[default_notifications.Snapshot, ...],
+    owners: dict[str, set[str]], previous: date, delivery_evidence: Path | None = None,
+) -> None:
+    """Печатает ещё не выведенные старые ключи с исходными сведениями и временем доставки."""
+    lines: list[str] = []
+    gaps: set[str] = set()
+    candidates = [item for item in notices if item.day <= previous
+                  and (item.record_id, item.kind) not in context.known]
+    for item in candidates:
+        uncertain = context.uncertain(item)
+        if uncertain:
+            gaps.update(uncertain)
+            continue
+        available = tuple(snapshot for snapshot in snapshots if snapshot.day <= item.day)
+        _, _, original = default_notifications.timeline(available, item.day)
+        observed, row = original[item.record_id]
+        snapshot_path = cbonds_events.CACHE / f"defaults_ru_{observed:%Y-%m-%d}.json"
+        proof = delivery_evidence / f"{observed:%Y-%m-%d}.json" if delivery_evidence else None
+        delivered = default_deliveries.observed_at(snapshot_path, proof)
+        delivery = (f"{delivered:%d.%m.%Y %H:%M:%S} МСК" if delivered is not None
+                    else "точное время доставки неизвестно")
+        names = ", ".join(sorted(owners.get(item.emission_id, set()))) or "эмитент не установлен"
+        text = default_notifications.said(item, (observed, row),
+                                           available[-1] if available else None)
+        first = ("дата первого вывода не зафиксирована (предпросмотр)" if context.preview
+                 else f"впервые выведено {context.printed_at:%d.%m.%Y}")
+        line = f"- {names}: {text}; снимок доставлен: {delivery}; {first}"
+        if context.claim(item, line):
+            lines.append(line)
+    print(f"## Доставлено с опозданием: {len(lines)}\n")
+    print("\n".join(lines) if lines else
+          "Не выявлено новых пропущенных ключей по доступным сведениям.")
+    if gaps:
+        print("\nПервый вывод части прежних ключей не установлен: строки без id записи в "
+              "сохранённых отчётах " + ", ".join(sorted(gaps)) + ". Эти ключи не объявлены новыми.")
     print()
 
 
@@ -427,7 +495,8 @@ def _read_scheduled(conn, kind: str, moment: date) -> dict[str, dict]:  # noqa: 
     }
 
 
-def main() -> int:
+def _render_main(notice_context: notification_journal.Context | None = None,
+                 delivery_evidence: Path | None = None) -> int:
     """Печатает отчёт изменений между двумя соседними точками истории."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     kind = "backfill"
@@ -483,9 +552,40 @@ def main() -> int:
         bonds = set(bond_issuers())
         health = fetch_all(_HEALTH, {"as_of": until, "kind": kind}, conn=conn)
         _report(
-            routing, kind, since, until, was, now, bonds, previous, health, was_day
+            routing, kind, since, until, was, now, bonds, previous, health, was_day,
+            notice_context, delivery_evidence,
         )
     return 0
+
+
+def main() -> int:
+    """Сохраняет неизменный отчёт с журналом либо печатает предварительный просмотр."""
+    output = Path(sys.argv[sys.argv.index("--output") + 1]) if "--output" in sys.argv else None
+    evidence = (Path(sys.argv[sys.argv.index("--delivery-evidence") + 1])
+                if "--delivery-evidence" in sys.argv else None)
+    kind = sys.argv[sys.argv.index("--kind") + 1] if "--kind" in sys.argv else "backfill"
+    if output is not None:
+        def render(context: notification_journal.Context) -> str:
+            """Собирает полный текст перед атомарной публикацией."""
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                result = _render_main(context if kind == "run" else None, evidence)
+            if result:
+                raise ValueError("отчёт не сохранён: сборка не завершена")
+            return buffer.getvalue()
+        notification_journal.publish(output, render)
+        print(output)
+        return 0
+    context = None
+    if kind == "run":
+        root = SNAPSHOTS.parents[2] / "output"
+        known, gaps = notification_journal.load(root)
+        context = notification_journal.Context(
+            "preview.md", datetime.now(notification_journal.MOSCOW),
+            known, gaps, preview=True,
+        )
+        print("> Предварительный просмотр: отчёт и первый вывод уведомлений не сохраняются.\n")
+    return _render_main(context, evidence)
 
 
 def _health(kind: str, rows: list) -> None:
@@ -873,7 +973,7 @@ def _subgroup_changes(routing, was: dict, now: dict) -> None:  # noqa: ANN001
 
 
 def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN001
-            health, was_day=None) -> None:
+            health, was_day=None, notice_context=None, delivery_evidence=None) -> None:
     """Собирает и печатает сам отчёт."""
     if was_day is None:
         was_day = was
@@ -896,7 +996,7 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
         f"Род точек — {'пересчёт' if kind == 'backfill' else 'наблюдение'}; "
         "наблюдение с пересчётом не сравнивается вовсе.\n"
     )
-    _urgent(routing, now, previous, until)
+    _urgent(routing, now, previous, until, notice_context, delivery_evidence)
     daily = _classify(routing, was_day, now, previous, until)
     weekly = _classify(routing, was, now, since, until)
     logger.info(

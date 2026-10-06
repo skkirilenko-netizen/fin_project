@@ -15,12 +15,13 @@
 
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from finlib.sources import cbonds  # noqa: E402
+from finlib.sources import cbonds, default_deliveries, default_notifications  # noqa: E402
+from finlib.sources.notification_journal import MOSCOW  # noqa: E402
 
 METHOD = "get_emission_default"
 
@@ -29,6 +30,8 @@ def main() -> int:
     """Забирает перечень дефолтов на сегодня; отказ источника — исключение."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     today = date.today()
+    snapshot = cbonds.CACHE / f"defaults_ru_{today:%Y-%m-%d}.json"
+    existed = snapshot.exists()
     found = cbonds.fetch(
         METHOD,
         f"defaults_ru_{today:%Y-%m-%d}",
@@ -37,6 +40,13 @@ def main() -> int:
         ),
         limit=1000,
     )
+    if not existed:
+        complete = default_notifications.snapshots_at(cbonds.CACHE, today)
+        if not complete or complete[-1].day != today:
+            raise ValueError("время доставки не зафиксировано: снимок неполный")
+        delivered_at = datetime.now(MOSCOW)
+        default_deliveries.record(snapshot, delivered_at)
+        logging.getLogger(__name__).info("снимок дефолтов доставлен %s", delivered_at.isoformat())
     print(
         f"перечень дефолтов на {today}: записей {len(found.get('items', []))} "
         f"из {found.get('total')}, запросов {cbonds.pace.requested}"
