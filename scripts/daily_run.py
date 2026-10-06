@@ -629,21 +629,8 @@ def _publish(
     # тогда, когда файл её лежит на диске, а карточка ссылается на свежайший
     # собранный список. Собранные раньше списка, карточки сослались бы
     # на вчерашний; собранные позже — попадают в сегодняшний по именам,
-    # которые не меняются. Поэтому список первым, карточки за ним.
-    for name, args in (
-        ("watchlist_run.py", ()),
-        ("watchlist_csv.py", ()),
-        ("issuer_card_run.py", ("--all",)),
-    ):
-        argv = sys.argv
-        try:
-            sys.argv = [name, *args]
-            runpy.run_path(str(ROOT / "eval" / name), run_name="__main__")
-        except SystemExit:
-            pass
-        finally:
-            sys.argv = argv
-
+    # которые не меняются. Поэтому список раньше карточек. Отчёт и CSV
+    # сохраняются до списка: интерфейс читает строки и ссылки своего запуска.
     report = report_path(today, started, said)
     argv = sys.argv
     try:
@@ -658,6 +645,24 @@ def _publish(
             raise
     finally:
         sys.argv = argv
+
+    html_out = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(".html")
+    csv_out = html_out.with_suffix(".csv")
+    for name, args in (
+        ("watchlist_csv.py", ("--out", str(csv_out))),
+        ("watchlist_run.py", ("--out", str(html_out), "--report", str(report),
+                             "--csv", str(csv_out))),
+        ("issuer_card_run.py", ("--all",)),
+    ):
+        argv = sys.argv
+        try:
+            sys.argv = [name, *args]
+            runpy.run_path(str(ROOT / "eval" / name), run_name="__main__")
+        except SystemExit as stop:
+            if stop.code:
+                raise
+        finally:
+            sys.argv = argv
 
     print(f"\nПрогон {today}: эмитентов {len(rows)}, запросов {_spent()}")
     for said in delivered:

@@ -13,9 +13,11 @@ from finlib.sources.notification_journal import MOSCOW, Context, publish
 
 def test_saved_rows_and_unknown_issuer_survive_index_failure(tmp_path: Path) -> None:
     """Интерфейс читает подтверждённую квитанцию отчёта и точные сохранённые строки."""
-    first = ("- эмитент не установлен: купон, выпуск test, запись key: "
-             "запись впервые обнаружена 02.01.2090; снимок доставлен: "
-             "02.01.2090 14:29:06 МСК; впервые выведено 03.01.2090")
+    first = (
+        "- эмитент не установлен: купон, выпуск test, запись key: "
+        "запись впервые обнаружена 02.01.2090; снимок доставлен: "
+        "02.01.2090 14:29:06 МСК; впервые выведено 03.01.2090"
+    )
 
     def render(context: Context) -> str:
         """Публикует синтетический первоначальный текст уведомления."""
@@ -49,10 +51,13 @@ def test_report_delivery_ratings_and_corrections_are_not_silently_lost(tmp_path:
     )
     data = report_data(path)
     assert len(data["events"]) == 1 and data["events"][0]["kind"] == "rating"
+    assert data["events"][0]["eventOn"] == "03.01.2090"
+    assert data["events"][0]["deliveredAt"] == "точное время доставки неизвестно"
     assert data["dailyChanges"] == 2
     assert data["sources"][1]["status"] == "cached"
     assert "2 из 3" in data["warnings"][0]
-    assert "не ноль" in data["warnings"][-1]
+    assert any("не ноль" in warning for warning in data["warnings"])
+    assert data["sources"][0]["status"] == "неполно: 2 / 3"
     assert any("- Тест: уточнение в снимке" in section["lines"] for section in data["sections"])
 
 

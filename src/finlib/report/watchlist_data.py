@@ -8,7 +8,9 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-from finlib.sources.notification_journal import receipt
+from finlib.scoring.routing_catalogue import catalogue_for
+from finlib.sources.notification_journal import load, receipt
+from finlib.standards import Standard
 
 UNKNOWN = "неизвестно"
 EVENTS = {
@@ -39,6 +41,7 @@ def report_data(path: Path | None) -> dict:
         "period": UNKNOWN,
         "reportDay": UNKNOWN,
         "lateAvailable": False,
+        "urgentAvailable": False,
         "reportName": path.name if path else UNKNOWN,
     }
     if path is None or not path.is_file():
@@ -49,6 +52,7 @@ def report_data(path: Path | None) -> dict:
     text = path.read_text(encoding="utf-8")
     entries = receipt(text, path.name)
     saved = {entry.line: entry for entry in entries or ()}
+    known = load(path.parent)[0] if entries is None else {}
     day = re.search(r"^# Что изменилось: (\d{2}\.\d{2}\.\d{4})", text, re.M)
     if day:
         result["reportDay"] = day[1]
@@ -59,8 +63,10 @@ def report_data(path: Path | None) -> dict:
                 {
                     "name": name.strip(),
                     "status": status.strip(),
-                    "note": ("Статус этапа из сохранённого отчёта; "
-                             "done сам по себе не доказывает полноту."),
+                    "note": (
+                        "Статус этапа из сохранённого отчёта; "
+                        "done сам по себе не доказывает полноту."
+                    ),
                 }
             )
     else:
@@ -92,6 +98,7 @@ def report_data(path: Path | None) -> dict:
             result["sections"].append(current)
             correction = False
             if title.startswith("Срочное"):
+                result["urgentAvailable"] = True
                 period = re.search(r"\((.*?)\): (\d+)", title)
                 if period:
                     result["period"], claimed["events"] = period[1], int(period[2])
@@ -121,10 +128,22 @@ def report_data(path: Path | None) -> dict:
                 if found:
                     kind, event_on = code, found[1]
                     break
+            if kind == "rating":
+                assigned = re.search(r" (\d{2}\.\d{2}\.\d{4})$", line)
+                if assigned:
+                    event_on = assigned[1]
             owner = re.match(r"- (.*?): (.*)", line)
             name, detail = owner.groups() if owner else ("эмитент не установлен", line[2:])
             inn = re.fullmatch(r"(.*?) \((\d+)\)", name)
             entry = saved.get(line)
+            record_id = re.search(r"запись ([^:]+):", line)
+            if entry is None and record_id and kind in ("first", "grace", "status"):
+                journal_kind = {
+                    "first": "first_seen",
+                    "grace": "grace_end",
+                    "status": "status_default",
+                }[kind]
+                entry = known.get((record_id[1], journal_kind))
             delivered = re.search(r"снимок доставлен: ([^;]+)", line)
             first = re.search(r"впервые выведено (\d{2}\.\d{2}\.\d{4})", line)
             result[bucket].append(
@@ -158,6 +177,15 @@ def report_data(path: Path | None) -> dict:
             "В сохранённом отчёте раздел опоздавших уведомлений отсутствует; "
             "это не ноль пропущенных событий."
         )
+    for item in result["sources"]:
+        if item["status"] not in ("done", "skip"):
+            result["warnings"].append(
+                f"{item['name']}: {item['status']}; новая доставка не подтверждена."
+            )
+        partial = re.search(r"Снимок рейтингов неполный: (\d+) из (\d+)", text)
+        if partial and "рейтинг" in item["name"]:
+            item["status"] = f"неполно: {partial[1]} / {partial[2]}"
+            item["note"] += " Поздний добор не подменяет сведения сохранённого отчёта."
     return result
 
 
@@ -244,6 +272,10 @@ def csv_rows(path: Path, *, bonds: set[str] | None = None) -> tuple[list[dict], 
             }
             and value
         ]
+        standard = item.get("стандарт")
+        if standard in {entry.value for entry in Standard}:
+            catalogue = catalogue_for(Standard(standard))
+            values = [[catalogue.name_of(key), value] for key, value in values]
         rows.append(
             {
                 "inn": item["инн"],
