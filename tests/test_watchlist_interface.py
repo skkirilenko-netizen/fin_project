@@ -187,10 +187,30 @@ def test_publication_uses_its_report_and_csv_before_list(
     assert [item[0] for item in called] == [
         "change_report_run.py",
         "watchlist_csv.py",
-        "watchlist_run.py",
         "issuer_card_run.py",
+        "watchlist_run.py",
     ]
     assert called[0][called[0].index("--output") + 1].endswith("2090-01-03_1507.md")
-    assert called[2][called[2].index("--report") + 1].endswith("2090-01-03_1507.md")
-    assert called[2][called[2].index("--csv") + 1].endswith("2090-01-03_1507.csv")
+    assert called[2][called[2].index("--watchlist") + 1].endswith("2090-01-03_1507.html")
+    assert called[3][called[3].index("--report") + 1].endswith("2090-01-03_1507.md")
+    assert called[3][called[3].index("--csv") + 1].endswith("2090-01-03_1507.csv")
+    assert sys.argv == argv
+
+
+def test_cards_failure_stops_list_publication(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Отказ карточек не скрывается и не выпускает список без новых ссылок."""
+    called: list[str] = []
+    argv = list(sys.argv)
+
+    def fail_cards(path: str, run_name: str) -> None:
+        """Только имитирует границу отказа без исполнения стадий."""
+        called.append(sys.argv[0])
+        if sys.argv[0] == "issuer_card_run.py":
+            raise SystemExit(2)
+
+    monkeypatch.setattr(daily_run.runpy, "run_path", fail_cards)
+    with pytest.raises(SystemExit) as stopped:
+        daily_run._publish(date(2090, 1, 3), [], {}, [], "", None, "")
+    assert stopped.value.code == 2
+    assert "watchlist_run.py" not in called
     assert sys.argv == argv
