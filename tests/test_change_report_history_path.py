@@ -68,6 +68,8 @@ def test_history_to_report_keeps_senior_changes_and_perimeter(
     assert "Вошли в периметр: 1   Вышли: 1" in text
     assert f"вошёл Тест ({inns[4]})" in text
     assert f"вышел Тест ({inns[5]})" in text and "причина выхода из истории не установлена" in text
+    assert "Новое основание без смены корзины: 1 (за неделю 01.01.2090 → 02.01.2090)" in text
+    assert "Вошли в периметр: 1   Вышли: 1 (за неделю 01.01.2090 → 02.01.2090)" in text
 
 
 def test_out_of_scope_return_names_the_removed_type_ground() -> None:

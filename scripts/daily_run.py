@@ -645,20 +645,19 @@ def _publish(
             sys.argv = argv
 
     report = report_path(today, started, said)
-    argv, out = sys.argv, sys.stdout
+    argv = sys.argv
     try:
-        sys.argv = ["change_report_run.py", "--kind", "run"] + (
+        sys.argv = ["change_report_run.py", "--kind", "run", "--output", str(report)] + (
             ["--note", said] if said else []
         )
-        with report.open("w", encoding="utf-8") as handle:
-            sys.stdout = handle
-            runpy.run_path(
-                str(ROOT / "eval" / "change_report_run.py"), run_name="__main__"
-            )
-    except SystemExit:
-        pass
+        runpy.run_path(
+            str(ROOT / "eval" / "change_report_run.py"), run_name="__main__"
+        )
+    except SystemExit as stop:
+        if stop.code:
+            raise
     finally:
-        sys.argv, sys.stdout = argv, out
+        sys.argv = argv
 
     print(f"\nПрогон {today}: эмитентов {len(rows)}, запросов {_spent()}")
     for said in delivered:
