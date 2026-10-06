@@ -1,60 +1,54 @@
-"""Резервная копия снимков: единственное, что нельзя пересчитать.
+"""Локальная копия снимков и истории уведомлений с проверкой каждого файла.
 
-    uv run python scripts/snapshots_backup.py --to /Volumes/архив/finsnap
-    uv run python scripts/snapshots_backup.py --to ... --check   # только сверка
-    uv run python scripts/snapshots_backup.py --to ... --accept-changed
+    uv run python scripts/snapshots_backup.py --to ПУТЬ
+    uv run python scripts/snapshots_backup.py --to ПУТЬ --check
+    uv run python scripts/snapshots_backup.py --to ПУТЬ --verify
 
-**Пересчитать снимок нельзя.** Отчётность, показатели, класс, маршрут —
-всё это восстанавливается из источников за один прогон. Снимок рейтингов
-и снимок котировок не восстанавливается вовсе: метод рейтингов отдаёт только
-последнее значение, у торгов история около сорока дней. Потерянный снимок —
-потерянный день истории, и другого пути к нему нет.
-
-**Копия проверяемая, а не просто копия.** Рядом с файлами лежит `manifest.json`
-с размером и sha256 каждого: «файл скопирован» и «файл скопирован верно» —
-разные утверждения, и различает их только сверка. Отличающийся файл
-не переписывается молча: копия — доказательная база, и затирать её тем, что
-не совпало, значит терять то, ради чего она заведена.
-
-**Изменение бывает законным, и тогда его называют словом.** Снимок дня
-сам себя не перезаписывает — только `--refresh` у прогона снимка, — поэтому
-различие означает либо такой пересбор, либо порчу. Различить их доставке
-нечем, и выбор остаётся человеку: `--accept-changed` переписывает то,
-что разошлось, и печатает, что именно.
-
-**Куда копировать — решение человека, и оно не зашито.** Каталог называется
-доводом: внешний диск, том по локальной сети, смонтированное хранилище.
-Ничего не отправляется в сеть само: у проекта внешний контур, но выбор
-места хранения — не дело доставки.
-
-**Копируются файлы дня, а не сырые ответы по эмитенту.** В файле дня лежит
-полная запись (с 22.09.2026 — и у рейтингов), поэтому сырые ответы
-по эмитенту суть кэш доставки: их потеря стоит одного прогона, а не дня
-истории.
+Место называет владелец. --check сравнивает с исходниками; --verify проверяет
+опись и файлы копии даже после утраты исходников. Оба режима только читают.
+Дополнение неполного снимка рейтингов законно меняет файл; принять замену
+сохранённой версии можно только явно, через --accept-changed.
 """
 
+import argparse
 import hashlib
 import json
 import logging
+import os
+import re
 import shutil
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-# Что нельзя пересчитать: снимки дня. Каталоги объявлены поимённо — «всё,
-# что лежит в data/raw» включило бы кэш доставки, который пересчитывается.
-#
-# **Котировки Cbonds отсюда убраны 22.09.2026 вместе с их снимком**: ту же
-# историю торгов ISS отдаёт глубже и бесплатно, и хранить 383 МБ в день ради
-# второго источника того же незачем. Снимок за один день остался на диске
-# и в копию не идёт — он не история, а единственный день.
-SOURCES: tuple[Path, ...] = (Path("data/raw/cbonds/ratings"),)
+DATA = Path("data")
 MANIFEST = "manifest.json"
 
 
+@dataclass(frozen=True)
+class Source:
+    """Каталог и маска сохраняемых файлов; обязательность относится к снимкам."""
+
+    folder: str
+    pattern: str
+    required: bool = False
+
+
+SOURCES = (
+    Source("raw/cbonds/ratings", "*.json", required=True),
+    Source("raw/cbonds", "defaults_ru_????-??-??.json", required=True),
+    Source("raw/cbonds/default_deliveries", "????-??-??.json"),
+    Source("output", "changes_????-??-??*.md"),
+    Source("output", "default_notification_journal.json"),
+)
+Metadata = dict[str, int | str]
+Manifest = dict[str, Metadata]
+
+
 def digest(path: Path) -> str:
-    """sha256 файла: «скопирован» и «скопирован верно» — разные утверждения."""
+    """Возвращает sha256 содержимого файла."""
     found = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -62,84 +56,172 @@ def digest(path: Path) -> str:
     return found.hexdigest()
 
 
-def main() -> int:
-    """Копирует снимки и сверяет копию; 1 — при расхождении либо без каталога."""
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if "--to" not in sys.argv:
-        print(
-            "куда копировать, не сказано: `--to ПУТЬ`. Место хранения — решение "
-            "человека, и зашивать его доставка не вправе."
-        )
-        return 1
-    where = Path(sys.argv[sys.argv.index("--to") + 1])
-    only_check = "--check" in sys.argv
-    accept = "--accept-changed" in sys.argv
-    if not where.parent.exists():
-        print(f"каталога {where.parent} нет: том не смонтирован либо путь чужой")
-        return 1
+def metadata(path: Path) -> Metadata:
+    """Размер и хеш файла для описи."""
+    return {"size": path.stat().st_size, "sha256": digest(path)}
 
-    manifest: dict[str, dict] = {}
-    known = where / MANIFEST
-    if known.exists():
-        manifest = json.loads(known.read_text(encoding="utf-8"))
 
-    copied = matched = differ = missing = 0
-    for folder in SOURCES:
-        if not folder.exists():
-            logger.warning("снимков нет на диске: %s", folder)
-            continue
-        for item in sorted(folder.glob("*.json")):
-            key = str(item.relative_to("data/raw"))
-            mine = {"size": item.stat().st_size, "sha256": digest(item)}
-            target = where / key
-            if key in manifest and manifest[key] != mine:
-                # **Расхождение не переписывается без слова человека.** Снимок
-                # дня не меняется по устройству: изменившийся файл означает
-                # либо пересбор с `--refresh`, либо порчу, и различить их
-                # доставке нечем.
-                logger.error(
-                    "%s расходится с копией: было %s (%d Б), стало %s (%d Б)%s",
-                    key,
-                    manifest[key]["sha256"][:12],
-                    manifest[key]["size"],
-                    mine["sha256"][:12],
-                    mine["size"],
-                    " — переписываю по `--accept-changed`" if accept else "",
-                )
-                if not accept:
-                    differ += 1
-                    continue
-            if target.exists() and digest(target) == mine["sha256"]:
+def _target(where: Path, key: str) -> Path:
+    """Разрешает только нормальный относительный путь внутри копии."""
+    relative = Path(key)
+    if (not key or relative.is_absolute() or ".." in relative.parts
+            or relative.as_posix() != key):
+        raise ValueError(f"недопустимый путь в описи: {key!r}")
+    target = where / relative
+    if not target.resolve().is_relative_to(where.resolve()):
+        raise ValueError(f"путь выходит из каталога копии: {key!r}")
+    return target
+
+
+def read_manifest(where: Path) -> Manifest:
+    """Читает и проверяет опись, не исправляя повреждённые сведения."""
+    raw = json.loads((where / MANIFEST).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("опись пуста либо имеет неверный формат")
+    for key, item in raw.items():
+        _target(where, key)
+        if (not isinstance(item, dict) or type(item.get("size")) is not int
+                or item["size"] < 0 or not isinstance(item.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None):
+            raise ValueError(f"неверные размер или sha256 в описи: {key}")
+    return raw
+
+
+def inventory(data: Path) -> tuple[dict[str, Path], int]:
+    """Перечисляет снимки и артефакты публикации; отсутствие снимков — ошибка."""
+    found: dict[str, Path] = {}
+    errors = 0
+    for source in SOURCES:
+        folder = data / source.folder
+        files = sorted(folder.glob(source.pattern))
+        if not files and source.required:
+            logger.error("снимков нет: %s/%s", folder, source.pattern)
+            errors += 1
+        for item in files:
+            relative = item.relative_to(data)
+            key = (relative.relative_to("raw").as_posix()
+                   if relative.parts[0] == "raw" else relative.as_posix())
+            found[key] = item
+    return found, errors
+
+
+def verify(where: Path, manifest: Manifest) -> tuple[int, int]:
+    """Проверяет все записи описи независимо от наличия исходных файлов."""
+    matched = errors = 0
+    for key, expected in manifest.items():
+        try:
+            target = _target(where, key)
+            if not target.is_file() or metadata(target) != expected:
+                logger.error("файл копии отсутствует или повреждён: %s", key)
+                errors += 1
+            else:
                 matched += 1
-                manifest[key] = mine
-                continue
-            if only_check:
-                missing += 1
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target)
-            if digest(target) != mine["sha256"]:
-                logger.error("%s скопирован неверно: sha256 не сошёлся", key)
-                differ += 1
-                continue
-            manifest[key] = mine
-            copied += 1
+        except (OSError, ValueError) as failure:
+            logger.error("не проверен %s: %s", key, failure)
+            errors += 1
+    return matched, errors
 
-    if not only_check:
-        known.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-    print(
-        f"{where}: скопировано {copied}, сошлось {matched}, "
-        f"расхождений {differ}, не скопировано {missing}; в описи {len(manifest)}"
-    )
-    if differ:
-        print(
-            "**Расхождение не переписано.** Снимок дня по устройству "
-            "не меняется: различие означает правку либо порчу, и решать это "
-            "человеку, а не доставке."
-        )
-    return 1 if differ else 0
+
+def _copy(item: Path, target: Path) -> None:
+    """Публикует проверенную копию файла атомарной заменой."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        shutil.copy2(item, temporary)
+        if metadata(temporary) != metadata(item):
+            raise ValueError(f"исходник изменился во время копирования: {item}")
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_manifest(where: Path, manifest: Manifest) -> None:
+    """Сохраняет новую опись целиком, оставляя прежнюю при сбое записи."""
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=where,
+                                     delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            json.dump(manifest, handle, ensure_ascii=False, indent=1)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(where / MANIFEST)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Копирует или проверяет файлы; любая неполнота даёт ненулевой исход."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--to", type=Path, required=True)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true")
+    modes.add_argument("--verify", action="store_true")
+    parser.add_argument("--accept-changed", action="store_true")
+    args = parser.parse_args(argv)
+    if args.accept_changed and (args.check or args.verify):
+        parser.error("--accept-changed применим только к копированию")
+    where = args.to
+    if not where.parent.is_dir():
+        logger.error("каталога %s нет: том не смонтирован либо путь неверен", where.parent)
+        return 1
+    manifest: Manifest = {}
+    try:
+        if (where / MANIFEST).exists() or args.check or args.verify:
+            manifest = read_manifest(where)
+        if args.verify:
+            matched, errors = verify(where, manifest)
+            print(f"{where}: проверено {matched} из {len(manifest)}, ошибок {errors}")
+            return int(bool(errors))
+        files, errors = inventory(DATA)
+        if not files:
+            logger.error("проверка не выполнена: исходных файлов нет")
+            return 1
+        copied = 0
+        for key, item in files.items():
+            mine = metadata(item)
+            target = _target(where, key)
+            changed = key in manifest and mine != manifest[key]
+            corrupt = key in manifest and target.exists() and metadata(target) != manifest[key]
+            if changed or corrupt:
+                logger.error("%s: %s", key, "исходник изменился" if changed else "копия повреждена")
+                if not args.accept_changed:
+                    errors += 1
+                    continue
+                logger.warning("%s: заменяю по --accept-changed", key)
+            if args.check:
+                if key not in manifest:
+                    logger.error("исходник не включён в опись: %s", key)
+                    errors += 1
+                continue
+            if not target.is_file() or metadata(target) != mine:
+                _copy(item, target)
+                copied += 1
+            manifest[key] = mine
+        if args.check:
+            for key in manifest.keys() - files.keys():
+                logger.error("исходник из описи отсутствует: %s", key)
+                errors += 1
+        if not manifest:
+            logger.error("опись не создана: ни один файл не сохранён")
+            return 1
+        matched, broken = verify(where, manifest)
+        errors += broken
+        if not args.check:
+            _write_manifest(where, manifest)
+        print(f"{where}: скопировано {copied}, проверено {matched} из {len(manifest)}, "
+              f"ошибок {errors}")
+        return int(bool(errors))
+    except (OSError, ValueError, TypeError) as failure:
+        logger.error("копия не подтверждена: %s", failure)
+        return 1
 
 
 if __name__ == "__main__":
