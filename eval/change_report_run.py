@@ -264,15 +264,16 @@ def _urgent(routing, now, previous: date, until: date,  # noqa: ANN001
             item.emission_id for item in events.records}
         for emission in emissions:
             owners.setdefault(emission, set()).add(_named(inn))
-        for item in notices:
-            if item.emission_id in emissions and previous < item.day <= until:
-                order = (URGENT_DECLARED if item.kind == "status_default"
-                         else URGENT_UNCONFIRMED)
-                text = default_notifications.said(item, latest[item.record_id],
-                                                   snapshots[-1] if snapshots else None)
-                line = f"- {_named(inn)}: {text}"
-                if notice_context is None or notice_context.claim(item, line):
-                    said.append((order, line))
+        for group in _by_record(
+            [item for item in notices
+             if item.emission_id in emissions and previous < item.day <= until],
+            notice_context,
+        ):
+            text = default_notifications.said_record(group, latest[group[0].record_id],
+                                                      snapshots[-1] if snapshots else None)
+            line = f"- {_named(inn)}: {text}"
+            if _claimed(notice_context, group, line):
+                said.append((_order(group), line))
         for item in corrections:
             if item.emission_id in emissions and previous < item.day <= until:
                 updates.append(f"- {_named(inn)}: {default_notifications.correction_said(item)}")
@@ -311,17 +312,19 @@ def _urgent(routing, now, previous: date, until: date,  # noqa: ANN001
                 )
             )
     if notice_context is not None:
-        for item in notices:
-            if previous < item.day <= until and item.emission_id not in owners:
-                text = default_notifications.said(item, latest[item.record_id],
-                                                   snapshots[-1] if snapshots else None)
-                line = f"- эмитент не установлен: {text}"
-                if notice_context.claim(item, line):
-                    order = (URGENT_DECLARED if item.kind == "status_default"
-                             else URGENT_UNCONFIRMED)
-                    said.append((order, line))
-    # Счётчик считает то, что напечатано: перечень с повторами назвал бы
-    # одно событие двумя.
+        for group in _by_record(
+            [item for item in notices
+             if previous < item.day <= until and item.emission_id not in owners],
+            notice_context,
+        ):
+            text = default_notifications.said_record(group, latest[group[0].record_id],
+                                                      snapshots[-1] if snapshots else None)
+            line = f"- эмитент не установлен: {text}"
+            if _claimed(notice_context, group, line):
+                said.append((_order(group), line))
+    # Счётчик считает то, что напечатано, — строки, то есть записи источника
+    # и рейтинговые действия, а не виды событий: перечень с повторами назвал
+    # бы одно событие двумя.
     said = list(dict.fromkeys(said))
     print(f"## Срочное за сутки ({previous:%d.%m.%Y} → {until:%d.%m.%Y}): {len(said)}\n")
     if not snapshots:
@@ -356,6 +359,40 @@ def _urgent(routing, now, previous: date, until: date,  # noqa: ANN001
                             previous, delivery_evidence)
 
 
+def _by_record(
+    items: list[default_notifications.Notice],
+    context: notification_journal.Context | None,
+) -> list[tuple[default_notifications.Notice, ...]]:
+    """Уведомления по записям источника; с журналом — только ещё не выведенные ключи.
+
+    **Одна строка — одна запись источника.** Ключ журнала прежний — (id записи,
+    вид события), — и каждый переход регистрируется своим ключом, а печатаются
+    переходы одной записи вместе: отдельная строка на вид события читалась
+    бы как отдельное обязательство.
+    """
+    groups: dict[str, list[default_notifications.Notice]] = {}
+    for item in items:
+        if context is None or context.claimable(item):
+            groups.setdefault(item.record_id, []).append(item)
+    return [tuple(group) for group in groups.values()]
+
+
+def _claimed(
+    context: notification_journal.Context | None,
+    group: tuple[default_notifications.Notice, ...], line: str,
+) -> bool:
+    """Регистрирует каждый ключ записи с общей строкой; без журнала — просто печать."""
+    if context is None:
+        return True
+    return all([context.claim(item, line) for item in group])
+
+
+def _order(group: tuple[default_notifications.Notice, ...]) -> int:
+    """Место записи в очереди: объявленный дефолт впереди неподтверждённого."""
+    return min(URGENT_DECLARED if item.kind == "status_default" else URGENT_UNCONFIRMED
+               for item in group)
+
+
 def _late_notifications(
     context: notification_journal.Context,
     notices: tuple[default_notifications.Notice, ...],
@@ -368,25 +405,36 @@ def _late_notifications(
     candidates = [item for item in notices if item.day <= previous
                   and (item.record_id, item.kind) not in context.known]
     for item in candidates:
-        uncertain = context.uncertain(item)
-        if uncertain:
-            gaps.update(uncertain)
-            continue
-        available = tuple(snapshot for snapshot in snapshots if snapshot.day <= item.day)
-        _, _, original = default_notifications.timeline(available, item.day)
-        observed, row = original[item.record_id]
-        snapshot_path = cbonds_events.CACHE / f"defaults_ru_{observed:%Y-%m-%d}.json"
-        proof = delivery_evidence / f"{observed:%Y-%m-%d}.json" if delivery_evidence else None
-        delivered = default_deliveries.observed_at(snapshot_path, proof)
-        delivery = (f"{delivered:%d.%m.%Y %H:%M:%S} МСК" if delivered is not None
-                    else "точное время доставки неизвестно")
-        names = ", ".join(sorted(owners.get(item.emission_id, set()))) or "эмитент не установлен"
-        text = default_notifications.said(item, (observed, row),
-                                           available[-1] if available else None)
+        gaps.update(context.uncertain(item))
+    for group in _by_record(candidates, context):
+        deliveries = []
+        for item in group:
+            available = tuple(snapshot for snapshot in snapshots if snapshot.day <= item.day)
+            _, _, original = default_notifications.timeline(available, item.day)
+            observed, _ = original[item.record_id]
+            snapshot_path = cbonds_events.CACHE / f"defaults_ru_{observed:%Y-%m-%d}.json"
+            proof = (delivery_evidence / f"{observed:%Y-%m-%d}.json"
+                     if delivery_evidence else None)
+            delivered = default_deliveries.observed_at(snapshot_path, proof)
+            deliveries.append(f"{delivered:%d.%m.%Y %H:%M:%S} МСК" if delivered is not None
+                              else "точное время доставки неизвестно")
+        # **Хвост строки — состояние записи на снимке последнего перехода**:
+        # более позднее состояние не подменяет известного к событию.
+        last = max(group, key=lambda item: item.day)
+        available = tuple(snapshot for snapshot in snapshots if snapshot.day <= last.day)
+        _, _, original = default_notifications.timeline(available, last.day)
+        # Одна доставка у всех переходов — одна пометка в конце, как у строки
+        # с одним переходом; разные — пометка у каждого перехода.
+        same = len(set(deliveries)) == 1
+        marks = None if same else tuple(f" (снимок доставлен: {item})" for item in deliveries)
+        text = default_notifications.said_record(group, original[last.record_id],
+                                                  available[-1] if available else None, marks)
+        names = ", ".join(sorted(owners.get(last.emission_id, set()))) or "эмитент не установлен"
         first = ("дата первого вывода не зафиксирована (предпросмотр)" if context.preview
                  else f"впервые выведено {context.printed_at:%d.%m.%Y}")
-        line = f"- {names}: {text}; снимок доставлен: {delivery}; {first}"
-        if context.claim(item, line):
+        delivery = f"; снимок доставлен: {deliveries[0]}" if same else ""
+        line = f"- {names}: {text}{delivery}; {first}"
+        if _claimed(context, group, line):
             lines.append(line)
     print(f"## Доставлено с опозданием: {len(lines)}\n")
     print("\n".join(lines) if lines else

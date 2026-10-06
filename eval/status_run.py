@@ -129,13 +129,18 @@ def _streak(runs: list[dict], now: datetime) -> tuple[int, str]:
         day -= timedelta(days=1)
 
 
-def _changes() -> tuple[str, str, str]:
-    """Срочное и смены корзины из свежайшего отчёта изменений: файл, два числа.
+def _changes() -> tuple[str, str, str, str]:
+    """Срочное, опоздавшее и смены корзины из свежайшего отчёта изменений: файл, три числа.
 
     **Главный отчёт дня — отчёт прогона по расписанию** (`changes_<дата>.md`);
     повторный прогон пишет свой рядом (`changes_<дата>_<ЧЧММ>.md`). Берётся
     свежайшая дата, у неё — главный отчёт, а если его нет — последний
     повторный, и это сказано в имени.
+
+    **Счётчик раздела — строки, то есть записи**: одна строка на запись
+    источника с её переходами, у «Срочного» — ещё и рейтинговые действия.
+    Сводка печатает его тем же словом, а не «событиями»: переходов в строке
+    бывает несколько.
     """
     dated = re.compile(r"changes_(\d{4}-\d{2}-\d{2})(?:_(\d{4}))?\.md$")
     found = sorted(
@@ -144,13 +149,14 @@ def _changes() -> tuple[str, str, str]:
         if (match := dated.match(path.name))
     )
     if not found:
-        return "отчёта изменений нет", "—", "—"
+        return "отчёта изменений нет", "—", "—", "—"
     day = found[-1][0]
     mine = [item for item in found if item[0] == day]
     main_report = next((item for item in mine if item[1]), None)
     chosen = main_report or mine[-1]
     text = chosen[3].read_text(encoding="utf-8")
     urgent = re.search(r"^## Срочное[^:]*:\s*(\d+)", text, re.M)
+    late = re.search(r"^## Доставлено с опозданием:\s*(\d+)", text, re.M)
     moved = re.search(r"^## Сменили корзину:\s*(\d+)\s*из\s*(\d+)", text, re.M)
     label = chosen[3].name
     if main_report is None:
@@ -160,6 +166,7 @@ def _changes() -> tuple[str, str, str]:
     return (
         label,
         urgent.group(1) if urgent else "раздела нет",
+        late.group(1) if late else "раздела нет",
         f"{moved.group(1)} из {moved.group(2)}" if moved else "раздела нет",
     )
 
@@ -204,8 +211,9 @@ def main() -> int:
         )
     else:
         print(f"\n**Снимка рейтингов за {today:%d.%m.%Y} нет.**")
-    name, urgent, moved = _changes()
-    print(f"\n**Отчёт изменений** {name}: срочное {urgent}, сменили корзину {moved}.")
+    name, urgent, late, moved = _changes()
+    print(f"\n**Отчёт изменений** {name}: срочное — строк {urgent}, доставлено "
+          f"с опозданием — записей {late}, сменили корзину {moved}.")
     now = datetime.now().astimezone()
     count, broke = _streak(runs, now)
     running = _running_today(runs, now)

@@ -165,7 +165,7 @@ def _snapshots(root: Path) -> None:
 def test_late_unbound_keys_have_delivery_and_original_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Два вида одного обязательства не скрываются без привязки и не используют поздний статус."""
+    """Два перехода одной записи — одна строка без привязки, ключей журнала по-прежнему два."""
     source, output = tmp_path / "source", tmp_path / "output"
     source.mkdir()
     _snapshots(source)
@@ -182,8 +182,11 @@ def test_late_unbound_keys_have_delivery_and_original_content(
             report._late_notifications(context, notices, snapshots, {}, date(2090, 1, 2))
         return buffer.getvalue()
     text = journal.publish(output / "changes_2090-01-03.md", render, printed_at=MOMENT)
-    assert "Доставлено с опозданием: 2" in text
-    assert text.count("эмитент не установлен") == 2
+    assert "Доставлено с опозданием: 1" in text
+    assert text.count("эмитент не установлен") == 1
+    line = next(item for item in text.splitlines() if item.startswith("- "))
+    assert "запись впервые обнаружена 02.01.2090; льготный срок закончился 02.01.2090" in line
+    assert line.count("снимок доставлен") == 1
     assert "02.01.2090 14:29:06 МСК" in text and "впервые выведено 03.01.2090" in text
     assert len(journal.load(output)[0]) == 2
     next_text = journal.publish(output / "changes_2090-01-04.md", render, printed_at=MOMENT)
@@ -276,3 +279,107 @@ def test_failed_render_has_no_receipt_or_journal(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="оборвалась"):
         journal.publish(tmp_path / "changes_2090-01-03.md", fail)
     assert journal.load(tmp_path)[0] == {}
+
+
+def _three_steps(root: Path) -> None:
+    """Запись появляется, её льгота кончается, затем она переходит в «Дефолт»."""
+    _snapshots(root)
+    row = {"id": "test-record", "emission_id": "test-issue", "type_name_rus": "Купон",
+           "status_name_rus": "Дефолт", "default_date": "2090-01-02", "actual_date": None}
+    (root / "defaults_ru_2090-01-03.json").write_text(
+        json.dumps({"items": [row], "total": 1, "count": 1}), encoding="utf-8")
+
+
+def test_urgent_prints_one_line_per_record_and_keeps_every_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Три перехода одной записи — одна строка и счётчик 1; ключей журнала три."""
+    from finlib.report.watchlist_data import report_data
+
+    source, output = tmp_path / "source", tmp_path / "output"
+    source.mkdir()
+    _three_steps(source)
+    monkeypatch.setattr(cbonds_events, "CACHE", source)
+    monkeypatch.setattr(cbonds_events, "SNAPSHOTS", source / "ratings")
+    def render(context: journal.Context) -> str:
+        """Срочное за окно, в которое входят все три перехода."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            report._urgent(load_routing(), {}, date(2090, 1, 1), date(2090, 1, 3), context)
+        return buffer.getvalue()
+    path = output / "changes_2090-01-03.md"
+    text = journal.publish(path, render, printed_at=MOMENT)
+    assert "Срочное за сутки (01.01.2090 → 03.01.2090): 1" in text
+    urgent = text.split("## Доставлено с опозданием:", 1)[0]
+    lines = [item for item in urgent.splitlines() if item.startswith("- ")]
+    assert len(lines) == 1
+    assert ("запись впервые обнаружена 02.01.2090; льготный срок закончился 02.01.2090; "
+            "впервые наблюдается переход «Технический дефолт» → «Дефолт» 03.01.2090") in lines[0]
+    assert lines[0].count("последний доступный снимок записи") == 1
+    assert set(journal.load(output)[0]) == {
+        ("test-record", "first_seen"), ("test-record", "grace_end"),
+        ("test-record", "status_default"),
+    }
+    event = report_data(path)["events"][0]
+    assert event["kinds"] == ["first", "grace", "status"]
+    assert event["eventOn"] == "02.01.2090, 03.01.2090"
+    assert event["firstPrintedOn"] == "03.01.2090"
+
+
+def test_record_line_names_only_keys_not_yet_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Выведенный ранее ключ в строку записи не возвращается, остальные — возвращаются."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _three_steps(source)
+    monkeypatch.setattr(cbonds_events, "CACHE", source)
+    monkeypatch.setattr(cbonds_events, "SNAPSHOTS", source / "ratings")
+    printed = journal.Entry("test-record", "first_seen", "2090-01-02", "- прежняя строка",
+                            "changes_2090-01-02.md", "2090-01-02")
+    context = journal.Context("changes_2090-01-03.md", MOMENT, {printed.key: printed})
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        report._urgent(load_routing(), {}, date(2090, 1, 1), date(2090, 1, 3), context)
+    lines = [item for item in buffer.getvalue().splitlines() if item.startswith("- ")]
+    assert len(lines) == 1
+    assert "запись впервые обнаружена" not in lines[0]
+    assert "льготный срок закончился 02.01.2090" in lines[0]
+    assert set(context.pending) == {("test-record", "grace_end"),
+                                    ("test-record", "status_default")}
+
+
+def test_late_record_with_two_deliveries_names_each(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Переходы, подтверждённые разными снимками, несут каждый своё время доставки."""
+    from finlib.report.watchlist_data import report_data
+
+    source, output = tmp_path / "source", tmp_path / "output"
+    source.mkdir()
+    _three_steps(source)
+    default_deliveries.record(source / "defaults_ru_2090-01-02.json",
+                              datetime(2090, 1, 2, 14, 29, 6, tzinfo=journal.MOSCOW))
+    default_deliveries.record(source / "defaults_ru_2090-01-03.json",
+                              datetime(2090, 1, 3, 9, 1, 2, tzinfo=journal.MOSCOW))
+    monkeypatch.setattr(cbonds_events, "CACHE", source)
+    until = date(2090, 1, 4)
+    snapshots = snapshots_at(source, until)
+    notices = timeline(snapshots, until)[0]
+    def render(context: journal.Context) -> str:
+        """Все три перехода уже вне окна — раздел опоздавших."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            report._late_notifications(context, notices, snapshots, {}, date(2090, 1, 3))
+        return buffer.getvalue()
+    path = output / "changes_2090-01-04.md"
+    text = journal.publish(path, render, printed_at=MOMENT)
+    assert "Доставлено с опозданием: 1" in text
+    line = next(item for item in text.splitlines() if item.startswith("- "))
+    assert "02.01.2090 (снимок доставлен: 02.01.2090 14:29:06 МСК)" in line
+    assert "03.01.2090 (снимок доставлен: 03.01.2090 09:01:02 МСК)" in line
+    assert "статус «Дефолт»" in line
+    assert len(journal.load(output)[0]) == 3
+    late = report_data(path)["late"][0]
+    assert late["kinds"] == ["first", "grace", "status"]
+    assert late["deliveredAt"] == "02.01.2090 14:29:06 МСК, 03.01.2090 09:01:02 МСК"
