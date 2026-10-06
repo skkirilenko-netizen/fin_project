@@ -627,24 +627,18 @@ def _publish(
     #
     # **Порядок здесь часть дела.** Список ставит ссылку на карточку только
     # тогда, когда файл её лежит на диске, а карточка ссылается на свежайший
-    # собранный список. Собранные раньше списка, карточки сослались бы
-    # на вчерашний; собранные позже — попадают в сегодняшний по именам,
-    # которые не меняются. Поэтому список первым, карточки за ним.
-    for name, args in (
-        ("watchlist_run.py", ()),
-        ("watchlist_csv.py", ()),
-        ("issuer_card_run.py", ("--all",)),
-    ):
-        argv = sys.argv
-        try:
-            sys.argv = [name, *args]
-            runpy.run_path(str(ROOT / "eval" / name), run_name="__main__")
-        except SystemExit:
-            pass
-        finally:
-            sys.argv = argv
-
+    # список этого запуска. Карточки получают его путь явно, до появления
+    # файла. HTML публикуется после успешной сборки карточек: новые эмитенты
+    # тоже получают ссылки, а отказ сборки не выдаётся за готовый список.
+    # Отчёт и CSV сохраняются до списка.
     report = report_path(today, started, said)
+    html_out = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(".html")
+    csv_out = html_out.with_suffix(".csv")
+    # Проверка в генераторе HTML остаётся последней защитой. Здесь отказ
+    # нужен до CSV и карточек, иначе спутники уже опубликованного списка
+    # изменятся раньше, чем генератор обнаружит существующую страницу.
+    if html_out.exists():
+        raise ValueError(f"сохранённый HTML не переписывается: {html_out}; выберите новый запуск")
     argv = sys.argv
     try:
         sys.argv = ["change_report_run.py", "--kind", "run", "--output", str(report)] + (
@@ -658,6 +652,22 @@ def _publish(
             raise
     finally:
         sys.argv = argv
+
+    for name, args in (
+        ("watchlist_csv.py", ("--out", str(csv_out))),
+        ("issuer_card_run.py", ("--all", "--watchlist", str(html_out))),
+        ("watchlist_run.py", ("--out", str(html_out), "--report", str(report),
+                             "--csv", str(csv_out))),
+    ):
+        argv = sys.argv
+        try:
+            sys.argv = [name, *args]
+            runpy.run_path(str(ROOT / "eval" / name), run_name="__main__")
+        except SystemExit as stop:
+            if stop.code:
+                raise
+        finally:
+            sys.argv = argv
 
     print(f"\nПрогон {today}: эмитентов {len(rows)}, запросов {_spent()}")
     for said in delivered:

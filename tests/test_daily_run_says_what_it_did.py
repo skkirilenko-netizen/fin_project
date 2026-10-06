@@ -15,7 +15,9 @@ import io
 import os
 import sys
 from contextlib import redirect_stdout
-from datetime import date
+from datetime import date, datetime
+
+import pytest
 
 from finlib.config import settings
 
@@ -44,15 +46,22 @@ def test_the_daily_run_builds_every_output() -> None:
     assert "change_report_run.py" in text, "прогон не строит отчёт изменений"
 
 
-def test_the_order_puts_the_list_before_the_cards() -> None:
-    """Список собирается раньше карточек, и порядок этот — часть дела.
-
-    Список ставит ссылку только на лежащую карточку, а карточка ссылается
-    на свежайший собранный список: собранные раньше списка карточки сослались
-    бы на вчерашний.
-    """
+def test_cards_are_ready_before_list_with_explicit_return_link() -> None:
+    """Новые карточки готовы до HTML, обратная ссылка названа явно."""
     text = _source()
-    assert text.index("watchlist_run.py") < text.index("issuer_card_run.py")
+    assert text.index("issuer_card_run.py") < text.index("watchlist_run.py")
+    assert '"--watchlist", str(html_out)' in text
+
+
+def test_card_return_link_can_name_not_yet_published_list(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """Предстоящая публикация не подменяется вчерашним списком."""
+    import issuer_card_run
+
+    cards = tmp_path / "cards"
+    monkeypatch.setattr(issuer_card_run, "OUT", cards)
+    target = tmp_path / "watchlist_2090-01-03_1507.html"
+    assert not target.exists()
+    assert issuer_card_run._newest_list(target).as_posix() == "../" + target.name
 
 
 def test_the_market_series_is_recomputed_after_delivery() -> None:
@@ -124,8 +133,12 @@ def _stage_run(tmp_path, monkeypatch, body: str, marker_exists: bool) -> dict:  
     script.write_text(body.replace("MARKER", str(marker)), encoding="utf-8")
     monkeypatch.setattr(daily_run, "_marker", lambda stage: marker)
     stage = daily_run.Stage(
-        code="probe", name="проба", script=str(script), every=7,
-        source="cbonds", why="тест",
+        code="probe",
+        name="проба",
+        script=str(script),
+        every=7,
+        source="cbonds",
+        why="тест",
     )
     return daily_run._run_stage(stage, dry=False)
 
@@ -176,8 +189,12 @@ def test_a_failed_delivery_stands_at_the_top_of_the_report() -> None:
                 "status": "failed",
                 "note": "источник отказал на доставке «снимок рейтингов»",
                 "sources": [
-                    {"code": "ratings", "name": "снимок рейтингов",
-                     "status": "failed", "error": "HTTP 503"},
+                    {
+                        "code": "ratings",
+                        "name": "снимок рейтингов",
+                        "status": "failed",
+                        "error": "HTTP 503",
+                    },
                     {"code": "moex", "name": "сектор риска", "status": "ok"},
                 ],
             }
@@ -196,9 +213,7 @@ def test_a_full_delivery_is_named_too() -> None:
             {
                 "status": "done",
                 "note": "эмитентов 900",
-                "sources": [
-                    {"code": "ratings", "name": "снимок рейтингов", "status": "ok"}
-                ],
+                "sources": [{"code": "ratings", "name": "снимок рейтингов", "status": "ok"}],
             }
         ]
     )
@@ -242,6 +257,45 @@ def _daily():  # noqa: ANN202
     daily = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daily)
     return daily
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_a_published_list_stops_before_changing_companion_files(
+    tmp_path, monkeypatch, manual: bool
+) -> None:  # noqa: ANN001
+    """Готовый HTML защищает свой отчёт, CSV и карточки до первой записи."""
+    daily = _daily()
+    monkeypatch.setattr(daily, "OUT", tmp_path)
+    today = date(2000, 1, 3)
+    started = datetime(2000, 1, 3, 15, 7) if manual else None
+    said = "проверка" if manual else ""
+    report = daily.report_path(today, started, said)
+    html_path = report.with_name(report.name.replace("changes_", "watchlist_")).with_suffix(
+        ".html"
+    )
+    csv_path = html_path.with_suffix(".csv")
+    card = tmp_path / "cards" / "0000000001.html"
+    card.parent.mkdir()
+    for path in (report, html_path, csv_path, card):
+        path.write_text(f"сохранённое содержимое {path.name}", encoding="utf-8")
+    before = {path: path.read_bytes() for path in (report, html_path, csv_path, card)}
+    called = []
+
+    def publication_stage(path: str, *, run_name: str) -> None:
+        """Имитирует перезапись спутников до отказа генератора HTML."""
+        called.append(path)
+        if path.endswith("watchlist_csv.py"):
+            csv_path.write_text("новый CSV", encoding="utf-8")
+        if path.endswith("issuer_card_run.py"):
+            card.write_text("новая карточка", encoding="utf-8")
+        if path.endswith("watchlist_run.py"):
+            raise ValueError("сохранённый HTML не переписывается")
+
+    monkeypatch.setattr(daily.runpy, "run_path", publication_stage)
+    with pytest.raises(ValueError, match="сохранённый HTML не переписывается"):
+        daily._publish(today, [], {}, [], "", started, said)
+    assert called == []
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_a_repeat_does_not_overwrite_the_scheduled_point(db_conn) -> None:  # noqa: ANN001
@@ -297,16 +351,23 @@ def _write_day(db_conn, daily, day: date, inn: str, points: tuple) -> tuple:  # 
         execute(
             daily.point_sql(kind),
             {
-                "run": run_id, "kind": kind, "inn": inn, "as_of": day,
-                "standard": None, "basket": basket, "subgroup": "", "grounds": [],
-                "grounds_all": [], "inputs": "{}", "fingerprint": "f",
+                "run": run_id,
+                "kind": kind,
+                "inn": inn,
+                "as_of": day,
+                "standard": None,
+                "basket": basket,
+                "subgroup": "",
+                "grounds": [],
+                "grounds_all": [],
+                "inputs": "{}",
+                "fingerprint": "f",
                 "report_date": None,
             },
             conn=db_conn,
         )
     rows = fetch_all(
-        "SELECT kind, basket FROM routing_history WHERE inn = %(i)s AND as_of = %(d)s "
-        "ORDER BY id",
+        "SELECT kind, basket FROM routing_history WHERE inn = %(i)s AND as_of = %(d)s ORDER BY id",
         {"i": inn, "d": day},
         conn=db_conn,
     )

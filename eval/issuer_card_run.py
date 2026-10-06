@@ -27,8 +27,10 @@
     uv run python eval/issuer_card_run.py --all
 """
 
+import argparse
 import json
 import logging
+import os
 import sys
 from datetime import date
 from functools import lru_cache
@@ -139,12 +141,14 @@ def _changed(row: dict, before: dict | None, names: dict[str, str]) -> str:
     return "; ".join(said) or "без изменений"
 
 
-def _newest_list() -> Path | None:
+def _newest_list(target: Path | None = None) -> Path | None:
     """Свежайший собранный список наблюдения; None — списка на диске нет.
 
     Карточки лежат в подкаталоге списка, поэтому ссылка ведёт на уровень
     выше — `../watchlist_<дата>.html`.
     """
+    if target is not None:
+        return Path(os.path.relpath(target.resolve(), OUT.resolve()))
     found = sorted(OUT.parent.glob("watchlist_*.html"))
     if not found:
         return None
@@ -597,7 +601,7 @@ def _gaps(item, routing, sets: list[dict], said: list) -> None:  # noqa: ANN001
         add(f"- {line}")
 
 
-def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
+def card(item, routing, conn, actions, bound_names, *, watchlist: Path | None = None) -> str:  # noqa: ANN001
     """Собирает карточку одного эмитента."""
     verdict = item.verdict
     basket = routing.basket(verdict.basket)
@@ -642,7 +646,7 @@ def card(item, routing, conn, actions, bound_names) -> str:  # noqa: ANN001
     # **Ссылка на список ставится только на собранный.** Карточку открывают
     # из списка и возвращаются в него; обещать страницу, которой на диске нет,
     # хуже, чем не обещать ничего.
-    if (found := _newest_list()) is not None:
+    if (found := _newest_list(watchlist)) is not None:
         add(f"[← Список наблюдения]({found.as_posix()})\n")
 
     add("\n## Основания корзины\n")
@@ -1091,8 +1095,15 @@ def _known(item) -> object:  # noqa: ANN001
 def main() -> int:
     """Собирает карточки названных эмитентов либо всех сразу."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
-    wanted = [item for item in sys.argv[1:] if item.isdigit()]
-    everyone = "--all" in sys.argv[1:]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("inn", nargs="*")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument(
+        "--watchlist", type=Path, help="список этого запуска, перед его публикацией"
+    )
+    args = parser.parse_args()
+    wanted = [item for item in args.inn if item.isdigit()]
+    everyone = args.all
     if not wanted and not everyone:
         print("назовите ИНН либо --all: карточка собирается по эмитенту")
         return 1
@@ -1114,7 +1125,7 @@ def main() -> int:
             if item is None:
                 print(f"{inn}: в списке нет — карточку собирать не из чего")
                 continue
-            text = card(item, routing, conn, actions, bound_names)
+            text = card(item, routing, conn, actions, bound_names, watchlist=args.watchlist)
             # **Единица проверяется и здесь.** Вопрос у всех выходов один —
             # не напечатана ли единица чужого комплекта, — и второй экземпляр
             # проверки разошёлся бы с первым.

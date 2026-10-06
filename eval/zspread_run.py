@@ -254,6 +254,24 @@ def composition(rows: dict, kind: dict, by_code: dict) -> set[str]:
     return gov
 
 
+def verify_g(rows: dict, base: Market) -> None:
+    """Сверяет ориентир и все точки G в обе стороны до сравнения вариантов."""
+    again = build(rows, 2, lambda item: True, base.census)
+    seen = {date.fromisoformat(name) for name in rows}
+    expected_bench = {day: value for day, value in base.benchmark.items() if day in seen}
+    expected_points = {
+        inn: {day: point for day, point in own.items() if day in seen}
+        for inn, own in base.issuers.items() if any(day in seen for day in own)
+    }
+    problems = []
+    if again.benchmark != expected_bench:
+        problems.append("ориентир")
+    if again.issuers != expected_points:
+        problems.append("точки эмитентов (включая лишние и пропущенные)")
+    if problems:
+        raise ValueError("G из pickle не воспроизводит сохранённый ряд: " + "; ".join(problems))
+
+
 def main() -> int:
     """Печатает проверку на ОФЗ, охват и три ступени."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -263,19 +281,9 @@ def main() -> int:
     policy = load_market()
     base = series()
     print("# Z-спред против G-спреда: проверка и три ступени ядра\n")
-    again = build(rows, 2, lambda item: True, base.census)
-    seen = {date.fromisoformat(name) for name in rows}
-    same_bench = again.benchmark == {
-        day: value for day, value in base.benchmark.items() if day in seen
-    }
-    same_points = all(
-        again.issuers.get(inn, {}) == {day: p for day, p in own.items() if day in seen}
-        for inn, own in base.issuers.items()
-        if any(day in seen for day in own)
-    )
+    verify_g(rows, base)
     print(
-        f"Сверка сборки с боевым рядом на G: ориентир {'совпал' if same_bench else 'НЕ совпал'}, "
-        f"точки эмитентов {'совпали' if same_points else 'НЕ совпали'} "
+        "Сверка сборки с боевым рядом на G: ориентир совпал, точки эмитентов совпали "
         f"({len(base.benchmark)} дней, {len(base.issuers)} эмитентов).\n"
     )
     ofz_check(rows)

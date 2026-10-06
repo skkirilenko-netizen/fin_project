@@ -1,6 +1,6 @@
 """Список наблюдения: один HTML-файл со всеми эмитентами и их корзинами.
 
-    uv run python eval/watchlist_run.py            # data/output/watchlist_<дата>.html
+    uv run python eval/watchlist_run.py    # data/output/watchlist_<дата>_manual_<ЧЧММСС>.html
     uv run python eval/watchlist_run.py --out ПУТЬ
 
 **Это чтение, и ничего кроме.** Из интерфейса нельзя ни исправить корзину,
@@ -20,11 +20,13 @@
 а предмет и величина говорят.
 """
 
+import argparse
 import html
+import json
 import logging
 import sys
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -33,11 +35,14 @@ from finlib.db import connection  # noqa: E402
 from finlib.metrics.display import foreign_units  # noqa: E402
 from finlib.report.market_chart import charts  # noqa: E402
 from finlib.report.policy import load_policy, months_between  # noqa: E402
+from finlib.report.watchlist import render as render_interface  # noqa: E402
+from finlib.report.watchlist_data import csv_rows, payload  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
 from finlib.scoring.routing_store import routing_rows  # noqa: E402
 from finlib.sources.market import load_market as _market_rules  # noqa: E402
 from finlib.sources.market import series as _market_series  # noqa: E402
+from finlib.sources.notification_journal import MOSCOW, atomic_write  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -372,43 +377,19 @@ def rows_of(conn, today: date) -> tuple[list[dict], dict[str, int]]:
     return rows, dict(summary)
 
 
-def render(rows: list[dict], summary: dict[str, int], routing, today: date) -> str:
-    """Собирает страницу: сводка, фильтры, таблица. Только чтение."""
-    baskets = [(item.code, item.name) for item in routing.ordered()]
-    subgroups: list[str] = []
-    for basket in routing.ordered():
-        subgroups.extend(item.name for item in basket.groups)
-    counts = "".join(
-        f'<div class="card"><div class="num">{count}</div>'
-        f'<div class="cap">{html.escape(name)}</div></div>'
-        for name, count in summary.items()
-    )
-    options = "".join(
-        f'<option value="{html.escape(code)}">{html.escape(name)}</option>'
-        for code, name in baskets
-    )
-    group_options = "".join(
-        f'<option value="{html.escape(name)}">{html.escape(name)}</option>'
-        for name in subgroups
-    )
-    body = "".join(_row_html(item) for item in rows)
-    status = (
-        f"структура правил {routing.status}"
-        + (f" ({routing.approved_by})" if routing.approved_by else "")
-        + f", пороги {routing.thresholds}"
-    )
-    return _PAGE.format(
-        today=f"{today:%d.%m.%Y}",
-        total=len(rows),
-        status=html.escape(status),
-        version=html.escape(routing.version),
-        cards=counts,
-        options=options,
-        groups=group_options,
-        rows=body,
-        coverage=html.escape(_coverage_line(summary)),
-        unchecked=_limitations(routing),
-    )
+def render(rows: list[dict], summary: dict, routing, today: date, *,
+           output: Path | None = None, report: Path | None = None,
+           csv_path: Path | None = None, late_report: Path | None = None,
+           cards: Path | None = None, coverage: str | None = None) -> str:
+    """Собирает согласованный интерфейс по готовым строкам и сохранённому отчёту."""
+    output = output or Path(f"data/output/watchlist_{today:%Y-%m-%d}.html")
+    report = report or Path(f"data/output/changes_{today:%Y-%m-%d}.md")
+    csv_path = csv_path or Path(f"data/output/watchlist_{today:%Y-%m-%d}.csv")
+    data = payload(rows, summary, today, output=output, report=report, csv_path=csv_path,
+                   cards=cards or CARDS, limitations=list(routing.limitations),
+                   coverage=coverage if coverage is not None else _coverage_line(summary),
+                   late_report=late_report)
+    return render_interface(data)
 
 
 # **Список называет то, чего он не проверяет.** Пустое место читается как
@@ -456,266 +437,6 @@ def _coverage_line(summary: dict[str, int]) -> str:
 CARDS = Path("data/output/cards")
 
 
-def _card_link(inn: str) -> str:
-    """ИНН строки со ссылкой на карточку, если она собрана."""
-    safe = html.escape(inn)
-    if not (CARDS / f"{inn}.md").exists():
-        return safe
-    return f'<a class="card" href="cards/{safe}.md" title="карточка эмитента">{safe}</a>'
-
-
-def _row_html(item: dict) -> str:
-    """Одна строка таблицы: главное основание, остальные свёрнуто.
-
-    **Одно главное основание в строке.** Перечень из четырёх формулировок
-    читается как список дел, а не как ответ на вопрос «что с эмитентом»:
-    главное стоит открыто, остальные — строкой «ещё N» под ним.
-    """
-    said = [text for entry in item["grounds"] for text in entry["details"]]
-    main = said[0] if said else ""
-    # Справочное стоит после оснований корзины: оно ничего не решает,
-    # но и потеряться не должно.
-    rest = said[1:] + list(item["notes"])
-    grounds = (
-        f'<div class="gn">{html.escape(main)}</div>'
-        + (
-            '<details class="more"><summary>ещё '
-            f'{len(rest)}</summary>'
-            + "".join(f'<span class="gd">{html.escape(text)}</span>' for text in rest)
-            + "</details>"
-            if rest
-            else ""
-        )
-        if main
-        # **Строка покрытия у «Без внимания».** Пустая графа читается
-        # как «ничего не проверяли», тогда как проверено всё, что маршрут
-        # умеет: величины и события.
-        else ""
-    )
-    # **График свёрнут, а не вынесен в отдельную графу.** Строка списка
-    # отвечает «что с эмитентом», а ряд — «как он к этому пришёл»: открывают
-    # его тогда, когда первое уже прочитано.
-    if item["chart"]:
-        grounds += (
-            '<details class="more"><summary>рынок: спред и цена</summary>'
-            f'<div class="chart">{item["chart"]}</div></details>'
-        )
-    if not main:
-        # **Строка покрытия у «Без внимания».** Пустая графа читается
-        # как «ничего не проверяли», тогда как проверено всё, что маршрут
-        # умеет: величины и события.
-        grounds = (
-            f'<div class="cover">{html.escape(item["coverage"])}</div>'
-            + "".join(
-                f'<span class="gd">{html.escape(text)}</span>' for text in rest
-            )
-            + grounds
-        )
-    values = "".join(
-        f'<div class="v"><span class="vn">{html.escape(name)}</span>'
-        f'<span class="vv">{html.escape(shown)}</span></div>'
-        for name, shown in item["values"]
-    )
-    subgroup = item["subgroups"][0] if item["subgroups"] else ""
-    others = ", ".join(item["subgroups"][1:])
-    action = item["actions"][0] if item["actions"] else ""
-    # Давность считается от отчётной даты, а её может не быть вовсе:
-    # «0 мес.» у эмитента без отчётности читалось бы как свежая.
-    when = item["report_date"] + (
-        f' · {item["months"]} мес.' if item["months"] is not None else ""
-    )
-    fresh = (
-        f'<span class="stale">{when}</span>'
-        if item["stale"] or item["overdue"]
-        else when
-    )
-    assessed = (
-        f'<span class="cls">класс {html.escape(item["assessed"])}</span>'
-        if item["assessed"]
-        else ""
-    )
-    # **Строка без выпусков в обращении помечена и отделена.** В сводные доли
-    # она не идёт: маршрут спрашивает, нужен ли человек, а нужен он там,
-    # где есть долг. Из списка она не исчезает — отчётность у нас есть,
-    # и молчание о ней читалось бы как «такого эмитента нет».
-    idle = (
-        ""
-        if item["bonds"]
-        else '<span class="idle">без выпусков в обращении</span>'
-    )
-    return (
-        f'<tr data-basket="{html.escape(item["basket"])}" '
-        f'data-group="{html.escape(subgroup)}" '
-        f'data-bonds="{"1" if item["bonds"] else "0"}" '
-        f'data-name="{html.escape(item["name"].lower())}">'
-        f'<td class="nm">{html.escape(item["name"])} {assessed} {idle}</td>'
-        f'<td class="inn">{_card_link(item["inn"])}</td>'
-        f'<td class="bk b-{html.escape(item["basket"])}">'
-        f'{html.escape(item["basket_name"])}</td>'
-        f'<td class="sg">{html.escape(subgroup)}'
-        + (f'<span class="act">{html.escape(action)}</span>' if action else "")
-        + (f'<span class="oth">ещё: {html.escape(others)}</span>' if others else "")
-        + f'</td><td class="gs">{grounds}</td><td class="vs">{values}</td>'
-        # **Источник, стандарт и контур — одна графа.** Единица у коэффициентов
-        # не значит ничего, а вот чья это отчётность и какого она контура —
-        # значит: отдельная отчётность управляющей компании и консолидированная
-        # группы описывают разные предметы.
-        f'<td class="src">{html.escape(item["origin"])}</td>'
-        f'<td class="fr">{fresh}</td></tr>'
-    )
-
-
-_PAGE = """<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Список наблюдения</title>
-<style>
-  :root {{
-    --bg: #fbfbf9; --fg: #1c1b19; --mut: #6b6862; --line: #e2ded6;
-    --review: #b3261e; --attention: #8a6100; --clear: #1f6b3a; --card: #fff;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root:not([data-theme="light"]) {{
-      --bg: #17181a; --fg: #ececec; --mut: #9c9a95; --line: #2e3033;
-      --review: #ff8a80; --attention: #ffca6a; --clear: #7ad39a; --card: #1e2022;
-    }}
-  }}
-  * {{ box-sizing: border-box; }}
-  body {{
-    margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--fg);
-    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }}
-  .wrap {{ max-width: 1240px; margin: 0 auto; }}
-  h1 {{ font-size: 22px; margin: 0 0 4px; }}
-  .sub {{ color: var(--mut); font-size: 13px; margin-bottom: 18px; }}
-  .cards {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }}
-  .card {{
-    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-    padding: 10px 14px; min-width: 132px;
-  }}
-  .num {{ font-size: 22px; font-weight: 600; }}
-  .cap {{ color: var(--mut); font-size: 12px; }}
-  .bar {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }}
-  select, input {{
-    font: inherit; padding: 7px 10px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--card); color: var(--fg);
-  }}
-  input {{ min-width: 220px; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{
-    text-align: left; vertical-align: top; padding: 9px 10px;
-    border-bottom: 1px solid var(--line); font-size: 13px;
-  }}
-  th {{
-    position: sticky; top: 0; background: var(--bg); font-size: 12px;
-    text-transform: uppercase; letter-spacing: .04em; color: var(--mut);
-  }}
-  .nm {{ font-weight: 600; min-width: 200px; }}
-  .inn {{ font-variant-numeric: tabular-nums; color: var(--mut); }}
-  .card {{ color: var(--mut); text-decoration: underline dotted; }}
-  .card:hover {{ color: var(--fg); }}
-  .bk {{ font-weight: 600; white-space: nowrap; }}
-  .b-review {{ color: var(--review); }}
-  .b-attention {{ color: var(--attention); }}
-  .b-clear {{ color: var(--clear); }}
-  .sg {{ min-width: 150px; }}
-  .act, .oth {{ display: block; color: var(--mut); font-size: 12px; }}
-  .g {{ margin-bottom: 6px; }}
-  .gn {{ display: block; }}
-  .gd {{ display: block; color: var(--mut); font-size: 12px; }}
-  .chart {{ margin-top: 6px; overflow-x: auto; }}
-  .chart svg {{ display: block; margin-bottom: 4px; }}
-  .v {{ display: flex; justify-content: space-between; gap: 10px; }}
-  .vn {{ color: var(--mut); }}
-  .vv {{ font-variant-numeric: tabular-nums; }}
-  .vs {{ min-width: 220px; }}
-  .fr {{ white-space: nowrap; }}
-  .stale {{ color: var(--review); }}
-  .cls, .idle {{
-    font-size: 11px; color: var(--mut); border: 1px solid var(--line);
-    border-radius: 6px; padding: 1px 5px; white-space: nowrap;
-  }}
-  .foot {{ color: var(--mut); font-size: 12px; margin-top: 18px; }}
-  @media (max-width: 720px) {{
-    .vs, .gs {{ min-width: 0; }}
-    th, td {{ padding: 8px 6px; font-size: 12px; }}
-  }}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Список наблюдения</h1>
-  <div class="sub">
-    {total} эмитентов, собрано {today}. Правила маршрутизации {version}:
-    {status}. Страница только читает: корзина и основания получены расчётом,
-    исправить их отсюда нельзя.
-  </div>
-  <div class="cards">{cards}</div>
-  <div class="bar">
-    <select id="basket"><option value="">все корзины</option>{options}</select>
-    <select id="group"><option value="">все подгруппы</option>{groups}</select>
-    <select id="bonds">
-      <option value="1">с выпусками в обращении</option>
-      <option value="">и с выпусками, и без</option>
-      <option value="0">только без выпусков в обращении</option>
-    </select>
-    <input id="search" type="search" placeholder="поиск по наименованию"
-           autocomplete="off">
-    <span id="shown" class="cap"></span>
-  </div>
-  <table>
-    <thead><tr>
-      <th>Эмитент</th><th>ИНН</th><th>Корзина</th><th>Подгруппа</th>
-      <th>Основания</th><th>Величины маршрута</th><th>Источник</th>
-      <th>Отчётность</th>
-    </tr></thead>
-    <tbody id="body">{rows}</tbody>
-  </table>
-  <div class="foot">
-    Корзина по умолчанию упорядочена: разбор, внимание, без внимания.
-    Величины печатаются той же разрядностью, что в заключении.
-    <br>{coverage}
-    <br>{unchecked}
-  </div>
-</div>
-<script>
-  const rows = Array.from(document.querySelectorAll('#body tr'));
-  const basket = document.getElementById('basket');
-  const group = document.getElementById('group');
-  const search = document.getElementById('search');
-  const shown = document.getElementById('shown');
-  // **Отбор по долгу стоит первым и по умолчанию показывает эмитентов
-  // с выпусками в обращении.** Сводные доли считаются по ним же: строка
-  // без долга из списка не исчезает, но маршрут спрашивает, нужен ли человек,
-  // а нужен он там, где есть долг.
-  const bonds = document.getElementById('bonds');
-  function apply() {{
-    const b = basket.value, g = group.value, d = bonds.value;
-    const q = search.value.trim().toLowerCase();
-    let visible = 0;
-    for (const row of rows) {{
-      const ok = (!b || row.dataset.basket === b)
-        && (!g || row.dataset.group === g)
-        && (!d || row.dataset.bonds === d)
-        && (!q || row.dataset.name.includes(q));
-      row.hidden = !ok;
-      if (ok) visible++;
-    }}
-    shown.textContent = 'показано ' + visible + ' из ' + rows.length;
-  }}
-  basket.addEventListener('change', apply);
-  group.addEventListener('change', apply);
-  bonds.addEventListener('change', apply);
-  search.addEventListener('input', apply);
-  apply();
-</script>
-</body>
-</html>
-"""
-
-
 def _journal(where: Path, today: date) -> None:
     """Пишет журнал исключений: кто вышел из списка, почему и когда.
 
@@ -758,27 +479,67 @@ def _journal(where: Path, today: date) -> None:
     where.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _now() -> datetime:
+    """Текущее московское время ручного запуска."""
+    return datetime.now(MOSCOW)
+
+
+# **Ручной запуск не занимает имя планового.** Плановый прогон передаёт
+# `--out` с `watchlist_<дата>.html` и отказывается публиковать, если файл уже
+# лежит: страница, собранная руками до 10:00, оставила бы день без планового
+# списка. Без `--out` имя помечено как ручное и несёт время до секунды —
+# два ручных запуска тоже не сталкиваются.
+def manual_stamp(today: date, now: datetime) -> str:
+    """Метка имён ручного запуска: дата отчёта, пометка и время запуска."""
+    return f"{today:%Y-%m-%d}_manual_{now:%H%M%S}"
+
+
 def main() -> int:
-    """Собирает файл списка наблюдения; 1 — если эмитентов не нашлось."""
+    """Сохраняет новую страницу; отдельная проба CSV не обращается к БД и сети."""
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
-    today = date.today()
-    out = Path(f"data/output/watchlist_{today:%Y-%m-%d}.html")
-    if "--out" in sys.argv:
-        out = Path(sys.argv[sys.argv.index("--out") + 1])
-    with connection() as conn:
-        rows, summary = rows_of(conn, today)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--as-of", type=date.fromisoformat, default=date.today())
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--csv", type=Path)
+    parser.add_argument("--late-report", type=Path)
+    parser.add_argument("--from-csv", type=Path)
+    parser.add_argument("--bonds-snapshot", type=Path)
+    parser.add_argument("--cards", type=Path)
+    args = parser.parse_args()
+    today = args.as_of
+    stamp = f"{today:%Y-%m-%d}" if args.out else manual_stamp(today, _now())
+    out = args.out or Path(f"data/output/watchlist_{stamp}.html")
+    if out.exists():
+        raise ValueError(f"сохранённый HTML не переписывается: {out}; выберите другой --out")
+    coverage = None
+    if args.from_csv:
+        bonds = None
+        if args.bonds_snapshot:
+            raw = json.loads(args.bonds_snapshot.read_text(encoding="utf-8"))
+            if raw.get("total") != len(raw["items"]):
+                raise ValueError("снимок выпусков неполный")
+            bonds = {str(item.get("emitent_inn") or "").strip() for item in raw["items"]}
+        rows, summary = csv_rows(args.from_csv, bonds=bonds)
+        coverage = ("Отдельная проба по сохранённому CSV. Оценки и величины не пересчитаны. "
+                    "Дополнительные счётчики маршрута, давность и графики в CSV не сохранены; "
+                    "их неизвестность не означает ноль. Статус выпусков — по переданному файлу "
+                    "либо неизвестен. Все исходные графы раскрываются в панели эмитента.")
+    else:
+        with connection() as conn:
+            rows, summary = rows_of(conn, today)
     if not rows:
-        print(
-            "эмитентов с комплектом вне карантина нет: страница не собрана. "
-            "Это не пустой список, а отсутствие данных."
-        )
+        print("строк нет: страница не собрана; это отсутствие данных, а не пустой список.")
         return 1
+    text = render(rows, summary, load_routing(), today, output=out, report=args.report,
+                  csv_path=args.from_csv or args.csv, late_report=args.late_report,
+                  cards=args.cards,
+                  coverage=coverage)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(rows, summary, load_routing(), today), encoding="utf-8")
-    _journal(out.with_name(f"watchlist_exclusions_{today:%Y-%m-%d}.md"), today)
+    atomic_write(out, text, exclusive=True)
+    if not args.from_csv:
+        _journal(out.with_name(f"watchlist_exclusions_{stamp}.md"), today)
     print(f"{out}: эмитентов {len(rows)}")
-    for name, count in summary.items():
-        print(f"  {name}: {count}")
     return 0
 
 
