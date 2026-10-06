@@ -58,12 +58,25 @@ class MarketFinding:
     # День величины спреда, когда он раньше последнего торгового дня биржи:
     # основание стоит по сроку жизни, а спред дня есть не каждый день.
     value_day: date | None = None
+    # **Ценовое основание по PV** (`distress_zone.measure: pv_kbd`): величина
+    # и граница — отношение × 100; цена и PV бумаги дня — в процентах
+    # номинала; пометки — величина взята подстановкой от номинала.
+    measure: str = "nominal"
+    priced_on: date | None = None
+    price: Decimal | None = None
+    pv: Decimal | None = None
+    by_nominal: bool = False
+    low_by_nominal: bool = False
 
     @property
     def variant(self) -> str:
         """Какая формулировка основания называет этот случай; пусто — обычная."""
         if self.floor is not None:
             return "floored"
+        if self.measure == "pv_kbd":
+            if self.low is not None and self.value >= self.threshold:
+                return "pv_recovered"
+            return "pv_nominal" if self.by_nominal else "pv"
         if self.low is not None and self.value >= self.threshold:
             return "recovered"
         return ""
@@ -101,6 +114,9 @@ class MarketFinding:
         if self.low is not None and self.low_day is not None:
             said["low"] = digits(self.low, price)
             said["low_day"] = f"{self.low_day:%d.%m.%Y}"
+        said.update(price="", pv="", on="", mark="", low_mark="")
+        if self.measure == "pv_kbd":
+            return self._pv_slots(policy, said)
         # **Упреждение, которое формулировка называет, берётся из замера,
         # а не пишется строкой** (решение владельца 25.09.2026): «43 дня»
         # в тексте основания пережили перемер, давший 61, и читатель получал
@@ -111,6 +127,33 @@ class MarketFinding:
             measured = zone.measured.get(f"at_{zone.price_below_percent:.0f}")
             if measured is not None:
                 said["lead_days"] = f"{measured['lead_days']:.0f}"
+        return said
+
+    def _pv_slots(self, policy: MarketPolicy, said: dict[str, str]) -> dict[str, str]:
+        """Величины основания по PV: отношение, цена и PV бумаги, дата и пометки.
+
+        **Упреждение не печатается**, пока у признака по PV нет своего числа
+        замера (решение владельца 06.10.2026): число 36 дней измерено у цены
+        от номинала, и под другим признаком оно читалось бы как его свойство.
+        """
+        zone = policy.distress_zone
+        scale = int(policy.display["pv_ratio_scale"])
+        price = int(policy.display["price_scale"])
+        mark = f" — {zone.nominal_mark}"
+        # Порог печатается так, как объявлен методикой: «0,6», а не «0,60».
+        places = max(0, -int(zone.ratio_below.normalize().as_tuple().exponent))
+        said.update(
+            value=digits(self.value / 100, scale),
+            threshold=digits(zone.ratio_below, places),
+            price=digits(self.price, price) if self.price is not None else "",
+            pv=digits(self.pv, price) if self.pv is not None else "",
+            on=f"{self.priced_on:%d.%m.%Y}" if self.priced_on else "",
+            mark=mark if self.by_nominal else "",
+            low_mark=mark if self.low_by_nominal else "",
+            lead_days="",
+        )
+        if self.low is not None:
+            said["low"] = digits(self.low / 100, scale)
         return said
 
 
@@ -144,6 +187,36 @@ def holds_price(below: Decimal) -> Holds:
     def holds(points: list[Point], number: int) -> bool:
         price = points[number].price
         return price is not None and price < below
+
+    return holds
+
+
+def distress_value(policy: MarketPolicy, point: Point) -> tuple[Decimal | None, bool]:
+    """Величина зоны дефолта дня в процентах и признак «взята по номиналу».
+
+    `nominal` — цена от номинала. `pv_kbd` — наименьшее отношение цены к PV
+    по КБД среди бумаг дня, × 100; с подстановкой в сравнение идёт и цена
+    от номинала бумаг, у которых поток не построен, — наименьшее из двух,
+    как в замере 6 (`eval/price_ratio_run.variant`).
+    """
+    zone = policy.distress_zone
+    if zone.measure == "nominal":
+        return point.price, False
+    flowed = point.ratio * 100 if point.ratio is not None else None
+    if zone.substitution and point.unflowed is not None and (
+        flowed is None or point.unflowed < flowed
+    ):
+        return point.unflowed, True
+    return flowed, False
+
+
+def holds_distress(policy: MarketPolicy) -> Holds:
+    """Признак дня: величина зоны дефолта ниже границы — от номинала либо к PV."""
+    below = policy.distress_zone.threshold
+
+    def holds(points: list[Point], number: int) -> bool:
+        value, _ = distress_value(policy, points[number])
+        return value is not None and value < below
 
     return holds
 
@@ -352,55 +425,79 @@ def _level_finding(
 def _price_finding(
     policy: MarketPolicy, market: Market, points: list[Point], today: date
 ) -> MarketFinding | None:
-    """Ценовое основание: цена ниже границы в пределах срока жизни.
+    """Ценовое основание: величина зоны ниже границы в пределах срока жизни.
 
     **Правило срока объявлено методикой** (`lifetime.price_rule`): `any_within`
-    — цена была ниже границы хоть раз за срок, `last` — последняя цена ниже
+    — величина была ниже границы хоть раз за срок, `last` — последняя ниже
     границы и не старше срока. Последняя цена у бумаги около 60 % пересекает
     границу туда и обратно, и основание по ней входило бы в корзину 2,7 раза
     за год на эмитента против 1,2.
+
+    **Чем мерится зона — объявлено методикой** (`distress_zone.measure`):
+    цена от номинала либо цена к PV потока по КБД; срок жизни и правило срока
+    у обеих одни.
     """
     zone = policy.distress_zone
-    below = zone.price_below_percent
-    priced = [item for item in points if item.price is not None]
+    if zone.measure == "pv_kbd" and not market.ratios:
+        raise ValueError(
+            "ряд собран без отношения цены к PV, а методика объявила measure: pv_kbd; "
+            "пересоберите ряд (series(refresh=True))"
+        )
+    below = zone.threshold
+    value_of = {item.day: distress_value(policy, item) for item in points}
+    priced = [item for item in points if value_of[item.day][0] is not None]
     if not priced:
         return None
-    hits = confirmed_days(points, holds_price(below), today)
+    hits = confirmed_days(points, holds_distress(policy), today)
     lifetime = _lifetime(policy, "price_distress")
     since = standing_since(market, hits, today, lifetime)
     if since is None:
         return None
     last = priced[-1]
+    value, by_nominal = value_of[last.day]
     low: Point | None = None
     if lifetime is not None:
         if policy.lifetime.price_rule == "last":
-            if last.price is None or last.price >= below:
+            if value is None or value >= below:
                 return None
         else:
-            # Наименьшая цена срока называется, когда последняя уже выше
+            # Наименьшая величина срока называется, когда последняя уже выше
             # границы: «цена 63 %, ниже 60 % с 01.09» читалось бы противоречием.
             edge = market.day_number(today) - lifetime
-            inside = [
-                item
-                for item in priced
-                if market.day_number(item.day) > edge and item.price is not None
-            ]
-            low = min(inside, key=lambda item: (item.price, item.day), default=None)
-    elif points[-1].price is None:
-        # Прежняя мера: цена последнего дня обязательна.
+            inside = [item for item in priced if market.day_number(item.day) > edge]
+            low = min(
+                inside, key=lambda item: (value_of[item.day][0], item.day), default=None
+            )
+    elif value_of[points[-1].day][0] is None:
+        # Прежняя мера: величина последнего дня обязательна.
         return None
-    assert last.price is not None
+    assert value is not None
+    recovered = low is not None and value >= below
     return MarketFinding(
         ground=zone.ground,
         basket=zone.basket,
         subgroup="",
         escalation=False,
-        value=last.price,
+        value=value,
         threshold=below,
         since=since,
-        low=low.price if low is not None and last.price >= below else None,
-        low_day=low.day if low is not None and last.price >= below else None,
+        low=value_of[low.day][0] if recovered and low is not None else None,
+        low_day=low.day if recovered and low is not None else None,
+        **(_pv_fields(value, by_nominal, last, recovered and low is not None
+                      and value_of[low.day][1]) if zone.measure == "pv_kbd" else {}),
     )
+
+
+def _pv_fields(value: Decimal, by_nominal: bool, last: Point, low_by_nominal: bool) -> dict:
+    """Поля основания по PV: цена и PV бумаги дня; по номиналу — цена подстановки."""
+    return {
+        "measure": "pv_kbd",
+        "priced_on": last.day,
+        "price": value if by_nominal else last.ratio_price,
+        "pv": None if by_nominal else last.ratio_pv,
+        "by_nominal": by_nominal,
+        "low_by_nominal": bool(low_by_nominal),
+    }
 
 
 def findings(

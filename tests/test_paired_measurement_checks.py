@@ -98,3 +98,43 @@ def test_g_reproduction_checks_both_directions(
         again.issuers = {}
     with pytest.raises(ValueError, match="G из pickle не воспроизводит"):
         zspread_run.verify_g({day.isoformat(): []}, base)
+
+
+def _series(price: Decimal, ratios: bool) -> paired_67.Market:
+    """Ряд одного эмитента на один день."""
+    from finlib.sources.market import Point
+
+    day = date(2090, 1, 2)
+    return paired_67.Market(
+        benchmark={day: Decimal(100)},
+        issuers={"a": {day: Point(day, None, price, Decimal(1), ratio=Decimal("0.5"))}},
+        counted={}, census={}, universe=1, with_isin=1, ratios=ratios,
+    )
+
+
+def test_rebuilt_series_must_match_saved_except_the_ratio() -> None:
+    """Ряд с отношением сверяется с сохранённым: иначе разность мерила бы и смену ряда."""
+    paired_67.verify_rebuild(_series(Decimal(40), False), _series(Decimal(40), True))
+    with pytest.raises(ValueError, match="у 1 эмитентов"):
+        paired_67.verify_rebuild(_series(Decimal(40), False), _series(Decimal(41), True))
+    with pytest.raises(ValueError, match="без отношения"):
+        paired_67.verify_rebuild(_series(Decimal(40), False), _series(Decimal(40), False))
+
+
+def test_early_and_late_parts_are_both_required() -> None:
+    """Решение — по поздней части; пустая часть — отказ, а не интервал из ничего."""
+    cuts = [date(2090, month, 1) for month in range(1, 7)]
+    early, late = paired_67.split_cuts(cuts, date(2090, 4, 1))
+    assert early == cuts[:3] and late == cuts[3:]
+    with pytest.raises(ValueError, match="пуста"):
+        paired_67.split_cuts(cuts, date(2091, 1, 1))
+
+
+def test_pv_variants_declare_substitution_and_keep_the_rest() -> None:
+    """Варианты замера — боевая методика с одной подменой измерения."""
+    policy = paired_67.load_market()
+    for substitution in (True, False):
+        rule = paired_67.pv_policy(policy, substitution)
+        assert rule.distress_zone.measure == "pv_kbd"
+        assert rule.distress_zone.substitution is substitution
+        assert rule.lifetime == policy.lifetime and rule.ladder == policy.ladder
