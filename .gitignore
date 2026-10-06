@@ -17,3 +17,7 @@ data/raw/*
 eval/out/
 docs/reviews/
 *.docx
+
+# Локальное: передача между агентами и личные настройки Claude Code
+HANDOFF.md
+.claude/settings.local.json
