@@ -29,6 +29,7 @@ import pickle
 import statistics
 import sys
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -41,6 +42,7 @@ from zspread_rows import OUT  # noqa: E402
 
 from finlib.sources.market import (  # noqa: E402
     Market,
+    Point,
     _of_day,
     load_market,
     percentile,
@@ -81,8 +83,11 @@ def build(rows: dict, value: int, keep, census: dict) -> Market:  # noqa: ANN001
             spread = item[value]
             if spread is not None and spread > ceiling:
                 spread = None
+            # **Отношения к PV у строк G/Z нет** (`zspread_rows.py` его
+            # не пишет): четвёртое поле строки `_of_day` — «не считали»,
+            # и точка выходит такой же, как у ряда, собранного без отношения.
             if spread is not None or item[7] is not None:
-                mine[item[1]].append((spread, item[6], item[7]))
+                mine[item[1]].append((spread, item[6], item[7], None))
         for inn, own in mine.items():
             issuers[inn][day] = _of_day(day, own)
     return Market(
@@ -254,13 +259,25 @@ def composition(rows: dict, kind: dict, by_code: dict) -> set[str]:
     return gov
 
 
+def _g_only(point: object) -> object:
+    """Точка без отношения к PV: строки G/Z его не несут, и сверяется только G."""
+    if isinstance(point, Point):
+        return replace(point, ratio=None, ratio_price=None, ratio_pv=None, unflowed=None)
+    return point
+
+
 def verify_g(rows: dict, base: Market) -> None:
-    """Сверяет ориентир и все точки G в обе стороны до сравнения вариантов."""
+    """Сверяет ориентир и все точки G в обе стороны до сравнения вариантов.
+
+    **Отношение к PV в сверку не входит**: ряд на диске собирается с ним при
+    `distress_zone.measure: pv_kbd`, а строки G/Z его не несут; спред, цена
+    и оборот сверяются полностью.
+    """
     again = build(rows, 2, lambda item: True, base.census)
     seen = {date.fromisoformat(name) for name in rows}
     expected_bench = {day: value for day, value in base.benchmark.items() if day in seen}
     expected_points = {
-        inn: {day: point for day, point in own.items() if day in seen}
+        inn: {day: _g_only(point) for day, point in own.items() if day in seen}
         for inn, own in base.issuers.items() if any(day in seen for day in own)
     }
     problems = []
