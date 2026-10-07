@@ -246,6 +246,28 @@ def test_measure7_prints_every_step_with_floor_and_parts() -> None:
     assert "| G, полное ядро (база) | 0 из 5 | 0.0% | — |" in lines
 
 
+def test_measure7_compares_every_step_against_every_baseline() -> None:
+    """Вторая база — своя таблица в каждой части и строка смены её порогов против первой."""
+    policy = _nominal()
+    early = paired_67.with_steps(policy, paired_67.training(
+        _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(150)), _DAYS7[5]))
+    base = _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(150))
+    variants = {
+        "а) Z, полное ядро": (policy, _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(90))),
+        "б) Z, ядро без госбумаг": (policy, _market7({"a": _DAYS7}, Decimal(120))),
+    }
+    baselines = {"G, боевые": policy, "G, ранние": early}
+    grounds = {"Разбор": {"market_spread_level"}}
+    lines = paired_67.measure7(policy, base, variants, {}, set(), grounds, _parts7(), baselines)
+    assert lines.count("### Против базы: G, боевые\n") == 2
+    assert lines.count("### Против базы: G, ранние\n") == 2
+    assert sum(line.startswith("| а) Z, полное ядро | Разбор |") for line in lines) == 4
+    assert sum(line.startswith("| б) Z, ядро без госбумаг | Разбор |") for line in lines) == 4
+    assert sum(line.startswith("| G, ранние против «G, боевые» | Разбор |") for line in lines) == 2
+    # Пол от порогов не зависит: таблица пола одна на часть.
+    assert sum(line.startswith("| G, полное ядро (база) |") for line in lines) == 2
+
+
 @pytest.mark.parametrize("case", ["grounds", "variant_days", "circle", "variants"])
 def test_measure7_refuses_an_empty_result(case: str) -> None:
     """Пустой результат — исключение с причиной, а не таблица без строк."""

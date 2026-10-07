@@ -16,7 +16,8 @@ pv_kbd`, `scoring.market.findings`), ряд с отношением — боев
 
 **Замер 7 размечен так же** — поздняя, ранняя части и весь календарь.
 Ступени: а) Z на полном ядре, б) Z на ядре без госбумаг — обе против G
-на полном ядре; пороги ступеней варианта — из его ранней части; при каждой —
+на полном ядре дважды: с боевыми порогами и с порогами из ранней части
+(симметрично вариантам); пороги ступеней варианта — из его ранней части; при каждой —
 дни ориентира ниже пола и квантиль пола. Круг и наблюдение — боевого ряда
 (`tallies(frame=…)`): ряд из строк G/Z покрывает не те же дни.
 """
@@ -268,12 +269,31 @@ def uncovered(frame: Market, market: Market, cuts: list[date]) -> tuple[int, int
 Part = tuple[str, list[date], Callable[[date], bool]]
 
 
+def _compared(
+    title: str, label: str, grounds: dict[str, set[str]], before: dict, after: dict,
+) -> list[str]:
+    """Строки сравнения по основаниям; пустой круг — отказ с причиной."""
+    rows = []
+    for key in grounds:
+        result = paired(before[key][0], after[key][0])
+        if not result.members:
+            raise ValueError(f"замер 7, {title}, {label}, {key}: круг эмитентов пуст")
+        rows.append(result_row(label, key, result))
+    return rows
+
+
 def measure7(
     policy: MarketPolicy, base: Market, variants: dict[str, tuple[MarketPolicy, Market]],
     when: dict[str, date], systemic: set[str], grounds: dict[str, set[str]],
-    parts: list[Part],
+    parts: list[Part], baselines: dict[str, MarketPolicy] | None = None,
 ) -> list[str]:
-    """Таблицы замера 7 по частям календаря: каждая ступень против G на полном ядре.
+    """Таблицы замера 7 по частям календаря: каждая ступень против каждой базы G.
+
+    **Базы — G на полном ядре с разными порогами ступеней** (`baselines`,
+    по умолчанию одна — боевые пороги `policy`). У вариантов пороги из ранней
+    части, у боевой базы — откалиброванные и на поздней: сравнение с базой,
+    чьи пороги тоже из ранней части, симметрично. Смена порогов самой базы
+    печатается отдельной строкой — против первой базы.
 
     **Пустой результат — отказ с причиной, а не пустая таблица.** Строки
     собираются целиком до печати: таблица с заголовком и без строк читалась
@@ -286,23 +306,43 @@ def measure7(
         raise ValueError("замер 7: сравнивать нечего — у лестницы нет ступеней и нет «Разбора»")
     if not variants:
         raise ValueError("замер 7: ступеней нет")
+    baselines = baselines or {"G, полное ядро, боевые пороги": policy}
+    header = [
+        "| Ступень | Основание | Прирост базы | Прирост варианта | "
+        f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     lines: list[str] = []
     for title, cuts, within in parts:
         if not cuts:
             raise ValueError(f"замер 7, {title}: срезов нет")
-        before = tallies(policy, base, when, systemic, grounds, cuts)
-        rows: list[str] = []
+        before = {
+            name: tallies(rule, base, when, systemic, grounds, cuts)
+            for name, rule in baselines.items()
+        }
+        after = {
+            label: tallies(rule, market, when, systemic, grounds, cuts, frame=base)
+            for label, (rule, market) in variants.items()
+        }
+        tables: list[str] = []
+        first = next(iter(baselines))
+        for name in baselines:
+            rows = [
+                row
+                for label in variants
+                for row in _compared(title, label, grounds, before[name], after[label])
+            ]
+            if name != first:
+                rows += _compared(title, f"{name} против «{first}»", grounds,
+                                  before[first], before[name])
+            if not rows:
+                raise ValueError(f"замер 7, {title}, {name}: ни одной строки сравнения")
+            tables += [f"### Против базы: {name}\n", *header, *rows, ""]
         below, days = below_floor(base, floor, within)
         if not days:
             raise ValueError(f"замер 7, {title}: у базы G нет дней ориентира в части")
         floors = [f"| G, полное ядро (база) | {below} из {days} | {below / days:.1%} | — |"]
-        for label, (rule, market) in variants.items():
-            new = tallies(rule, market, when, systemic, grounds, cuts, frame=base)
-            for key in grounds:
-                result = paired(before[key][0], new[key][0])
-                if not result.members:
-                    raise ValueError(f"замер 7, {title}, {label}, {key}: круг эмитентов пуст")
-                rows.append(result_row(label, key, result))
+        for label, (_, market) in variants.items():
             below, days = below_floor(market, floor, within)
             if not days:
                 raise ValueError(
@@ -312,15 +352,9 @@ def measure7(
             floors.append(
                 f"| {label} | {below} из {days} | {below / days:.1%} | {missing} из {total} |"
             )
-        if not rows:
-            raise ValueError(f"замер 7, {title}: ни одной строки сравнения")
         lines += [
             f"## {title}: срезов {len(cuts)}, {cuts[0]} — {cuts[-1]}\n",
-            "| Ступень | Основание | Прирост G | Прирост варианта | "
-            f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |",
-            "|---|---|---|---|---|---|---|---|",
-            *rows,
-            "",
+            *tables,
             f"| Ряд | Дней ориентира ниже пола {floor} б. п. | Квантиль пола в ядре "
             "| Наблюдений без точки варианта |",
             "|---|---|---|---|",
@@ -430,7 +464,14 @@ def main() -> int:
         ("Весь календарь — исследовательская сводка, не основание решения", cuts,
          lambda day: True),
     ]
-    tables = measure7(policy, base, variants, when, systemic, grounds, parts)
+    # Две базы G на полном ядре: боевые пороги (откалиброваны и на поздней
+    # части) и пороги из ранней части тем же правилом, что у вариантов, —
+    # симметричное сравнение (решение владельца 07.10.2026).
+    baselines = {
+        "G, полное ядро, боевые пороги": policy,
+        "G, полное ядро, пороги из ранней части": with_steps(policy, training(base, args.split)),
+    }
+    tables = measure7(policy, base, variants, when, systemic, grounds, parts, baselines)
     eve = []
     clean_rule = variants["б) Z, ядро без госбумаг"][0]
     for name, market, rule in (("G, полное ядро", base, policy),
@@ -443,14 +484,15 @@ def main() -> int:
                 text[text.index("| Основание | Стоит накануне"):].split("\n\n")[0] + "\n"]
     print("# 7. Z и ядро без ОФЗ, субфедеральных и муниципальных против G "
           "на полном ядре\n")
-    print(f"Госбумаг в ядре исключено: {len(gov)}. Каждая ступень — против G "
-          "на полном ядре (боевой ряд), круг и наблюдение эмитентов — его; "
-          "эмитент без точки варианта к срезу наблюдается, но основания не получает.\n")
-    print("Пороги ступеней варианта — из его ранней части (до "
-          f"{args.split:%d.%m.%Y}): " + "; ".join(
-              f"{label}: " + ", ".join(
-                  f"p{step.percentile} {step.multiple:.2f}" for step in rule.ladder.steps)
-              for label, (rule, _) in variants.items()) + "\n")
+    print(f"Госбумаг в ядре исключено: {len(gov)}. Каждая ступень — против двух баз "
+          "G на полном ядре (боевой ряд): с боевыми порогами и с порогами из ранней "
+          "части; круг и наблюдение эмитентов — боевого ряда; эмитент без точки "
+          "варианта к срезу наблюдается, но основания не получает.\n")
+    named = {**baselines, **{label: rule for label, (rule, _) in variants.items()}}
+    print(f"Пороги ступеней (ранняя часть — до {args.split:%d.%m.%Y}): " + "; ".join(
+        f"{label}: " + ", ".join(
+            f"p{step.percentile} {step.multiple:.2f}" for step in rule.ladder.steps)
+        for label, rule in named.items()) + "\n")
     print("\n".join(tables))
     print("\n".join(eve))
     return 0
