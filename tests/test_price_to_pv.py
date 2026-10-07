@@ -103,14 +103,14 @@ def _price_ground(policy: MarketPolicy, market: Market, today: date):  # noqa: A
     )
 
 
-def test_the_default_measure_is_nominal_and_pv_needs_a_declared_substitution() -> None:
-    """Маршрут по умолчанию прежний; признак по PV без объявленной подстановки не грузится."""
+def test_the_measure_is_pv_with_substitution_and_pv_needs_a_declared_substitution() -> None:
+    """Действует признак по PV с подстановкой (07.10.2026); без подстановки не грузится."""
     zone = load_market().distress_zone
-    assert zone.measure == "nominal" and zone.threshold == zone.price_below_percent
-    assert zone.ratio_below == Decimal("0.6")
+    assert zone.measure == "pv_kbd" and zone.substitution is True
+    assert zone.measure_status == "accepted"
+    assert zone.ratio_below == Decimal("0.6") and zone.threshold == zone.ratio_below * 100
     with pytest.raises(ValueError, match="substitution"):
-        type(zone).model_validate({**zone.model_dump(), "measure": "pv_kbd"})
-
+        type(zone).model_validate({**zone.model_dump(), "substitution": None})
 
 def test_almost_zero_coupon_at_half_par_is_not_distress_by_pv(flows: dict[str, str]) -> None:
     """Купон 0,01 % за 50 % на пять лет: от номинала — признак, по PV — нет."""
