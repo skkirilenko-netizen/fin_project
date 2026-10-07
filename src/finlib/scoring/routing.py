@@ -474,6 +474,10 @@ class Refinancing(BaseModel):
     # индексы и свежесть рядов. Нет блока — пустой купон читается нулём,
     # как до решения владельца 01.10.2026.
     floating_coupons: dict | None = None
+    # **Оферты в платежах года** (шаг 2): объём, предъявляемый по оферте окна,
+    # входит в первую меру, а вторая не выставляется. Выключено — как прежде.
+    offers_in_payments: bool = False
+    offers_in_payments_origin: str | None = None
 
 
 class HoldingFallback(BaseModel):
@@ -1060,6 +1064,10 @@ class Refinance:
     bases: tuple[str, ...] = ()
     # Ставка из условий — данные; сумма сохраняется отдельно от оценки.
     by_terms: Decimal = Decimal(0)
+    # **Оферты в платежах года** (`refinancing.offers_in_payments`): сколько
+    # из `due` приходится на объём, предъявляемый по офертам окна. `None` —
+    # оферты в платежи не входят, и мер две, как до шага 2.
+    offers_in_due: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1657,6 +1665,18 @@ def route(
                 # Печать включается только объявленной методической формулировкой.
                 if terms_key in routing.statements.by_ground["refinancing_gap"]:
                     key = terms_key
+            if refinance.offers_in_due:
+                # **«В т. ч. оферты» — своей формулировкой**: платежи года
+                # содержат возможное погашение по праву владельца, и читатель
+                # обязан видеть, сколько. Варианты объявлены у каждой
+                # формулировки, и это проверяется тестом.
+                extra["offers"] = Amount(
+                    refinance.offers_in_due,
+                    refinance.unit,
+                    money(refinance.offers_in_due),
+                    True,
+                )
+                key = f"{key}_offers".lstrip("_")
             if refinance.estimated:
                 extra["estimated"] = Amount(
                     refinance.estimated, refinance.unit, money(refinance.estimated), True
@@ -1684,8 +1704,10 @@ def route(
     # праву означала бы «человек нужен» у всякого эмитента с офертой в окне.
     # Довод снят существом права — предъявляют оферту именно в стрессе,
     # и ошибиться в мягкую сторону здесь дешевле. Отсечка та же, своего
-    # числа здесь нет.
-    if refinance is not None and short_of_cash(
+    # числа здесь нет. **С шагом 2 мера уходит** (`offers_in_payments`):
+    # оферты окна уже в платежах года, и второе основание о том же объёме
+    # было бы вторым решением по одному обстоятельству.
+    if refinance is not None and refinance.offers_in_due is None and short_of_cash(
         routing,
         refinance.cash,
         refinance.offered,
