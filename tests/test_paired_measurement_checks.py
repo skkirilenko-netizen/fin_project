@@ -121,6 +121,41 @@ def test_rebuilt_series_must_match_saved_except_the_ratio() -> None:
         paired_67.verify_rebuild(_series(Decimal(40), False), _series(Decimal(40), False))
 
 
+def _gz_rows(day: date) -> dict[str, list[tuple]]:
+    """Строки G/Z одного дня в формате `zspread_rows.pkl`: без отношения к PV.
+
+    Поля: код, ИНН, G, Z, причина, ядро, оборот, цена.
+    """
+    core = [
+        (f"RU{number}", None, Decimal(100 + 50 * number), Decimal(90 + 50 * number), "",
+         True, Decimal(1), Decimal(99))
+        for number in range(5)
+    ]
+    own = ("RUA", "a", Decimal(400), Decimal(380), "", False, Decimal(2), Decimal(55))
+    return {day.isoformat(): [*core, own]}
+
+
+def test_gz_rows_without_ratio_build_and_verify_against_a_pv_series() -> None:
+    """Строка G/Z без отношения читается как «отношения нет»; сверка G его не требует."""
+    from dataclasses import replace
+
+    day = date(2090, 1, 2)
+    rows = _gz_rows(day)
+    again = zspread_run.build(rows, 2, lambda item: True, {})
+    point = again.issuers["a"][day]
+    assert point.spread == Decimal(400) and point.price == Decimal(55)
+    assert point.ratio is None and point.unflowed is None
+    # Ряд на диске при `pv_kbd` несёт отношение: сверка G его не замечает…
+    with_pv = replace(point, ratio=Decimal("0.6"), ratio_price=Decimal(56),
+                      ratio_pv=Decimal(93), unflowed=Decimal(54))
+    base = replace(again, issuers={"a": {day: with_pv}})
+    zspread_run.verify_g(rows, base)
+    # …а расхождение цены, спреда и оборота по-прежнему останавливает замер.
+    moved = replace(again, issuers={"a": {day: replace(with_pv, price=Decimal(56))}})
+    with pytest.raises(ValueError, match="G из pickle не воспроизводит"):
+        zspread_run.verify_g(rows, moved)
+
+
 def test_early_and_late_parts_are_both_required() -> None:
     """Решение — по поздней части; пустая часть — отказ, а не интервал из ничего."""
     cuts = [date(2090, month, 1) for month in range(1, 7)]
