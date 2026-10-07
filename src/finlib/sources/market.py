@@ -36,6 +36,7 @@ from finlib.config import settings
 from finlib.sources.cbonds import bond_issuers
 from finlib.sources.cbonds_events import issues_of
 from finlib.sources.moex import CACHE
+from finlib.sources.zspread import PriceToPv, emission_map, price_to_pv
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,32 @@ class Distress(BaseModel):
     observed: tuple[dict[str, str], ...] = ()
     statement_origin: str = Field(min_length=1)
     yield_is_meaningless: bool
+    # **Чем мерится зона: ценой от номинала или ценой к PV потока по КБД.**
+    # `nominal` — прежний признак, `pv_kbd` — грязная цена к приведённой
+    # стоимости потока по кривой дня (`sources.zspread.price_to_pv`).
+    # `substitution` — у бумаги без потока берётся цена от номинала
+    # с пометкой `nominal_mark`; без подстановки такая бумага признака
+    # не даёт. Умолчаний нет: молчание читалось бы как решение методики.
+    measure: Literal["nominal", "pv_kbd"]
+    measure_status: str = Field(min_length=1)
+    measure_origin: str = Field(min_length=1)
+    ratio_below: Decimal = Field(gt=0)
+    substitution: bool | None
+    nominal_mark: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _pv_declares_substitution(self) -> "Distress":
+        """У признака по PV подстановка объявлена явно: от неё зависит круг бумаг."""
+        if self.measure == "pv_kbd" and self.substitution is None:
+            raise ValueError("measure: pv_kbd требует явного substitution: true | false")
+        return self
+
+    @property
+    def threshold(self) -> Decimal:
+        """Граница признака в процентах: номинала либо PV (отношение × 100)."""
+        if self.measure == "pv_kbd":
+            return self.ratio_below * 100
+        return self.price_below_percent
 
 
 class Lifetime(BaseModel):
@@ -284,6 +311,16 @@ class Point:
     spread: Decimal | None
     price: Decimal | None
     weight: Decimal
+    # **Цена к PV по КБД** — у бумаги эмитента с наименьшим отношением в этот
+    # день: отношение, её грязная цена и PV в процентах непогашенного
+    # номинала. Пусто — ни у одной бумаги дня поток не построен либо ряд
+    # собран без отношения (`Market.ratios`).
+    ratio: Decimal | None = None
+    ratio_price: Decimal | None = None
+    ratio_pv: Decimal | None = None
+    # Наименьшая цена от номинала среди бумаг дня, у которых поток
+    # не построен: её берёт подстановка.
+    unflowed: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +335,10 @@ class Market:
     census: dict[str, dict[str, int]]
     universe: int
     with_isin: int
+    # Собран ли ряд с отношением цены к PV. Пустое отношение в ряду без
+    # расчёта значит «не считали», а не «потока нет», и признак по PV
+    # на таком ряду отказывает, а не молчит.
+    ratios: bool = False
     # Ряд по возрастанию дня, собранный при первом спросе: пересчёт истории
     # спрашивает об одном эмитенте двести раз, и сортировать заново каждый
     # раз значило бы платить за один и тот же ответ.
@@ -474,13 +515,20 @@ def _number(value: object) -> Decimal | None:
         return None
 
 
-def build(policy: MarketPolicy | None = None) -> Market:
+def build(policy: MarketPolicy | None = None, ratios: bool | None = None) -> Market:
     """Пересчёт ряда из срезов: один проход по доставленным дням.
 
     Хранится только сведённое — по эмитенту на дату: полтора миллиона строк
     не помещаются ни в память, ни в осмысленный файл.
+
+    **Отношение цены к PV считается, когда его спрашивают**: методикой
+    (`distress_zone.measure: pv_kbd`) либо явно (`ratios`, замер). Поток
+    каждой бумаги в каждый день дисконтируется в `Decimal`, и при признаке
+    от номинала эта работа никому не нужна.
     """
     policy = policy or load_market()
+    with_ratios = policy.distress_zone.measure == "pv_kbd" if ratios is None else ratios
+    by_code = emission_map()[0] if with_ratios else {}
     core = policy.benchmark["liquid_core"]
     place = int(policy.benchmark["percentile"])
     ceiling = Decimal(str(policy.spread["ceiling_bp"]))
@@ -502,9 +550,9 @@ def build(policy: MarketPolicy | None = None) -> Market:
         day = date.fromisoformat(name)
         curve = curve_of(points)
         market: list[Decimal] = []
-        mine: dict[str, list[tuple[Decimal | None, Decimal, Decimal | None]]] = (
-            defaultdict(list)
-        )
+        mine: dict[
+            str, list[tuple[Decimal | None, Decimal, Decimal | None, PriceToPv | None]]
+        ] = defaultdict(list)
         for row in json.loads(path.read_text(encoding="utf-8")).get("history") or []:
             counted["строк"] += 1
             inn = mine_of.get(str(row.get("SECID") or ""))
@@ -542,12 +590,21 @@ def build(policy: MarketPolicy | None = None) -> Market:
                     and turnover >= core["min_turnover_rub"]
                 ):
                     market.append(spread)
+            flowed: PriceToPv | None = None
+            if with_ratios and inn is not None and price is not None:
+                # Цена та же, что у признака от номинала, — после правил
+                # сравнимости и сделок: меняется одна величина, не круг бумаг.
+                flowed = price_to_pv(
+                    row, day, lambda years, c=curve: curve_at(c, years)[0], price, by_code
+                )
+                if flowed.ratio is None:
+                    counted[f"поток не построен: {flowed.why}"] += 1
             if inn is not None:
                 census[inn]["rows"] += 1
                 census[inn]["with_price"] += int(price is not None)
                 census[inn]["with_spread"] += int(spread is not None)
                 if spread is not None or price is not None:
-                    mine[inn].append((spread, turnover, price))
+                    mine[inn].append((spread, turnover, price, flowed))
         if len(market) < 5:
             # Ядро из трёх бумаг ориентиром не является: день остаётся
             # без ориентира, и спреды этого дня в кратность не идут.
@@ -562,11 +619,13 @@ def build(policy: MarketPolicy | None = None) -> Market:
         census=dict(census),
         universe=len(universe()),
         with_isin=len(set(mine_of.values())),
+        ratios=with_ratios,
     )
 
 
 def _of_day(
-    day: date, rows: list[tuple[Decimal | None, Decimal, Decimal | None]]
+    day: date,
+    rows: list[tuple[Decimal | None, Decimal, Decimal | None, PriceToPv | None]],
 ) -> Point:
     """Величина дня у эмитента: оборотом взвешенный спред и наименьшая цена.
 
@@ -583,11 +642,23 @@ def _of_day(
             (item[0] * (item[1] or Decimal(1)) for item in spreads), Decimal(0)
         ) / (total or Decimal(len(spreads)))
     prices = [item[2] for item in rows if item[2]]
+    # Отношение — у бумаги с наименьшим, как наименьшая цена у признака
+    # от номинала; цена бумаги без потока — отдельно, для подстановки.
+    flowed = [item[3] for item in rows if item[3] is not None and item[3].ratio is not None]
+    lowest = min(flowed, key=lambda item: item.ratio or Decimal(0), default=None)
+    unflowed = [
+        item[2] for item in rows
+        if item[2] and item[3] is not None and item[3].ratio is None
+    ]
     return Point(
         day=day,
         spread=spread,
         price=min(prices) if prices else None,
         weight=weight,
+        ratio=lowest.ratio if lowest else None,
+        ratio_price=lowest.price if lowest else None,
+        ratio_pv=lowest.pv if lowest else None,
+        unflowed=min(unflowed) if unflowed else None,
     )
 
 
@@ -637,6 +708,15 @@ def _written(found: Market) -> str:
                         "spread": None if item.spread is None else str(item.spread),
                         "price": None if item.price is None else str(item.price),
                         "weight": str(item.weight),
+                        **{
+                            name: None if value is None else str(value)
+                            for name, value in (
+                                ("ratio", item.ratio),
+                                ("ratio_price", item.ratio_price),
+                                ("ratio_pv", item.ratio_pv),
+                                ("unflowed", item.unflowed),
+                            )
+                        },
                     }
                     for day, item in own.items()
                 }
@@ -646,6 +726,7 @@ def _written(found: Market) -> str:
             "census": found.census,
             "universe": found.universe,
             "with_isin": found.with_isin,
+            "ratios": found.ratios,
         },
         ensure_ascii=False,
     )
@@ -665,6 +746,10 @@ def _read(raw: dict) -> Market:
                     spread=None if item["spread"] is None else Decimal(item["spread"]),
                     price=None if item["price"] is None else Decimal(item["price"]),
                     weight=Decimal(item["weight"]),
+                    **{
+                        name: None if item.get(name) is None else Decimal(item[name])
+                        for name in ("ratio", "ratio_price", "ratio_pv", "unflowed")
+                    },
                 )
                 for day, item in own.items()
             }
@@ -674,4 +759,6 @@ def _read(raw: dict) -> Market:
         census=raw["census"],
         universe=raw["universe"],
         with_isin=raw["with_isin"],
+        # Ряд, записанный до отношения к PV, его не содержит: «не считали».
+        ratios=bool(raw.get("ratios", False)),
     )

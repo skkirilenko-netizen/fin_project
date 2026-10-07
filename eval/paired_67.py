@@ -1,4 +1,19 @@
-"""Парная разность прироста рыночных оснований: цена/PV (6) и Z без госбумаг (7). Только чтение."""
+"""Парная разность прироста рыночных оснований: цена/PV (6) и Z без госбумаг (7). Только чтение.
+
+    # 6 — ранняя и поздняя части календаря, оба варианта подстановки:
+    uv run python eval/paired_67.py --until ГГГГ-ММ-ДД --split ГГГГ-ММ-ДД --database БАЗА
+    # 6 и 7 — с сохранёнными строками G/Z (`eval/zspread_rows.py`):
+    uv run python eval/paired_67.py --until … --split … --database … --input ПУТЬ.pkl
+
+**Замер 6 не считает сам.** Признак по PV — боевой (`distress_zone.measure:
+pv_kbd`, `scoring.market.findings`), ряд с отношением — боевая сборка
+(`sources.market.build`), сверенная с сохранённым рядом во всём, кроме
+отношения. Строки G/Z нужны только замеру 7.
+
+**Решение принимается по поздней части** (ROADMAP, принцип 2): порог 0,6
+не подбирается, а вариант подстановки — выбор, и интервал на всём
+календаре печатается справочно, как исследовательская сводка.
+"""
 
 import argparse
 import contextlib
@@ -26,11 +41,11 @@ from market_lead_run import (  # noqa: E402
     pointwise,
     systemic_issuers,
 )
-from price_ratio_run import variant  # noqa: E402
 from zspread_run import build, composition, verify_g, with_steps  # noqa: E402
 
 from finlib.scoring.market import findings  # noqa: E402
 from finlib.sources.market import Market, MarketPolicy, load_market, series  # noqa: E402
+from finlib.sources.market import build as build_series  # noqa: E402
 
 Tally = tuple[int, int, int, int]
 
@@ -154,6 +169,55 @@ def result_row(label: str, key: str, result: PairedResult) -> str:
     )
 
 
+def pv_policy(policy: MarketPolicy, substitution: bool) -> MarketPolicy:
+    """Боевая методика с признаком по PV и явно названной подстановкой."""
+    zone = policy.distress_zone.model_copy(
+        update={"measure": "pv_kbd", "substitution": substitution}
+    )
+    return policy.model_copy(update={"distress_zone": zone})
+
+
+def verify_rebuild(saved: Market, rebuilt: Market) -> None:
+    """Ряд, пересобранный с отношением, обязан совпасть с сохранённым во всём прочем.
+
+    Иначе разность прироста мерила бы вместе с признаком и смену ряда.
+    Расхождение называется числом эмитентов, без их перечня: вывод замера —
+    только агрегаты.
+    """
+    if not rebuilt.ratios:
+        raise ValueError("ряд пересобран без отношения цены к PV")
+    if saved.benchmark != rebuilt.benchmark:
+        raise ValueError("ориентир пересобранного ряда расходится с сохранённым")
+    if saved.issuers.keys() != rebuilt.issuers.keys():
+        raise ValueError(
+            "состав эмитентов пересобранного ряда расходится с сохранённым: "
+            f"{len(saved.issuers.keys() ^ rebuilt.issuers.keys())}"
+        )
+    different = sum(
+        1
+        for inn, own in saved.issuers.items()
+        if own.keys() != rebuilt.issuers[inn].keys()
+        or any(
+            (own[day].spread, own[day].price)
+            != (rebuilt.issuers[inn][day].spread, rebuilt.issuers[inn][day].price)
+            for day in own
+        )
+    )
+    if different:
+        raise ValueError(f"цена или спред расходятся с сохранённым рядом у {different} эмитентов")
+
+
+def split_cuts(cuts: list[date], split: date) -> tuple[list[date], list[date]]:
+    """Ранняя часть — срезы до `split`, поздняя — с него; пустая часть — отказ."""
+    early = [cut for cut in cuts if cut < split]
+    late = [cut for cut in cuts if cut >= split]
+    if not early or not late:
+        raise ValueError(
+            f"ранняя ({len(early)}) или поздняя ({len(late)}) часть пуста: выберите другой --split"
+        )
+    return early, late
+
+
 def check_snapshot(metadata: dict, expected: str) -> None:
     """Требует явно согласованную базу и серверный запрет записи."""
     if metadata != {"db": expected, "ro": "on"}:
@@ -164,8 +228,10 @@ def main() -> int:
     """Печатает парные интервалы для двух решений."""
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--input", type=Path, help="строки G/Z: нужны только замеру 7")
     parser.add_argument("--until", type=date.fromisoformat, required=True)
+    parser.add_argument("--split", type=date.fromisoformat, required=True,
+                        help="первый срез поздней части")
     parser.add_argument("--database", required=True, help="согласованная неизменная база снимка")
     args = parser.parse_args()
     from finlib.db import connection, fetch_one
@@ -176,40 +242,67 @@ def main() -> int:
             conn=conn,
         )
         check_snapshot(got, args.database)
-    with args.input.open("rb") as handle:
-        saved = pickle.load(handle)
-    rows, kind, by_code = saved["rows"], saved["kind"], saved["by_code"]
-    policy = load_market()
+    loaded = load_market()
+    # Прежний признак — от номинала, какое бы измерение ни стояло в методике:
+    # сравнение «новый − прежний» не должно зависеть от того, переключено ли оно.
+    policy = loaded.model_copy(update={
+        "distress_zone": loaded.distress_zone.model_copy(update={"measure": "nominal"})})
     base = series()
-    verify_g(rows, base)
     days = base.calendar()
     if not days or max(days) != args.until:
         raise ValueError("конец ряда не совпадает с зафиксированной конечной датой")
     cuts = cutoffs(days, days[0] + timedelta(days=HORIZON), args.until)
     validate_cuts(cuts, args.until)
+    early, late = split_cuts(cuts, args.split)
     when = events()
     systemic = systemic_issuers()
     price = policy.distress_zone.ground
     steps = {f"p{s.percentile}": {s.ground} for s in policy.route_steps}
     review = {s.ground for s in policy.route_steps if s.basket == "review"} | {price}
 
-    print("# Исследовательская сводка 6–7; не поздняя проверка принятия методики\n")
     print(f"Конец ряда: {args.until}; срезов: {len(cuts)}; полный горизонт {HORIZON} дней.\n")
     print("# 6. Цена / PV по КБД: парная разность прироста ценового основания\n")
-    old = tallies(policy, base, when, systemic, {"цена": {price}, "Разбор": review}, cuts)
-    with_fallback, _, _ = variant(base, rows, True)
-    pure, _, _ = variant(base, rows, False)
-    print("| Вариант | Основание | Прирост прежний | Прирост новый | "
-          f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |")
-    print("|---|---|---|---|---|---|---|---|")
-    for label, market in (("цена/PV, без отношения — от номинала", with_fallback),
-                          ("цена/PV, только где отношение есть", pure)):
-        new = tallies(policy, market, when, systemic, {"цена": {price}, "Разбор": review}, cuts)
-        for key in ("цена", "Разбор"):
-            print(result_row(label, key, paired(old[key][0], new[key][0])))
+    rebuilt = build_series(policy, ratios=True)
+    verify_rebuild(base, rebuilt)
+    points = [item for own in rebuilt.issuers.values() for item in own.values()]
+    print(f"Ряд пересобран с отношением и совпал с сохранённым по ориентиру, ценам "
+          f"и спредам. Точек эмитент-день с ценой: "
+          f"{sum(1 for item in points if item.price is not None)}, с отношением: "
+          f"{sum(1 for item in points if item.ratio is not None)}, с ценой бумаги "
+          f"без потока: {sum(1 for item in points if item.unflowed is not None)}.\n")
+    print("Строк бумаг, у которых поток не построен, по причинам:\n")
+    for reason, count in sorted(rebuilt.counted.items()):
+        if reason.startswith("поток не построен: "):
+            print(f"- {reason.removeprefix('поток не построен: ')}: {count}")
     print()
+    grounds6 = {"цена": {price}, "Разбор": review}
+    variants = (("цена/PV, без потока — цена от номинала", pv_policy(policy, True)),
+                ("цена/PV, только где поток построен", pv_policy(policy, False)))
+    for part, part_cuts in (
+        ("Поздняя часть — по ней решение", late),
+        ("Ранняя часть", early),
+        ("Весь календарь — исследовательская сводка, не основание решения", cuts),
+    ):
+        print(f"## {part}: срезов {len(part_cuts)}, {part_cuts[0]} — {part_cuts[-1]}\n")
+        old = tallies(policy, base, when, systemic, grounds6, part_cuts)
+        print("| Вариант | Основание | Прирост прежний | Прирост новый | "
+              f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |")
+        print("|---|---|---|---|---|---|---|---|")
+        for label, rule in variants:
+            new = tallies(rule, rebuilt, when, systemic, grounds6, part_cuts)
+            for key in grounds6:
+                print(result_row(label, key, paired(old[key][0], new[key][0])))
+        print()
 
-    print("# 7. Z, ядро без ОФЗ, субфедеральных и муниципальных, против G и полного ядра\n")
+    if args.input is None:
+        print("# 7. Не считался: строки G/Z не переданы (--input)\n")
+        return 0
+    with args.input.open("rb") as handle:
+        saved = pickle.load(handle)
+    rows, kind, by_code = saved["rows"], saved["kind"], saved["by_code"]
+    verify_g(rows, base)
+    print("# 7. Исследовательская сводка: Z, ядро без ОФЗ, субфедеральных "
+          "и муниципальных, против G и полного ядра; весь календарь\n")
     with contextlib.redirect_stdout(io.StringIO()):
         gov = composition(rows, kind, by_code)
     clean = build(rows, 3, lambda item: item[0] not in gov, base.census)

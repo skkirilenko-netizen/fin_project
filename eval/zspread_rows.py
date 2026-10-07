@@ -18,11 +18,9 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from decimal import Decimal
-from functools import cache
 from pathlib import Path
 
 from finlib.config import settings
-from finlib.sources import cbonds
 from finlib.sources.market import (
     CACHE,
     _number,
@@ -33,12 +31,9 @@ from finlib.sources.market import (
     load_market,
 )
 from finlib.sources.zspread import (
-    cash_flow,
-    offer_price,
-    present_value,
-    read_flows,
-    read_offers,
-    settlement,
+    bond_flow,
+    emission_map,
+    price_to_pv,
     z_spread,
 )
 
@@ -49,38 +44,6 @@ OUT = settings.data_dir / "market" / "zspread_rows.pkl"
 _STATE: dict = {}
 
 
-def emission_map() -> tuple[dict[str, str], dict[str, str]]:
-    """Код торгов → выпуск Cbonds и выпуск → тип эмитента источника.
-
-    Источники соответствия — все сохранённые ответы о выпусках: перечень
-    выпусков в обращении, выпуски эмитентов справочника и поиск бумаг ядра
-    по ISIN и номеру регистрации (`scripts/core_flows_fetch.py`). У ОФЗ код
-    торгов не ISIN: соответствие — по номеру регистрации в имени файла.
-    """
-    by_code: dict[str, str] = {}
-    kind: dict[str, str] = {}
-    files = sorted(cbonds.CACHE.glob("emissions_*.json"))
-    files += sorted(cbonds.CACHE.glob("emission_isin_*.json"))
-    files += sorted(cbonds.CACHE.glob("emission_regnum_*.json"))
-    for path in files:
-        try:
-            found = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        for item in found.get("items", []) if isinstance(found, dict) else []:
-            emission = str(item.get("id") or "")
-            if not emission:
-                continue
-            kind[emission] = str(item.get("emitent_type_name_rus") or "")
-            isin = str(item.get("isin_code") or "").strip()
-            if isin:
-                by_code.setdefault(isin, emission)
-            number = str(item.get("state_reg_number") or "").strip()
-            if path.name.startswith("emission_regnum_") and number:
-                by_code.setdefault(f"SU{number}", emission)
-    return by_code, kind
-
-
 def _init(by_code: dict[str, str], mine: dict[str, str]) -> None:
     """Состояние рабочего процесса: соответствия передаются один раз."""
     _STATE["by_code"] = by_code
@@ -88,63 +51,14 @@ def _init(by_code: dict[str, str], mine: dict[str, str]) -> None:
     _STATE["policy"] = load_market()
 
 
-@cache
-def _flows(emission: str) -> tuple[list, Decimal | None] | None:
-    """График выпуска с диска; None — графика нет."""
-    path = cbonds.CACHE / f"flow_{emission}.json"
-    return read_flows(path) if path.exists() else None
-
-
-@cache
-def _offers(emission: str) -> dict:
-    """Оферты выпуска с диска."""
-    return read_offers(cbonds.CACHE / f"offert_{emission}.json")
-
-
-def _code(secid: str) -> str:
-    """Ключ соответствия: у ОФЗ — номер регистрации без контрольной цифры."""
-    if secid.startswith("SU") and len(secid) == 12:
-        return secid[:-1]
-    return secid
-
-
 def _flow(
     row: dict, day: date, curve: list, price: Decimal | None
 ) -> tuple[list, list, Decimal, str]:
     """Поток строки, ставки кривой в его сроках, грязная цена и причина отказа."""
-    secid = str(row.get("SECID") or "")
-    emission = _STATE["by_code"].get(_code(secid))
-    if emission is None:
-        return [], [], Decimal(0), "выпуск не сопоставлен"
-    got = _flows(emission)
-    if got is None:
-        return [], [], Decimal(0), "графика нет"
-    flows, _ = got
-    face = _number(row.get("FACEVALUE"))
-    accrued = _number(row.get("ACCINT")) or Decimal(0)
-    if not face or price is None:
-        return [], [], Decimal(0), "нет цены или номинала"
-    settle = settlement(day)
-    cut = None
-    for field in ("BUYBACKDATE", "OFFERDATE"):
-        raw = str(row.get(field) or "")[:10]
-        if raw and raw != "0000-00-00":
-            try:
-                cut = date.fromisoformat(raw)
-                break
-            except ValueError:
-                continue
-    pairs, why = cash_flow(
-        flows,
-        settle,
-        face,
-        cut,
-        offer_price(_offers(emission), cut) if cut else Decimal(100),
+    pairs, rates, dirty, _, why = bond_flow(
+        row, day, lambda years: curve_at(curve, years)[0], price, _STATE["by_code"]
     )
-    if why:
-        return [], [], Decimal(0), why
-    rates = [curve_at(curve, years)[0] for years, _ in pairs]
-    return pairs, rates, price / 100 * face + accrued, ""
+    return pairs, rates, dirty, why
 
 
 def _z(row: dict, day: date, curve: list, compounding: str) -> tuple[Decimal | None, str]:
@@ -161,11 +75,9 @@ def _z(row: dict, day: date, curve: list, compounding: str) -> tuple[Decimal | N
 
 def _ratio(row: dict, day: date, curve: list, price: Decimal) -> Decimal | None:
     """Грязная цена к приведённой стоимости потока по КБД без надбавки; None — потока нет."""
-    pairs, rates, dirty, why = _flow(row, day, curve, price)
-    if why:
-        return None
-    value = present_value(pairs, rates)
-    return dirty / value if value else None
+    return price_to_pv(
+        row, day, lambda years: curve_at(curve, years)[0], price, _STATE["by_code"]
+    ).ratio
 
 
 def day_rows(path_name: str, curve_points: list) -> tuple[str, list[tuple]]:
