@@ -2,6 +2,9 @@
 
     uv run python eval/threshold_calibration_run.py --pilot   # пять дат: контроль и время
     uv run python eval/threshold_calibration_run.py > data/output/threshold_calibration.md
+    # замер 8, МСФО (IFRS) 16: прежнее, с арендой, с арендой и квантилем;
+    # --names — названия сменивших корзину (по умолчанию только числа)
+    uv run python eval/threshold_calibration_run.py --definition [--names]
 
 **Схема согласована владельцем 28.09.2026.** Порог — точка распределения
 величины (принцип 2 дорожной карты); по событиям выбирается только
@@ -33,7 +36,7 @@ import re
 import statistics
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -175,15 +178,34 @@ def _scale_edges(code: str) -> tuple[Decimal, Decimal, bool]:
     ближайший вариант при равенстве: решение по нынешнему порогу даёт
     маршрут без замены, а не это число.
     """
+    points = _points(code)
+    edge, below = _edges(points, _lower())
+    return edge, below, points[0][0] > points[-1][0]
+
+
+def _points(code: str) -> list[tuple[Decimal, Decimal]]:
+    """Опорные точки шкалы МСФО: величина и балл, от нулевого балла."""
     scale = catalogue_for(Standard.IFRS).scale(code)
     assert scale is not None, f"шкалы {code} нет"
-    points = [(Decimal(str(x)), Decimal(str(s))) for x, s in scale.points]
-    lower = Decimal(str(load_theses().bands.lower_below))
-    edge = points[0][0]
+    return [(Decimal(str(x)), Decimal(str(s))) for x, s in scale.points]
+
+
+def _lower() -> Decimal:
+    """Балл, ниже которого величина — в нижней части шкалы."""
+    return Decimal(str(load_theses().bands.lower_below))
+
+
+def _edges(points: list[tuple[Decimal, Decimal]], lower: Decimal) -> tuple[Decimal, Decimal]:
+    """Отсечки маршрута по опорным точкам: конец шкалы и величина на балле `lower`.
+
+    Маршрут решает только ими (`routing.route`: «за концом шкалы» — нулевой
+    балл, «нижняя часть» — балл ниже `lower`), и замена точек шкалы
+    в варианте замера передаётся ему этими двумя величинами.
+    """
     for (x0, s0), (x1, s1) in zip(points, points[1:], strict=False):
         if s0 <= lower <= s1 and s1 != s0:
-            return edge, x0 + (x1 - x0) * (lower - s0) / (s1 - s0), points[0][0] > points[-1][0]
-    raise AssertionError(f"балл {lower} вне шкалы {code}")
+            return points[0][0], x0 + (x1 - x0) * (lower - s0) / (s1 - s0)
+    raise AssertionError(f"балл {lower} вне шкалы {points}")
 
 
 def subjects() -> tuple[Subject, ...]:
@@ -466,18 +488,175 @@ class DefinitionPass:
         }
 
 
-def definition_pass(dates: list[date]) -> DefinitionPass:
-    """Проход по датам: боевой маршрут с прежним определением долга и с арендой."""
+# **Третий вариант — порог, перенесённый квантилем** (решение владельца
+# 07.10.2026): каждая опорная точка шкалы прежнего определения переносится
+# на распределение нового по своей доле наблюдений по худшую сторону —
+# на обучающей части, у корпоративного периметра МСФО, только по точным
+# величинам обоих определений одной и той же точки. События в выборе
+# не участвуют: это перенос порога, а не подбор.
+LEASES_QUANTILE = "с арендой, квантиль"
+DEBT = "net_debt_ebitda"
+DEBT_LEASES = "net_debt_ebitda_leases"
+DEBT_FLOOR = "net_debt_ebitda_leases_floor"
+
+
+@dataclass(slots=True)
+class Values:
+    """Величины двух определений на обучающей части и знаменатели отказа.
+
+    В распределение идут только пары точных величин одной точки (ИНН, дата):
+    один круг у обоих определений. Оценка снизу (аренда не раскрыта)
+    считается, но в распределение не идёт — иначе его полнота зависела бы
+    от прежней шкалы, по которой оценка встаёт в маршрут.
+    """
+
+    pairs: dict[tuple[str, date], tuple[Decimal, Decimal]] = field(default_factory=dict)
+    # Прежняя величина каждой точки периметра — для сверки с историей.
+    old: dict[tuple[str, date], Decimal] = field(default_factory=dict)
+    lower_bound: int = 0
+    old_missing: int = 0
+    refused: int = 0
+
+
+def _exact(item: object) -> Decimal | None:
+    """Точная величина показателя либо None."""
+    if item is None or not item.calculable or item.value is None:  # type: ignore[attr-defined]
+        return None
+    return item.value  # type: ignore[attr-defined]
+
+
+def collect(values: Values, rows: list, moment: date) -> None:
+    """Величины обоих определений у корпоративного периметра МСФО на дату."""
+    seen: set[str] = set()
+    for row in rows:
+        if row.standard is not Standard.IFRS or row.verdict.basket not in PERIMETER:
+            continue
+        if row.inn in seen:
+            raise ValueError(f"замер 8: эмитент дважды на {moment:%d.%m.%Y}")
+        seen.add(row.inn)
+        by_code = {item.code: item for item in row.computed}
+        old, new = _exact(by_code.get(DEBT)), _exact(by_code.get(DEBT_LEASES))
+        key = (row.inn, moment)
+        if old is not None:
+            values.old[key] = old
+        if old is not None and new is not None:
+            values.pairs[key] = (old, new)
+        elif old is None:
+            values.old_missing += 1
+        elif _exact(by_code.get(DEBT_FLOOR)) is not None:
+            values.lower_bound += 1
+        else:
+            values.refused += 1
+
+
+def value_control(history: list[dict], values: Values) -> "Control":
+    """Прежняя величина пересчёта против записанной истории — по каждой точке обучения.
+
+    Сверяется сама величина, а не только корзина: порог переносится
+    по распределению величин, и расхождение в них сдвинуло бы его молча.
+    Расхождение у эмитента с перезабранными файлами источника названо
+    отдельно, и такой эмитент выпадает из распределений обоих определений.
+    """
+    said = Control()
+    for row in history:
+        if (
+            row["as_of"] >= SPLIT
+            or row["standard"] != Standard.IFRS.value
+            or row["basket"] not in PERIMETER
+        ):
+            continue
+        stored = _value(row["inputs"] or {}, f"metrics.{DEBT}")
+        now = values.old.get((row["inn"], row["as_of"]))
+        if stored is None and now is None:
+            continue
+        said.compared += 1
+        if stored == now:
+            continue
+        files = refetched(row["inn"], row["created_at"])
+        if files:
+            days, _ = said.refetched.setdefault(row["inn"], ([], files))
+            days.append(row["as_of"])
+            continue
+        said.differ.append(
+            f"{row['inn']} {row['as_of']:%d.%m.%Y}: записано {stored}, сейчас {now}"
+        )
+    return said
+
+
+@dataclass(frozen=True, slots=True)
+class Transfer:
+    """Опорная точка шкалы, её доля по худшую сторону и перенесённая величина."""
+
+    point: Decimal
+    score: Decimal
+    worse: Decimal
+    mark: Decimal
+    moved: Decimal
+
+
+def transfer(
+    pairs: dict[tuple[str, date], tuple[Decimal, Decimal]],
+    points: list[tuple[Decimal, Decimal]],
+    high_bad: bool,
+) -> tuple[Transfer, ...]:
+    """Опорные точки прежнего определения, перенесённые на распределение нового.
+
+    Правило то же, что у перцентиля нынешнего порога (`distributions`): доля
+    по худшую сторону — на объединённых наблюдениях прежнего определения,
+    перцентиль — до 0,1 п. п., величина — медиана дневных перцентилей нового.
+    Только точки до раздела: поздняя часть в порог не входит.
+    """
+    early = {key: pair for key, pair in pairs.items() if key[1] < SPLIT}
+    if not early:
+        raise ValueError("замер 8: точных пар обоих определений на обучающей части нет")
+    olds = [old for old, _ in early.values()]
+    by_day: dict[date, list[Decimal]] = defaultdict(list)
+    for (_, day), (_, new) in early.items():
+        by_day[day].append(new)
+    found: list[Transfer] = []
+    for point, score_at in points:
+        worse = sum(1 for value in olds if (value >= point if high_bad else value <= point))
+        share = Decimal(worse) / len(olds) * 100
+        mark = (100 - share if high_bad else share).quantize(Decimal("0.1"))
+        moved = statistics.median(_rank(values, mark) for values in by_day.values())
+        found.append(Transfer(point, score_at, share, mark, moved))
+    return tuple(found)
+
+
+def quantile_variant(moved: tuple[Transfer, ...]) -> Overrides:
+    """Вариант «с арендой, квантиль»: новое определение и отсечки перенесённой шкалы."""
+    edge, below = _edges([(item.moved, item.score) for item in moved], _lower())
+    return Overrides(
+        metrics=dict(LEASES_VARIANT.metrics),
+        floors=dict(LEASES_VARIANT.floors),
+        review={DEBT: edge},
+        attention={DEBT: below},
+        standard=Standard.IFRS,
+    )
+
+
+def definition_pass(
+    dates: list[date],
+    chosen: dict[str, Overrides],
+    memo: dict | None = None,
+    values: Values | None = None,
+) -> DefinitionPass:
+    """Проход по датам: боевой маршрут с вариантами определения долга.
+
+    `values` — собрать величины обоих определений на обучающих датах
+    (`collect`); `memo` общий у проходов: показатели комплекта считаются раз.
+    """
     said = DefinitionPass()
-    memo: dict = {}
-    chosen = {"прежний": Overrides(), LEASES: LEASES_VARIANT}
+    memo = memo if memo is not None else {}
     with connection() as conn:
         for moment in dates:
             started = time.monotonic()
             verdicts: dict = {}
-            routing_rows(
+            rows, _ = routing_rows(
                 conn, moment, as_of=moment, memo=memo, variants=chosen, verdicts=verdicts
             )
+            if values is not None and moment < SPLIT:
+                collect(values, rows, moment)
             for name, by_inn in verdicts.items():
                 for inn, verdict in by_inn.items():
                     said.found[name][inn][moment] = frozenset(
@@ -769,7 +948,9 @@ def main() -> int:
             Part("обучение", start, max(d for d in grid if d < SPLIT)),
             Part("проверка", SPLIT, end),
         )
-        return _definition(rows, grid, found, calendar, parts, len(train), len(test))
+        return _definition(
+            rows, grid, found, calendar, parts, len(train), len(test), "--names" in sys.argv
+        )
 
     print("# Калибровка порогов отчётности (фаза 6)\n")
     print(
@@ -927,23 +1108,59 @@ def _definition(
     parts: tuple[Part, Part],
     train_events: int,
     test_events: int,
+    names: bool = False,
 ) -> int:
     """Замер МСФО (IFRS) 16: прежнее определение долга против долга с арендой.
 
-    Мера и бутстрэп те же, что у порогов: прирост на обеих частях календаря
-    и 90 % интервал парной разности на одних и тех же выборках эмитентов.
-    Сверх того — кто сменил корзину на последней дате истории и сколько
-    эмитентов расходились хоть в один день.
+    Варианты: «с арендой» при прежних порогах и «с арендой, квантиль» —
+    опорные точки шкалы перенесены на распределение нового определения
+    на обучающей части. Мера и бутстрэп те же, что у порогов: прирост
+    на обеих частях календаря и 90 % интервал парной разности на одних
+    и тех же выборках эмитентов; решение — по проверке. Сверх того — смены
+    корзины на последней дате истории числом по переходам; названия
+    эмитентов — только с `--names`.
     """
-    done = definition_pass(grid)
-    checked = control(rows, done.base(), grid)
+    memo: dict = {}
+    values = Values()
+    first = definition_pass(
+        [day for day in grid if day < SPLIT], {"прежний": Overrides()}, memo, values
+    )
     print("# Долг с арендой (МСФО (IFRS) 16): замер определения\n")
     print(
         f"История: {len(grid)} дат, {grid[0]:%d.%m.%Y} — {grid[-1]:%d.%m.%Y}. "
         f"Раздел {SPLIT:%d.%m.%Y}: событий в обучении **{train_events}**, "
-        f"в проверке **{test_events}**. Вариант «{LEASES}» — довод замера: "
-        "в маршрут новое определение не включено.\n"
+        f"в проверке **{test_events}**. Варианты «{LEASES}» и «{LEASES_QUANTILE}» — "
+        "довод замера: в маршрут новое определение не включено.\n"
     )
+    by_value = value_control(rows, values)
+    print(
+        f"**Сверка величин обучения**: прежняя нагрузка пересчёта против записанной "
+        f"истории — сверено **{by_value.compared}** точек, расхождений "
+        f"**{len(by_value.differ)}**. Проход обучения {sum(first.seconds) / 60:.0f} мин.\n"
+    )
+    for line in by_value.differ[:20]:
+        print(f"- {line}")
+    for line in by_value.said():
+        print(f"- {line}")
+    if by_value.differ:
+        print(
+            "\n**Замер остановлен**: величины пересчёта расходятся с историей, "
+            "и порог, перенесённый по ним, сдвинулся бы молча. Сначала объяснить.\n"
+        )
+        return 1
+    pairs = {
+        key: pair for key, pair in values.pairs.items() if key[0] not in by_value.refetched
+    }
+    dropped = len(values.pairs) - len(pairs)
+    moved = transfer(pairs, _points(DEBT), high_bad=True)
+    _print_transfer(values, pairs, dropped, len(by_value.refetched), moved)
+    chosen = {
+        "прежний": Overrides(),
+        LEASES: LEASES_VARIANT,
+        LEASES_QUANTILE: quantile_variant(moved),
+    }
+    done = definition_pass(grid, chosen, memo)
+    checked = control(rows, done.base(), grid)
     print(
         f"**Контроль**: «прежний» против записанной истории — сверено "
         f"**{checked.compared}** точек, расхождений **{len(checked.differ)}**. "
@@ -963,8 +1180,9 @@ def _definition(
         print(f"## {subject.name}\n")
         for part in parts:
             members = circle(rows, branches, subject, part)
+            if not members:
+                raise ValueError(f"замер 8, {subject.name}, {part.name}: круг пуст")
             old = flags(done.days_of("прежний", subject), observed, members, calendar, part)
-            new = flags(done.days_of(LEASES, subject), observed, members, calendar, part)
             print(
                 f"**{part.name.capitalize()}** ({part.start:%d.%m.%Y} — "
                 f"{part.end:%d.%m.%Y}): круг {len(members)}.\n"
@@ -972,31 +1190,99 @@ def _definition(
             print("| Определение | Сработал | Пойман | Выявляемость | Прирост | Упреждение |")
             print("|---|---|---|---|---|---|")
             print(_line("прежнее", score(old)))
-            print(_line(LEASES, score(new)))
-            low, high, empty = paired(old, new)
-            interval = (
-                f"[{low:.2f}; {high:.2f}]"
-                if low is not None and high is not None
-                else "не определён"
-            )
-            print(
-                f"\nПарная разность прироста ({LEASES} − прежнее), "
-                f"{CONFIDENCE:.0f} % интервал на {REPLICAS} выборках эмитентов: "
-                f"**{interval}**; выборок без определённого прироста {empty}.\n"
-            )
+            news = {
+                name: flags(done.days_of(name, subject), observed, members, calendar, part)
+                for name in (LEASES, LEASES_QUANTILE)
+            }
+            for name, new in news.items():
+                print(_line(name, score(new)))
+            print()
+            for name, new in news.items():
+                low, high, empty = paired(old, new)
+                interval = (
+                    f"[{low:.2f}; {high:.2f}]"
+                    if low is not None and high is not None
+                    else "не определён"
+                )
+                print(
+                    f"Парная разность прироста ({name} − прежнее), "
+                    f"{CONFIDENCE:.0f} % интервал на {REPLICAS} выборках эмитентов: "
+                    f"**{interval}**; выборок без определённого прироста {empty}.\n"
+                )
     routing = load_routing()
     last = grid[-1]
-    before, after = done.baskets["прежний"], done.baskets[LEASES]
-    moved = sorted(
-        inn for inn, by_day in before.items()
-        if last in by_day and after.get(inn, {}).get(last) != by_day[last]
+    before = done.baskets["прежний"]
+    for name in (LEASES, LEASES_QUANTILE):
+        after = done.baskets[name]
+        moved_now = sorted(
+            inn for inn, by_day in before.items()
+            if last in by_day and after.get(inn, {}).get(last) != by_day[last]
+        )
+        ever = sum(
+            1 for inn, by_day in before.items()
+            if any(after.get(inn, {}).get(day) != basket for day, basket in by_day.items())
+        )
+        print(
+            f"## Смена корзины на {last:%d.%m.%Y}, «{name}»: {len(moved_now)} "
+            f"из {len(before)}\n\nРасходились хоть в один день истории: **{ever}**.\n"
+        )
+        steps = Counter(
+            (routing.basket(before[inn][last]).name, routing.basket(after[inn][last]).name)
+            for inn in moved_now
+        )
+        if steps:
+            print("| Прежнее определение | Вариант | Эмитентов |")
+            print("|---|---|---|")
+            for (was, now), count in sorted(steps.items()):
+                print(f"| {was} | {now} | {count} |")
+            print()
+        if names and moved_now:
+            _print_names(moved_now, before, after, last, routing)
+    return 0 if not checked.differ else 1
+
+
+def _print_transfer(
+    values: Values,
+    pairs: dict,
+    dropped: int,
+    refetched_issuers: int,
+    moved: tuple[Transfer, ...],
+) -> None:
+    """Распределение обучения, знаменатели отказа и перенесённые точки шкалы."""
+    issuers = {inn for inn, _ in pairs}
+    days = {day for _, day in pairs}
+    print("## Перенос шкалы квантилем (обучение)\n")
+    print(
+        f"Пар точных величин обоих определений: **{len(pairs)}** точек, "
+        f"{len(issuers)} эмитентов, {len(days)} дат. Не вошли: аренда не раскрыта "
+        f"(только оценка снизу) — **{values.lower_bound}** точек; прежней величины "
+        f"нет — {values.old_missing}; новой нет ни точной, ни оценки — "
+        f"{values.refused}; у {refetched_issuers} эмитентов с перезабранными "
+        f"данными источника — {dropped}.\n"
     )
-    ever = sum(
-        1 for inn, by_day in before.items()
-        if any(after.get(inn, {}).get(day) != basket for day, basket in by_day.items())
+    print("| Опорная точка | Балл | По худшую сторону, прежнее | Перцентиль | С арендой |")
+    print("|---|---|---|---|---|")
+    for item in moved:
+        print(
+            f"| {item.point} | {item.score} | {item.worse:.1f} % | p{_pct(item.mark)} "
+            f"| {item.moved:.3f} |"
+        )
+    edge, below = _edges([(item.moved, item.score) for item in moved], _lower())
+    old_edge, old_below = _edges(_points(DEBT), _lower())
+    print(
+        f"\nОтсечки маршрута: конец шкалы {old_edge:.3f} → **{edge:.3f}** (и порог "
+        f"границы по прибыли от продаж — он у той же точки), нижняя часть "
+        f"(балл {_lower()}) {old_below:.3f} → **{below:.3f}**. Оценка снизу "
+        "встаёт в маршрут, как прежде.\n"
     )
+
+
+def _print_names(
+    moved: list[str], before: dict, after: dict, last: date, routing: object
+) -> None:
+    """Названия эмитентов, сменивших корзину, — только по явной просьбе (`--names`)."""
     with connection() as conn:
-        names = {
+        found = {
             row["inn"]: row["name"]
             for row in fetch_all(
                 "SELECT inn, name FROM organization WHERE inn = ANY(%(inns)s)",
@@ -1004,20 +1290,15 @@ def _definition(
                 conn=conn,
             )
         }
-    print(
-        f"## Смена корзины на {last:%d.%m.%Y}: {len(moved)} из {len(before)}\n\n"
-        f"Расходились хоть в один день истории: **{ever}**.\n"
-    )
-    if moved:
-        print("| Эмитент | Прежнее определение | С арендой |")
-        print("|---|---|---|")
-        for inn in moved:
-            print(
-                f"| {names.get(inn) or inn} ({inn}) "
-                f"| {routing.basket(before[inn][last]).name} "
-                f"| {routing.basket(after[inn][last]).name} |"
-            )
-    return 0 if not checked.differ else 1
+    print("| Эмитент | Прежнее определение | Вариант |")
+    print("|---|---|---|")
+    for inn in moved:
+        print(
+            f"| {found.get(inn) or inn} ({inn}) "
+            f"| {routing.basket(before[inn][last]).name} "  # type: ignore[attr-defined]
+            f"| {routing.basket(after[inn][last]).name} |"  # type: ignore[attr-defined]
+        )
+    print()
 
 
 def _line(label: str, item: Score) -> str:
