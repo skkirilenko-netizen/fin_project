@@ -498,6 +498,11 @@ LEASES_QUANTILE = "с арендой, квантиль"
 DEBT = "net_debt_ebitda"
 DEBT_LEASES = "net_debt_ebitda_leases"
 DEBT_FLOOR = "net_debt_ebitda_leases_floor"
+# **Граница по прибыли от продаж переносится отдельно** (решение владельца
+# 07.10.2026): по своей доле наблюдений в своём распределении — долг
+# с арендой к операционной прибыли, — а не значением конца шкалы долг/EBITDA.
+BOUND = "net_debt_op_profit"
+BOUND_LEASES = "net_debt_op_profit_leases"
 
 
 @dataclass(slots=True)
@@ -516,6 +521,9 @@ class Values:
     lower_bound: int = 0
     old_missing: int = 0
     refused: int = 0
+    # Граница по прибыли от продаж — те же правила, своё распределение.
+    bound_pairs: dict[tuple[str, date], tuple[Decimal, Decimal]] = field(default_factory=dict)
+    bound_old: dict[tuple[str, date], Decimal] = field(default_factory=dict)
 
 
 def _exact(item: object) -> Decimal | None:
@@ -547,6 +555,11 @@ def collect(values: Values, rows: list, moment: date) -> None:
             values.lower_bound += 1
         else:
             values.refused += 1
+        was, now = _exact(by_code.get(BOUND)), _exact(by_code.get(BOUND_LEASES))
+        if was is not None:
+            values.bound_old[key] = was
+        if was is not None and now is not None:
+            values.bound_pairs[key] = (was, now)
 
 
 def value_control(history: list[dict], values: Values) -> "Control":
@@ -565,21 +578,23 @@ def value_control(history: list[dict], values: Values) -> "Control":
             or row["basket"] not in PERIMETER
         ):
             continue
-        stored = _value(row["inputs"] or {}, f"metrics.{DEBT}")
-        now = values.old.get((row["inn"], row["as_of"]))
-        if stored is None and now is None:
-            continue
-        said.compared += 1
-        if stored == now:
-            continue
-        files = refetched(row["inn"], row["created_at"])
-        if files:
-            days, _ = said.refetched.setdefault(row["inn"], ([], files))
-            days.append(row["as_of"])
-            continue
-        said.differ.append(
-            f"{row['inn']} {row['as_of']:%d.%m.%Y}: записано {stored}, сейчас {now}"
-        )
+        for code, recomputed in ((DEBT, values.old), (BOUND, values.bound_old)):
+            stored = _value(row["inputs"] or {}, f"metrics.{code}")
+            now = recomputed.get((row["inn"], row["as_of"]))
+            if stored is None and now is None:
+                continue
+            said.compared += 1
+            if stored == now:
+                continue
+            files = refetched(row["inn"], row["created_at"])
+            if files:
+                days, _ = said.refetched.setdefault(row["inn"], ([], files))
+                days.append(row["as_of"])
+                continue
+            said.differ.append(
+                f"{row['inn']} {row['as_of']:%d.%m.%Y} {code}: записано {stored}, "
+                f"сейчас {now}"
+            )
     return said
 
 
@@ -598,6 +613,7 @@ def transfer(
     pairs: dict[tuple[str, date], tuple[Decimal, Decimal]],
     points: list[tuple[Decimal, Decimal]],
     high_bad: bool,
+    what: str = "долговой нагрузки",
 ) -> tuple[Transfer, ...]:
     """Опорные точки прежнего определения, перенесённые на распределение нового.
 
@@ -608,7 +624,9 @@ def transfer(
     """
     early = {key: pair for key, pair in pairs.items() if key[1] < SPLIT}
     if not early:
-        raise ValueError("замер 8: точных пар обоих определений на обучающей части нет")
+        raise ValueError(
+            f"замер 8: точных пар обоих определений {what} на обучающей части нет"
+        )
     olds = [old for old, _ in early.values()]
     by_day: dict[date, list[Decimal]] = defaultdict(list)
     for (_, day), (_, new) in early.items():
@@ -623,16 +641,22 @@ def transfer(
     return tuple(found)
 
 
-def quantile_variant(moved: tuple[Transfer, ...]) -> Overrides:
-    """Вариант «с арендой, квантиль»: новое определение и отсечки перенесённой шкалы."""
+def quantile_variant(moved: tuple[Transfer, ...], bound: Transfer) -> Overrides:
+    """Вариант «с арендой, квантиль»: новое определение, отсечки шкалы и граница — свои."""
     edge, below = _edges([(item.moved, item.score) for item in moved], _lower())
     return Overrides(
         metrics=dict(LEASES_VARIANT.metrics),
         floors=dict(LEASES_VARIANT.floors),
         review={DEBT: edge},
         attention={DEBT: below},
+        bound={BOUND: bound.moved},
         standard=Standard.IFRS,
     )
+
+
+def bound_edge() -> Decimal:
+    """Нынешний порог границы: крайняя опорная точка шкалы, как у маршрута."""
+    return max(point for point, _ in _points(DEBT))
 
 
 def definition_pass(
@@ -1153,11 +1177,21 @@ def _definition(
     }
     dropped = len(values.pairs) - len(pairs)
     moved = transfer(pairs, _points(DEBT), high_bad=True)
+    bound_pairs = {
+        key: pair
+        for key, pair in values.bound_pairs.items()
+        if key[0] not in by_value.refetched
+    }
+    bound = transfer(
+        bound_pairs, [(bound_edge(), Decimal(0))], high_bad=True,
+        what="границы по прибыли от продаж",
+    )[0]
     _print_transfer(values, pairs, dropped, len(by_value.refetched), moved)
+    _print_cutoffs(moved, bound, len(pairs), len(bound_pairs))
     chosen = {
         "прежний": Overrides(),
         LEASES: LEASES_VARIANT,
-        LEASES_QUANTILE: quantile_variant(moved),
+        LEASES_QUANTILE: quantile_variant(moved, bound),
     }
     done = definition_pass(grid, chosen, memo)
     checked = control(rows, done.base(), grid)
@@ -1267,14 +1301,35 @@ def _print_transfer(
             f"| {item.point} | {item.score} | {item.worse:.1f} % | p{_pct(item.mark)} "
             f"| {item.moved:.3f} |"
         )
+    print()
+
+
+def _print_cutoffs(
+    moved: tuple[Transfer, ...], bound: Transfer, pairs: int, bound_pairs: int
+) -> None:
+    """Отсечки маршрута варианта: прежнее и новое значение и доля по худшую сторону.
+
+    Конец шкалы и граница по прибыли от продаж переносятся каждая своей
+    долей в своём распределении; нижняя часть — балл на перенесённой шкале.
+    """
     edge, below = _edges([(item.moved, item.score) for item in moved], _lower())
     old_edge, old_below = _edges(_points(DEBT), _lower())
+    print("### Отсечки маршрута варианта «с арендой, квантиль»\n")
+    print("| Отсечка | Прежнее | По худшую сторону, прежнее | Новое | Пар точных величин |")
+    print("|---|---|---|---|---|")
     print(
-        f"\nОтсечки маршрута: конец шкалы {old_edge:.3f} → **{edge:.3f}** (и порог "
-        f"границы по прибыли от продаж — он у той же точки), нижняя часть "
-        f"(балл {_lower()}) {old_below:.3f} → **{below:.3f}**. Оценка снизу "
-        "встаёт в маршрут, как прежде.\n"
+        f"| Долг/EBITDA: конец шкалы | {old_edge:.3f} | {moved[0].worse:.1f} % "
+        f"| **{edge:.3f}** | {pairs} |"
     )
+    print(
+        f"| Долг/EBITDA: нижняя часть (балл {_lower()}) | {old_below:.3f} "
+        f"| — (балл на перенесённой шкале) | **{below:.3f}** | {pairs} |"
+    )
+    print(
+        f"| Граница: долг к прибыли от продаж | {bound.point:.3f} | {bound.worse:.1f} % "
+        f"| **{bound.moved:.3f}** | {bound_pairs} |"
+    )
+    print("\nОценка снизу встаёт в маршрут, как прежде.\n")
 
 
 def _print_names(
