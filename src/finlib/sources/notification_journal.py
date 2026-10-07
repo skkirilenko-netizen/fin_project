@@ -61,10 +61,15 @@ class Context:
         return tuple(name for since, until, name in self.ambiguous
                      if since < notice.day <= until)
 
+    def claimable(self, notice: Notice) -> bool:
+        """Ключ ещё не выведен, не готовится и не попадает в окно старого отчёта без id."""
+        key = notice.record_id, notice.kind
+        return key not in self.known and key not in self.pending and not self.uncertain(notice)
+
     def claim(self, notice: Notice, line: str) -> bool:
         """Готовит первый вывод ключа, не фиксируя его до публикации отчёта."""
         key = notice.record_id, notice.kind
-        if key in self.known or key in self.pending or self.uncertain(notice):
+        if not self.claimable(notice):
             return False
         self.pending[key] = Entry(
             notice.record_id, notice.kind, notice.day.isoformat(), line,

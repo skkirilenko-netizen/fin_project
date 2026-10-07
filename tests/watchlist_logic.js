@@ -16,6 +16,10 @@ function check(ok, label) {if (!ok) throw new Error(label);}
 /*APPLICATION*/
 check(node('total').textContent === 93, 'исходный счётчик');
 check(node('urgent-total').textContent === 1, 'счётчик уведомлений из данных');
+check(node('event-tabs').innerHTML.includes('Первое появление · 1')
+  && node('event-tabs').innerHTML.includes('Переход в «Дефолт» · 1')
+  && node('event-tabs').innerHTML.includes('Окончание льготы · 0'), 'строка записи в каждом своём виде');
+check(node('events').innerHTML.includes('Первое появление · Переход в «Дефолт»'), 'переходы записи в заголовке');
 check(node('late-events').innerHTML.includes('14:29:06 МСК'), 'фактическая доставка');
 check(node('late-events').innerHTML.includes('Первый вывод: 03.01.2090'), 'первый вывод');
 check(node('late-events').innerHTML.includes('эмитент не установлен'), 'непривязанный ключ');

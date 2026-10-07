@@ -33,14 +33,17 @@ function issuerName(event) {
   const name = known ? `<button class="issuerbutton" data-inn="${esc(event.inn)}">${esc(event.name)}</button>` : `<strong>${esc(event.name)}</strong>`;
   return name + `<div class="subtle">${event.inn ? 'ИНН ' + esc(event.inn) : 'Привязка к эмитенту не установлена'}</div>`;
 }
+// Строка — запись источника: переходы одной записи названы вместе, по датам.
+const kindsOf = event => event.kinds || [event.kind];
 function eventHTML(event) {
-  return `<div class="event"><div>${issuerName(event)}</div><details><summary><div class="event-title">${esc(labels[event.kind] || 'Событие')}</div><span class="subtle">${esc(event.eventOn)} · раскрыть сведения источника</span></summary><p>${esc(event.text)}</p><div class="event-dates subtle"><span>Исходная дата: ${esc(event.eventOn)}</span><span>Доставка: ${esc(event.deliveredAt)}</span><span>Первый вывод: ${esc(event.firstPrintedOn)}</span></div></details><span class="chevron">›</span></div>`;
+  const title = [...new Set(kindsOf(event).map(kind => labels[kind] || 'Событие'))].join(' · ');
+  return `<div class="event"><div>${issuerName(event)}</div><details><summary><div class="event-title">${esc(title)}</div><span class="subtle">${esc(event.eventOn)} · раскрыть сведения источника</span></summary><p>${esc(event.text)}</p><div class="event-dates subtle"><span>Исходная дата: ${esc(event.eventOn)}</span><span>Доставка: ${esc(event.deliveredAt)}</span><span>Первый вывод: ${esc(event.firstPrintedOn)}</span></div></details><span class="chevron">›</span></div>`;
 }
 function eventRender() {
-  const filtered = data.events.filter(event => state.event === 'all' || event.kind === state.event);
+  const filtered = data.events.filter(event => state.event === 'all' || kindsOf(event).includes(state.event));
   const shown = state.allEvents ? filtered : filtered.slice(0, 7);
   $('event-tabs').innerHTML = [['all', 'Все'], ...Object.entries(labels)].map(([key, label]) => {
-    const count = key === 'all' ? data.events.length : data.events.filter(event => event.kind === key).length;
+    const count = key === 'all' ? data.events.length : data.events.filter(event => kindsOf(event).includes(key)).length;
     return `<button class="chip ${state.event === key ? 'active' : ''}" data-event="${key}" aria-pressed="${state.event === key}">${esc(label)} · ${count}</button>`;
   }).join('');
   $('events').innerHTML = shown.map(eventHTML).join('') || '<p class="muted" style="padding:20px">' + (data.urgentAvailable ? 'Нет выявленных уведомлений по доступным сведениям отчёта.' : 'Срочные уведомления не установлены: сохранённый раздел отсутствует.') + '</p>';
@@ -164,7 +167,7 @@ $('total').textContent = data.rows.length;
 $('urgent-total').textContent = data.urgentAvailable ? data.events.length : 'не установлены';
 $('nav-count').textContent = data.events.length + data.late.length;
 $('warnings').innerHTML = data.warnings.map(text => `<div class="notice"><span>◈</span><div>${esc(text).replace(/\n/g, '<br>')}</div></div>`).join('');
-$('late-state').textContent = data.lateAvailable ? `${data.late.length} уведомлений · исходная дата, доставка и первый вывод` : 'В сохранённом отчёте не установлен: это не ноль событий';
+$('late-state').textContent = data.lateAvailable ? `записей: ${data.late.length} · исходные даты переходов, доставка и первый вывод` : 'В сохранённом отчёте не установлен: это не ноль событий';
 $('late-events').innerHTML = data.late.map(eventHTML).join('') || '<p class="muted" style="padding:20px">' + (data.lateAvailable ? 'Новых пропущенных ключей по доступным сведениям не выявлено.' : 'Сведения о первом выводе в этом отчёте отсутствуют.') + '</p>';
 bindIssuerButtons($('late-events'));
 if (data.lateReportLink) {$('late-report-link').hidden = false; fileLink('late-report-link', data.lateReportLink);}

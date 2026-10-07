@@ -131,25 +131,51 @@ def timeline(
     return tuple(notices.values()), tuple(corrections), latest
 
 
+EVENTS = {
+    "first_seen": "запись впервые обнаружена",
+    "grace_end": "льготный срок закончился",
+    "status_default": "впервые наблюдается переход «Технический дефолт» → «Дефолт»",
+}
+
+
 def said(
     notice: Notice, latest: tuple[date, DefaultRecord], last_snapshot: Snapshot | None = None,
 ) -> str:
     """Называет вид и дату события с датой и статусом последнего снимка записи."""
+    return said_record((notice,), latest, last_snapshot)
+
+
+def said_record(
+    notices: tuple[Notice, ...], latest: tuple[date, DefaultRecord],
+    last_snapshot: Snapshot | None = None, marks: tuple[str, ...] | None = None,
+) -> str:
+    """Одна строка на запись источника: переходы по датам и общий хвост снимка записи.
+
+    **Запись — одно обязательство, переходы — его история.** Первое появление,
+    конец льготы и переход в «Дефолт» остаются самостоятельными ключами
+    журнала, а печатаются одной строкой: три строки об одной записи читались
+    бы как три обязательства. `marks` — пометка к каждому переходу в том же
+    порядке, что `notices` (время доставки подтверждающего снимка).
+    """
+    if not notices or len({item.record_id for item in notices}) != 1:
+        raise ValueError("строка уведомления собирается по одной записи источника")
+    order = list(EVENTS)
+    paired = sorted(zip(notices, marks or ("",) * len(notices), strict=True),
+                    key=lambda pair: (pair[0].day, order.index(pair[0].kind)))
     snapshot_day, row = latest
-    if notice.kind == "first_seen":
-        event = "запись впервые обнаружена"
-    elif notice.kind == "grace_end":
-        event = "льготный срок закончился"
-    else:
-        event = "впервые наблюдается переход «Технический дефолт» → «Дефолт»"
-    text = (f"{row.kind.lower()}, выпуск {row.emission_id}, запись {notice.record_id}: "
-            f"{event} {notice.day:%d.%m.%Y}")
-    if notice.kind == "status_default" and notice.previous_snapshot is not None:
-        text += (f"; предыдущий доступный снимок {notice.previous_snapshot:%d.%m.%Y}; "
-                 "точная дата изменения статуса источником не установлена")
+    steps = []
+    for notice, mark in paired:
+        step = f"{EVENTS[notice.kind]} {notice.day:%d.%m.%Y}{mark}"
+        if notice.kind == "status_default" and notice.previous_snapshot is not None:
+            step += (f"; предыдущий доступный снимок {notice.previous_snapshot:%d.%m.%Y}; "
+                     "точная дата изменения статуса источником не установлена")
+        steps.append(step)
+    record_id = notices[0].record_id
+    text = (f"{row.kind.lower()}, выпуск {row.emission_id}, запись {record_id}: "
+            + "; ".join(steps))
     text += (f"; последний доступный снимок записи {snapshot_day:%d.%m.%Y}, "
              f"статус «{row.status}»")
-    if last_snapshot is not None and notice.record_id not in last_snapshot.records:
+    if last_snapshot is not None and record_id not in last_snapshot.records:
         text += (f"; в последнем полном снимке {last_snapshot.day:%d.%m.%Y} "
                  "запись отсутствует; это не подтверждение исполнения")
     text += (f"; дата исполнения в снимке {row.met:%d.%m.%Y}" if row.met is not None

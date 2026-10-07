@@ -2,6 +2,9 @@
 
 import sys
 from datetime import datetime
+from pathlib import Path
+
+import pytest
 
 from finlib.config import settings
 
@@ -94,3 +97,18 @@ def test_a_running_scheduled_run_defers_the_count() -> None:
     assert run._running_today(stale, datetime(2026, 9, 29, 11, 0).astimezone()) is None
     count, broke = run._streak(stale, datetime(2026, 9, 29, 11, 0).astimezone())
     assert count == 0 and broke.startswith("29.09.2026")
+
+
+def test_counters_are_read_as_printed_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сводка берёт счётчики строк из заголовков отчёта, не пересчитывая переходы."""
+    (tmp_path / "changes_2090-01-03.md").write_text(
+        "## Срочное за сутки (02.01.2090 → 03.01.2090): 1\n"
+        "- Тест: купон, выпуск e, запись r: запись впервые обнаружена 02.01.2090; "
+        "льготный срок закончился 03.01.2090\n"
+        "## Доставлено с опозданием: 2\n- a\n- b\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run, "OUTPUT", tmp_path)
+    assert run._changes() == ("changes_2090-01-03.md", "1", "2", "раздела нет")

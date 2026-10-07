@@ -67,13 +67,15 @@ def _data(tmp_path: Path) -> dict:
         "name": "эмитент не установлен",
         "inn": None,
         "kind": "first",
+        "kinds": ["first", "status"],
         "eventOn": "02.01.2090",
         "deliveredAt": "02.01.2090 14:29:06 МСК",
         "firstPrintedOn": "03.01.2090",
         "text": "выпуск synthetic, запись synthetic",
     }
     data["events"] = [event]
-    data["late"] = [{**event, "kind": "grace", "text": "выпуск synthetic, запись other"}]
+    data["late"] = [{**event, "kind": "grace", "kinds": ["grace"],
+                     "text": "выпуск synthetic, запись other"}]
     data["urgentAvailable"], data["lateAvailable"] = True, True
     return data
 

@@ -122,12 +122,18 @@ def report_data(path: Path | None) -> dict:
             )
             if bucket is None or correction or not line.startswith("- "):
                 continue
+            # **Строка — запись источника, переходы — её история**: в одной
+            # строке их может быть несколько, и каждый называется своей датой.
+            steps = sorted(
+                (found.start(), code, found[1])
+                for phrase, code in EVENTS.items()
+                for found in re.finditer(re.escape(phrase) + r" (\d{2}\.\d{2}\.\d{4})", line)
+            )
+            transitions = [{"kind": code, "eventOn": day} for _, code, day in steps]
             kind, event_on = "rating", UNKNOWN
-            for phrase, code in EVENTS.items():
-                found = re.search(re.escape(phrase) + r" (\d{2}\.\d{2}\.\d{4})", line)
-                if found:
-                    kind, event_on = code, found[1]
-                    break
+            if transitions:
+                kind = transitions[0]["kind"]
+                event_on = ", ".join(dict.fromkeys(item["eventOn"] for item in transitions))
             if kind == "rating":
                 assigned = re.search(r" (\d{2}\.\d{2}\.\d{4})$", line)
                 if assigned:
@@ -144,7 +150,7 @@ def report_data(path: Path | None) -> dict:
                     "status": "status_default",
                 }[kind]
                 entry = known.get((record_id[1], journal_kind))
-            delivered = re.search(r"снимок доставлен: ([^;]+)", line)
+            delivered = re.findall(r"снимок доставлен: ([^;)]+)", line)
             first = re.search(r"впервые выведено (\d{2}\.\d{2}\.\d{4})", line)
             result[bucket].append(
                 {
@@ -153,8 +159,10 @@ def report_data(path: Path | None) -> dict:
                     "text": detail,
                     "line": line,
                     "kind": kind,
+                    "kinds": [item["kind"] for item in transitions] or [kind],
+                    "transitions": transitions,
                     "eventOn": event_on,
-                    "deliveredAt": delivered[1]
+                    "deliveredAt": ", ".join(dict.fromkeys(delivered))
                     if delivered
                     else "точное время доставки неизвестно",
                     "firstPrintedOn": (
