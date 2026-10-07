@@ -141,6 +141,12 @@ def _changes() -> tuple[str, str, str, str]:
     источника с её переходами, у «Срочного» — ещё и рейтинговые действия.
     Сводка печатает его тем же словом, а не «событиями»: переходов в строке
     бывает несколько.
+
+    **Смены корзины — заголовок «За сутки сменили корзину: N из M»**
+    (`eval/change_report_run.py`); прежний «Сменили корзину: N из M» читается
+    у старых отчётов. Без суточной точки сравнения отчёт пишет «Суточные
+    смены не установлены» — это не ноль и не «раздела нет», и сводка
+    говорит так же.
     """
     dated = re.compile(r"changes_(\d{4}-\d{2}-\d{2})(?:_(\d{4}))?\.md$")
     found = sorted(
@@ -157,7 +163,10 @@ def _changes() -> tuple[str, str, str, str]:
     text = chosen[3].read_text(encoding="utf-8")
     urgent = re.search(r"^## Срочное[^:]*:\s*(\d+)", text, re.M)
     late = re.search(r"^## Доставлено с опозданием:\s*(\d+)", text, re.M)
-    moved = re.search(r"^## Сменили корзину:\s*(\d+)\s*из\s*(\d+)", text, re.M)
+    moved = re.search(
+        r"^## (?:За сутки с|С)менили корзину:\s*(\d+)\s*из\s*(\d+)", text, re.M
+    )
+    unset = re.search(r"^## Суточные смены не установлены", text, re.M)
     label = chosen[3].name
     if main_report is None:
         label += " (повторного прогона: отчёта прогона по расписанию нет)"
@@ -167,7 +176,9 @@ def _changes() -> tuple[str, str, str, str]:
         label,
         urgent.group(1) if urgent else "раздела нет",
         late.group(1) if late else "раздела нет",
-        f"{moved.group(1)} из {moved.group(2)}" if moved else "раздела нет",
+        f"{moved.group(1)} из {moved.group(2)}" if moved
+        else "не установлены: суточной точки нет" if unset
+        else "раздела нет",
     )
 
 

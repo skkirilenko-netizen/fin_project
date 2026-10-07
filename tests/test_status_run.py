@@ -112,3 +112,26 @@ def test_counters_are_read_as_printed_lines(
     )
     monkeypatch.setattr(run, "OUTPUT", tmp_path)
     assert run._changes() == ("changes_2090-01-03.md", "1", "2", "раздела нет")
+
+
+@pytest.mark.parametrize(
+    ("heading", "said"),
+    [
+        ("## За сутки сменили корзину: 3 из 701\n", "3 из 701"),
+        ("## Сменили корзину: 4 из 700\n", "4 из 700"),
+        ("## Суточные смены не установлены\n", "не установлены: суточной точки нет"),
+    ],
+)
+def test_basket_changes_are_read_from_the_report_heading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, heading: str, said: str,
+) -> None:
+    """Смены корзины читаются из нынешнего заголовка отчёта, прежнего и «не установлены»."""
+    (tmp_path / "changes_2090-01-03.md").write_text(heading, encoding="utf-8")
+    monkeypatch.setattr(run, "OUTPUT", tmp_path)
+    assert run._changes()[3] == said
+
+
+def test_basket_heading_matches_the_report_writer() -> None:
+    """Заголовок, который ищет сводка, печатает отчёт изменений — без расхождения."""
+    writer = (Path(__file__).resolve().parents[1] / "eval" / "change_report_run.py")
+    assert "## За сутки сменили корзину: {changed} из" in writer.read_text(encoding="utf-8")
