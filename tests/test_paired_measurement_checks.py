@@ -173,3 +173,94 @@ def test_pv_variants_declare_substitution_and_keep_the_rest() -> None:
         assert rule.distress_zone.measure == "pv_kbd"
         assert rule.distress_zone.substitution is substitution
         assert rule.lifetime == policy.lifetime and rule.ladder == policy.ladder
+
+
+def _nominal() -> paired_67.MarketPolicy:
+    """Боевая методика с ценой от номинала: замер 7 сравнивает спреды, не цену к PV."""
+    loaded = paired_67.load_market()
+    zone = loaded.distress_zone.model_copy(update={"measure": "nominal"})
+    return loaded.model_copy(update={"distress_zone": zone})
+
+
+def _market7(issuers: dict[str, list[date]], level: Decimal) -> paired_67.Market:
+    """Ряд из точек со спредом 300 б. п. и ориентиром дня `level`."""
+    from finlib.sources.market import Point
+
+    days = sorted({day for own in issuers.values() for day in own})
+    return paired_67.Market(
+        benchmark={day: level for day in days},
+        issuers={
+            inn: {day: Point(day, Decimal(300), Decimal(99), Decimal(1)) for day in own}
+            for inn, own in issuers.items()
+        },
+        counted={}, census={}, universe=len(issuers), with_isin=len(issuers),
+    )
+
+
+_DAYS7 = [date(2090, 1, 2) + timedelta(days=7 * number) for number in range(10)]
+
+
+def _parts7() -> list[paired_67.Part]:
+    """Ранняя и поздняя части синтетического календаря."""
+    split = _DAYS7[5]
+    return [
+        ("Поздняя часть", _DAYS7[5:], lambda day: day >= split),
+        ("Ранняя часть", _DAYS7[:5], lambda day: day < split),
+    ]
+
+
+def test_variant_tallies_share_the_frame_circle_and_observation() -> None:
+    """Ряд варианта без эмитента и ранних дней не меняет знаменателя: разность считается."""
+    policy = _nominal()
+    base = _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(150))
+    variant = _market7({"a": _DAYS7[3:]}, Decimal(80))
+    grounds = {"Разбор": {"market_spread_level"}}
+    when = {"a": _DAYS7[-1] + timedelta(days=10)}
+    old = paired_67.tallies(policy, base, when, set(), grounds, _DAYS7)
+    # Без рамки — ровно тот отказ, что оборвал замер 7 после заголовка таблицы.
+    alone = paired_67.tallies(policy, variant, when, set(), grounds, _DAYS7)
+    with pytest.raises(ValueError, match="охват ИНН различается"):
+        paired_67.paired(old["Разбор"][0], alone["Разбор"][0])
+    new = paired_67.tallies(policy, variant, when, set(), grounds, _DAYS7, frame=base)
+    assert paired_67.paired(old["Разбор"][0], new["Разбор"][0]).members == 2
+    assert paired_67.uncovered(base, variant, _DAYS7) == (10 + 3, 20)
+
+
+def test_measure7_prints_every_step_with_floor_and_parts() -> None:
+    """Обе ступени в каждой части, по каждой — дни ниже пола и квантиль пола."""
+    policy = _nominal()
+    base = _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(150))
+    variants = {
+        "а) Z, полное ядро": (policy, _market7({"a": _DAYS7, "b": _DAYS7}, Decimal(90))),
+        "б) Z, ядро без госбумаг": (policy, _market7({"a": _DAYS7}, Decimal(120))),
+    }
+    grounds = {"Разбор": {"market_spread_level"}}
+    lines = paired_67.measure7(policy, base, variants, {}, set(), grounds, _parts7())
+    text = "\n".join(lines)
+    for part in ("Поздняя часть", "Ранняя часть"):
+        assert f"## {part}: срезов 5" in text
+    assert sum(line.startswith("| а) Z, полное ядро | Разбор |") for line in lines) == 2
+    assert sum(line.startswith("| б) Z, ядро без госбумаг | Разбор |") for line in lines) == 2
+    assert "| а) Z, полное ядро | 5 из 5 | 100.0% | 0 из 10 |" in lines
+    assert "| б) Z, ядро без госбумаг | 0 из 5 | 0.0% | 5 из 10 |" in lines
+    assert "| G, полное ядро (база) | 0 из 5 | 0.0% | — |" in lines
+
+
+@pytest.mark.parametrize("case", ["grounds", "variant_days", "circle", "variants"])
+def test_measure7_refuses_an_empty_result(case: str) -> None:
+    """Пустой результат — исключение с причиной, а не таблица без строк."""
+    policy = _nominal()
+    base = _market7({"a": _DAYS7}, Decimal(150))
+    variants = {"а) Z, полное ядро": (policy, _market7({"a": _DAYS7}, Decimal(90)))}
+    grounds: dict[str, set[str]] = {"Разбор": {"market_spread_level"}}
+    if case == "grounds":
+        grounds = {}
+    elif case == "variant_days":
+        variants = {"а) Z, полное ядро": (policy, _market7({"a": _DAYS7[:5]}, Decimal(90)))}
+    elif case == "circle":
+        base = _market7({}, Decimal(150))
+        base.benchmark.update({day: Decimal(150) for day in _DAYS7})
+    else:
+        variants = {}
+    with pytest.raises(ValueError, match="замер 7"):
+        paired_67.measure7(policy, base, variants, {}, set(), grounds, _parts7())

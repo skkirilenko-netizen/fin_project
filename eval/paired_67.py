@@ -13,6 +13,12 @@ pv_kbd`, `scoring.market.findings`), ряд с отношением — боев
 **Решение принимается по поздней части** (ROADMAP, принцип 2): порог 0,6
 не подбирается, а вариант подстановки — выбор, и интервал на всём
 календаре печатается справочно, как исследовательская сводка.
+
+**Замер 7 размечен так же** — поздняя, ранняя части и весь календарь.
+Ступени: а) Z на полном ядре, б) Z на ядре без госбумаг — обе против G
+на полном ядре; пороги ступеней варианта — из его ранней части; при каждой —
+дни ориентира ниже пола и квантиль пола. Круг и наблюдение — боевого ряда
+(`tallies(frame=…)`): ряд из строк G/Z покрывает не те же дни.
 """
 
 import argparse
@@ -22,6 +28,7 @@ import logging
 import pickle
 import random
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -101,10 +108,19 @@ def validate_cuts(cuts: list[date], until: date) -> None:
 
 def tallies(
     policy: MarketPolicy, market: Market, when: dict[str, date], systemic: set[str],
-    grounds_of: dict[str, set[str]], cuts: list[date],
+    grounds_of: dict[str, set[str]], cuts: list[date], frame: Market | None = None,
 ) -> dict:
-    """ИНН → счётчик поточечной меры по набору оснований, боевым `findings`."""
-    circle = set(market.issuers)
+    """ИНН → счётчик поточечной меры по набору оснований, боевым `findings`.
+
+    **Круг и наблюдение — у ряда-рамки** (`frame`, по умолчанию сам ряд).
+    Ряд варианта, собранный из строк G/Z, покрывает не те же дни и не тех же
+    эмитентов, что боевой: день без ядра варианта выпадает у всех, а парная
+    разность требует одного знаменателя. Эмитент, которого в ряду варианта
+    нет к срезу, в нём наблюдается, но основания не получает — это и есть
+    цена смены охвата, и она считается, а не прячется.
+    """
+    frame = frame or market
+    circle = set(frame.issuers)
     cache: dict = {}
 
     def said(inn: str, day: date) -> tuple:
@@ -113,7 +129,7 @@ def tallies(
         return cache[(inn, day)]
 
     def observed(inn: str, day: date) -> bool:
-        own = market.ordered(inn)
+        own = frame.ordered(inn)
         return bool(own) and own[0].day <= day
 
     found = {}
@@ -218,6 +234,102 @@ def split_cuts(cuts: list[date], split: date) -> tuple[list[date], list[date]]:
     return early, late
 
 
+def training(market: Market, split: date) -> Market:
+    """Ряд ранней части: по нему пересчитываются пороги ступеней варианта (принцип 2)."""
+    return Market(
+        benchmark={day: value for day, value in market.benchmark.items() if day < split},
+        issuers=market.issuers,
+        counted=market.counted,
+        census=market.census,
+        universe=market.universe,
+        with_isin=market.with_isin,
+        ratios=market.ratios,
+    )
+
+
+def below_floor(market: Market, floor: Decimal, within: Callable[[date], bool]) -> tuple[int, int]:
+    """Дней ориентира части ниже пола и всего дней ориентира части."""
+    values = [value for day, value in market.benchmark.items() if within(day)]
+    return sum(1 for value in values if value < floor), len(values)
+
+
+def uncovered(frame: Market, market: Market, cuts: list[date]) -> tuple[int, int]:
+    """Наблюдений эмитент-срез у рамки, где у варианта к срезу точки нет, и всех наблюдений."""
+    missing = total = 0
+    for inn in frame.issuers:
+        own, mine = frame.ordered(inn), market.ordered(inn)
+        for cut in cuts:
+            if own and own[0].day <= cut:
+                total += 1
+                missing += int(not mine or mine[0].day > cut)
+    return missing, total
+
+
+Part = tuple[str, list[date], Callable[[date], bool]]
+
+
+def measure7(
+    policy: MarketPolicy, base: Market, variants: dict[str, tuple[MarketPolicy, Market]],
+    when: dict[str, date], systemic: set[str], grounds: dict[str, set[str]],
+    parts: list[Part],
+) -> list[str]:
+    """Таблицы замера 7 по частям календаря: каждая ступень против G на полном ядре.
+
+    **Пустой результат — отказ с причиной, а не пустая таблица.** Строки
+    собираются целиком до печати: таблица с заголовком и без строк читалась
+    бы как «изменений нет», хотя замер не досчитан.
+    """
+    floor = policy.floor
+    if floor is None:
+        raise ValueError("замер 7: пол ориентира в методике не объявлен")
+    if not grounds:
+        raise ValueError("замер 7: сравнивать нечего — у лестницы нет ступеней и нет «Разбора»")
+    if not variants:
+        raise ValueError("замер 7: ступеней нет")
+    lines: list[str] = []
+    for title, cuts, within in parts:
+        if not cuts:
+            raise ValueError(f"замер 7, {title}: срезов нет")
+        before = tallies(policy, base, when, systemic, grounds, cuts)
+        rows: list[str] = []
+        below, days = below_floor(base, floor, within)
+        if not days:
+            raise ValueError(f"замер 7, {title}: у базы G нет дней ориентира в части")
+        floors = [f"| G, полное ядро (база) | {below} из {days} | {below / days:.1%} | — |"]
+        for label, (rule, market) in variants.items():
+            new = tallies(rule, market, when, systemic, grounds, cuts, frame=base)
+            for key in grounds:
+                result = paired(before[key][0], new[key][0])
+                if not result.members:
+                    raise ValueError(f"замер 7, {title}, {label}, {key}: круг эмитентов пуст")
+                rows.append(result_row(label, key, result))
+            below, days = below_floor(market, floor, within)
+            if not days:
+                raise ValueError(
+                    f"замер 7, {title}, {label}: у варианта нет дней ориентира в части"
+                )
+            missing, total = uncovered(base, market, cuts)
+            floors.append(
+                f"| {label} | {below} из {days} | {below / days:.1%} | {missing} из {total} |"
+            )
+        if not rows:
+            raise ValueError(f"замер 7, {title}: ни одной строки сравнения")
+        lines += [
+            f"## {title}: срезов {len(cuts)}, {cuts[0]} — {cuts[-1]}\n",
+            "| Ступень | Основание | Прирост G | Прирост варианта | "
+            f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |",
+            "|---|---|---|---|---|---|---|---|",
+            *rows,
+            "",
+            f"| Ряд | Дней ориентира ниже пола {floor} б. п. | Квантиль пола в ядре "
+            "| Наблюдений без точки варианта |",
+            "|---|---|---|---|",
+            *floors,
+            "",
+        ]
+    return lines
+
+
 def check_snapshot(metadata: dict, expected: str) -> None:
     """Требует явно согласованную базу и серверный запрет записи."""
     if metadata != {"db": expected, "ro": "on"}:
@@ -301,38 +413,46 @@ def main() -> int:
         saved = pickle.load(handle)
     rows, kind, by_code = saved["rows"], saved["kind"], saved["by_code"]
     verify_g(rows, base)
-    print("# 7. Исследовательская сводка: Z, ядро без ОФЗ, субфедеральных "
-          "и муниципальных, против G и полного ядра; весь календарь\n")
     with contextlib.redirect_stdout(io.StringIO()):
         gov = composition(rows, kind, by_code)
     clean = build(rows, 3, lambda item: item[0] not in gov, base.census)
     full = build(rows, 3, lambda item: True, base.census)
-    rules = with_steps(policy, clean)
-    full_rules = with_steps(policy, full)
+    # Пороги ступеней варианта — из его распределения ранней части: поздняя
+    # часть, по которой решение, в выбор порога не входит (принцип 2).
+    variants = {
+        "а) Z, полное ядро": (with_steps(policy, training(full, args.split)), full),
+        "б) Z, ядро без госбумаг": (with_steps(policy, training(clean, args.split)), clean),
+    }
     grounds = {**steps, "Разбор": review}
-    before = tallies(policy, base, when, systemic, grounds, cuts)
-    middle = tallies(full_rules, full, when, systemic, grounds, cuts)
-    after = tallies(rules, clean, when, systemic, grounds, cuts)
-    print(f"Госбумаг в ядре исключено: {len(gov)}\n")
-    print("| Ступень | Основание | Прирост прежний | Прирост новый | "
-          f"{CONFIDENCE} % интервал разности | пригодные / все | исключены | ИНН |")
-    print("|---|---|---|---|---|---|---|---|")
-    for key in grounds:
-        print(result_row("G → Z, полное ядро", key, paired(before[key][0], middle[key][0])))
-        print(result_row("Z: полное → чистое ядро", key, paired(middle[key][0], after[key][0])))
-    print()
-    floor = policy.floor
-    print(f"Дней ниже пола {floor}: G полное — "
-          f"{sum(1 for v in base.benchmark.values() if v < floor)} из {len(base.benchmark)}, "
-          f"Z чистое — {sum(1 for v in clean.benchmark.values() if v < floor)} "
-          f"из {len(clean.benchmark)}\n")
-    for name, market, rule in (("G, полное ядро", base, policy), ("Z, чистое ядро", clean, rules)):
+    parts: list[Part] = [
+        ("Поздняя часть — по ней решение", late, lambda day: day >= args.split),
+        ("Ранняя часть", early, lambda day: day < args.split),
+        ("Весь календарь — исследовательская сводка, не основание решения", cuts,
+         lambda day: True),
+    ]
+    tables = measure7(policy, base, variants, when, systemic, grounds, parts)
+    eve = []
+    clean_rule = variants["б) Z, ядро без госбумаг"][0]
+    for name, market, rule in (("G, полное ядро", base, policy),
+                               ("б) Z, ядро без госбумаг", clean, clean_rule)):
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             _market_pointwise(rule, market, when)
         text = buffer.getvalue()
-        print(f"## Накануне события: {name}\n")
-        print(text[text.index("| Основание | Стоит накануне"):].split("\n\n")[0] + "\n")
+        eve += [f"## Накануне события, весь календарь: {name}\n",
+                text[text.index("| Основание | Стоит накануне"):].split("\n\n")[0] + "\n"]
+    print("# 7. Z и ядро без ОФЗ, субфедеральных и муниципальных против G "
+          "на полном ядре\n")
+    print(f"Госбумаг в ядре исключено: {len(gov)}. Каждая ступень — против G "
+          "на полном ядре (боевой ряд), круг и наблюдение эмитентов — его; "
+          "эмитент без точки варианта к срезу наблюдается, но основания не получает.\n")
+    print("Пороги ступеней варианта — из его ранней части (до "
+          f"{args.split:%d.%m.%Y}): " + "; ".join(
+              f"{label}: " + ", ".join(
+                  f"p{step.percentile} {step.multiple:.2f}" for step in rule.ladder.steps)
+              for label, (rule, _) in variants.items()) + "\n")
+    print("\n".join(tables))
+    print("\n".join(eve))
     return 0
 
 
