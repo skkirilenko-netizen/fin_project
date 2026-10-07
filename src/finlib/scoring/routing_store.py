@@ -938,6 +938,14 @@ def routing_rows(
             today,
             offer_kinds=routing.refinancing.offer_kinds,
             estimator=floating.estimator(coupons) if coupons else None,
+            offers_in_payments=routing.refinancing.offers_in_payments,
+        )
+        # Шаг 2 (`offers_in_payments`): доля платежей года, приходящаяся
+        # на оферты окна; `None` — оферты считаются второй мерой, как прежде.
+        offers_in_due = (
+            ((in_unit(plan.offers_in_due, unit_code) or Decimal(0)) if plan.known else Decimal(0))
+            if routing.refinancing.offers_in_payments
+            else None
         )
         refinance = Refinance(
             due=in_unit(plan.scheduled, unit_code) if plan.known else None,
@@ -959,6 +967,7 @@ def routing_rows(
             by_terms=(in_unit(plan.by_terms, unit_code) or Decimal(0))
             if plan.known
             else Decimal(0),
+            offers_in_due=offers_in_due,
         )
         # **Доводы маршрута набираются один раз и переиспользуются вторым
         # проходом.** Прежде второй проход собирал перечень доводов заново
@@ -1335,7 +1344,14 @@ def _rendered(value: object) -> str:
     if isinstance(value, ManualFloor):
         return f"{value.author}:{value.basket}:{value.decided_on}:{value.valid_until}"
     if isinstance(value, Refinance):
-        return f"{value.due}:{value.offered}:{value.cash}:{value.unit}"
+        # Доля оферт входит в отпечаток только при шаге 2: прежний вид строки
+        # сохраняется, иначе вся история изменилась бы «у нас».
+        if value.offers_in_due is None:
+            return f"{value.due}:{value.offered}:{value.cash}:{value.unit}"
+        return (
+            f"{value.due}:{value.offered}:{value.cash}:{value.unit}"
+            f":offers={value.offers_in_due}"
+        )
     if isinstance(value, IssuerType):
         return value.code
     if isinstance(value, RiskSector):

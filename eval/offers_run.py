@@ -10,15 +10,16 @@
 - **Шаг 1 — без call.** Call — право эмитента погасить, а не право
   владельца предъявить; во второй мере остаются put и «доп. оферта»
   (выкуп по предложению эмитента — тоже право владельца).
-- **Шаг 2 — объединение.** Оферты в окне складываются с платежами года
-  в одну меру (позиция владельца 01.10.2026: оферта в окне — возможное
-  погашение всего объёма в обращении на дату оферты), вторая мера пуста.
-  Виды оферт — как сейчас: шаги меряются порознь.
+- **Шаг 2 — объединение.** Оферты в окне входят в платежи года одной мерой
+  (решения владельца 01.10.2026 и 07.10.2026; `refinancing.offers_in_payments`):
+  платежи графика до дня выкупа включительно, объём на день выкупа после
+  погашений — по цене оферты, когда она названа, — платежи после выкупа
+  сняты, вторая мера не выставляется. Виды оферт — как сейчас: шаги
+  меряются порознь.
 
 **Замер не считает сам**: подменяется только чтение оферт (шаг 1) либо
-итог `refinancing` (шаг 2); корзины — `routing_rows`, календарь — поточечная
-мера корзины. Купоны после даты оферты в шаге 2 не вычитаются — это
-завышение сверху, названное здесь, а не исправленное.
+флаг справочника (шаг 2); корзины — `routing_rows`, календарь — поточечная
+мера корзины.
 """
 
 import contextlib
@@ -26,7 +27,6 @@ import json
 import logging
 import sys
 from collections import Counter
-from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -79,18 +79,29 @@ def step_one():  # noqa: ANN201
 
 @contextlib.contextmanager
 def step_two():  # noqa: ANN201
-    """Шаг 2: оферты года складываются с платежами года в одну меру."""
-    original = routing_store.refinancing
+    """Шаг 2: боевой расчёт с `refinancing.offers_in_payments: true`.
 
-    def merged(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        found = original(*args, **kwargs)
-        return replace(found, scheduled=found.scheduled + found.offered, offered=found.offered * 0)
+    Подменяется только справочник, который читает сборка входов маршрута:
+    расчёт платежей, формулировки и отказ от второй меры — те же, что
+    включит переключение флага в `routing.yaml`.
+    """
+    original = routing_store.load_routing
 
-    routing_store.refinancing = merged
+    def switched():  # noqa: ANN202
+        policy = original()
+        return policy.model_copy(
+            update={
+                "refinancing": policy.refinancing.model_copy(
+                    update={"offers_in_payments": True}
+                )
+            }
+        )
+
+    routing_store.load_routing = switched
     try:
         yield
     finally:
-        routing_store.refinancing = original
+        routing_store.load_routing = original
 
 
 def main() -> int:

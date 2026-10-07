@@ -85,9 +85,16 @@ class Schedule:
     nominal: Decimal | None
 
     def due_between(
-        self, start: date, edge: date, outstanding: Decimal | None
+        self,
+        start: date,
+        edge: date,
+        outstanding: Decimal | None,
+        last: date | None = None,
     ) -> Decimal | None:
         """Платежи отрезка в валюте выпуска; None — считать нечем.
+
+        `last` — последний день, платежи которого ещё в счёт (день выкупа
+        по оферте): после него выпуск выкуплен, и график дальше не платится.
 
         **Отрезок задан двумя датами, а не сроком от одной.** Край окна
         закреплён на отчётной дате плюс год, а считать надо от сегодня:
@@ -102,9 +109,33 @@ class Schedule:
             return None
         bonds = outstanding / self.nominal
         return sum(
-            (item.total * bonds for item in self.payments if start <= item.due < edge),
+            (
+                item.total * bonds
+                for item in self.payments
+                if start <= item.due < edge and (last is None or item.due <= last)
+            ),
             start=Decimal(0),
         )
+
+    def residual_after(self, edge: date, last: date) -> Decimal | None:
+        """Остаток номинала одной бумаги после погашений до `last` включительно.
+
+        **Погашения берутся и прошедшие**: объём в обращении источник отдаёт
+        по первоначальному номиналу, и уменьшает его только график. Погашение
+        за краем окна в счёт не идёт — в платежах окна его нет, и остаток,
+        уменьшенный на него, потерял бы его из суммы вовсе.
+        """
+        if not self.nominal or self.nominal <= 0:
+            return None
+        paid = sum(
+            (
+                item.redemption
+                for item in self.payments
+                if item.due < edge and item.due <= last
+            ),
+            start=Decimal(0),
+        )
+        return max(self.nominal - paid, Decimal(0))
 
 
 def _number(value: object) -> Decimal:
@@ -174,8 +205,8 @@ def offers_of(
 ) -> tuple[date, ...] | None:
     """Даты оферт выпуска с диска; None — ответа источника нет.
 
-    Записей на одну оферту бывает две — день предъявления и день приобретения,
-    — и различать их здесь незачем: в окно попадают обе или ни одна. `None`
+    Запись одна на оферту (проверено на диске 07.10.2026); записи одного дня
+    у выпуска бывают, но мера — есть ли оферта в окне, а не их число. `None`
     означает, что доставка до выпуска не дошла, и это не «оферт нет».
 
     `kinds` — виды оферт (`type_rus` источника), которые берутся; пусто —
@@ -195,6 +226,57 @@ def offers_of(
         except ValueError:
             continue
     return tuple(sorted(found))
+
+
+@dataclass(frozen=True, slots=True)
+class Offer:
+    """Оферта выпуска: её даты, день выкупа и цена в процентах номинала."""
+
+    dates: tuple[date, ...]
+    settles: date
+    # Цена оферты источника (`price`, чистая, в % номинала); None — не названа.
+    price: Decimal | None
+
+
+# Поля даты записи оферты: дата опциона и период предъявления. Оферта в окне,
+# если в нём хотя бы одна из них; день выкупа — поздняя.
+OFFER_DATE_FIELDS = ("date", "date_open", "date_close")
+
+
+def offer_terms_of(
+    emission_id: str, kinds: tuple[str, ...] | None = None
+) -> tuple[Offer, ...] | None:
+    """Оферты выпуска с датами и ценой; None — ответа источника нет.
+
+    **Одна запись источника — одна оферта** (описание `get_offert`,
+    `docs/cbonds/openapi.yaml`): `date` — дата опциона, `date_open`
+    и `date_close` — период предъявления. Днём выкупа берётся поздняя
+    из дат записи (решение владельца 07.10.2026).
+    """
+    path = CACHE / f"offert_{emission_id}.json"
+    if not path.exists():
+        return None
+    found: list[Offer] = []
+    for item in json.loads(path.read_text(encoding="utf-8")).get("items", []):
+        if kinds is not None and str(item.get("type_rus") or "") not in kinds:
+            continue
+        dates: list[date] = []
+        for field in OFFER_DATE_FIELDS:
+            try:
+                dates.append(date.fromisoformat(str(item.get(field) or "")[:10]))
+            except ValueError:
+                continue
+        if not dates:
+            continue
+        price = _number(item.get("price"))
+        found.append(
+            Offer(
+                dates=tuple(sorted(set(dates))),
+                settles=max(dates),
+                price=price if price > 0 else None,
+            )
+        )
+    return tuple(sorted(found, key=lambda offer: offer.settles))
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +308,9 @@ class Refinancing:
     # в графике не проставлена: это данные, а не оценка (решение владельца
     # 02.10.2026), и в `estimated` они не входят — только в `scheduled`.
     by_terms: Decimal = Decimal(0)
+    # Объём, предъявляемый по офертам окна (входит в `scheduled`), когда
+    # оферты считаются в платежах года (`offers_in_payments`); иначе ноль.
+    offers_in_due: Decimal = Decimal(0)
 
     @property
     def known(self) -> bool:
@@ -239,11 +324,19 @@ def refinancing(
     today: date,
     offer_kinds: tuple[str, ...] | None = None,
     estimator: Estimator | None = None,
+    offers_in_payments: bool = False,
 ) -> Refinancing:
     """Платежи и оферты ближайших месяцев по выпускам эмитента, в рублях.
 
     Оферты считаются порознь: предъявление — право владельца, и сложенное
     с купоном оно выдало бы возможное за состоявшееся.
+
+    **С `offers_in_payments` оферта входит в платежи года** (решения владельца
+    01.10.2026 и 07.10.2026, шаг 2): у выпуска с офертой в окне платежи
+    графика считаются до дня выкупа включительно, к ним прибавляется объём
+    в обращении после погашений до этого дня — по цене оферты, когда она
+    названа, иначе по номиналу, — а платежи после выкупа снимаются. Выкуп
+    за краем окна: платежи — до края, объём — на край.
 
     **Окно скользящее: от сегодня на объявленное число дней вперёд**
     (решение человека 23.09.2026). Край едет посуточно, и это не порок,
@@ -260,7 +353,7 @@ def refinancing(
     Денежные средства при этом остаются на отчётную дату, а платежи всегда
     будущие: моменты расходятся намеренно — это предмет меры, а не её изъян.
     """
-    scheduled = offered = estimated = by_terms = Decimal(0)
+    scheduled = offered = estimated = by_terms = in_due = Decimal(0)
     counted = no_schedule = no_volume = no_offers = unknown = 0
     bases: list[str] = []
     start = today
@@ -279,11 +372,32 @@ def refinancing(
         if outstanding is None:
             no_volume += 1
             continue
-        due = plan.due_between(start, edge, outstanding)
+        # **Первая оферта окна** — у которой в окне хотя бы одна дата; платежи
+        # графика до её дня выкупа включительно, дальше выпуск выкуплен.
+        first: Offer | None = None
+        if offers_in_payments:
+            terms = offer_terms_of(emission, offer_kinds)
+            first = next(
+                (
+                    item
+                    for item in terms or ()
+                    if any(start <= day < edge for day in item.dates)
+                ),
+                None,
+            )
+        last = first.settles if first is not None else None
+        due = plan.due_between(start, edge, outstanding, last)
         if due is None:
             no_volume += 1
             continue
         scheduled += due
+        if first is not None and plan.nominal:
+            residual = plan.residual_after(edge, first.settles) or Decimal(0)
+            volume = outstanding / plan.nominal * residual
+            if first.price is not None:
+                volume = volume * first.price / 100
+            scheduled += volume
+            in_due += volume
         if estimator is not None and plan.nominal:
             # **Неустановленный купон окна оценивается, а не читается нулём**
             # (`sources.floating`); не оценённый — выпуск идёт в счёт
@@ -291,6 +405,8 @@ def refinancing(
             missed = False
             for item in plan.payments:
                 if not (start <= item.due < edge) or item.coupon_known:
+                    continue
+                if last is not None and item.due > last:
                     continue
                 amount, basis, data = estimator(emission, item, plan, today)
                 if amount is None:
@@ -327,4 +443,5 @@ def refinancing(
         unknown=unknown,
         bases=tuple(bases),
         by_terms=by_terms,
+        offers_in_due=in_due,
     )
