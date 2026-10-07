@@ -201,9 +201,9 @@ def test_every_statement_has_an_offers_variant() -> None:
         assert "{offers}" in templates[variant]
 
 
-def test_flag_is_off_by_default() -> None:
-    """Методика объявляет шаг 2 выключенным: маршрут прежний до решения."""
-    assert load_routing().refinancing.offers_in_payments is False
+def test_flag_is_on_by_decision() -> None:
+    """Методика объявляет шаг 2 включённым (решение владельца 07.10.2026)."""
+    assert load_routing().refinancing.offers_in_payments is True
 
 
 def _verdict(offers_in_due: Decimal | None):  # noqa: ANN202
