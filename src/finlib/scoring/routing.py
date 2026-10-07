@@ -960,6 +960,10 @@ class Overrides:
     только величина, и сравнение «было/стало» идёт тем же маршрутом.
     `floors` — оценка снизу того же показателя, встающая на его место,
     когда точной величины нет (аренда не раскрыта).
+    `bound` — порог границы по коду границы (`rule.bound`), отдельно от конца
+    шкалы показателя, на который она опирается: у границы своё распределение
+    (замер 8, решение владельца 07.10.2026). Пусто — порог границы, как
+    прежде, у конца шкалы (`review` либо крайняя опорная точка).
     """
 
     review: Mapping[str, Decimal] = None  # type: ignore[assignment]
@@ -967,13 +971,14 @@ class Overrides:
     cover: Mapping[str, Decimal] = None  # type: ignore[assignment]
     metrics: Mapping[str, str] = None  # type: ignore[assignment]
     floors: Mapping[str, str] = None  # type: ignore[assignment]
+    bound: Mapping[str, Decimal] = None  # type: ignore[assignment]
     standard: Standard | None = None
     branch_in: frozenset[str] | None = None
     branch_out: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Пустые перечни создаются у каждого варианта свои."""
-        for name in ("review", "attention", "cover", "metrics", "floors"):
+        for name in ("review", "attention", "cover", "metrics", "floors", "bound"):
             if getattr(self, name) is None:
                 object.__setattr__(self, name, {})
 
@@ -1611,8 +1616,9 @@ def route(
                 ),
             )
         )
-    debt_threshold = over.review.get(
-        rule.bound_of, catalogue.threshold_of(rule.bound_of)
+    debt_threshold = over.bound.get(
+        rule.bound,
+        over.review.get(rule.bound_of, catalogue.threshold_of(rule.bound_of)),
     )
     # **Отчётности нет вовсе — одно обстоятельство, а не перечень пробелов.**
     # Маршрут при этом строится: события и рейтинги от стандарта не зависят.
