@@ -28,8 +28,15 @@ from finlib.sources.market import Market, MarketPolicy, Point, load_market
 
 
 def _policy() -> MarketPolicy:
-    """Боевая методика: проверяется она сама, а не её копия."""
-    return load_market()
+    """Боевая методика с ценой от номинала: признак по PV — `test_price_to_pv.py`.
+
+    С 07.10.2026 действует `pv_kbd`; синтетические ряды здесь собраны без
+    отношения к PV и проверяют срок жизни, уровень и спред, общие у обоих
+    измерений зоны.
+    """
+    policy = load_market()
+    zone = policy.distress_zone.model_copy(update={"measure": "nominal"})
+    return policy.model_copy(update={"distress_zone": zone})
 
 
 def _market(points: dict[str, list[Point]], level: Decimal = Decimal(100)) -> Market:
