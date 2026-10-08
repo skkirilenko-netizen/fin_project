@@ -32,12 +32,15 @@
 / 365 (база начисления выпуска не учитывается — допущение, названо).
 """
 
+import bisect
+import calendar
 import json
 import re
+import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from functools import cache
 from pathlib import Path
 
@@ -508,7 +511,148 @@ def estimator(rules: dict) -> Callable[[str, Payment, Schedule, date], tuple]:
 PV_KINDS: tuple[str, ...] = (TERMS, ESTIMATE, LAST_KNOWN)
 
 
-def pv_coupons(rules: dict) -> Callable[[str, date], dict[date, Decimal]]:
+# Значение индекса в потоке к PV (`distress_zone.pv_floating_index`):
+# текущее на день торгов либо гибрид — текущее для ближних периодов,
+# форвард КБД для дальних.
+CURRENT = "current"
+HYBRID = "hybrid"
+YEAR = Decimal(365)
+FORWARD_PRECISION = 20
+
+
+def months_after(day: date, months: int) -> date:
+    """Тот же день месяца через `months` месяцев; нет такого дня — последний день месяца."""
+    year, month = divmod(day.year * 12 + day.month - 1 + months, 12)
+    month += 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def forward_rate(
+    points: list[tuple[Decimal, Decimal]], t1: Decimal, t2: Decimal
+) -> Decimal | None:
+    """Форвардная ставка кривой на отрезок [t1, t2] лет, % годовых; годовой компаундинг.
+
+    Точки — линейной интерполяцией `market.curve_at`, компаундинг — тот же,
+    что у потока к PV (`zspread.present_value`).
+    """
+    from finlib.sources.market import curve_at
+
+    if t2 <= t1 or t2 <= 0:
+        return None
+    t1 = max(t1, Decimal(0))
+    with localcontext() as ctx:
+        ctx.prec = FORWARD_PRECISION
+        far = 1 + curve_at(points, t2)[0] / 100
+        near = 1 + curve_at(points, t1)[0] / 100 if t1 > 0 else Decimal(1)
+        if far <= 0 or near <= 0:
+            return None
+        growth = (t2 * far.ln() - t1 * near.ln()) / (t2 - t1)
+        return (growth.exp() - 1) * 100
+
+
+class Forward:
+    """Форвард индекса на купонный период от КБД дня торгов (проект forward_index).
+
+    Ключевая — форвард КБД на период минус базис короткого конца: медиана
+    «кратчайшая точка КБД − ключевая» за `basis_days` торговых дней КБД
+    до дня торгов. RUONIA — ещё минус медиана «ключевая − RUONIA» за то же
+    окно (RUONIA, опубликованная к дню торгов). КБД N лет — форвардная точка
+    кривой на N лет от начала периода, без базиса. Премия за срок
+    не вычитается (решение владельца 08.10.2026: на диске один цикл
+    смягчения). Ряды читаются один раз на сборку.
+    """
+
+    def __init__(self, basis_days: int, stale_days: int) -> None:
+        self.window = basis_days
+        self.stale = timedelta(days=stale_days)
+        self.key = list(key_rate())
+        self.key_days = [day for day, _ in self.key]
+        self.ruonia = list(ruonia())
+        self.ruonia_days = [day for day, _, _ in self.ruonia]
+        raw = curves()
+        self.curves = {date.fromisoformat(day): points for day, points in raw.items()}
+        self.curve_days = sorted(self.curves)
+        self._basis: dict[date, tuple[Decimal, Decimal | None] | None] = {}
+
+    def key_on(self, day: date) -> Decimal | None:
+        """Ключевая, действующая на день; день раньше начала ряда — None."""
+        place = bisect.bisect_right(self.key_days, day)
+        return self.key[place - 1][1] if place else None
+
+    def ruonia_on(self, day: date, known_by: date) -> Decimal | None:
+        """RUONIA последнего дня ставки не позже дня, опубликованная к `known_by`."""
+        place = bisect.bisect_right(self.ruonia_days, day)
+        while place and self.ruonia[place - 1][1] > known_by:
+            place -= 1
+        if not place or day - self.ruonia[place - 1][0] > self.stale:
+            return None
+        return self.ruonia[place - 1][2]
+
+    def curve_on(self, day: date) -> tuple[list[tuple[Decimal, Decimal]], date] | None:
+        """Кривая последнего дня не позже дня и сам день; старше свежести — None."""
+        place = bisect.bisect_right(self.curve_days, day)
+        if not place or day - self.curve_days[place - 1] > self.stale:
+            return None
+        seen = self.curve_days[place - 1]
+        return self.curves[seen], seen
+
+    def basis(self, day: date) -> tuple[Decimal, Decimal | None] | None:
+        """Базис короткого конца к ключевой и «ключевая − RUONIA» за окно; None — нет."""
+        if day in self._basis:
+            return self._basis[day]
+        place = bisect.bisect_right(self.curve_days, day)
+        short: list[Decimal] = []
+        spread: list[Decimal] = []
+        for seen in self.curve_days[max(0, place - self.window):place]:
+            key = self.key_on(seen)
+            if key is None:
+                continue
+            short.append(self.curves[seen][0][1] - key)
+            overnight = self.ruonia_on(seen, day)
+            if overnight is not None:
+                spread.append(key - overnight)
+        found = (
+            (statistics.median(short), statistics.median(spread) if spread else None)
+            if short
+            else None
+        )
+        self._basis[day] = found
+        return found
+
+    def index(
+        self, terms: Terms, day: date, start: date, due: date
+    ) -> tuple[Decimal, date] | None:
+        """Форвардное значение индекса на период [start, due] и день кривой; None — нет."""
+        got = self.curve_on(day)
+        if got is None:
+            return None
+        points, seen = got
+        t1 = Decimal((start - day).days) / YEAR
+        t2 = Decimal((due - day).days) / YEAR
+        if terms.index == "ofz_curve":
+            if terms.term is None:
+                return None
+            begin = max(t1, Decimal(0))
+            found = forward_rate(points, begin, begin + terms.term)
+            return (found, seen) if found is not None else None
+        forward = forward_rate(points, t1, t2)
+        basis = self.basis(day)
+        if forward is None or basis is None:
+            return None
+        short, spread = basis
+        if terms.index in ("key_rate", "refinancing_rate"):
+            return forward - short, seen
+        if terms.index == "ruonia" and spread is not None:
+            return forward - short - spread, seen
+        return None
+
+
+def pv_coupons(
+    rules: dict,
+    index: str = CURRENT,
+    near_months: int | None = None,
+    basis_days: int | None = None,
+) -> Callable[[str, date], dict[date, Decimal]]:
     """Оценки неустановленных будущих купонов выпуска на день торгов: срок → сумма.
 
     Та же оценка, что у рефинансирования (`estimate`, `terms_of`), по графику
@@ -516,16 +660,38 @@ def pv_coupons(rules: dict) -> Callable[[str, date], dict[date, Decimal]]:
     сегодня: ряд строится за прошлые дни. Купон без оценки в ответе
     отсутствует — поток у такой бумаги не строится. Правило выпуска и ставка
     индекса дня запоминаются на время одной сборки ряда.
+
+    `index` — значение индекса в формуле условий: `current` — на день торгов
+    у всех периодов; `hybrid` — у текущего периода и периодов, начинающихся
+    не позже `near_months` месяцев от дня торгов, текущее, у дальних —
+    форвард КБД на период (`Forward`, окно базиса `basis_days`). Пол
+    и потолок — к своему значению индекса у каждого периода.
     """
+    if index not in (CURRENT, HYBRID):
+        raise ValueError(f"значение индекса в потоке к PV не объявлено: {index}")
+    if index == HYBRID and (near_months is None or basis_days is None):
+        raise ValueError("гибрид требует near_months и basis_days из методики")
     stale = int(rules["rate_stale_days"])
     plans: dict[str, tuple[Schedule, Terms] | None] = {}
     rates: dict[tuple[str, Decimal | None, date], tuple[Decimal, date] | None] = {}
+    ahead: list[Forward] = []
 
     def rate_at(terms: Terms, day: date, stale_days: int) -> tuple[Decimal, date] | None:
         key = (terms.index, terms.term, day)
         if key not in rates:
             rates[key] = rate_on(terms, day, stale_days)
         return rates[key]
+
+    def forward_at(payment: Payment, terms: Terms, day: date) -> Callable | None:
+        """Ставка индекса дальнего периода форвардом; None — период ближний."""
+        if index != HYBRID or terms.kind != ESTIMATE or payment.start is None:
+            return None
+        if payment.start <= months_after(day, int(near_months or 0)):
+            return None
+        if not ahead:
+            ahead.append(Forward(int(basis_days or 0), stale))
+        got = ahead[0].index(terms, day, payment.start, payment.due)
+        return lambda *_: got
 
     def coupons(emission: str, day: date) -> dict[date, Decimal]:
         if emission not in plans:
@@ -547,7 +713,10 @@ def pv_coupons(rules: dict) -> Callable[[str, date], dict[date, Decimal]]:
             period = _period(payment, plan)
             if period is None:
                 continue
-            got = estimate(terms, *period, day, stale, payment.number, rate_at)
+            got = estimate(
+                terms, *period, day, stale, payment.number,
+                forward_at(payment, terms, day) or rate_at,
+            )
             if got.amount is not None and got.kind in PV_KINDS:
                 found[payment.due] = got.amount
         return found

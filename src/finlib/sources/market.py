@@ -208,6 +208,15 @@ class Distress(BaseModel):
     # берётся подстановка от номинала. Умолчания нет, как у `substitution`.
     pv_floating: bool
     pv_floating_origin: str = Field(min_length=1)
+    # Значение индекса в формуле условий: `current` — на день торгов у всех
+    # периодов; `hybrid` — текущее у периодов с началом не дальше
+    # `pv_floating_near_months` месяцев, форвард КБД у дальних (окно базиса
+    # `pv_floating_basis_days` торговых дней, `floating.Forward`). Читается
+    # только при `pv_floating: true`.
+    pv_floating_index: Literal["current", "hybrid"]
+    pv_floating_near_months: int = Field(ge=0)
+    pv_floating_basis_days: int = Field(gt=0)
+    pv_floating_index_origin: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _pv_declares_substitution(self) -> "Distress":
@@ -551,7 +560,11 @@ def build(policy: MarketPolicy | None = None, ratios: bool | None = None) -> Mar
                 "distress_zone.pv_floating: true, а блока "
                 "refinancing.floating_coupons в методике нет"
             )
-        coupons = pv_coupons(rules)
+        zone = policy.distress_zone
+        coupons = pv_coupons(
+            rules, zone.pv_floating_index, zone.pv_floating_near_months,
+            zone.pv_floating_basis_days,
+        )
     core = policy.benchmark["liquid_core"]
     place = int(policy.benchmark["percentile"])
     ceiling = Decimal(str(policy.spread["ceiling_bp"]))

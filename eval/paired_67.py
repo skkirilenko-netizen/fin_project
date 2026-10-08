@@ -6,6 +6,8 @@
     uv run python eval/paired_67.py --until … --split … --database … --input ПУТЬ.pkl
     # 6 при оценке неустановленного купона флоатера в потоке и без неё:
     uv run python eval/paired_67.py --until … --split … --database … --pv-floating true
+    # то же, дальние купоны — форвардом КБД (гибрид):
+    uv run python eval/paired_67.py … --pv-floating true --pv-floating-index hybrid
 
 **Замер 6 не считает сам.** Признак по PV — боевой (`distress_zone.measure:
 pv_kbd`, `scoring.market.findings`), ряд с отношением — боевая сборка
@@ -386,6 +388,11 @@ def main() -> int:
         help="неустановленный купон в потоке к PV оценкой (distress_zone.pv_floating); "
              "не задано — как в методике",
     )
+    parser.add_argument(
+        "--pv-floating-index", choices=("current", "hybrid"),
+        help="значение индекса в оценке (distress_zone.pv_floating_index); "
+             "не задано — как в методике",
+    )
     args = parser.parse_args()
     from finlib.db import connection, fetch_one
 
@@ -403,9 +410,11 @@ def main() -> int:
     # и того же прежнего.
     floating = (loaded.distress_zone.pv_floating if args.pv_floating is None
                 else args.pv_floating == "true")
+    index = args.pv_floating_index or loaded.distress_zone.pv_floating_index
     policy = loaded.model_copy(update={
         "distress_zone": loaded.distress_zone.model_copy(
-            update={"measure": "nominal", "pv_floating": floating})})
+            update={"measure": "nominal", "pv_floating": floating,
+                    "pv_floating_index": index})})
     base = series()
     days = base.calendar()
     if not days or max(days) != args.until:
@@ -422,7 +431,8 @@ def main() -> int:
     print(f"Конец ряда: {args.until}; срезов: {len(cuts)}; полный горизонт {HORIZON} дней.\n")
     print("# 6. Цена / PV по КБД: парная разность прироста ценового основания\n")
     print(f"Неустановленный купон в потоке к PV (pv_floating): "
-          f"{'оценкой v2' if floating else 'нет — бумага без потока'}.\n")
+          f"{'оценкой v2' if floating else 'нет — бумага без потока'}"
+          + (f"; индекс — {index}" if floating else "") + ".\n")
     rebuilt = build_series(policy, ratios=True)
     verify_rebuild(base, rebuilt)
     points = [item for own in rebuilt.issuers.values() for item in own.values()]

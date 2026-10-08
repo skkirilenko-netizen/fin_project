@@ -185,3 +185,98 @@ def test_an_estimated_pv_is_named_by_the_statement() -> None:
         finding.ground, "pv", **finding.slots(policy)
     )
     assert text == plain + "; PV включает оценку неустановленных купонов флоатера"
+
+
+def _curve(monkeypatch: pytest.MonkeyPatch, *pairs: tuple[str, str]) -> list:
+    """КБД дня торгов из пар «годы, доходность»; RUONIA на диске нет."""
+    points = [(Decimal(years), Decimal(value)) for years, value in pairs]
+    monkeypatch.setattr(floating, "curves", lambda: {f"{TRADE}": points})
+    monkeypatch.setattr(floating, "ruonia", lambda: ())
+    return points
+
+
+def _hybrid(emission: str) -> dict[date, Decimal]:
+    """Оценки гибридом с параметрами методики."""
+    zone = load_market().distress_zone
+    coupons = floating.pv_coupons(
+        _rules(), floating.HYBRID, zone.pv_floating_near_months, zone.pv_floating_basis_days
+    )
+    return coupons(emission, TRADE)
+
+
+def test_hybrid_on_a_flat_curve_with_its_basis_is_the_current_index(
+    disk: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Плоская КБД 15 % при ключевой 16 %: базис −1, форвард ключевой — те же 16 %."""
+    disk["1"] = ON_KEY
+    _curve(monkeypatch, ("0.25", "15"), ("1", "15"), ("10", "15"))
+    current = floating.pv_coupons(_rules())("1", TRADE)
+    hybrid = _hybrid("1")
+    assert set(hybrid) == set(current) == set(DUES[1:])
+    for due in DUES[1:]:
+        assert abs(hybrid[due] - current[due]) < Decimal("1e-9")
+
+
+def test_hybrid_takes_the_forward_beyond_the_near_months(
+    disk: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Растущая КБД: ближний период — текущий индекс, дальние — форвард минус базис."""
+    disk["1"] = ON_KEY
+    points = _curve(monkeypatch, ("0.25", "15"), ("1", "16"), ("2", "17"), ("5", "18"))
+    hybrid = _hybrid("1")
+    near, far = DUES[1], DUES[2]
+    # Период 10.01.2090–10.01.2091 начинается через 8 дней — текущий индекс.
+    assert hybrid[near] == Decimal(_amount(KEY + 2, near))
+    start = date(far.year - 1, 1, 10)
+    t1 = Decimal((start - TRADE).days) / 365
+    t2 = Decimal((far - TRADE).days) / 365
+    index = floating.forward_rate(points, t1, t2) - (Decimal(15) - KEY)
+    days = (far - start).days
+    assert hybrid[far] == Decimal(1000) * (index + 2) / 100 * days / 365
+    assert index > KEY
+
+
+def test_hybrid_without_a_curve_leaves_the_far_coupons_without_estimate(
+    disk: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кривой на день нет — дальних купонов нет, поток не строится, а не текущий индекс."""
+    disk["1"] = ON_KEY
+    monkeypatch.setattr(floating, "curves", lambda: {})
+    monkeypatch.setattr(floating, "ruonia", lambda: ())
+    assert set(_hybrid("1")) == {DUES[1]}
+    zone = load_market().distress_zone
+    coupons = floating.pv_coupons(
+        _rules(), floating.HYBRID, zone.pv_floating_near_months, zone.pv_floating_basis_days
+    )
+    got = _pv("1", coupons)
+    assert got.ratio is None and got.why == "будущий купон не оценён"
+
+
+def test_months_after_keeps_the_day_or_takes_the_last_of_the_month() -> None:
+    """31 января плюс месяц — 28 февраля; плюс три месяца — 30 апреля."""
+    assert floating.months_after(date(2026, 1, 31), 1) == date(2026, 2, 28)
+    assert floating.months_after(date(2026, 1, 31), 3) == date(2026, 4, 30)
+    assert floating.months_after(date(2026, 11, 15), 3) == date(2027, 2, 15)
+
+
+def test_forward_of_a_rising_curve_by_annual_compounding() -> None:
+    """Форвард 1→2 года: (1,14² / 1,12) − 1 при точках 12 % и 14 %."""
+    points = [(Decimal("0.25"), Decimal(10)), (Decimal(1), Decimal(12)), (Decimal(2), Decimal(14))]
+    found = floating.forward_rate(points, Decimal(1), Decimal(2))
+    expected = (Decimal("1.14") ** 2 / Decimal("1.12") - 1) * 100
+    assert found is not None and abs(found - expected) < Decimal("1e-12")
+    assert floating.forward_rate(points, Decimal(2), Decimal(1)) is None
+
+
+def test_the_index_value_is_declared_current_and_has_no_default() -> None:
+    """В методике — current; гибрид без параметров окна и значение вне списка — отказ."""
+    zone = load_market().distress_zone
+    assert zone.pv_floating_index == "current" and zone.pv_floating_index_origin
+    raw = zone.model_dump()
+    raw.pop("pv_floating_index")
+    with pytest.raises(ValidationError):
+        Distress(**raw)
+    with pytest.raises(ValueError):
+        floating.pv_coupons(_rules(), floating.HYBRID)
+    with pytest.raises(ValueError):
+        floating.pv_coupons(_rules(), "forward")
