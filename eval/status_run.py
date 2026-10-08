@@ -182,6 +182,37 @@ def _changes() -> tuple[str, str, str, str]:
     )
 
 
+# Исходы попытки агента копии словами (`scripts/snapshots_backup_agent.py`).
+BACKUP_OUTCOMES = {
+    "no_disk": "диск не подключён, копия не сделана",
+    "run_in_progress": "шёл плановый прогон, копия отложена",
+    "failed": "копия не подтверждена — см. data/output/snapshots_backup.log",
+}
+
+
+def _backup() -> str:
+    """Строка о резервной копии снимков: дата последней успешной и неудачная попытка после неё."""
+    try:
+        status = json.loads((OUTPUT / "snapshots_backup_status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "**Резервная копия снимков** не делалась: исхода агента копии нет."
+    success = status.get("last_success")
+    said = (
+        f"**Резервная копия снимков**: последняя успешная "
+        f"{datetime.fromisoformat(success):%d.%m.%Y %H:%M}, файлов в описи "
+        f"{status.get('files')}."
+        if success
+        else "**Резервная копия снимков**: успешной ещё не было."
+    )
+    outcome = status.get("last_outcome")
+    if outcome and outcome != "ok" and status.get("last_attempt"):
+        said += (
+            f" Последняя попытка {datetime.fromisoformat(status['last_attempt']):%d.%m.%Y %H:%M}: "
+            f"{BACKUP_OUTCOMES.get(outcome, outcome)}."
+        )
+    return said
+
+
 def main() -> int:
     """Печатает утреннюю сводку."""
     today = date.today()
@@ -225,7 +256,8 @@ def main() -> int:
     name, urgent, late, moved = _changes()
     print(f"\n**Отчёт изменений** {name}: срочное — строк {urgent}, доставлено "
           f"с опозданием — записей {late}, сменили корзину {moved}.")
-    now = datetime.now().astimezone()
+    print(f"\n{_backup()}")
+    now =datetime.now().astimezone()
     count, broke = _streak(runs, now)
     running = _running_today(runs, now)
     pending = (

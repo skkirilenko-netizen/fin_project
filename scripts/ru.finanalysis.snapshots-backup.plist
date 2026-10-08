@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Резервная копия снимков на внешний диск с проверкой описи
+  (`scripts/snapshots_backup_agent.py` → `scripts/snapshots_backup.py`).
+  Снимки рейтингов и перечни дефолтов не восстанавливаются ничем: история
+  у источника закрыта, и копия — единственная страховка от потери диска.
+  Порядок установки и проверки — `docs/snapshots_backup.md`.
+
+  Установка (агент пользователя, не системный демон):
+
+      cp scripts/ru.finanalysis.snapshots-backup.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ru.finanalysis.snapshots-backup.plist
+      launchctl kickstart -p gui/$(id -u)/ru.finanalysis.snapshots-backup   # проверка
+
+  Снятие:
+
+      launchctl bootout gui/$(id -u)/ru.finanalysis.snapshots-backup
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ru.finanalysis.snapshots-backup</string>
+
+  <!-- **Место копии — параметр здесь, а не в коде** (решение владельца
+       08.10.2026): внешний SSD, каталог создан владельцем. Каталога нет —
+       диск не подключён: агент пишет это в журнал и выходит без ошибки. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>scripts/snapshots_backup_agent.py</string>
+    <string>--to</string>
+    <string>/Volumes/Transcend/fin-snapshots</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/sk/Work/fin-analysis</string>
+
+  <!-- **12:15 по рабочим дням — после планового прогона** (10:00) и снимка
+       рейтингов (11:30): к этому часу файлы дня дописаны. Идёт прогон
+       дольше обычного — агент копию откладывает, а не копирует
+       недописанное. Weekday: 1 — понедельник, 5 — пятница. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Weekday</key><integer>1</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>15</integer>
+    </dict>
+  </array>
+
+  <!-- **И при подключении диска**: копия, пропущенная без диска, делается,
+       как только он вставлен. launchd запускает агента при монтировании
+       любого тома — чужой том даёт в журнале строку «диск не подключён»,
+       и только. -->
+  <key>StartOnMount</key>
+  <true/>
+
+  <!-- Журнал агента: «копия не сделана — диска нет» и «агент
+       не запускался» должны различаться. -->
+  <key>StandardOutPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/snapshots_backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sk/Work/fin-analysis/data/output/snapshots_backup.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
