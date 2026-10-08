@@ -288,8 +288,8 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
         said |= {
             "status": "failed",
             "error": f"{type(failure).__name__}: {failure}"[:200],
-            # Таймаут или обрыв сети — стадию повторят через паузу
-            # (`_retry`); 4xx и прочее повтор не лечит.
+            # Временный сбой (таймаут, обрыв или отказ в соединении, 5xx) —
+            # стадию повторят через паузу (`_retry`); 4xx повтор не лечит.
             "transient": transient(failure),
         }
     finally:
@@ -540,14 +540,18 @@ def _deliver(today: date, dry: bool, delivered: list[dict]) -> None:
 
 
 def _retryable(item: dict) -> bool:
-    """Повтор лечит только таймаут и обрыв сети: «нет сети» либо `transient`."""
+    """Повтор лечит только временный сбой: «нет сети» либо `transient`."""
     return item.get("status") == "offline" or (
         item.get("status") == "failed" and bool(item.get("transient"))
     )
 
 
 def _retry(dry: bool, delivered: list[dict]) -> None:
-    """Один повтор стадий, упавших по таймауту или обрыву сети, через паузу.
+    """Один повтор стадий, упавших на временном сбое, через паузу.
+
+    Временный сбой — таймаут, обрыв или отказ в соединении, ответ 5xx
+    (`network.transient`, решение владельца 08.10.2026); ответ 4xx и отказ
+    по норме не повторяются.
 
     **Повтор один и до закрытия прогона** (решение владельца 07.10.2026):
     05.10.2026 медленный Cbonds держался дольше пауз клиента, и день был

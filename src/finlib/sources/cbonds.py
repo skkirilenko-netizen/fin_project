@@ -56,7 +56,11 @@ class CbondsUnavailableError(Exception):
 
 
 class CbondsError(Exception):
-    """Источник ответил не набором записей."""
+    """Источник ответил не набором записей; `status` — код ответа, если он не 200."""
+
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class FilterIgnoredError(CbondsError):
@@ -218,7 +222,10 @@ def fetch(
         response = _post(method, body)
         raw = response.text
         if response.status_code != 200:
-            raise CbondsError(f"Cbonds {method}: {response.status_code} — {raw[:200]}")
+            raise CbondsError(
+                f"Cbonds {method}: {response.status_code} — {raw[:200]}",
+                status=response.status_code,
+            )
         found = json.loads(raw, parse_float=Decimal)
         if "items" not in found:
             raise CbondsError(f"Cbonds {method}: в ответе нет `items` — {raw[:200]}")

@@ -40,25 +40,29 @@ def _refused(cause: BaseException) -> ratings_snapshot.SourceRefusedError:
         httpx.ReadError("connection reset"),
         NetworkDownError("нет сети"),
         _refused(httpx.ReadTimeout("timed out")),
+        httpx.ConnectError("Connection refused"),
+        cbonds.CbondsError("Cbonds get_emissions: 503 — сервис недоступен", status=503),
+        _refused(cbonds.CbondsError("Cbonds get_rating_emitent_maxdate: 502", status=502)),
     ],
 )
-def test_timeouts_and_broken_links_are_transient(failure: BaseException) -> None:
-    """Таймаут и обрыв соединения — в том числе причиной отказа снимка — повтор лечит."""
+def test_temporary_failures_are_transient(failure: BaseException) -> None:
+    """Таймаут, обрыв и отказ в соединении, ответ 5xx — в том числе причиной отказа снимка."""
     assert transient(failure)
 
 
 @pytest.mark.parametrize(
     "failure",
     [
-        cbonds.CbondsError("Cbonds get_emissions: 403 — доступ запрещён"),
-        cbonds.CbondsError("Cbonds get_emissions: 503 — сервис недоступен"),
-        httpx.ConnectError("Connection refused"),
-        _refused(cbonds.CbondsError("Cbonds get_rating_emitent_maxdate: 400")),
+        cbonds.CbondsError("Cbonds get_emissions: 403 — доступ запрещён", status=403),
+        cbonds.CbondsError("Cbonds get_emissions: 429 — предел", status=429),
+        _refused(cbonds.CbondsError("Cbonds get_rating_emitent_maxdate: 400", status=400)),
+        cbonds.CbondsError("Cbonds get_emissions: в ответе нет `items`"),
+        httpx.UnsupportedProtocol("Request URL is missing a scheme"),
         ValueError("разбор ответа"),
     ],
 )
-def test_answers_and_refusals_are_not_transient(failure: BaseException) -> None:
-    """Ответ источника, отказ в соединении и наш дефект повтором не лечатся."""
+def test_client_errors_and_our_defects_are_not_transient(failure: BaseException) -> None:
+    """Ответ 4xx, ответ без записей и наш дефект повтором не лечатся."""
     assert not transient(failure)
 
 
@@ -150,10 +154,23 @@ def test_failed_again_fails_the_run(_quiet: list[float], monkeypatch) -> None:
     assert daily_run._shortfall(delivered) == "доставка неполна: перечень дефолтов — отказ"
 
 
+def test_a_server_error_is_retried(_quiet: list[float], monkeypatch) -> None:
+    """Ответ 5xx после попыток клиента — временный сбой: повтор через паузу."""
+    monkeypatch.setattr(
+        daily_run.runpy,
+        "run_path",
+        _script({"defaults": [cbonds.CbondsError("Cbonds get_defaults: 503", status=503), None]}),
+    )
+    delivered: list[dict] = []
+    daily_run._deliver(TODAY, False, delivered)
+    got = _by_code(delivered)["defaults"]
+    assert _quiet == [1200.0] and got["status"] == "done" and got["retries"] == 1
+
+
 @pytest.mark.parametrize(
     "failure",
     [
-        cbonds.CbondsError("Cbonds get_defaults: 403 — доступ запрещён"),
+        cbonds.CbondsError("Cbonds get_defaults: 403 — доступ запрещён", status=403),
         SystemExit(1),
     ],
 )

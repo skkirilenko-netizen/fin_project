@@ -48,21 +48,31 @@ def network_down(failure: BaseException) -> bool:
     return False
 
 
-# Обрывы на установленном соединении: запрос ушёл, ответа не дождались.
-_BROKEN = (
+# Временные сбои связи (решение владельца 08.10.2026): таймаут, обрыв
+# установленного соединения и отказ в соединении. `LocalProtocolError`
+# и `UnsupportedProtocol` — наш дефект запроса, сюда не входят.
+_TRANSIENT = (
     httpx.TimeoutException,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.CloseError,
+    httpx.NetworkError,
     httpx.RemoteProtocolError,
 )
 
 
-def transient(failure: BaseException) -> bool:
-    """Таймаут либо обрыв сети в цепочке исключения: такой сбой повтор лечит.
+def _server_error(failure: BaseException) -> bool:
+    """Ответ 5xx: временный сбой на той стороне, а не суждение о запросе."""
+    status = getattr(failure, "status", None)
+    if isinstance(failure, httpx.HTTPStatusError):
+        status = failure.response.status_code
+    return isinstance(status, int) and status >= 500
 
-    Отказ в соединении (`ConnectError`), ответ 4xx и 5xx сюда не входят:
-    узел на той стороне нас услышал и ответил.
+
+def transient(failure: BaseException) -> bool:
+    """Временный сбой в цепочке исключения: такой сбой повтор лечит.
+
+    Таймаут, обрыв и отказ в соединении, нет сети у нас, ответ 5xx
+    (решение владельца 08.10.2026). Ответ 4xx — суждение источника
+    о запросе, повтор его не изменит; отказ по суточной норме сюда
+    не попадает вовсе — такая стадия не запускается (`no_quota`).
     """
     if network_down(failure):
         return True
@@ -70,7 +80,7 @@ def transient(failure: BaseException) -> bool:
     current: BaseException | None = failure
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (NetworkDownError, *_BROKEN)):
+        if isinstance(current, (NetworkDownError, *_TRANSIENT)) or _server_error(current):
             return True
         current = current.__cause__ or current.__context__
     return False
