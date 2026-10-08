@@ -412,17 +412,24 @@ def estimate(
             label = f"{label} {terms.term:.0f} лет"
         said = f"{label} {_percent(rate)} % на {seen:%d.%m.%Y}"
         said += " + спред условий" if terms.factor == 1 else " по формуле условий"
-        value = terms.factor * rate + terms.spread
-        # **Пол и потолок — при текущем значении индекса** (решение владельца
-        # 02.10.2026, 3.2): не связывают — индекс + спред, связывают — они.
-        if terms.floor is not None and value < terms.floor:
-            value = terms.floor
-            said += f"; связывает пол условий {_percent(terms.floor)} %"
-        if terms.cap is not None and value > terms.cap:
-            value = terms.cap
-            said += f"; связывает потолок условий {_percent(terms.cap)} %"
-        return Estimate(face * value / 100 * days / 365, ESTIMATE, said)
+        value, bound = coupon_rate(terms, rate)
+        return Estimate(face * value / 100 * days / 365, ESTIMATE, said + bound)
     return Estimate(None, LOWER, "")
+
+
+def coupon_rate(terms: Terms, index: Decimal) -> tuple[Decimal, str]:
+    """Ставка купона по формуле условий при значении индекса и пометка о связавшей границе."""
+    value = terms.factor * index + terms.spread
+    said = ""
+    # **Пол и потолок — при текущем значении индекса** (решение владельца
+    # 02.10.2026, 3.2): не связывают — индекс + спред, связывают — они.
+    if terms.floor is not None and value < terms.floor:
+        value = terms.floor
+        said += f"; связывает пол условий {_percent(terms.floor)} %"
+    if terms.cap is not None and value > terms.cap:
+        value = terms.cap
+        said += f"; связывает потолок условий {_percent(terms.cap)} %"
+    return value, said
 
 
 @cache
