@@ -35,6 +35,8 @@ def _stages(monkeypatch) -> list[str]:
 
     monkeypatch.setattr(daily_run, "_run_stage", run)
     monkeypatch.setattr(daily_run, "_fresh", lambda path, every, today: False)
+    # «Нет сети» повторяется через паузу (`_retry`): здесь пауза не ждётся.
+    monkeypatch.setattr(daily_run.time, "sleep", lambda pause: None)
     return ran
 
 
@@ -42,7 +44,8 @@ def test_no_stage_stops_the_others(_stages: list[str]) -> None:
     """Рейтинги без сети — дефолты, выпуски, отчётность и биржа всё равно идут."""
     delivered: list[dict] = []
     daily_run._deliver(TODAY, False, delivered)
-    assert _stages == [stage.code for stage in daily_run.STAGES]
+    # Все по порядку, затем один повтор рейтингов без сети.
+    assert _stages == [stage.code for stage in daily_run.STAGES] + ["ratings"]
     assert _stages[0] == "ratings"
 
 

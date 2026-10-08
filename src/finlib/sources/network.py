@@ -18,6 +18,8 @@ import socket
 import time
 from collections.abc import Callable
 
+import httpx
+
 from finlib.config import settings
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,34 @@ def network_down(failure: BaseException) -> bool:
         if isinstance(current, socket.gaierror):
             return True
         if isinstance(current, OSError) and current.errno in _OFFLINE_ERRNO:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+# Обрывы на установленном соединении: запрос ушёл, ответа не дождались.
+_BROKEN = (
+    httpx.TimeoutException,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.CloseError,
+    httpx.RemoteProtocolError,
+)
+
+
+def transient(failure: BaseException) -> bool:
+    """Таймаут либо обрыв сети в цепочке исключения: такой сбой повтор лечит.
+
+    Отказ в соединении (`ConnectError`), ответ 4xx и 5xx сюда не входят:
+    узел на той стороне нас услышал и ответил.
+    """
+    if network_down(failure):
+        return True
+    seen: set[int] = set()
+    current: BaseException | None = failure
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (NetworkDownError, *_BROKEN)):
             return True
         current = current.__cause__ or current.__context__
     return False

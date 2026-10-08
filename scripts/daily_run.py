@@ -42,13 +42,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
 
 from routing_backfill_run import decision_values
 
+from finlib import run_lock
+from finlib.config import settings
 from finlib.db import connection, execute, fetch_all
 from finlib.schedule import is_scheduled
 from finlib.scoring.routing import load_routing
 from finlib.scoring.routing_store import routing_rows
 from finlib.sources import cbonds
 from finlib.sources.market import series as market_series
-from finlib.sources.network import NetworkDownError
+from finlib.sources.network import NetworkDownError, transient
 from finlib.version import code_version, route_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -286,6 +288,9 @@ def _run_stage(stage: Stage, dry: bool) -> dict:
         said |= {
             "status": "failed",
             "error": f"{type(failure).__name__}: {failure}"[:200],
+            # Таймаут или обрыв сети — стадию повторят через паузу
+            # (`_retry`); 4xx и прочее повтор не лечит.
+            "transient": transient(failure),
         }
     finally:
         sys.argv = argv
@@ -427,8 +432,20 @@ def point_kind(scheduled: bool) -> str:
 
 
 def main() -> int:
-    """Проводит день целиком: доставка, маршрут, история, список, отчёт."""
+    """Проводит день целиком под замком; замок занят — отказ до записи в журнал."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # **Второй прогон при идущем отказывается** (решение владельца 08.10.2026):
+    # до строки `routing_run`, с тем, кто держит замок, и ненулевым исходом.
+    try:
+        with run_lock.hold():
+            return _day()
+    except run_lock.RunInProgressError as busy:
+        logger.error("%s; этот запуск не выполнен", busy)
+        return 2
+
+
+def _day() -> int:
+    """Проводит день целиком: доставка, маршрут, история, список, отчёт."""
     dry = "--dry" in sys.argv
     reason = (
         sys.argv[sys.argv.index("--reason") + 1] if "--reason" in sys.argv else ""
@@ -519,6 +536,57 @@ def _deliver(today: date, dry: bool, delivered: list[dict]) -> None:
             )
             continue
         delivered.append(_run_stage(stage, dry))
+    _retry(dry, delivered)
+
+
+def _retryable(item: dict) -> bool:
+    """Повтор лечит только таймаут и обрыв сети: «нет сети» либо `transient`."""
+    return item.get("status") == "offline" or (
+        item.get("status") == "failed" and bool(item.get("transient"))
+    )
+
+
+def _retry(dry: bool, delivered: list[dict]) -> None:
+    """Один повтор стадий, упавших по таймауту или обрыву сети, через паузу.
+
+    **Повтор один и до закрытия прогона** (решение владельца 07.10.2026):
+    05.10.2026 медленный Cbonds держался дольше пауз клиента, и день был
+    потерян целиком. Пауза одна на все такие стадии (`stage_retry_pause_s`).
+    Повтор докачивает недостающее, а не начинает заново: стадии берут
+    сделанное сегодня с диска — снимок рейтингов дозапрашивает `refused`,
+    выпуски не переспрашивают полученное сегодня. Не дошла и после
+    повтора — прогон `failed`, как прежде. Первая попытка остаётся
+    в записи стадии (`first`), число повторов — в `retries`.
+    """
+    again = [index for index, item in enumerate(delivered) if _retryable(item)]
+    if dry or not again:
+        return
+    names = ", ".join(delivered[index]["name"] for index in again)
+    logger.warning(
+        "повтор через %.0f мин: %s", settings.stage_retry_pause_s / 60, names
+    )
+    time.sleep(settings.stage_retry_pause_s)
+    by_code = {stage.code: stage for stage in STAGES}
+    for index in again:
+        first = delivered[index]
+        stage = by_code[first["code"]]
+        if stage.source == "cbonds" and _spent() > DAILY_QUOTA - RESERVE:
+            said = {
+                "code": stage.code,
+                "name": stage.name,
+                "status": "no_quota",
+                "why": "суточная норма запросов Cbonds исчерпана",
+            }
+        else:
+            said = _run_stage(stage, dry)
+        delivered[index] = said | {
+            "retries": 1,
+            "first": {
+                key: first[key]
+                for key in ("status", "error", "why", "requests", "seconds")
+                if key in first
+            },
+        }
 
 
 def _shortfall(delivered: list[dict]) -> str:

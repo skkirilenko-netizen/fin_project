@@ -100,7 +100,8 @@ def test_the_run_record_is_opened_before_any_delivery() -> None:
     перехвата стадии, журнал не сказал бы ничего: «прогона не было»
     и «прогон упал» выглядели бы одинаково.
     """
-    called = _calls(_function("main"))
+    # Тело дня — `_day`: `main` лишь берёт замок прогона.
+    called = _calls(_function("_day"))
     assert "_open_run" in called and "_deliver_and_route" in called
     assert called.index("_open_run") < called.index("_deliver_and_route")
     assert "_close_failed" in called, "оборвавшийся прогон не закрывает свою строку"

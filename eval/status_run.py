@@ -182,6 +182,17 @@ def _changes() -> tuple[str, str, str, str]:
     )
 
 
+def _retried(item: dict) -> str:
+    """Пометка повтора стадии с исходом первой попытки; пусто — повтора не было."""
+    if not item.get("retries"):
+        return ""
+    first = item.get("first") or {}
+    why = first.get("error") or first.get("why") or ""
+    return f" после повтора; первая попытка — {first.get('status')}" + (
+        f": {why}" if why else ""
+    )
+
+
 def main() -> int:
     """Печатает утреннюю сводку."""
     today = date.today()
@@ -195,7 +206,11 @@ def main() -> int:
     deliveries = last["sources"] or []
     if isinstance(deliveries, str):
         deliveries = json.loads(deliveries)
-    spent = sum(item.get("requests") or 0 for item in deliveries)
+    # Запросы первой попытки повторённой стадии — тоже расход дня.
+    spent = sum(
+        (item.get("requests") or 0) + ((item.get("first") or {}).get("requests") or 0)
+        for item in deliveries
+    )
     print(
         f"**Последний прогон** № {last['id']} на {last['as_of']:%d.%m.%Y}: "
         f"{last['status']}, {'по расписанию' if _scheduled(last) else 'ручной'}, "
@@ -210,7 +225,7 @@ def main() -> int:
     for item in deliveries:
         print(
             f"| {item.get('name')} | {item.get('status')} | {item.get('requests', '—')} "
-            f"| {item.get('seconds', '—')} | {item.get('error') or ''} |"
+            f"| {item.get('seconds', '—')} | {item.get('error') or ''}{_retried(item)} |"
         )
     snapshot = RATINGS / f"{today:%Y-%m-%d}.json"
     if snapshot.exists():

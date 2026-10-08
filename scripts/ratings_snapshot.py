@@ -27,6 +27,10 @@
 маршрут берёт для них последнее наблюдение, а следующий запуск (агент
 в 11:30) дозапрашивает ровно их.
 
+**Пока идёт плановый прогон, агент в Cbonds не ходит**: ждёт снятия замка
+прогона (`finlib.run_lock`, не дольше `run_lock_wait_max_s`) и берёт файл
+снимка дня с диска — полный не трогает, неполный дозапрашивает.
+
 Запросов: один на эмитента. Перечень берётся из карточек справочника, а не
 из базы: снимок нужен и по тем, у кого отчётности у нас пока нет.
 """
@@ -41,6 +45,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from finlib import run_lock  # noqa: E402
 from finlib.config import settings  # noqa: E402
 from finlib.sources import cbonds  # noqa: E402
 from finlib.sources.network import NetworkDownError  # noqa: E402
@@ -184,6 +189,18 @@ def _complete(path: Path, today: date) -> int:
 def main() -> int:
     """Делает снимок на сегодня; 1 — если снимать было нечем."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # **Пока идёт плановый прогон, в Cbonds не ходим** (решение владельца
+    # 07.10.2026): прогон снимает рейтинги сам, и два процесса делили бы
+    # предел частоты и норму. Ждём снятия его замка и берём файл дня с диска;
+    # запуск изнутри прогона замок своего процесса чужим не считает.
+    busy = run_lock.wait_free(settings.run_lock_poll_s, settings.run_lock_wait_max_s)
+    if busy is not None:
+        print(
+            f"снимок не сделан: плановый прогон не закончился за "
+            f"{settings.run_lock_wait_max_s / 3600:.1f} ч ({busy}); "
+            "в Cbonds не обращались"
+        )
+        return 1
     today = date.today()
     limit = 0
     if "--limit" in sys.argv:
