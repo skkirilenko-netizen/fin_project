@@ -36,7 +36,7 @@ Z — постоянная надбавка к бескупонной криво
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from functools import cache
@@ -313,18 +313,36 @@ def bond_flow(
     `rate_at` — доходность кривой дня в сроке, годы → проценты. Цена — процент
     непогашенного номинала биржи; грязная — она же плюс НКД биржи, на одну бумагу.
     """
+    return _bond_flow(row, day, rate_at, price, by_code, None)[:5]
+
+
+Flowed = tuple[list[tuple[Decimal, Decimal]], list[Decimal], Decimal, Decimal, str, bool]
+
+
+def _bond_flow(
+    row: dict, day: date, rate_at: Callable[[Decimal], Decimal],
+    price: Decimal | None, by_code: dict[str, str],
+    coupons: Callable[[str, date], dict[date, Decimal]] | None,
+) -> Flowed:
+    """`bond_flow` с оценкой неустановленных купонов и признаком «оценка вошла в поток».
+
+    `coupons` — оценки выпуска на день торгов (`floating.pv_coupons`,
+    `distress_zone.pv_floating`); без них неустановленный будущий купон
+    оставляет бумагу без потока.
+    """
+    none: Flowed = ([], [], Decimal(0), Decimal(0), "", False)
     secid = str(row.get("SECID") or "")
     emission = by_code.get(trade_code(secid))
     if emission is None:
-        return [], [], Decimal(0), Decimal(0), "выпуск не сопоставлен"
+        return none[:4] + ("выпуск не сопоставлен", False)
     got = _flows_at(cbonds.CACHE / f"flow_{emission}.json")
     if got is None:
-        return [], [], Decimal(0), Decimal(0), "графика нет"
+        return none[:4] + ("графика нет", False)
     flows, _ = got
     face = _amount(row.get("FACEVALUE"))
     accrued = _amount(row.get("ACCINT")) or Decimal(0)
     if not face or price is None:
-        return [], [], Decimal(0), Decimal(0), "нет цены или номинала"
+        return none[:4] + ("нет цены или номинала", False)
     settle = settlement(day)
     cut = None
     for field in ("BUYBACKDATE", "OFFERDATE"):
@@ -335,6 +353,16 @@ def bond_flow(
                 break
             except ValueError:
                 continue
+    unknown = [
+        item.due for item in flows
+        if item.coupon is None and item.due > settle and (cut is None or item.due <= cut)
+    ]
+    if coupons is not None and unknown:
+        guessed = coupons(emission, day)
+        flows = [
+            replace(item, coupon=guessed.get(item.due)) if item.coupon is None else item
+            for item in flows
+        ]
     pairs, why = cash_flow(
         flows,
         settle,
@@ -343,10 +371,13 @@ def bond_flow(
         offer_price(_offers_at(cbonds.CACHE / f"offert_{emission}.json"), cut)
         if cut else Decimal(100),
     )
+    estimated = coupons is not None and bool(unknown)
+    if why == "будущий купон не объявлен" and estimated:
+        why = "будущий купон не оценён"
     if why:
-        return [], [], Decimal(0), Decimal(0), why
+        return none[:4] + (why, False)
     rates = [rate_at(years) for years, _ in pairs]
-    return pairs, rates, price / 100 * face + accrued, face, ""
+    return pairs, rates, price / 100 * face + accrued, face, "", estimated
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,17 +392,29 @@ class PriceToPv:
     price: Decimal | None
     pv: Decimal | None
     why: str
+    # В потоке есть оценённый купон (`floating.pv_coupons`): PV — по оценке.
+    estimated: bool = False
 
 
 def price_to_pv(
     row: dict, day: date, rate_at: Callable[[Decimal], Decimal],
     price: Decimal, by_code: dict[str, str],
+    coupons: Callable[[str, date], dict[date, Decimal]] | None = None,
 ) -> PriceToPv:
-    """Отношение грязной цены к PV потока по кривой дня; та же реализация, что у Z."""
-    pairs, rates, dirty, face, why = bond_flow(row, day, rate_at, price, by_code)
+    """Отношение грязной цены к PV потока по кривой дня; та же реализация, что у Z.
+
+    `coupons` — оценки неустановленных купонов (`bond_flow`); Z их не получает.
+    """
+    pairs, rates, dirty, face, why, estimated = _bond_flow(
+        row, day, rate_at, price, by_code, coupons
+    )
     if why:
         return PriceToPv(None, None, None, why)
     value = present_value(pairs, rates)
     if not value:
         return PriceToPv(None, None, None, "приведённая стоимость не определена")
-    return PriceToPv(dirty / value, dirty / face * 100, value / face * 100, "")
+    return PriceToPv(
+        dirty / value, dirty / face * 100, value / face * 100, "",
+        estimated=estimated,
+    )
+

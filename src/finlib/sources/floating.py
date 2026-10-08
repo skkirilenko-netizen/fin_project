@@ -42,7 +42,7 @@ from functools import cache
 from pathlib import Path
 
 from finlib.config import settings
-from finlib.sources.cbonds_flows import Payment, Schedule
+from finlib.sources.cbonds_flows import Payment, Schedule, schedule_of
 
 CBR = settings.raw_dir / "cbr"
 MOEX = settings.raw_dir / "moex"
@@ -390,8 +390,13 @@ def estimate(
     today: date,
     stale_days: int,
     number: int | None = None,
+    rate_at: Callable[[Terms, date, int], tuple[Decimal, date] | None] | None = None,
 ) -> Estimate:
-    """Купон на одну бумагу за период `days` при непогашенном номинале `face`."""
+    """Купон на одну бумагу за период `days` при непогашенном номинале `face`.
+
+    `rate_at` — ставка индекса на дату, по умолчанию `rate_on`; поток к PV
+    подаёт её запомненной на день торгов: правило то же, счёт один раз.
+    """
     if number is not None:
         for first, last, rate in terms.fixed:
             if first <= number <= last:
@@ -403,7 +408,7 @@ def estimate(
     if terms.kind == FLOOR and terms.floor is not None:
         return Estimate(face * terms.floor / 100 * days / 365, FLOOR, "пол купона по условиям")
     if terms.kind == ESTIMATE:
-        got = rate_on(terms, today, stale_days)
+        got = (rate_at or rate_on)(terms, today, stale_days)
         if got is None:
             return Estimate(None, LOWER, "ставки индекса на дату нет")
         rate, seen = got
@@ -461,6 +466,20 @@ def last_rate(plan: Schedule) -> Decimal | None:
     return known[-1] if known else None
 
 
+def _period(payment: Payment, plan: Schedule) -> tuple[Decimal, int] | None:
+    """Непогашенный номинал на одну бумагу и дни купонного периода; None — не определены."""
+    if plan.nominal is None or payment.start is None:
+        return None
+    face = plan.nominal - sum(
+        (item.redemption for item in plan.payments if item.due < payment.due),
+        Decimal(0),
+    )
+    days = (payment.due - payment.start).days
+    if face <= 0 or days <= 0:
+        return None
+    return face, days
+
+
 def estimator(rules: dict) -> Callable[[str, Payment, Schedule, date], tuple]:
     """Оценщик купона для `cbonds_flows.refinancing` по блоку методики."""
 
@@ -468,19 +487,69 @@ def estimator(rules: dict) -> Callable[[str, Payment, Schedule, date], tuple]:
         emission: str, payment: Payment, plan: Schedule, today: date
     ) -> tuple[Decimal | None, str, bool]:
         record = record_of(emission)
-        if record is None or plan.nominal is None or payment.start is None:
+        period = _period(payment, plan)
+        if record is None or period is None:
             return None, "", False
         terms = terms_of(record, rules, last_rate(plan))
-        face = plan.nominal - sum(
-            (item.redemption for item in plan.payments if item.due < payment.due),
-            Decimal(0),
-        )
-        days = (payment.due - payment.start).days
-        if face <= 0 or days <= 0:
-            return None, "", False
         found = estimate(
-            terms, face, days, today, int(rules["rate_stale_days"]), payment.number
+            terms, *period, today, int(rules["rate_stale_days"]), payment.number
         )
         return found.amount, found.basis, found.data
 
     return said
+
+
+# **Что из оценок идёт в поток к PV** (решение владельца 08.10.2026): ставка
+# по условиям выпуска, «индекс + спред» с полом и потолком при текущем индексе
+# и последний известный купон — как в рефинансировании. **Пол без индекса —
+# нет**: это граница снизу, она занижает купон, завышает отношение цены к PV
+# и может спрятать признак; такой выпуск остаётся без потока, и берётся
+# подстановка от номинала.
+PV_KINDS: tuple[str, ...] = (TERMS, ESTIMATE, LAST_KNOWN)
+
+
+def pv_coupons(rules: dict) -> Callable[[str, date], dict[date, Decimal]]:
+    """Оценки неустановленных будущих купонов выпуска на день торгов: срок → сумма.
+
+    Та же оценка, что у рефинансирования (`estimate`, `terms_of`), по графику
+    `cbonds_flows.schedule_of` и при ставке индекса на день торгов, а не на
+    сегодня: ряд строится за прошлые дни. Купон без оценки в ответе
+    отсутствует — поток у такой бумаги не строится. Правило выпуска и ставка
+    индекса дня запоминаются на время одной сборки ряда.
+    """
+    stale = int(rules["rate_stale_days"])
+    plans: dict[str, tuple[Schedule, Terms] | None] = {}
+    rates: dict[tuple[str, Decimal | None, date], tuple[Decimal, date] | None] = {}
+
+    def rate_at(terms: Terms, day: date, stale_days: int) -> tuple[Decimal, date] | None:
+        key = (terms.index, terms.term, day)
+        if key not in rates:
+            rates[key] = rate_on(terms, day, stale_days)
+        return rates[key]
+
+    def coupons(emission: str, day: date) -> dict[date, Decimal]:
+        if emission not in plans:
+            plan = schedule_of(emission)
+            record = record_of(emission)
+            plans[emission] = (
+                (plan, terms_of(record, rules, last_rate(plan)))
+                if plan is not None and record is not None
+                else None
+            )
+        known = plans[emission]
+        if known is None:
+            return {}
+        plan, terms = known
+        found: dict[date, Decimal] = {}
+        for payment in plan.payments:
+            if payment.coupon_known or payment.due <= day:
+                continue
+            period = _period(payment, plan)
+            if period is None:
+                continue
+            got = estimate(terms, *period, day, stale, payment.number, rate_at)
+            if got.amount is not None and got.kind in PV_KINDS:
+                found[payment.due] = got.amount
+        return found
+
+    return coupons

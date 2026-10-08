@@ -4,6 +4,8 @@
     uv run python eval/paired_67.py --until ГГГГ-ММ-ДД --split ГГГГ-ММ-ДД --database БАЗА
     # 6 и 7 — с сохранёнными строками G/Z (`eval/zspread_rows.py`):
     uv run python eval/paired_67.py --until … --split … --database … --input ПУТЬ.pkl
+    # 6 при оценке неустановленного купона флоатера в потоке и без неё:
+    uv run python eval/paired_67.py --until … --split … --database … --pv-floating true
 
 **Замер 6 не считает сам.** Признак по PV — боевой (`distress_zone.measure:
 pv_kbd`, `scoring.market.findings`), ряд с отношением — боевая сборка
@@ -379,6 +381,11 @@ def main() -> int:
     parser.add_argument("--split", type=date.fromisoformat, required=True,
                         help="первый срез поздней части")
     parser.add_argument("--database", required=True, help="согласованная неизменная база снимка")
+    parser.add_argument(
+        "--pv-floating", choices=("false", "true"),
+        help="неустановленный купон в потоке к PV оценкой (distress_zone.pv_floating); "
+             "не задано — как в методике",
+    )
     args = parser.parse_args()
     from finlib.db import connection, fetch_one
 
@@ -391,8 +398,14 @@ def main() -> int:
     loaded = load_market()
     # Прежний признак — от номинала, какое бы измерение ни стояло в методике:
     # сравнение «новый − прежний» не должно зависеть от того, переключено ли оно.
+    # Оценка купона в потоке меняет только отношение к PV: прежний признак
+    # от номинала её не читает, и сравнение двух значений идёт против одного
+    # и того же прежнего.
+    floating = (loaded.distress_zone.pv_floating if args.pv_floating is None
+                else args.pv_floating == "true")
     policy = loaded.model_copy(update={
-        "distress_zone": loaded.distress_zone.model_copy(update={"measure": "nominal"})})
+        "distress_zone": loaded.distress_zone.model_copy(
+            update={"measure": "nominal", "pv_floating": floating})})
     base = series()
     days = base.calendar()
     if not days or max(days) != args.until:
@@ -408,14 +421,18 @@ def main() -> int:
 
     print(f"Конец ряда: {args.until}; срезов: {len(cuts)}; полный горизонт {HORIZON} дней.\n")
     print("# 6. Цена / PV по КБД: парная разность прироста ценового основания\n")
+    print(f"Неустановленный купон в потоке к PV (pv_floating): "
+          f"{'оценкой v2' if floating else 'нет — бумага без потока'}.\n")
     rebuilt = build_series(policy, ratios=True)
     verify_rebuild(base, rebuilt)
     points = [item for own in rebuilt.issuers.values() for item in own.values()]
     print(f"Ряд пересобран с отношением и совпал с сохранённым по ориентиру, ценам "
           f"и спредам. Точек эмитент-день с ценой: "
           f"{sum(1 for item in points if item.price is not None)}, с отношением: "
-          f"{sum(1 for item in points if item.ratio is not None)}, с ценой бумаги "
-          f"без потока: {sum(1 for item in points if item.unflowed is not None)}.\n")
+          f"{sum(1 for item in points if item.ratio is not None)}, из них PV "
+          f"с оценённым купоном: {sum(1 for item in points if item.ratio_estimated)}, "
+          f"с ценой бумаги без потока: "
+          f"{sum(1 for item in points if item.unflowed is not None)}.\n")
     print("Строк бумаг, у которых поток не построен, по причинам:\n")
     for reason, count in sorted(rebuilt.counted.items()):
         if reason.startswith("поток не построен: "):

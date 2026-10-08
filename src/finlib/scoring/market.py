@@ -67,6 +67,9 @@ class MarketFinding:
     pv: Decimal | None = None
     by_nominal: bool = False
     low_by_nominal: bool = False
+    # PV бумаги дня — с оценённым купоном (`distress_zone.pv_floating`):
+    # формулировка `pv_estimated` называет это суффиксом.
+    pv_estimated: bool = False
 
     @property
     def variant(self) -> str:
@@ -76,7 +79,9 @@ class MarketFinding:
         if self.measure == "pv_kbd":
             if self.low is not None and self.value >= self.threshold:
                 return "pv_recovered"
-            return "pv_nominal" if self.by_nominal else "pv"
+            if self.by_nominal:
+                return "pv_nominal"
+            return "pv_estimated" if self.pv_estimated else "pv"
         if self.low is not None and self.value >= self.threshold:
             return "recovered"
         return ""
@@ -497,6 +502,7 @@ def _pv_fields(value: Decimal, by_nominal: bool, last: Point, low_by_nominal: bo
         "pv": None if by_nominal else last.ratio_pv,
         "by_nominal": by_nominal,
         "low_by_nominal": bool(low_by_nominal),
+        "pv_estimated": not by_nominal and last.ratio_estimated,
     }
 
 

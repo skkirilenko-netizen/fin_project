@@ -201,6 +201,13 @@ class Distress(BaseModel):
     ratio_below: Decimal = Field(gt=0)
     substitution: bool | None
     nominal_mark: str = Field(min_length=1)
+    # **Неустановленный купон флоатера в потоке к PV** — оценкой v2 из
+    # рефинансирования (`floating.pv_coupons`): ставка по условиям, индекс +
+    # спред при индексе дня торгов с полом и потолком, последний известный
+    # купон; пол без индекса — нет. `false` — такая бумага без потока, и
+    # берётся подстановка от номинала. Умолчания нет, как у `substitution`.
+    pv_floating: bool
+    pv_floating_origin: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _pv_declares_substitution(self) -> "Distress":
@@ -321,6 +328,9 @@ class Point:
     # Наименьшая цена от номинала среди бумаг дня, у которых поток
     # не построен: её берёт подстановка.
     unflowed: Decimal | None = None
+    # PV бумаги с наименьшим отношением посчитан с оценённым купоном
+    # (`distress_zone.pv_floating`).
+    ratio_estimated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,6 +539,19 @@ def build(policy: MarketPolicy | None = None, ratios: bool | None = None) -> Mar
     policy = policy or load_market()
     with_ratios = policy.distress_zone.measure == "pv_kbd" if ratios is None else ratios
     by_code = emission_map()[0] if with_ratios else {}
+    coupons = None
+    if with_ratios and policy.distress_zone.pv_floating:
+        # Правило оценки одно — блок рефинансирования, второго экземпляра нет.
+        from finlib.scoring.routing import load_routing
+        from finlib.sources.floating import pv_coupons
+
+        rules = load_routing().refinancing.floating_coupons
+        if not rules:
+            raise ValueError(
+                "distress_zone.pv_floating: true, а блока "
+                "refinancing.floating_coupons в методике нет"
+            )
+        coupons = pv_coupons(rules)
     core = policy.benchmark["liquid_core"]
     place = int(policy.benchmark["percentile"])
     ceiling = Decimal(str(policy.spread["ceiling_bp"]))
@@ -595,7 +618,8 @@ def build(policy: MarketPolicy | None = None, ratios: bool | None = None) -> Mar
                 # Цена та же, что у признака от номинала, — после правил
                 # сравнимости и сделок: меняется одна величина, не круг бумаг.
                 flowed = price_to_pv(
-                    row, day, lambda years, c=curve: curve_at(c, years)[0], price, by_code
+                    row, day, lambda years, c=curve: curve_at(c, years)[0], price, by_code,
+                    coupons,
                 )
                 if flowed.ratio is None:
                     counted[f"поток не построен: {flowed.why}"] += 1
@@ -659,6 +683,7 @@ def _of_day(
         ratio_price=lowest.price if lowest else None,
         ratio_pv=lowest.pv if lowest else None,
         unflowed=min(unflowed) if unflowed else None,
+        ratio_estimated=bool(lowest and lowest.estimated),
     )
 
 
@@ -717,6 +742,9 @@ def _written(found: Market) -> str:
                                 ("unflowed", item.unflowed),
                             )
                         },
+                        # Пишется только «да»: ряд без оценок остаётся
+                        # байт в байт прежним.
+                        **({"ratio_estimated": True} if item.ratio_estimated else {}),
                     }
                     for day, item in own.items()
                 }
@@ -750,6 +778,7 @@ def _read(raw: dict) -> Market:
                         name: None if item.get(name) is None else Decimal(item[name])
                         for name in ("ratio", "ratio_price", "ratio_pv", "unflowed")
                     },
+                    ratio_estimated=bool(item.get("ratio_estimated", False)),
                 )
                 for day, item in own.items()
             }

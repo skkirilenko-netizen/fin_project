@@ -958,6 +958,12 @@ statements:
       pv: >-
         Цена {price} % при PV по КБД {pv} %, отношение {value}
         (порог {threshold}) на {on}
+      # `pv` с суффиксом владельца 08.10.2026: PV бумаги дня посчитан
+      # с оценённым купоном (`distress_zone.pv_floating`, `pv_estimated`).
+      pv_estimated: >-
+        Цена {price} % при PV по КБД {pv} %, отношение {value}
+        (порог {threshold}) на {on}; PV включает оценку неустановленных
+        купонов флоатера
       pv_nominal: >-
         Цена {price} % номинала, отношение к номиналу {value}
         (порог {threshold}) на {on}{mark}
