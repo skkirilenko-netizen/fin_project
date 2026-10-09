@@ -158,6 +158,36 @@ def test_without_a_flow_substitution_prints_its_mark(flows: dict[str, str]) -> N
     assert _price_ground(_policy("pv_kbd", False), _market(points), days[-1]) is None
 
 
+def test_the_nominal_statement_is_chosen_only_by_substitution(flows: dict[str, str]) -> None:
+    """Формулировка `pv_nominal` — тогда и только тогда, когда величина взята подстановкой.
+
+    Решение владельца 09.10.2026: при подстановке основание считается
+    к номиналу, и текст «% номинала» верен; без подстановки он был бы ложью.
+    """
+    days = _days()
+    day = days[-1]
+    flowed = price_to_pv(_row("RU000COUP01"), day, lambda years: RATE, Decimal(40), flows)
+    bare = price_to_pv(_row("RU000NOFLOW"), day, lambda years: RATE, Decimal(55), flows)
+    cases = {
+        "поток есть": [_point(item, Decimal(40), "RU000COUP01", flows) for item in days],
+        "потока нет": [_point(item, Decimal(40), "RU000NOFLOW", flows) for item in days],
+        # Отношение ниже цены подставленной бумаги: в сравнение идёт оно.
+        "обе, ниже отношение": [_of_day(
+            day, [(None, Decimal(1), Decimal(40), flowed), (None, Decimal(1), Decimal(55), bare)]
+        )],
+    }
+    seen = set()
+    for name, points in cases.items():
+        for substitution in (True, False):
+            found = _price_ground(_policy("pv_kbd", substitution), _market(points), day)
+            if found is None:
+                continue
+            assert (found.variant == "pv_nominal") == found.by_nominal, name
+            assert substitution or not found.by_nominal, name
+            seen.add(found.variant)
+    assert seen == {"pv", "pv_nominal"}
+
+
 def test_the_lower_of_ratio_and_substituted_price_counts(flows: dict[str, str]) -> None:
     """Две бумаги эмитента: в сравнение идёт наименьшее, как в замере 6."""
     day = _days(1)[0]
