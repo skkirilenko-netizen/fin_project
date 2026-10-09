@@ -140,11 +140,9 @@ class MarketFinding:
         scale = int(policy.display["pv_ratio_scale"])
         price = int(policy.display["price_scale"])
         mark = f" — {zone.nominal_mark}"
-        # Порог печатается так, как объявлен методикой: «0,6», а не «0,60».
-        places = max(0, -int(zone.ratio_below.normalize().as_tuple().exponent))
         said.update(
             value=digits(self.value / 100, scale),
-            threshold=digits(zone.ratio_below, places),
+            threshold=zone.ratio_below_said,
             price=digits(self.price, price) if self.price is not None else "",
             pv=digits(self.pv, price) if self.pv is not None else "",
             on=f"{self.priced_on:%d.%m.%Y}" if self.priced_on else "",

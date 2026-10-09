@@ -17,7 +17,7 @@ import yaml
 
 from finlib.config import settings
 from finlib.scoring.market import findings
-from finlib.scoring.routing import RoutingPolicy, load_routing
+from finlib.scoring.routing import RoutingPolicy, load_routing, measure_context
 from finlib.sources import cbonds
 from finlib.sources.market import (
     DistressMeasure,
@@ -187,39 +187,76 @@ def test_a_recovered_ratio_names_its_low(flows: dict[str, str]) -> None:
     assert f"{days[2]:%d.%m.%Y}" in text and "по номиналу" not in text
 
 
-def test_the_ground_is_named_by_the_measure_and_substitution_keeps_its_mark(
+def _strings(value: object, path: str = "") -> list[tuple[str, str]]:
+    """Все строки выгрузки справочника с путём к каждой."""
+    if isinstance(value, str):
+        return [(path, value)]
+    if isinstance(value, dict):
+        return [item for key, inner in value.items() for item in _strings(inner, f"{path}.{key}")]
+    if isinstance(value, list | tuple):
+        return [
+            item
+            for number, inner in enumerate(value)
+            for item in _strings(inner, f"{path}[{number}]")
+        ]
+    return []
+
+
+def test_the_ground_is_said_by_the_measure_and_substitution_keeps_its_mark(
     flows: dict[str, str],
 ) -> None:
-    """Наименование основания — по действующей мере; подстановка — пометкой в тексте.
+    """Наименование и обоснования — по действующей мере; подстановка — пометкой в тексте.
 
     Отчёт 09.10.2026: восемь смен «Внимание → Разбор» по ценовому основанию
     печатались «цена бумаги ниже 60 % номинала» при `measure: pv_kbd`.
     """
-    named = {item.code: item.name for item in load_routing().basket("review").grounds}
-    assert named["market_price_distress"] == "цена к PV по КБД ниже порога"
+    routing = load_routing()
+    zone = load_market().distress_zone
+    ground = next(item for item in routing.basket("review").grounds
+                  if item.code == "market_price_distress")
+    layer = routing.basket("review").subgroup("market_risk")
+    assert layer is not None
+    assert ground.name == "цена к PV по КБД ниже порога"
+    # Порог — из методики рынка, а не числом в тексте.
+    said = f"ниже {zone.ratio_below_said} от PV по КБД"
+    assert said in ground.why and said in layer.why
+    assert "{" not in ground.why + layer.why
+    # **Ни один текст при pv_kbd не говорит «номинала»**, кроме формулировок
+    # для прежней меры и для подстановки (`pv_nominal`, пометка `nominal_mark`).
+    elsewhere = {"default", "recovered", "pv_nominal"}
+    spoken = [
+        (path, text)
+        for path, text in _strings(routing.model_dump())
+        if "_by_measure" not in path
+        and not (".market_price_distress." in path and path.rsplit(".", 1)[-1] in elsewhere)
+    ]
+    assert [path for path, text in spoken if "номинала" in text] == []
+    # При прежней мере тексты прежние.
     raw = yaml.safe_load((settings.methodology_dir / "routing.yaml").read_text(encoding="utf-8"))
-    measures = get_args(DistressMeasure)
-    by_nominal = RoutingPolicy.model_validate(
-        raw, context={"distress_measure": "nominal", "distress_measures": measures}
-    )
-    named = {item.code: item.name for item in by_nominal.basket("review").grounds}
-    assert named["market_price_distress"] == "цена бумаги ниже 60 % номинала"
-    # Справочник без меры не читается: наименование выбрать было бы не по чему.
+    by_nominal = RoutingPolicy.model_validate(raw, context=measure_context("nominal"))
+    ground = next(item for item in by_nominal.basket("review").grounds
+                  if item.code == "market_price_distress")
+    layer = by_nominal.basket("review").subgroup("market_risk")
+    assert layer is not None
+    assert ground.name == "цена бумаги ниже 60 % номинала"
+    assert ground.why.startswith("Ниже этой цены доходность перестаёт быть ценой риска")
+    assert layer.why.startswith("Наблюдение сегодняшнего дня: цена ниже 60 % номинала")
+    # Справочник без меры не читается: текст выбрать было бы не по чему.
     with pytest.raises(ValueError, match="мера не передана"):
         RoutingPolicy.model_validate(raw)
-    # Мера, у которой нет своего наименования, не грузится вовсе.
-    with pytest.raises(ValueError, match="без своего имени"):
-        RoutingPolicy.model_validate(
-            raw, context={"distress_measure": "nominal", "distress_measures": (*measures, "z")}
-        )
-    # Подстановка номинала в наименование не идёт: у неё своя пометка.
+    # Мера, у которой нет своего текста, не грузится вовсе.
+    context = measure_context("nominal")
+    context["distress_measures"] = (*get_args(DistressMeasure), "z")
+    with pytest.raises(ValueError, match="печатался бы чужим"):
+        RoutingPolicy.model_validate(raw, context=context)
+    # Подстановка номинала в тексты не идёт: у неё своя пометка.
     day = _days(1)[0]
     bare = price_to_pv(_row("RU000NOFLOW"), day, lambda years: RATE, Decimal(55), flows)
     policy = _policy("pv_kbd", True)
     market = _market([_of_day(day, [(None, Decimal(1), Decimal(55), bare)])])
     found = _price_ground(policy, market, day)
     assert found is not None and found.by_nominal
-    text = load_routing().say(found.ground, found.variant, **found.slots(policy))
+    text = routing.say(found.ground, found.variant, **found.slots(policy))
     assert text.endswith(policy.distress_zone.nominal_mark)
 
 
