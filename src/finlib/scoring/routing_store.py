@@ -1178,7 +1178,10 @@ def routing_rows(
             for entry in item.guarantees
             if entry.inn in by_inn and entry.inn != item.inn
         ]
-        if not backing:
+        # **Без выпусков в обращении поручитель ничего не решает** (`perimeter`,
+        # решение владельца 09.10.2026): отвечать ему не по чему, и корзина
+        # поручителя «Вне периметра» отменила бы.
+        if not backing or "no_bonds_outstanding" in item.verdict.grounds:
             secured_rows.append(item)
             continue
         counts["пар с поручителем в списке"] += 1

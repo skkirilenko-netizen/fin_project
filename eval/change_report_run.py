@@ -972,6 +972,17 @@ def _moves_table(routing, groups: dict, was, now, since, until, order) -> None: 
     print()
 
 
+def no_bonds_left(was: dict, now: dict) -> list[str]:
+    """ИНН, у которых за окно появилось основание «нет выпусков в обращении»."""
+    return sorted(
+        inn
+        for inn, row in now.items()
+        if inn in was
+        and "no_bonds_outstanding" in row["grounds"]
+        and "no_bonds_outstanding" not in was[inn]["grounds"]
+    )
+
+
 def _our_change(before: dict, after: dict) -> str:
     """Категория причины с наблюдавшимися версиями без недоказанной атрибуции."""
     old = before.get("code_version") or "не записана"
@@ -1141,6 +1152,19 @@ def _report(routing, kind, since, until, was, now, bonds, previous,  # noqa: ANN
             f"- вышел {_named(inn)}: было {_basket_name(routing, was[inn]['basket'])}; "
             "причина выхода из истории не установлена — проверить журнал исключений"
         )
+    print()
+    # **Выход по периметру — своей строкой** (решение владельца 09.10.2026):
+    # эмитент остаётся в списке, но «Вне периметра методики» по основанию
+    # `no_bonds_outstanding`, и среди прочих смен корзины его причину не видно.
+    gone = no_bonds_left(was, now)
+    print(f"Вышли: нет выпусков в обращении — {len(gone)} ({period})\n")
+    for inn in gone[:20]:
+        print(
+            f"- вышел: нет выпусков в обращении — {_named(inn)}: было "
+            f"{_basket_name(routing, was[inn]['basket'])}"
+        )
+    if len(gone) > 20:
+        print(f"\nПоказаны первые двадцать из {len(gone)}; остальные видны в истории.")
     print()
 
     print(f"## От календаря: {len(by_calendar)} ({period})\n")

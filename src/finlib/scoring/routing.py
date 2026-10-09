@@ -632,6 +632,19 @@ class Freshness(BaseModel):
         return max(expected - latest.year, 0)
 
 
+class Perimeter(BaseModel):
+    """Периметр по выпускам: без выпусков в обращении — «Вне периметра методики»."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Статусы выпуска, при которых выпуск есть: в обращении, размещаемый,
+    # планируемый (решение владельца 09.10.2026).
+    bond_statuses: tuple[str, ...] = Field(min_length=1)
+    # Основания, при которых эмитент без выпусков остаётся по прежним правилам.
+    keeps_route: tuple[str, ...] = Field(min_length=1)
+    origin: str = Field(min_length=1)
+
+
 class Statements(BaseModel):
     """Формулировки оснований: смысл, а не механика расчёта.
 
@@ -763,6 +776,7 @@ class RoutingPolicy(BaseModel):
     holdings: Holdings
     refinancing: Refinancing
     freshness: Freshness
+    perimeter: Perimeter
     # **Чего список не проверяет и чем ограничен.** Объявлено методикой,
     # а не написано в коде страницы: текст, который читатель принимает
     # за оговорку методики, правится диффом, как всякая формулировка.
@@ -868,6 +882,13 @@ class RoutingPolicy(BaseModel):
             raise ValueError(
                 "у типов эмитента нет формулировки отброшенного основания: "
                 + ", ".join(sorted(silent))
+            )
+        # Удерживающее основание периметра объявлено: опечатка в перечне
+        # молча вывела бы эмитента с дефолтом из маршрута.
+        stray = set(self.perimeter.keeps_route) - declared
+        if stray:
+            raise ValueError(
+                "периметр удерживает основаниями, которых нет: " + ", ".join(sorted(stray))
             )
         return self
 
@@ -2071,7 +2092,8 @@ def route(
                 ),
             )
         )
-    found = bankrupt + status + review + attention
+    outside = _no_bonds(routing, events, bankrupt + status + review + attention)
+    found = bankrupt + outside + status + review + attention
     # **Корзину называют основания той тяжести, по которой она выбрана.**
     # Прежде перечень собирался из всех сработавших по одному признаку —
     # объявлено ли основание у корзины, — и решение человека о внимании,
@@ -2080,6 +2102,11 @@ def route(
     named: list[Finding] = []
     if bankrupt:
         code, named = "review", bankrupt + review
+    elif outside:
+        # **Периметр старше очереди статуса и корзин тяжести** (решение
+        # владельца 09.10.2026): без долга в обращении вопроса маршрута нет,
+        # а обстоятельства, которые его удержали бы, проверены в `_no_bonds`.
+        code, named = "out_of_scope", outside
     elif status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
         # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
@@ -2123,6 +2150,38 @@ def route(
         inapplicable=inapplicable,
         named=named,
     )
+
+
+def _no_bonds(
+    routing: RoutingPolicy, events: object | None, found: list[Finding]
+) -> list[Finding]:
+    """Основание «нет выпусков в обращении»; пусто — выпуски есть, неизвестны либо удержан.
+
+    **Нет ответа источника — не «нет выпусков»** (`issues_known`): такой
+    эмитент идёт по прежним правилам. Выпуск есть, если хоть один в статусе
+    из `perimeter.bond_statuses`; удерживают эмитента в маршруте основания
+    `perimeter.keeps_route` — банкротство, неурегулированный дефолт, решение
+    человека.
+    """
+    perimeter = routing.perimeter
+    if events is None or not getattr(events, "issues_known", False):
+        return []
+    issues = tuple(getattr(events, "issues", ()))
+    if any(item.status in perimeter.bond_statuses for item in issues):
+        return []
+    if {item.ground for item in found} & set(perimeter.keeps_route):
+        return []
+    counted: dict[str, int] = {}
+    for item in issues:
+        name = item.status or "статус не назван"
+        counted[name] = counted.get(name, 0) + 1
+    said = (
+        f"выпусков у источника {len(issues)}: "
+        + ", ".join(f"{name} {count}" for name, count in sorted(counted.items()))
+        if issues
+        else "выпусков у источника нет"
+    )
+    return [Finding("no_bonds_outstanding", "", routing.say("no_bonds_outstanding", said=said))]
 
 
 def _with_basis(

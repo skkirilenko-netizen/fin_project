@@ -493,6 +493,7 @@ def test_settled_default_is_not_a_current_circumstance() -> None:
                 outstanding=None,
                 updated=date(2024, 3, 11),
             ),
+            live(),
         ),
         issues_known=True,
         records=(record("9", "2016-06-03", met="2016-07-01"),),
@@ -571,6 +572,22 @@ def issue(name: str, status: str, maturity: date, *, unsettled: bool):
         offer=None,
         outstanding=None,
         updated=date(2026, 9, 1),
+    )
+
+
+def live():
+    """Выпуск в обращении без признака дефолта.
+
+    **Эмитент без выпусков в обращении — «Вне периметра»** (`perimeter`,
+    решение владельца 09.10.2026): тесты кредитной истории по погашенным
+    выпускам держат рядом живой выпуск, иначе проверяли бы периметр.
+    """
+    from finlib.sources.cbonds_events import Issue
+
+    return Issue(
+        emission_id="ЖИВОЙ-01", name="ЖИВОЙ-01", isin="RUЖИВОЙ01", status="в обращении",
+        default=False, unsettled=False, maturity=date(2030, 1, 1), offer=None,
+        outstanding=None, updated=date(2026, 9, 1),
     )
 
 
@@ -762,6 +779,7 @@ def test_a_default_on_a_repaid_issue_is_credit_history() -> None:
     verdict = verdict_for(
         with_issues(
             issue("001P-03", "погашена", date(2026, 3, 14), unsettled=True),
+            live(),
             records=(record("001P-03", "2026-02-10"),),
         )
     )
@@ -829,6 +847,7 @@ def test_recently_settled_default_is_credit_history() -> None:
     verdict = verdict_for(
         with_issues(
             issue("001P-02", "погашена", date(2025, 11, 25), unsettled=False),
+            live(),
             records=(record("001P-02", "2025-11-25", met="2025-12-02"),),
         )
     )
@@ -846,6 +865,7 @@ def test_stale_settled_default_is_a_note_and_not_a_silence() -> None:
     verdict = verdict_for(
         with_issues(
             issue("еврооблигации", "погашена", date(2016, 5, 2), unsettled=False),
+            live(),
             records=(record("еврооблигации", "2016-06-03", met="2016-08-01"),),
         )
     )
@@ -1209,6 +1229,7 @@ def test_settled_events_outweigh_the_card_flag_but_are_counted() -> None:
     """
     events = with_issues(
         issue("001Р-02", "досрочно погашена", date(2026, 11, 15), unsettled=True),
+        live(),
         records=(record("001Р-02", "2025-07-07", met="2025-07-21"),),
     )
     assert not events.unsettled_default
