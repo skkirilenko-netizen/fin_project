@@ -47,6 +47,10 @@ SERIES = settings.data_dir / "market" / "series.json"
 
 _RULES = settings.methodology_dir / "market.yaml"
 
+# Чем мерится зона дефолта (`distress_zone.measure`). Перечень один: по нему
+# же справочник маршрута проверяет наименования основания по мере.
+DistressMeasure = Literal["nominal", "pv_kbd"]
+
 # Ряд, прочитанный в этом процессе: двести тысяч точек читаются с диска
 # однажды. `None` означает «ещё не читали», а не «ряда нет».
 _LOADED: "Market | None" = None
@@ -195,7 +199,7 @@ class Distress(BaseModel):
     # `substitution` — у бумаги без потока берётся цена от номинала
     # с пометкой `nominal_mark`; без подстановки такая бумага признака
     # не даёт. Умолчаний нет: молчание читалось бы как решение методики.
-    measure: Literal["nominal", "pv_kbd"]
+    measure: DistressMeasure
     measure_status: str = Field(min_length=1)
     measure_origin: str = Field(min_length=1)
     ratio_below: Decimal = Field(gt=0)

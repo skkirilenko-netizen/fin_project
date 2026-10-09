@@ -10,13 +10,17 @@ import json
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import get_args
 
 import pytest
+import yaml
 
+from finlib.config import settings
 from finlib.scoring.market import findings
-from finlib.scoring.routing import load_routing
+from finlib.scoring.routing import RoutingPolicy, load_routing
 from finlib.sources import cbonds
 from finlib.sources.market import (
+    DistressMeasure,
     Market,
     MarketPolicy,
     Point,
@@ -181,6 +185,42 @@ def test_a_recovered_ratio_names_its_low(flows: dict[str, str]) -> None:
     text = load_routing().say(found.ground, found.variant, **found.slots(policy))
     assert text.startswith("Отношение цены к PV по КБД опускалось до 0,4")
     assert f"{days[2]:%d.%m.%Y}" in text and "по номиналу" not in text
+
+
+def test_the_ground_is_named_by_the_measure_and_substitution_keeps_its_mark(
+    flows: dict[str, str],
+) -> None:
+    """Наименование основания — по действующей мере; подстановка — пометкой в тексте.
+
+    Отчёт 09.10.2026: восемь смен «Внимание → Разбор» по ценовому основанию
+    печатались «цена бумаги ниже 60 % номинала» при `measure: pv_kbd`.
+    """
+    named = {item.code: item.name for item in load_routing().basket("review").grounds}
+    assert named["market_price_distress"] == "цена к PV по КБД ниже порога"
+    raw = yaml.safe_load((settings.methodology_dir / "routing.yaml").read_text(encoding="utf-8"))
+    measures = get_args(DistressMeasure)
+    by_nominal = RoutingPolicy.model_validate(
+        raw, context={"distress_measure": "nominal", "distress_measures": measures}
+    )
+    named = {item.code: item.name for item in by_nominal.basket("review").grounds}
+    assert named["market_price_distress"] == "цена бумаги ниже 60 % номинала"
+    # Справочник без меры не читается: наименование выбрать было бы не по чему.
+    with pytest.raises(ValueError, match="мера не передана"):
+        RoutingPolicy.model_validate(raw)
+    # Мера, у которой нет своего наименования, не грузится вовсе.
+    with pytest.raises(ValueError, match="без своего имени"):
+        RoutingPolicy.model_validate(
+            raw, context={"distress_measure": "nominal", "distress_measures": (*measures, "z")}
+        )
+    # Подстановка номинала в наименование не идёт: у неё своя пометка.
+    day = _days(1)[0]
+    bare = price_to_pv(_row("RU000NOFLOW"), day, lambda years: RATE, Decimal(55), flows)
+    policy = _policy("pv_kbd", True)
+    market = _market([_of_day(day, [(None, Decimal(1), Decimal(55), bare)])])
+    found = _price_ground(policy, market, day)
+    assert found is not None and found.by_nominal
+    text = load_routing().say(found.ground, found.variant, **found.slots(policy))
+    assert text.endswith(policy.distress_zone.nominal_mark)
 
 
 def test_a_series_without_ratios_refuses_instead_of_staying_silent(

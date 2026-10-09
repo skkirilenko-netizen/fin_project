@@ -54,10 +54,10 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Self, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from finlib.config import settings
 from finlib.metrics.display import money, percent
@@ -91,6 +91,36 @@ class Ground(BaseModel):
     why: str = Field(min_length=1)
     threshold_from: str | None = None
     group: str | None = None
+    # **Наименование по действующей мере** (`market.yaml`, `distress_zone.
+    # measure`): ценовое основание при `pv_kbd` называлось «ниже 60 %
+    # номинала», и отчёт изменений печатал меру, которой основание больше
+    # не мерится. Выбор делает загрузка справочника (`load_routing`).
+    name_by_measure: dict[str, str] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _named_by_measure(cls, data: object, info: ValidationInfo) -> object:
+        """Наименование берётся у действующей меры; перечень мер — полный."""
+        if not isinstance(data, dict) or not data.get("name_by_measure"):
+            return data
+        named = data["name_by_measure"]
+        context = info.context or {}
+        measures = context.get("distress_measures")
+        if measures is None:
+            # Перепроверка уже собранного справочника: наименование выбрано.
+            if data.get("name"):
+                return data
+            raise ValueError(
+                f"основание {data.get('code')}: наименование зависит от меры "
+                "зоны дефолта, а мера не передана — справочник читает load_routing"
+            )
+        if set(named) != set(measures):
+            raise ValueError(
+                f"основание {data.get('code')}: наименования объявлены для мер "
+                f"{', '.join(sorted(named))}, а мер {', '.join(sorted(measures))} — "
+                "основание без своего имени печаталось бы чужим"
+            )
+        return {**data, "name": named[context["distress_measure"]]}
 
 
 class Subgroup(BaseModel):
@@ -920,10 +950,16 @@ class RoutingPolicy(BaseModel):
 
 @lru_cache(maxsize=1)
 def load_routing(path: Path | None = None) -> RoutingPolicy:
-    """Читает справочник маршрутизации."""
+    """Читает справочник маршрутизации; наименования по мере — у действующей."""
+    from finlib.sources.market import DistressMeasure, load_market
+
     source = path or settings.methodology_dir / "routing.yaml"
     policy = RoutingPolicy.model_validate(
-        yaml.safe_load(Path(source).read_text(encoding="utf-8"))
+        yaml.safe_load(Path(source).read_text(encoding="utf-8")),
+        context={
+            "distress_measure": load_market().distress_zone.measure,
+            "distress_measures": get_args(DistressMeasure),
+        },
     )
     logger.info(
         "маршрутизация %s (%s): корзин %d",
