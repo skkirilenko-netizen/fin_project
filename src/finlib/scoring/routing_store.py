@@ -32,6 +32,7 @@
 по событиям и рейтингам: они от стандарта не зависят вовсе.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -402,10 +403,11 @@ def _bankruptcy(card: dict, routing: RoutingPolicy) -> dict[str, str]:
     status = str(card.get("emitent_statuses_id") or "")
     if status not in universe.bankruptcy_statuses:
         return {}
-    return {
-        "bankruptcy": universe.status_of(status),
-        "bankruptcy_updated": str(card.get("updating_date") or "")[:10],
-    }
+    # Дата печатается так же, как прочие даты оснований: «16.09.2026».
+    updated = str(card.get("updating_date") or "")[:10]
+    with contextlib.suppress(ValueError):
+        updated = f"{date.fromisoformat(updated):%d.%m.%Y}"
+    return {"bankruptcy": universe.status_of(status), "bankruptcy_updated": updated}
 
 
 @dataclass(frozen=True, slots=True)

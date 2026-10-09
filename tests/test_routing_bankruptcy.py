@@ -97,7 +97,7 @@ def test_bankruptcy_names_review_over_the_status_queue_and_attention(case: str) 
     given, before = CASES[case]
     assert _routed(**given).basket == before
     verdict = _routed(**given, bankruptcy="идёт процедура банкротства",
-                      bankruptcy_updated="2026-09-16")
+                      bankruptcy_updated="16.09.2026")
     assert verdict.basket == "review"
     assert "bankruptcy_proceedings" in verdict.grounds
     assert verdict.subgroups[0] == "event_risk"
@@ -105,7 +105,7 @@ def test_bankruptcy_names_review_over_the_status_queue_and_attention(case: str) 
     was = {item.ground for item in _routed(**given).findings}
     assert was <= {item.ground for item in verdict.findings}
     said = next(item for item in verdict.findings if item.ground == "bankruptcy_proceedings")
-    assert "идёт процедура банкротства" in said.text and "2026-09-16" in said.text
+    assert "идёт процедура банкротства" in said.text and "16.09.2026" in said.text
 
 
 def test_the_card_status_gives_bankruptcy_only_for_declared_statuses() -> None:
@@ -116,8 +116,11 @@ def test_the_card_status_gives_bankruptcy_only_for_declared_statuses() -> None:
     card = {"emitent_statuses_id": code, "updating_date": "2026-09-16T00:00:00"}
     assert _bankruptcy(card, routing) == {
         "bankruptcy": universe.status_of(code),
-        "bankruptcy_updated": "2026-09-16",
+        "bankruptcy_updated": "16.09.2026",
     }
+    # Дата, которую не разобрать, печатается как есть, а не пропадает.
+    odd = {"emitent_statuses_id": code, "updating_date": "не дата"}
+    assert _bankruptcy(odd, routing)["bankruptcy_updated"] == "не дата"
     active = next(key for key, name in universe.statuses.items() if name == "действующая")
     assert _bankruptcy({"emitent_statuses_id": active}, routing) == {}
     assert _bankruptcy({}, routing) == {}
