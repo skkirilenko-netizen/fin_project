@@ -54,10 +54,10 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Self, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from finlib.config import settings
 from finlib.metrics.display import money, percent
@@ -81,6 +81,45 @@ logger = logging.getLogger(__name__)
 # `routing.yaml`, блок `standards`, и берётся он через `catalogue_for`.
 
 
+def _by_measure(data: object, info: ValidationInfo, fields: tuple[str, ...]) -> object:
+    """Тексты по мере зоны дефолта: берётся текст действующей меры, перечень мер полный.
+
+    **Тексты ценового основания зависят от меры** (`market.yaml`,
+    `distress_zone.measure`): при `pv_kbd` основание называлось «ниже 60 %
+    номинала», и отчёт изменений 09.10.2026 печатал меру, которой основание
+    больше не мерится. Выбор делает загрузка справочника (`load_routing`),
+    она же подставляет порог (`{ratio_below}`) из методики рынка.
+    """
+    if not isinstance(data, dict):
+        return data
+    declared = [field for field in fields if data.get(f"{field}_by_measure")]
+    if not declared:
+        return data
+    context = info.context or {}
+    measures = context.get("distress_measures")
+    if measures is None:
+        # Перепроверка уже собранного справочника: тексты выбраны.
+        if all(data.get(field) for field in declared):
+            return data
+        raise ValueError(
+            f"{data.get('code')}: текст зависит от меры зоны дефолта, а мера "
+            "не передана — справочник читает load_routing"
+        )
+    chosen = dict(data)
+    for field in declared:
+        said = data[f"{field}_by_measure"]
+        if set(said) != set(measures):
+            raise ValueError(
+                f"{data.get('code')}: {field} объявлен для мер "
+                f"{', '.join(sorted(said))}, а мер {', '.join(sorted(measures))} — "
+                "текст без своей меры печатался бы чужим"
+            )
+        chosen[field] = said[context["distress_measure"]].format(
+            **context["distress_slots"]
+        )
+    return chosen
+
+
 class Ground(BaseModel):
     """Основание корзины: код, наименование и откуда берётся порог."""
 
@@ -91,6 +130,15 @@ class Ground(BaseModel):
     why: str = Field(min_length=1)
     threshold_from: str | None = None
     group: str | None = None
+    # Наименование и обоснование по действующей мере (`_by_measure`).
+    name_by_measure: dict[str, str] | None = None
+    why_by_measure: dict[str, str] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _said_by_measure(cls, data: object, info: ValidationInfo) -> object:
+        """Наименование и обоснование — у действующей меры."""
+        return _by_measure(data, info, ("name", "why"))
 
 
 class Subgroup(BaseModel):
@@ -104,6 +152,15 @@ class Subgroup(BaseModel):
     action: str = Field(min_length=1)
     action_code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     why: str = Field(min_length=1)
+    # Обоснование по действующей мере (`_by_measure`): слой «рынок» называет
+    # ценовое основание той же мерой, что и само основание.
+    why_by_measure: dict[str, str] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _said_by_measure(cls, data: object, info: ValidationInfo) -> object:
+        """Обоснование — у действующей меры."""
+        return _by_measure(data, info, ("why",))
 
 
 class Basket(BaseModel):
@@ -918,12 +975,29 @@ class RoutingPolicy(BaseModel):
         return tuple(sorted(self.baskets, key=lambda item: item.order))
 
 
+def measure_context(measure: str | None = None) -> dict[str, object]:
+    """Контекст проверки справочника: мера зоны дефолта, перечень мер и порог.
+
+    Мера — действующая (`market.yaml`), если не названа явно; явная нужна
+    проверке, что справочник читается и при другой.
+    """
+    from finlib.sources.market import DistressMeasure, load_market
+
+    zone = load_market().distress_zone
+    return {
+        "distress_measure": measure or zone.measure,
+        "distress_measures": get_args(DistressMeasure),
+        "distress_slots": {"ratio_below": zone.ratio_below_said},
+    }
+
+
 @lru_cache(maxsize=1)
 def load_routing(path: Path | None = None) -> RoutingPolicy:
-    """Читает справочник маршрутизации."""
+    """Читает справочник маршрутизации; тексты по мере — у действующей."""
     source = path or settings.methodology_dir / "routing.yaml"
     policy = RoutingPolicy.model_validate(
-        yaml.safe_load(Path(source).read_text(encoding="utf-8"))
+        yaml.safe_load(Path(source).read_text(encoding="utf-8")),
+        context=measure_context(),
     )
     logger.info(
         "маршрутизация %s (%s): корзин %d",

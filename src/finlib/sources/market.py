@@ -33,6 +33,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finlib.config import settings
+from finlib.metrics.display import digits
 from finlib.sources.cbonds import bond_issuers
 from finlib.sources.cbonds_events import issues_of
 from finlib.sources.moex import CACHE
@@ -46,6 +47,10 @@ logger = logging.getLogger(__name__)
 SERIES = settings.data_dir / "market" / "series.json"
 
 _RULES = settings.methodology_dir / "market.yaml"
+
+# Чем мерится зона дефолта (`distress_zone.measure`). Перечень один: по нему
+# же справочник маршрута проверяет наименования основания по мере.
+DistressMeasure = Literal["nominal", "pv_kbd"]
 
 # Ряд, прочитанный в этом процессе: двести тысяч точек читаются с диска
 # однажды. `None` означает «ещё не читали», а не «ряда нет».
@@ -195,7 +200,7 @@ class Distress(BaseModel):
     # `substitution` — у бумаги без потока берётся цена от номинала
     # с пометкой `nominal_mark`; без подстановки такая бумага признака
     # не даёт. Умолчаний нет: молчание читалось бы как решение методики.
-    measure: Literal["nominal", "pv_kbd"]
+    measure: DistressMeasure
     measure_status: str = Field(min_length=1)
     measure_origin: str = Field(min_length=1)
     ratio_below: Decimal = Field(gt=0)
@@ -215,6 +220,12 @@ class Distress(BaseModel):
         if self.measure == "pv_kbd":
             return self.ratio_below * 100
         return self.price_below_percent
+
+    @property
+    def ratio_below_said(self) -> str:
+        """Порог отношения так, как объявлен методикой: «0,6», а не «0,60»."""
+        places = max(0, -int(self.ratio_below.normalize().as_tuple().exponent))
+        return digits(self.ratio_below, places)
 
 
 class Lifetime(BaseModel):
