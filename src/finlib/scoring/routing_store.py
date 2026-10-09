@@ -396,6 +396,18 @@ def cards() -> dict[str, dict]:
     return json.loads(CARDS.read_text(encoding="utf-8"))
 
 
+def _bankruptcy(card: dict, routing: RoutingPolicy) -> dict[str, str]:
+    """Доводы маршрута о банкротстве по карточке; пусто — статус не банкротство."""
+    universe = routing.universe
+    status = str(card.get("emitent_statuses_id") or "")
+    if status not in universe.bankruptcy_statuses:
+        return {}
+    return {
+        "bankruptcy": universe.status_of(status),
+        "bankruptcy_updated": str(card.get("updating_date") or "")[:10],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Exclusion:
     """Запись журнала исключений: кто вышел из списка, почему и когда.
@@ -1020,6 +1032,9 @@ def routing_rows(
             refinance=refinance,
             systemic_volume=systemic.get(inn),
             status_unconfirmed=unconfirmed.get(inn, ""),
+            # Банкротство — статус карточки, как и неподтверждённый выход:
+            # источник у них один, и истории у него нет.
+            **_bankruptcy(card, routing),
             manual_floor=floor_for(decided, inn, standard),
             # **Календарь рейтинговых действий даёт одно — дату перехода.**
             # Категорию по-прежнему называет ежедневный снимок, и корзина
@@ -1170,9 +1185,11 @@ def routing_rows(
         heaviest = min(
             backing, key=lambda entry: routing.basket(entry.verdict.basket).order
         )
-        if item.inn in spv:
+        if item.inn in spv and "bankruptcy_proceedings" not in item.verdict.grounds:
             # Финансирующая структура собой не оценивается: её корзина —
-            # корзина того, кто отвечает по её долгу.
+            # корзина того, кто отвечает по её долгу. **Кроме банкротства
+            # самой структуры**: процедура идёт у неё, а не у поручителя,
+            # и корзина поручителя её разбор отменила бы.
             counts["из них корзина взята у поручителя"] += 1
             led[item.inn] = heaviest
             # **У варианта корзина SPV берётся у того же поручителя** — его

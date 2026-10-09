@@ -692,6 +692,20 @@ class Universe(BaseModel):
     require_successor: bool
     unconfirmed_to: str = Field(min_length=1)
     origin: str = Field(min_length=1)
+    # Статусы карточки, означающие процедуру банкротства: основание «Разбора»
+    # `bankruptcy_proceedings` (решение владельца 09.10.2026).
+    bankruptcy_statuses: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _bankruptcy_is_a_known_status(self) -> Self:
+        """Статус банкротства — из объявленных: иначе основание не сработало бы никогда."""
+        unknown = set(self.bankruptcy_statuses) - set(self.statuses)
+        if unknown:
+            raise ValueError(
+                "статусы банкротства не объявлены среди статусов карточки: "
+                + ", ".join(sorted(unknown))
+            )
+        return self
 
     def status_of(self, code: str) -> str:
         """Наименование статуса по коду; неизвестный код называется кодом.
@@ -1340,6 +1354,10 @@ def route(
     # Статус карточки говорит о ликвидации, а преемник не подтверждён: эмитент
     # из списка не выходит, но и величинами о нём судить нельзя.
     status_unconfirmed: str = "",
+    # Статус карточки — процедура банкротства (`universe.bankruptcy_statuses`):
+    # наименование статуса и дата обновления карточки. Пусто — не банкротство.
+    bankruptcy: str = "",
+    bankruptcy_updated: str = "",
     # Действующее решение человека о корзине: обстоятельство, которого машина
     # не видит. Истёкшие решения сюда не доходят — их отбирает выборка журнала.
     manual_floor: "ManualFloor | None" = None,
@@ -2035,14 +2053,34 @@ def route(
             _with_basis(items, basis_note, routing)
             for items in (status, review, attention)
         )
-    found = status + review + attention
+    # **Банкротство старше очереди статуса и типа эмитента** (решение владельца
+    # 09.10.2026). Очередь статуса спрашивает, не начато ли банкротство, —
+    # карточка уже ответила; тип эмитента объявляет применимость величин,
+    # а процедура банкротства о величинах не говорит. Поэтому основание
+    # ставится после отбора по типу и называет «Разбор» первым.
+    bankrupt: list[Finding] = []
+    if bankruptcy:
+        bankrupt.append(
+            Finding(
+                "bankruptcy_proceedings",
+                "",
+                routing.say(
+                    "bankruptcy_proceedings",
+                    status=bankruptcy,
+                    updated=bankruptcy_updated or "дата не названа",
+                ),
+            )
+        )
+    found = bankrupt + status + review + attention
     # **Корзину называют основания той тяжести, по которой она выбрана.**
     # Прежде перечень собирался из всех сработавших по одному признаку —
     # объявлено ли основание у корзины, — и решение человека о внимании,
     # объявленное и в разборе, вышло бы основанием разбора у эмитента,
     # которого в разбор отправил стоп-фактор.
     named: list[Finding] = []
-    if status:
+    if bankrupt:
+        code, named = "review", bankrupt + review
+    elif status:
         # Очередь статуса старше корзин тяжести: по числам такой давности
         # решение принимать нельзя, каким бы тяжёлым обстоятельство ни было.
         code, named = "status_unknown", status
