@@ -217,21 +217,6 @@ def test_a_recovered_ratio_names_its_low(flows: dict[str, str]) -> None:
     assert f"{days[2]:%d.%m.%Y}" in text and "по номиналу" not in text
 
 
-def _strings(value: object, path: str = "") -> list[tuple[str, str]]:
-    """Все строки выгрузки справочника с путём к каждой."""
-    if isinstance(value, str):
-        return [(path, value)]
-    if isinstance(value, dict):
-        return [item for key, inner in value.items() for item in _strings(inner, f"{path}.{key}")]
-    if isinstance(value, list | tuple):
-        return [
-            item
-            for number, inner in enumerate(value)
-            for item in _strings(inner, f"{path}[{number}]")
-        ]
-    return []
-
-
 def test_the_ground_is_said_by_the_measure_and_substitution_keeps_its_mark(
     flows: dict[str, str],
 ) -> None:
@@ -251,16 +236,20 @@ def test_the_ground_is_said_by_the_measure_and_substitution_keeps_its_mark(
     said = f"ниже {zone.ratio_below_said} от PV по КБД"
     assert said in ground.why and said in layer.why
     assert "{" not in ground.why + layer.why
-    # **Ни один текст при pv_kbd не говорит «номинала»**, кроме формулировок
-    # для прежней меры и для подстановки (`pv_nominal`, пометка `nominal_mark`).
+    # **Ни один текст ценового основания при pv_kbd не говорит «номинала»**,
+    # кроме формулировок прежней меры и подстановки (`pv_nominal`, пометка
+    # `nominal_mark`). Проверяются тексты основания и слоя «рынок», а не весь
+    # справочник: «номинал» выпуска законно стоит в других местах (оферты
+    # по номиналу в `refinancing`), и проверка всего справочника ловила их.
+    statements = routing.statements.by_ground["market_price_distress"]
     elsewhere = {"default", "recovered", "pv_nominal"}
-    spoken = [
-        (path, text)
-        for path, text in _strings(routing.model_dump())
-        if "_by_measure" not in path
-        and not (".market_price_distress." in path and path.rsplit(".", 1)[-1] in elsewhere)
-    ]
-    assert [path for path, text in spoken if "номинала" in text] == []
+    spoken = {
+        "наименование": ground.name,
+        "обоснование": ground.why,
+        "слой «рынок»": layer.why,
+        **{key: text for key, text in statements.items() if key not in elsewhere},
+    }
+    assert [key for key, text in spoken.items() if "номинала" in text] == []
     # При прежней мере тексты прежние.
     raw = yaml.safe_load((settings.methodology_dir / "routing.yaml").read_text(encoding="utf-8"))
     by_nominal = RoutingPolicy.model_validate(raw, context=measure_context("nominal"))
