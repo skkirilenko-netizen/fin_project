@@ -136,3 +136,57 @@ def test_the_impact_names_the_cause_of_a_move() -> None:
     assert impact.cause(("no_bonds_outstanding",)) == "периметр: нет выпусков в обращении"
     assert impact.cause(("bankruptcy_proceedings", "emission_default")) == "банкротство в карточке"
     assert impact.cause(("stop_factor_capped",)) == "иное: данные или календарь"
+
+
+def test_bonds_seen_elsewhere_keep_the_route() -> None:
+    """Файл эмитента выпусков не видит, другой источник видит — прежние правила."""
+    events = _events(_issue("погашена"))
+    assert _routed(events).basket == "out_of_scope"
+    for source in ("перечень Cbonds", "срез биржи", "поручительство"):
+        assert _routed(events, bonds_elsewhere=(source,)).basket == "clear"
+
+
+def test_bond_sources_count_the_list_the_board_and_the_guarantee(
+    tmp_path, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
+) -> None:
+    """Пустой файл при выпуске в перечне, устаревший файл при бумаге в срезе, поручитель SPV.
+
+    no-bonds-impact 09.10.2026: у ПИК-СЗ файл выпусков устарел, у SPV
+    «нет выпусков» приходило от поручителя без собственных выпусков.
+    """
+    import json
+
+    from finlib.scoring import routing_store as store
+    from finlib.sources import moex
+    from finlib.sources.cbonds_events import Guarantee
+
+    (tmp_path / "xsec_2026-10-08.json").write_text(json.dumps({"history": [{"SECID": "RUB2"}]}))
+    (tmp_path / "xsec_2026-10-12.json").write_text(json.dumps({"history": [{"SECID": "RUX"}]}))
+    monkeypatch.setattr(moex, "CACHE", tmp_path)
+    monkeypatch.setattr(store, "outstanding_universe", lambda: [
+        {"emitent_inn": "A", "isin_code": "RUA1"},
+    ])
+    stale = Issue(emission_id="b", name="b", isin="RUB2", status="погашена", default=False,
+                  unsettled=False, maturity=None, offer=None, outstanding=None, updated=None)
+    files = {
+        "A": (),  # пустой файл, выпуск — в перечне
+        "B": (stale,),  # устаревший файл, бумага — в срезе
+        "S": (_issue("в обращении"),),  # SPV с выпуском
+        "G": (),  # поручитель SPV без собственных выпусков
+        "N": (_issue("погашена"),),  # выпусков нет нигде
+    }
+    monkeypatch.setattr(store, "issues_of", lambda inn: (files[inn], True))
+    monkeypatch.setattr(store, "guarantees_of", lambda inn, statuses: (
+        (Guarantee("G", "Головная", "Поручитель", "S-01"),) if inn == "S" else ()
+    ))
+    counts = store.bond_sources(list(files), TODAY, load_routing())
+    assert counts["A"][store.OWN_FILE] == 0 and counts["A"][store.LISTED] == 1
+    # Срез — последний не позже дня маршрута: 12.10 после 09.10 не берётся.
+    assert counts["B"][store.BOARD] == 1
+    assert counts["S"][store.OWN_FILE] == 1
+    assert counts["G"][store.BACKING] == 1
+    assert not any(counts["N"].values())
+    # Пустой файл при выпуске в перечне — не «вне периметра».
+    elsewhere = tuple(name for name, count in counts["A"].items()
+                      if count and name != store.OWN_FILE)
+    assert _routed(_events(), bonds_elsewhere=elsewhere).basket == "clear"

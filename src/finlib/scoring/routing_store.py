@@ -36,7 +36,7 @@ import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
@@ -60,8 +60,8 @@ from finlib.scoring.routing import (
     route,
 )
 from finlib.scoring.routing_catalogue import RoutingCatalogue, catalogue_for
-from finlib.sources import floating
-from finlib.sources.cbonds import bond_issuers
+from finlib.sources import floating, moex
+from finlib.sources.cbonds import bond_issuers, outstanding_universe
 from finlib.sources.cbonds_events import (
     DEFAULT_STATUSES,
     Guarantee,
@@ -408,6 +408,72 @@ def _bankruptcy(card: dict, routing: RoutingPolicy) -> dict[str, str]:
     with contextlib.suppress(ValueError):
         updated = f"{date.fromisoformat(updated):%d.%m.%Y}"
     return {"bankruptcy": universe.status_of(status), "bankruptcy_updated": updated}
+
+
+# Источники сведений о выпусках эмитента в обращении (`perimeter`): файл
+# выпусков эмитента, перечень Cbonds в обращении, последний срез биржи,
+# поручительство по выпускам в обращении другого эмитента.
+OWN_FILE = "файл эмитента"
+LISTED = "перечень Cbonds"
+BOARD = "срез биржи"
+BACKING = "поручительство"
+BOND_SOURCES = (OWN_FILE, LISTED, BOARD, BACKING)
+
+
+def board_isins(day: date) -> set[str]:
+    """Бумаги последнего среза биржи не позже дня; срезов нет — пусто."""
+    found = []
+    for path in moex.CACHE.glob("xsec_*.json"):
+        if "_p" in path.name:
+            continue
+        with contextlib.suppress(ValueError):
+            on = date.fromisoformat(path.name[len("xsec_") : -len(".json")])
+            if on <= day:
+                found.append((on, path))
+    if not found:
+        return set()
+    rows = json.loads(max(found)[1].read_text(encoding="utf-8")).get("history") or []
+    return {str(row.get("SECID") or "") for row in rows} - {""}
+
+
+def bond_sources(
+    inns: Iterable[str], day: date, routing: RoutingPolicy
+) -> dict[str, dict[str, int]]:
+    """Число выпусков эмитента в обращении по каждому источнику (`BOND_SOURCES`).
+
+    **Источник один — ошибка одна** (no-bonds-impact 09.10.2026): файл выпусков
+    эмитента устаревает — новый выпуск в нём не появляется, — и у ПИК-СЗ
+    с выпусками в обращении периметр видел «нет выпусков». Поэтому сведения
+    берутся у трёх источников, а у поручителя — ещё и выпуски в обращении
+    тех, по чьему долгу он отвечает: у финансирующей структуры корзина
+    берётся у поручителя, и его «нет выпусков» становилось её корзиной.
+    """
+    statuses = set(routing.perimeter.bond_statuses)
+    accepted = frozenset(routing.events.guarantee_statuses)
+    listed: dict[str, set[str]] = {}
+    for row in outstanding_universe():
+        listed.setdefault(str(row.get("emitent_inn") or "").strip(), set()).add(
+            str(row.get("isin_code") or "").strip()
+        )
+    board = board_isins(day)
+    counts: dict[str, dict[str, int]] = {}
+    for inn in inns:
+        issues, _ = issues_of(inn)
+        own = {item.isin or item.emission_id for item in issues if item.status in statuses}
+        known = {item.isin for item in issues if item.isin} | listed.get(inn, set())
+        counts[inn] = {
+            OWN_FILE: len(own),
+            LISTED: len(listed.get(inn, set())),
+            BOARD: len(known & board),
+            BACKING: 0,
+        }
+    for inn, said in list(counts.items()):
+        if not any(said[name] for name in (OWN_FILE, LISTED, BOARD)):
+            continue
+        for item in guarantees_of(inn, accepted):
+            if item.inn and item.inn != inn:
+                counts.setdefault(item.inn, dict.fromkeys(BOND_SOURCES, 0))[BACKING] += 1
+    return counts
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,6 +829,10 @@ def routing_rows(
     # ответа на него не было вовсе, и формулировка объявляла поручителя
     # отсутствующим по одному тому, что имя известно.
     listed = {inn for inn in universe if inn not in skip}
+    # Выпуски в обращении по каждому источнику — один раз на проход: периметр
+    # судит по всем, а не по файлу эмитента (`bond_sources`).
+    sources_of_bonds = bond_sources(universe, as_of or today, routing)
+    counts["источники о выпусках расходятся"] = 0
     for inn in universe:
         if inn in skip:
             counts["вышло из списка"] += 1
@@ -1029,6 +1099,13 @@ def routing_rows(
             if standard is None
             else "",
             events=events,
+            # Источники, кроме файла эмитента, видящие выпуски в обращении:
+            # хоть один — периметр не применяется (`_no_bonds`).
+            bonds_elsewhere=tuple(
+                name
+                for name in BOND_SOURCES
+                if name != OWN_FILE and sources_of_bonds.get(inn, {}).get(name)
+            ),
             today=today,
             catalogue=catalogue,
             refinance=refinance,
@@ -1079,6 +1156,15 @@ def routing_rows(
         )
         verdict = route(computed, **inputs)
         given[inn] = inputs
+        # **Источники о выпусках расходятся** — файл эмитента пуст, а другой
+        # источник выпуски видит: эмитент идёт по прежним правилам, и это
+        # считается, а не проходит молча.
+        if (
+            events.issues_known
+            and not sources_of_bonds.get(inn, {}).get(OWN_FILE)
+            and inputs["bonds_elsewhere"]
+        ):
+            counts["источники о выпусках расходятся"] += 1
         if variants and verdicts is not None:
             for name, over in variants.items():
                 verdicts.setdefault(name, {})[inn] = route(

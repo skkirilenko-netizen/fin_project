@@ -23,7 +23,7 @@ from datetime import date
 
 from finlib.db import connection, fetch_all
 from finlib.scoring.routing import load_routing
-from finlib.scoring.routing_store import routing_rows
+from finlib.scoring.routing_store import BOND_SOURCES, OWN_FILE, bond_sources, routing_rows
 
 _ROUTE = """
 SELECT inn, basket, grounds, as_of FROM routing_day
@@ -76,16 +76,45 @@ def main() -> int:
     print("| Было | Стало | Эмитентов |\n|---|---|---|")
     for (old, new), count in sorted(pairs.items(), key=lambda entry: -entry[1]):
         print(f"| {names.get(old, old)} | {names.get(new, new)} | {count} |")
+    # Выпуски в обращении по каждому источнику — тот же код, что у маршрута
+    # (`bond_sources`): число печатается, чтобы «нет выпусков» было видно
+    # проверяемым, а не принятым на веру (no-bonds-impact 09.10.2026).
+    counted = bond_sources([item.inn for item in rows], day, routing)
+    head = " | ".join(BOND_SOURCES)
+
+    def by_source(inn: str) -> str:
+        said = counted.get(inn, {})
+        return " | ".join(str(said.get(name, 0)) for name in BOND_SOURCES)
+
     print("\n## Список\n")
-    print("| Эмитент | ИНН | Было | Стало | Причина | Основания было | Основания стало |")
-    print("|---|---|---|---|---|---|---|")
+    print(f"| Эмитент | ИНН | Было | Стало | Причина | {head} | "
+          "Основания было | Основания стало |")
+    print("|---|---|---|---|---|" + "---|" * len(BOND_SOURCES) + "---|---|")
     for item in moved:
         old = was[item.inn]
         print(
             f"| {item.name} | {item.inn} | {names.get(old['basket'], old['basket'])} | "
             f"{item.verdict.basket_name} | {cause(item.verdict.grounds)} | "
+            f"{by_source(item.inn)} | "
             f"{', '.join(old['grounds']) or '—'} | {', '.join(item.verdict.grounds) or '—'} |"
         )
+    # **Источники расходятся** — файл эмитента пуст, другой источник выпуски
+    # видит: эмитент по прежним правилам (решение владельца 09.10.2026).
+    split = [
+        item for item in sorted(rows, key=lambda entry: (entry.name, entry.inn))
+        if item.events is not None and item.events.issues_known
+        and not counted.get(item.inn, {}).get(OWN_FILE)
+        and any(counted.get(item.inn, {}).get(name) for name in BOND_SOURCES
+                if name != OWN_FILE)
+    ]
+    print(f"\n## Источники расходятся: {len(split)}\n")
+    print("Файл выпусков эмитента в обращении не показывает ни одного, другой "
+          "источник — показывает; эмитент идёт по прежним правилам.\n")
+    print(f"| Эмитент | ИНН | Корзина | {head} |")
+    print("|---|---|---|" + "---|" * len(BOND_SOURCES))
+    for item in split:
+        print(f"| {item.name} | {item.inn} | {item.verdict.basket_name} | "
+              f"{by_source(item.inn)} |")
     return 0
 
 
