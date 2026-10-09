@@ -106,10 +106,15 @@ def test_volumes_compare_route_issues_and_the_source_list() -> None:
          "currency_name": "CNY"},
         {"isin_code": "RU5", "status_name_rus": "В обращении", "outstanding_volume": "100",
          "currency_name": "USD"},
+        # Досрочно погашенный, аннулированный и планируемый — не непогашенные
+        # (разбор digest 09.10.2026): ни в сумму, ни в «без объёма» не идут.
+        {"isin_code": "RU6", "status_name_rus": "Досрочно погашена", "outstanding_volume": "5000"},
+        {"isin_code": "", "status_name_rus": "Аннулирована", "outstanding_volume": None},
+        {"isin_code": "", "status_name_rus": "Планируется", "outstanding_volume": None},
     ]
     universe = [{"isin_code": "RU1", "outstanding_volume": "1000"},
                 {"isin_code": "RU9", "outstanding_volume": "50"}]
-    got = diag.volumes_of(issues, universe, Decimal(1100), ("погашена",))
+    got = diag.volumes_of(issues, universe, Decimal(1100))
     assert got.by_issues == Decimal(1300) and got.amortized == Decimal(800)
     assert got.universe == Decimal(1050) and got.without_volume == 1
     assert got.foreign == ["RU5: USD"]
@@ -118,7 +123,7 @@ def test_volumes_compare_route_issues_and_the_source_list() -> None:
     assert diag.share_gap(None, Decimal(1)) is None
     assert diag.share_gap(Decimal(0), Decimal(0)) is None
     assert diag.share_gap(Decimal(0), Decimal(5)) == Decimal(1)
-    empty = diag.volumes_of([], [], None, ("погашена",))
+    empty = diag.volumes_of([], [], None)
     assert empty.by_issues is None and empty.universe is None
 
 
@@ -130,7 +135,12 @@ def test_card_status_against_the_basket() -> None:
     active = code["действующая"]
     queue = universe.unconfirmed_to
     assert diag.card_mismatch(active, "clear", routing, False) == ""
-    assert "очередь статуса" in diag.card_mismatch(active, queue, routing, False)
+    # Очередь статуса у действующего — расхождение, только если её назвал статус:
+    # давность отчётности у действующего штатна (разбор digest 09.10.2026).
+    assert diag.card_mismatch(active, queue, routing, False, ("reporting_two_cycles_old",)) == ""
+    assert "неподтверждённый статус" in diag.card_mismatch(
+        active, queue, routing, False, ("status_not_confirmed",)
+    )
     assert "в маршруте эмитента нет" in diag.card_mismatch(active, None, routing, False)
     reorganized = code["в процессе реорганизации"]
     assert diag.card_mismatch(reorganized, "clear", routing, False).endswith("«Без внимания»")
@@ -144,7 +154,8 @@ def test_card_status_against_the_basket() -> None:
     assert diag.card_mismatch(gone, queue, routing, False) == ""
     assert diag.card_mismatch("99", queue, routing, False) == ""
     assert "не опознан" in diag.card_mismatch("99", "clear", routing, False)
-    assert diag.card_mismatch(None, "clear", routing, False) == "карточки нет"
+    # Без карточки — не расхождение: эмитент в маршруте по отчётности.
+    assert diag.card_mismatch(None, "clear", routing, False) == ""
 
 
 def test_the_book_has_a_summary_and_a_sheet_per_command(tmp_path: Path) -> None:
@@ -188,15 +199,23 @@ def test_market_gaps_end_to_end_on_disk_fixtures(
     )
     monkeypatch.setattr(diag, "series", lambda: market)
     monkeypatch.setattr(diag, "holders", lambda: {"RU_TRADED": "1", "RU_SILENT": "2"})
-    issues = {"1": (_issue("RU_TRADED"),), "2": (_issue("RU_SILENT"),)}
+    issues = {
+        "1": (_issue("RU_TRADED"),),
+        "2": (_issue("RU_SILENT"),),
+        "3": (_issue("RU_GONE", "погашена"),),
+    }
     monkeypatch.setattr(diag, "issues_of", lambda inn: (issues[inn], True))
-    route = [{"inn": "1", "basket": "clear"}, {"inn": "2", "basket": "clear"}]
+    route = [{"inn": inn, "basket": "clear"} for inn in ("1", "2", "3")]
     rows, detail, summary = diag.market_gaps(route, {}, {"1"}, 10, days[-1])
     by_inn = {row[0]: row for row in rows}
     assert by_inn["1"][8] == "разрыва нет" and by_inn["1"][5] == 0
     assert by_inn["2"][5] == "точек нет" and by_inn["2"][8] == "в срезах есть, сделок нет"
+    # Без выпусков в обращении — отдельная строка сводки, а не разрыв.
+    assert by_inn["3"][8] == "без выпусков в обращении (погашена)"
     assert summary["с разрывом рынка"] == 1
-    assert {row[1] for row in detail} == {"RU_TRADED", "RU_SILENT"}
+    assert summary["без выпусков в обращении (не разрыв)"] == 1
+    assert not any(key.startswith("причина: выпусков") for key in summary)
+    assert {row[1] for row in detail} == {"RU_TRADED", "RU_SILENT", "RU_GONE"}
 
 
 def test_spv_coverage_reads_the_live_rows(
@@ -212,11 +231,14 @@ def test_spv_coverage_reads_the_live_rows(
     rows = [
         SimpleNamespace(inn="10", name="SPV",
                         guarantees=(Guarantee("20", "Головная", "Поручитель", "x"),),
-                        verdict=SimpleNamespace(basket="clear", findings=(led,))),
+                        # Отметку о поручителе `led_by_guarantor` кладёт
+                        # в справочные, а не в сработавшие (разбор 09.10.2026).
+                        verdict=SimpleNamespace(basket="clear", findings=(), notes=(led,))),
         SimpleNamespace(inn="20", name="Головная", guarantees=(),
-                        verdict=SimpleNamespace(basket="clear", findings=())),
+                        verdict=SimpleNamespace(basket="clear", findings=(), notes=())),
         SimpleNamespace(inn="30", name="SPV без файла", guarantees=(),
-                        verdict=SimpleNamespace(basket="status_unknown", findings=())),
+                        verdict=SimpleNamespace(basket="status_unknown", findings=(),
+                                                notes=())),
     ]
 
     @contextmanager

@@ -46,7 +46,7 @@ from finlib.scoring.routing import RoutingPolicy, load_routing
 from finlib.scoring.routing_store import _outstanding, cards, exclusions, routing_rows
 from finlib.sources import cbonds, moex
 from finlib.sources.cbonds import bond_issuers, outstanding_universe
-from finlib.sources.cbonds_events import issues_of
+from finlib.sources.cbonds_events import DEFAULT_STATUSES, issues_of
 from finlib.sources.market import SERIES, Market, excluded, holders, load_market, series
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,11 @@ FOCUS: dict[str, tuple[str, ...]] = {
 # Статусы выпуска, которые маршрут складывает в объём в обращении
 # (`routing_store._outstanding`): повторены здесь только для показа графы.
 ROUTE_STATUSES = ("в обращении", "размещается")
+# **«Непогашенные» — в обращении, размещаемые и в дефолте** (решение владельца
+# 09.10.2026 по разбору digest): прежде непогашенным считалось всё, кроме
+# «погашена», — и досрочно погашенные, аннулированные и планируемые выпуски
+# давали расхождения в десятки тысяч процентов.
+LIVE_STATUSES = frozenset(ROUTE_STATUSES) | DEFAULT_STATUSES
 
 _ROUTE = """
 SELECT inn, basket, subgroup, grounds, grounds_all, as_of
@@ -232,7 +237,7 @@ def market_gaps(
     unbenchmarked = len(in_window - set(market.benchmark))
     rows: list[list] = []
     detail: list[list] = []
-    gaps = 0
+    gaps = bondless = 0
     reasons: dict[str, int] = {}
     for item in sorted(route, key=lambda entry: entry["inn"]):
         inn = item["inn"]
@@ -247,8 +252,16 @@ def market_gaps(
         if not gap and inn not in focus:
             continue
         own = list(states[inn].values())
+        # **Без выпусков в обращении рынка и не должно быть** (решение
+        # владельца 09.10.2026): такой эмитент — отдельная строка сводки,
+        # а не разрыв, и в причины разрыва не идёт.
+        idle = gap and not any(state.status in ROUTE_STATUSES for state in own)
         reason = gap_reason(own, slices_behind, days, unbenchmarked) if gap else "разрыва нет"
-        if gap:
+        if idle:
+            bondless += 1
+            said = sorted({state.status or "статус не назван" for state in own})
+            reason = "без выпусков в обращении" + (f" ({', '.join(said)})" if said else "")
+        elif gap:
             gaps += 1
             head = reason.split(":")[0]
             reasons[head] = reasons.get(head, 0) + 1
@@ -285,6 +298,7 @@ def market_gaps(
         "эмитентов в маршруте": len(route),
         "с разрывом рынка": gaps,
         **{f"причина: {key}": value for key, value in sorted(reasons.items())},
+        "без выпусков в обращении (не разрыв)": bondless,
     }
     return rows, detail, summary
 
@@ -354,11 +368,14 @@ def spv_coverage(
         counts["с поручительством"] += bool(item.guarantees)
         backing = [by_inn[entry.inn] for entry in item.guarantees if entry.inn in by_inn]
         # Корзина взята у поручителя — предмет основания SPV назван его именем
-        # (`led_by_guarantor`); своя очередь типа называет код типа.
+        # (`led_by_guarantor`); своя очередь типа называет код типа. **Отметку
+        # `led_by_guarantor` кладёт в справочные (`notes`), а не в сработавшие:**
+        # искавшая её в `findings` диагностика 09.10.2026 объявила «не взятой»
+        # корзину у всех двенадцати SPV, где она совпадала с поручителем.
         led = any(
             finding.ground == "financing_structure"
             and finding.subject in {entry.name for entry in backing}
-            for finding in item.verdict.findings
+            for finding in item.verdict.notes
         )
         verdict = coverage_verdict(spv, raw, delivered, accepted, listed, led)
         counts["покрытие не учтено"] += bool(verdict)
@@ -415,20 +432,22 @@ class Volumes:
 
 
 def volumes_of(
-    issues: list[dict], universe_rows: list[dict], route: Decimal | None, repaid: Iterable[str]
+    issues: list[dict], universe_rows: list[dict], route: Decimal | None,
+    live_statuses: Iterable[str] = LIVE_STATUSES,
 ) -> Volumes:
     """Объём по выпускам эмитента и по перечню источника рядом с маршрутом.
 
-    `by_issues` — сумма `outstanding_volume` по всем непогашенным выпускам
-    эмитента (маршрут берёт только «в обращении» и «размещается»);
+    `by_issues` — сумма `outstanding_volume` по непогашенным выпускам
+    эмитента: в обращении, размещаемым и в дефолте (маршрут берёт только
+    «в обращении» и «размещается»); «без объёма» — только среди них;
     `amortized` — та же сумма с текущим номиналом вместо исходного там,
     где источник называет оба (оценка амортизации, не правило);
     `universe` — сумма по перечню выпусков в обращении источника.
     """
-    gone = set(repaid)
+    alive = set(live_statuses)
     live = [
         item for item in issues
-        if str(item.get("status_name_rus") or "").strip().lower() not in gone
+        if str(item.get("status_name_rus") or "").strip().lower() in alive
     ]
     total = amortized = Decimal(0)
     seen = without = 0
@@ -484,8 +503,7 @@ def outstanding(
         issues = (
             json.loads(path.read_text(encoding="utf-8")).get("items", []) if path.exists() else []
         )
-        got = volumes_of(issues, by_inn.get(inn, []), _outstanding(inn),
-                         routing.events.repaid_statuses)
+        got = volumes_of(issues, by_inn.get(inn, []), _outstanding(inn))
         gaps = [share_gap(got.route, other) for other in (got.by_issues, got.universe)]
         worst = max((gap for gap in gaps if gap is not None), default=None)
         diverged = worst is not None and worst > tolerance
@@ -516,7 +534,11 @@ def outstanding(
 
 
 def card_mismatch(
-    status: str | None, basket: str | None, routing: RoutingPolicy, successor: bool
+    status: str | None,
+    basket: str | None,
+    routing: RoutingPolicy,
+    successor: bool,
+    grounds: Iterable[str] = (),
 ) -> str:
     """Расхождение статуса карточки с корзиной маршрута; пусто — согласованы.
 
@@ -525,11 +547,19 @@ def card_mismatch(
     (очередь статуса); прочие недействующие статусы корзину не называют,
     и «Без внимания» при них — расхождение, банкротство не в «Разборе» —
     тоже.
+
+    **Очередь статуса у действующего — расхождение, только когда её назвал
+    статус** (`status_not_confirmed` среди оснований `grounds`). Очередь
+    называет и давность отчётности (`reporting_two_cycles_old`), и у
+    действующего это штатно: прежняя проверка без оснований объявила
+    расхождением пятьдесят таких эмитентов 09.10.2026. Эмитент без карточки
+    расхождением не считается — он в маршруте по отчётности; считается
+    справочно (`card_status`).
     """
     universe = routing.universe
     unknown = routing.universe.unconfirmed_to
     if status is None:
-        return "карточки нет" if basket is not None else ""
+        return ""
     name = universe.status_of(status)
     if not universe.known_status(status):
         return "" if basket == unknown else f"статус «{name}», а корзина {basket or 'нет'}"
@@ -540,7 +570,9 @@ def card_mismatch(
     if basket is None:
         return f"«{name}», а в маршруте эмитента нет"
     if name == "действующая":
-        return "" if basket != unknown else "«действующая», а корзина — очередь статуса"
+        if basket != unknown or "status_not_confirmed" not in set(grounds):
+            return ""
+        return "«действующая», а корзину называет неподтверждённый статус"
     if "банкрот" in name and basket != "review":
         return f"«{name}», а корзина {basket}"
     if basket == "clear":
@@ -553,16 +585,21 @@ def card_status(
 ) -> tuple[list[list], dict[str, object]]:
     """Статус эмитента в карточке против корзины последнего маршрута."""
     basket = {item["inn"]: item["basket"] for item in route}
+    grounds = {item["inn"]: tuple(item.get("grounds") or ()) for item in route}
     skip, _ = exclusions(known, routing)
     by_id = {str(card.get("id")): card for card in known.values()}
     subjects = sorted(set(basket) | set(bond_issuers()) | focus)
     found: list[list] = []
     counts: dict[str, int] = {}
+    cardless = 0
     for inn in subjects:
         card = known.get(inn)
         status = str(card.get("emitent_statuses_id") or "") if card is not None else None
         target = str((card or {}).get("emitents_id_absorption") or "").strip()
-        why = card_mismatch(status, basket.get(inn), routing, target in by_id)
+        why = card_mismatch(
+            status, basket.get(inn), routing, target in by_id, grounds.get(inn, ())
+        )
+        cardless += card is None and inn in basket
         if not why and inn not in focus:
             continue
         if why:
@@ -575,12 +612,14 @@ def card_status(
             routing.universe.status_of(status) if status is not None else "карточки нет",
             str((card or {}).get("updating_date") or "")[:10],
             basket.get(inn) or "нет в маршруте",
+            ", ".join(grounds.get(inn, ())),
             skip[inn].reason if inn in skip else "",
             why or "согласовано",
         ])
     return found, {
         "проверено эмитентов": len(subjects),
         "расхождений": sum(counts.values()),
+        "в маршруте без карточки (справочно, не расхождение)": cardless,
     }
 
 
@@ -603,7 +642,7 @@ HEADERS = {
                     "не в рублях", "выпусков без объёма", "только у эмитента",
                     "только в перечне", "оговорка"),
     "card-status": ("ИНН", "наименование", "фокус", "статус карточки", "карточка обновлена",
-                    "корзина", "вышел из списка", "расхождение"),
+                    "корзина", "основания", "вышел из списка", "расхождение"),
 }
 
 
