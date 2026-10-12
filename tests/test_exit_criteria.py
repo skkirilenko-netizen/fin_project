@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
+from finlib.acceptance import load_acceptance
 from finlib.config import settings
 from finlib.db import PgConnection, execute, fetch_all
 
 sys.path.insert(0, str(settings.base_dir / "eval"))
 import exit_criteria as exits  # noqa: E402
 
+RULE = load_acceptance()
 DAY = date(2090, 3, 15)  # среда
 INNS = [f"00000000{number:02d}" for number in range(80, 86)]
 MARKS = "вердикт эксперта (согласен / не согласен / лишний / нет выпусков)"
@@ -139,6 +141,57 @@ def test_stability_is_broken_by_a_failed_delivery(conn: PgConnection) -> None:
     assert "09.03.2090: прогон по расписанию не чистый" in found.fact
 
 
+def _run(conn: PgConnection, day: date, hour: int, minute: int, status: str,
+         sources: list[dict]) -> None:
+    """Один прогон журнала: время старта, исход и доставки."""
+    started = datetime(day.year, day.month, day.day, hour, minute, 30).astimezone()
+    execute(
+        "INSERT INTO routing_run (kind, as_of, status, started_at, sources) "
+        "VALUES ('run', %(day)s, %(status)s, %(started)s, %(sources)s)",
+        {"day": day, "status": status, "started": started, "sources": json.dumps(sources)},
+        conn=conn,
+    )
+
+
+DONE = [{"name": "рейтинги", "status": "done"}]
+BROKEN = date(2090, 3, 9)
+
+
+@pytest.mark.parametrize("scheduled", ["failed", "running"])
+def test_a_manual_repeat_after_a_failed_or_unfinished_scheduled_run_does_not_clean_the_day(
+    conn: PgConnection, scheduled: str
+) -> None:
+    """Плановый упал либо не завершился, ручной повтор днём прошёл — день не чистый."""
+    month = [day for day in _weekdays(date(2090, 2, 16), DAY) if day != BROKEN]
+    _scheduled_runs(conn, month)
+    failed = [{"name": "рейтинги", "status": "failed"}] if scheduled == "failed" else []
+    _run(conn, BROKEN, 10, 0, scheduled, failed)
+    _run(conn, BROKEN, 15, 20, "done", DONE)
+    found = exits.stability(conn, DAY)
+    assert found.done is False
+    assert "09.03.2090: прогон по расписанию не чистый" in found.fact
+
+
+def test_a_manual_repeat_after_a_clean_scheduled_run_keeps_the_streak(
+    conn: PgConnection,
+) -> None:
+    """Плановый прошёл, ручной повтор днём упал — счёт не обрывается."""
+    month = _weekdays(date(2090, 2, 16), DAY)
+    _scheduled_runs(conn, month)
+    _run(conn, BROKEN, 15, 20, "failed", [{"name": "рейтинги", "status": "failed"}])
+    assert exits.stability(conn, DAY).done is True
+
+
+def test_an_automatic_stage_retry_inside_the_run_keeps_the_streak(conn: PgConnection) -> None:
+    """Автоповтор стадии внутри планового прогона (run-retry) дошёл — день чистый."""
+    month = [day for day in _weekdays(date(2090, 2, 16), DAY) if day != BROKEN]
+    _scheduled_runs(conn, month)
+    retried = [{"name": "рейтинги", "status": "done", "retries": 1,
+                "first": {"status": "failed", "error": "ReadTimeout"}}]
+    _run(conn, BROKEN, 10, 0, "done", retried)
+    assert exits.stability(conn, DAY).done is True
+
+
 def _answer(
     path: Path,
     day: date,
@@ -173,10 +226,30 @@ def test_expertise_needs_two_passed_reviews_in_a_row(tmp_path: Path) -> None:
     _answer(tmp_path / "a.xlsx", date(2090, 3, 1), [("согласен", "да")])
     _answer(tmp_path / "b.xlsx", date(2090, 3, 8), good)
     _answer(tmp_path / "c.xlsx", date(2090, 3, 15), good)
-    found = exits.expertise(tmp_path)
+    found = exits.expertise(tmp_path, RULE)
     assert found.done is True
     assert "01.03.2090 (a.xlsx): не пройдена; критичных 1" in found.fact
     assert "«лишних» в «Разборе» 1 из 10" in found.fact
+
+
+def test_reviews_before_the_counted_date_do_not_count(tmp_path: Path) -> None:
+    """Проверки до 13.10.2026 не засчитываются: ни продолжить серию, ни оборвать."""
+    good = [("согласен", "нет")]
+    _answer(tmp_path / "a.xlsx", date(2026, 9, 30), good)
+    _answer(tmp_path / "b.xlsx", date(2026, 10, 13), good)
+    found = exits.expertise(tmp_path, RULE)
+    assert found.done is False
+    assert "в счёт с 13.10.2026 — 1" in found.fact
+    assert "30.09.2026 (a.xlsx): пройдена; не в счёт — до 13.10.2026" in found.fact
+    _answer(tmp_path / "c.xlsx", date(2026, 10, 12), [("согласен", "да")])
+    _answer(tmp_path / "d.xlsx", date(2026, 10, 14), good)
+    assert exits.expertise(tmp_path, RULE).done is True
+
+
+def test_only_old_reviews_are_not_established(tmp_path: Path) -> None:
+    """Все проверки до даты счёта — «не установлено», а не «нет»."""
+    _answer(tmp_path / "a.xlsx", date(2026, 9, 30), [("согласен", "")])
+    assert exits.expertise(tmp_path, RULE).done is None
 
 
 def test_expertise_fails_on_a_critical_defect_or_too_many_extra(tmp_path: Path) -> None:
@@ -184,10 +257,10 @@ def test_expertise_fails_on_a_critical_defect_or_too_many_extra(tmp_path: Path) 
     _answer(tmp_path / "a.xlsx", date(2090, 3, 8), [("согласен", "")],
             clear=[("не согласен", "да")])
     _answer(tmp_path / "b.xlsx", date(2090, 3, 15), [("согласен", "")] * 4 + [("лишний", "")])
-    found = exits.expertise(tmp_path)
+    found = exits.expertise(tmp_path, RULE)
     assert found.done is False
     reviews = [exits.read_review(tmp_path / name) for name in ("a.xlsx", "b.xlsx")]
-    assert [item.passed for item in reviews] == [False, False]
+    assert [item.passed(RULE) for item in reviews] == [False, False]
     assert reviews[0].critical == 1 and reviews[1].extra == 1
 
 
@@ -199,12 +272,21 @@ def test_an_unmarked_or_unknown_answer_makes_the_review_incomplete(tmp_path: Pat
     assert not odd.complete and "слова вне перечня графы — лишнее" in odd.why
     unseen = exits.read_review(_answer(tmp_path / "c.xlsx", DAY, [("согласен", "")], seen=""))
     assert not unseen.complete and "«Без внимания» просмотрен целиком" in unseen.why
-    assert not unseen.passed
+    assert not unseen.passed(RULE)
 
 
 def test_expertise_without_answers_is_not_established(tmp_path: Path) -> None:
     """Файлов ответов нет — «не установлено»."""
-    assert exits.expertise(tmp_path / "нет").done is None
+    assert exits.expertise(tmp_path / "нет", RULE).done is None
+
+
+def test_the_eve_is_the_phase_5_rule() -> None:
+    """Накануне — последняя точка строго до дня события; событие до начала истории не в счёт."""
+    points = [(date(2090, 3, 1), "attention"), (date(2090, 3, 8), "clear"),
+              (date(2090, 3, 10), "review")]
+    assert exits.eve_basket(points, date(2090, 3, 10), date(2090, 1, 1)) == "clear"
+    assert exits.eve_basket(points, date(2090, 3, 1), date(2090, 1, 1)) is None
+    assert exits.eve_basket(points, date(2090, 3, 10), date(2090, 3, 10)) is None
 
 
 def test_documentation_names_every_ground_and_is_not_a_draft(tmp_path: Path) -> None:

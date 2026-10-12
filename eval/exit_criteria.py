@@ -12,12 +12,18 @@
 - **качество** — на календаре событий за двенадцать месяцев до даты ни одного
   дефолта в «Без внимания» накануне события: календарь —
   `market_lead_run.events` (тот же, что у замеров), корзина накануне —
-  последняя точка истории до дня события, отдельно по пересчёту (`backfill`)
-  и по наблюдению (`routing_day`): роды точек не смешиваются;
+  правило замера фазы 5 (`ltm_basis_run.eve_basket`), отдельно по пересчёту
+  (`backfill`) и по наблюдению (`routing_day`); «Без внимания» хоть в одном
+  роде — не выполнен (решение владельца 12.10.2026);
 - **устойчивость** — чистые прогоны по расписанию подряд не меньше месяца:
-  счёт — `status_run._streak`, тот же, что у утренней сводки;
-- **экспертиза** — две последние экспертные проверки подряд пройдены:
-  файлы ответов (пакеты `eval/expert_review_run.py` с отметками эксперта);
+  счёт — `status_run._streak`, тот же, что у утренней сводки. День чист,
+  если чист прогон по расписанию этого дня: ручной повтор после упавшего
+  или незавершённого планового день не спасает, повтор после успешного
+  и автоповтор стадии внутри прогона (run-retry, `retries` в записи
+  доставки) счёт не обрывают (решение владельца 12.10.2026);
+- **экспертиза** — последние проверки подряд пройдены: файлы ответов
+  (пакеты `eval/expert_review_run.py` с отметками эксперта); условие
+  и с какого пакета проверки идут в счёт — `methodology/acceptance.yaml`;
 - **документация** — обзор методики для аналитика называет каждое основание
   `routing.yaml` кодом и не помечен черновиком.
 
@@ -55,8 +61,10 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from change_report_run import _read  # noqa: E402
+from ltm_basis_run import eve_basket  # noqa: E402
 from status_run import _streak  # noqa: E402
 
+from finlib.acceptance import ExpertReviewAcceptance, load_acceptance  # noqa: E402
 from finlib.config import settings  # noqa: E402
 from finlib.db import PgConnection, connection, fetch_all  # noqa: E402
 
@@ -68,16 +76,16 @@ QUALITY_MONTHS = 12
 STABILITY_MONTHS = 1
 
 # **Слова ответа эксперта — те же, что у пакета** (`eval/expert_review_run.py`,
-# `MARKS`, `CRITICAL_YES`, `EXTRA_SHARE_MAX`, `SIGNS`; решение владельца
-# 12.10.2026). Пакет v2 и этот разбор пришли разными ветками; после слияния
-# обеих константы берутся импортом оттуда, а не повторяются здесь. Перечень
+# `MARKS`, `CRITICAL_YES`, `SIGNS`). Пакет и этот разбор пришли разными
+# ветками; после слияния обеих слова берутся импортом оттуда, а не
+# повторяются здесь. Условие проверки (доля «лишних», критичных, подряд,
+# с какого пакета) — в методике, `methodology/acceptance.yaml`. Перечень
 # допустимых слов читается из шапки самой графы вердикта — у старого пакета
 # он свой, и слово вне перечня делает проверку незавершённой, а не теряется.
 VERDICT_HEAD = "вердикт эксперта"
 CRITICAL_HEAD = "критичный дефект"
 EXTRA = "лишний"
 CRITICAL_YES = "да"
-EXTRA_SHARE_MAX = Decimal("0.10")
 SIGN_CLEAR_SEEN = "«Без внимания» просмотрен целиком (да / нет)"
 REVIEW, CLEAR, SAMPLE = "Разбор", "Без внимания", "Выборка"
 DRAFT = "Черновик"
@@ -141,11 +149,8 @@ def coverage(
     return Criterion(name, fact, not missing)
 
 
-_EVE = """
-SELECT DISTINCT ON (inn) inn, as_of, basket FROM {source}
-WHERE inn = %(inn)s AND as_of < %(moment)s {kind}
-ORDER BY inn, as_of DESC
-"""
+_FIRST = "SELECT min(as_of) AS first FROM {source} WHERE TRUE {kind}"
+_SERIES = "SELECT as_of, basket FROM {source} WHERE inn = %(inn)s {kind} ORDER BY as_of"
 _SOURCES = {
     "пересчёт": ("routing_history", "AND kind = 'backfill'"),
     "наблюдение": ("routing_day", ""),
@@ -161,17 +166,22 @@ def quality(conn: PgConnection, as_of: date, happened: Mapping[str, date] | None
     window = {inn: moment for inn, moment in happened.items() if since < moment <= as_of}
     seen = dict.fromkeys(_SOURCES, 0)
     missed: dict[str, list[str]] = {source: [] for source in _SOURCES}
-    for inn, moment in sorted(window.items()):
-        for source, (table, kind) in _SOURCES.items():
-            rows = fetch_all(
-                _EVE.format(source=table, kind=kind),
-                {"inn": inn, "moment": moment},
-                conn=conn,
-            )
-            if not rows:
+    for source, (table, kind) in _SOURCES.items():
+        [row] = fetch_all(_FIRST.format(source=table, kind=kind), {}, conn=conn)
+        first = row["first"]
+        for inn, moment in sorted(window.items()):
+            points = [
+                (point["as_of"], point["basket"])
+                for point in fetch_all(
+                    _SERIES.format(source=table, kind=kind), {"inn": inn}, conn=conn
+                )
+            ]
+            # Правило замера фазы 5 — его же кодом (`ltm_basis_run.eve_basket`).
+            basket = eve_basket(points, moment, first) if points else None
+            if basket is None:
                 continue
             seen[source] += 1
-            if rows[0]["basket"] == "clear":
+            if basket == "clear":
                 missed[source].append(f"{inn} ({_ru(moment)})")
     fact = (
         f"событий с {_ru(since + timedelta(days=1))} по {_ru(as_of)}: {len(window)}; "
@@ -230,12 +240,11 @@ class Review:
     review_rows: int
     why: str
 
-    @property
-    def passed(self) -> bool:
-        """Пройдена: размечена целиком, критичных нет, «лишних» в «Разборе» не больше доли."""
-        if not self.complete or self.critical:
+    def passed(self, rule: ExpertReviewAcceptance) -> bool:
+        """Пройдена: размечена целиком, критичных не больше допуска, «лишних» не больше доли."""
+        if not self.complete or self.critical > rule.critical_max:
             return False
-        return Decimal(self.extra) <= EXTRA_SHARE_MAX * self.review_rows
+        return Decimal(self.extra) <= rule.extra_share_max * self.review_rows
 
 
 def _column(head: list, start: str) -> int | None:
@@ -312,8 +321,14 @@ def read_review(path: Path) -> Review:
     )
 
 
-def expertise(answers: Path) -> Criterion:
-    """Экспертиза: две последние по дате маршрута проверки подряд пройдены."""
+def expertise(answers: Path, rule: ExpertReviewAcceptance) -> Criterion:
+    """Экспертиза: последние `rule.consecutive` проверок подряд пройдены; счёт — с `counted_from`.
+
+    **Проверки до `counted_from` в счёт не идут** (решение владельца
+    12.10.2026: счёт — с пакета 13.10.2026): они печатаются строкой «не в
+    счёт», но ни продолжить серию, ни оборвать её не могут. Проверка без
+    даты маршрута в счёт не идёт тоже — её место в серии неизвестно.
+    """
     name = "экспертиза"
     files = sorted(answers.glob("*.xlsx")) if answers.is_dir() else []
     files = [path for path in files if not path.name.startswith("~$")]
@@ -323,6 +338,7 @@ def expertise(answers: Path) -> Criterion:
         (read_review(path) for path in files),
         key=lambda item: (item.day or date.min, item.path.name),
     )
+    counted = [item for item in reviews if item.day and item.day >= rule.counted_from]
     lines = []
     for item in reviews:
         when = _ru(item.day) if item.day else "дата не установлена"
@@ -334,17 +350,23 @@ def expertise(answers: Path) -> Criterion:
         if not item.complete:
             verdict = f"не завершена ({item.why})"
         else:
-            verdict = "пройдена" if item.passed else "не пройдена"
+            verdict = "пройдена" if item.passed(rule) else "не пройдена"
+        if item not in counted:
+            verdict += f"; не в счёт — до {_ru(rule.counted_from)}"
         lines.append(
             f"{when} ({item.path.name}): {verdict}; критичных {item.critical}; {share}"
         )
-    last_two = reviews[-2:]
-    done = len(last_two) == 2 and all(item.passed for item in last_two)
+    last = counted[-rule.consecutive :] if rule.consecutive else []
+    done = len(last) == rule.consecutive and all(item.passed(rule) for item in last)
     fact = (
-        f"проверок {len(reviews)}; условие — две последние подряд пройдены "
-        f"(критичных нет, «лишних» в «Разборе» не больше {EXTRA_SHARE_MAX * 100:.0f} %, "
-        f"размечено целиком): " + " | ".join(lines)
+        f"проверок {len(reviews)}, в счёт с {_ru(rule.counted_from)} — {len(counted)}; "
+        f"условие — последние {rule.consecutive} подряд пройдены (критичных не больше "
+        f"{rule.critical_max}, «лишних» в «Разборе» не больше "
+        f"{rule.extra_share_max * 100:.0f} %, размечено целиком; "
+        f"methodology/acceptance.yaml): " + " | ".join(lines)
     )
+    if not counted:
+        return Criterion(name, fact, None)
     return Criterion(name, fact, done)
 
 
@@ -409,7 +431,7 @@ def build(
         coverage(conn, as_of, universe, excluded),
         quality(conn, as_of, happened),
         stability(conn, as_of),
-        expertise(answers),
+        expertise(answers, load_acceptance()),
         documentation(doc, doc.parent.parent / "methodology" / "routing.yaml"),
     ]
 

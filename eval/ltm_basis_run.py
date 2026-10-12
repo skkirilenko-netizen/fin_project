@@ -207,6 +207,23 @@ def _seasonality(before: dict, after: dict) -> None:
         )
 
 
+def eve_basket(
+    points: list[tuple[date, str]], moment: date, first: date | None
+) -> str | None:
+    """Корзина эмитента накануне события; None — событие в замер не идёт.
+
+    Правило замера фазы 5 (25.09.2026), одно на замер и на критерий выхода
+    «качество» (`eval/exit_criteria.py`): событие идёт в счёт, только если
+    история началась раньше него (`first` — первая точка истории этого рода
+    у всех эмитентов), а «накануне» — последняя точка эмитента строго до дня
+    события, без ограничения давности.
+    """
+    if first is None or moment <= first:
+        return None
+    prior = [basket for day, basket in sorted(points) if day < moment]
+    return prior[-1] if prior else None
+
+
 def _quality(before: dict, after: dict) -> None:
     """Критерий «качество»: эмитент с событием стоял «Без внимания» накануне."""
     print("\n## 4. Критерий «качество»: «Без внимания» накануне события\n")
@@ -220,13 +237,13 @@ def _quality(before: dict, after: dict) -> None:
         missed: list[str] = []
         seen = 0
         for inn, moment in happened.items():
-            if first is None or moment <= first or inn not in series:
+            if inn not in series:
                 continue
-            prior = [basket for day, basket in sorted(series[inn]) if day < moment]
-            if not prior:
+            basket = eve_basket(series[inn], moment, first)
+            if basket is None:
                 continue
             seen += 1
-            if prior[-1] == "clear":
+            if basket == "clear":
                 missed.append(f"{inn} ({moment:%d.%m.%Y})")
         print(
             f"- {name}: событий в окне истории {seen}, «Без внимания» накануне "
