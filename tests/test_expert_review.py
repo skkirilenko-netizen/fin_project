@@ -16,6 +16,9 @@ from openpyxl import load_workbook
 from finlib.config import settings
 from finlib.db import PgConnection, execute
 from finlib.normalize.lines import load_lines
+from finlib.scoring import routing_store as store
+from finlib.sources import moex
+from finlib.sources.cbonds_events import Guarantee, Issue
 
 sys.path.insert(0, str(settings.base_dir / "eval"))
 import expert_review_run as review  # noqa: E402
@@ -43,7 +46,9 @@ def _point(conn: PgConnection, inn: str, basket: str, grounds: list[str],
 
 
 @pytest.fixture
-def day(db_conn: PgConnection, monkeypatch: pytest.MonkeyPatch) -> PgConnection:
+def day(
+    db_conn: PgConnection, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> PgConnection:
     """Маршрут дня: один в «Разборе», пять «Без внимания»; у одного крупный долг."""
     execute("DELETE FROM routing_history WHERE inn = ANY(%(inns)s)", {"inns": INNS},
             conn=db_conn)
@@ -56,6 +61,22 @@ def day(db_conn: PgConnection, monkeypatch: pytest.MonkeyPatch) -> PgConnection:
     volumes = {INNS[5]: Decimal(10) ** 12}
     monkeypatch.setattr(review, "_outstanding", lambda inn: volumes.get(inn))
     monkeypatch.setattr(review, "SAMPLE_SIZE", 3)
+    # Выпуски — тем же кодом, что у периметра (`bond_sources`), на синтетике:
+    # у первого выпуск в файле и в срезе биржи, у второго — только в перечне
+    # Cbonds, третий — поручитель первого; у прочих выпусков нет нигде.
+    board = tmp_path_factory.mktemp("moex")
+    (board / "xsec_2090-03-01.json").write_text(
+        json.dumps({"history": [{"SECID": "RUE1"}]}), encoding="utf-8")
+    monkeypatch.setattr(moex, "CACHE", board)
+    issue = Issue(emission_id="e1", name="e1", isin="RUE1", status="в обращении",
+                  default=False, unsettled=False, maturity=None, offer=None,
+                  outstanding=None, updated=None)
+    monkeypatch.setattr(store, "outstanding_universe", lambda: [
+        {"emitent_inn": INNS[1], "isin_code": "RUL1"}])
+    monkeypatch.setattr(store, "issues_of", lambda inn: (
+        (issue,) if inn == INNS[0] else (), True))
+    monkeypatch.setattr(store, "guarantees_of", lambda inn, statuses: (
+        (Guarantee(INNS[2], "Поручитель", "Поручитель", "e1"),) if inn == INNS[0] else ()))
     return db_conn
 
 
@@ -72,7 +93,8 @@ def test_the_package_is_built_from_the_recorded_route(day: PgConnection, tmp_pat
     (tmp_path / "cards" / f"{INNS[0]}.md").write_text("карточка", encoding="utf-8")
     out = tmp_path / "pack.xlsx"
     review.build(day, DAY, out)
-    assert load_workbook(out).sheetnames == ["Сводка", "Разбор", "Без внимания", "Выборка"]
+    assert load_workbook(out).sheetnames == [
+        "Инструкция", "Сводка", "Разбор", "Без внимания", "Выборка"]
     [first] = _rows(out, "Разбор")
     assert first["ИНН"] == INNS[0] and first["корзина"] == "Разбор"
     assert first["решающее основание"]
@@ -125,6 +147,45 @@ def test_a_repeat_of_the_day_is_read_as_the_last_point(
     out = tmp_path / "pack.xlsx"
     review.build(day, DAY, out)
     assert {row["ИНН"] for row in _rows(out, "Разбор")} == {INNS[0], INNS[1]}
+
+
+BONDS = "выпусков в обращении: файл / перечень / срез"
+
+
+def test_bonds_outstanding_are_counted_by_the_perimeter_code(
+    day: PgConnection, tmp_path: Path
+) -> None:
+    """Графа выпусков — числа `bond_sources` по источникам; расхождение — в сводке."""
+    out = tmp_path / "pack.xlsx"
+    summary = dict(review.build(day, DAY, out))
+    shown = {row["ИНН"]: row[BONDS] for row in _rows(out, "Без внимания")}
+    shown |= {row["ИНН"]: row[BONDS] for row in _rows(out, "Разбор")}
+    assert shown[INNS[0]] == "1 / 0 / 1"
+    assert shown[INNS[1]] == "0 / 1 / 0"
+    assert shown[INNS[2]] == "0 / 0 / 0, поручительство 1"
+    assert shown[INNS[3]] == "0 / 0 / 0"
+    said = summary["Выпуски в обращении по источникам"]
+    assert "молчат все источники у 3 из 6" in said
+    assert "другой источник видит выпуски, — у 2" in said
+
+
+def test_the_instruction_says_what_to_check_and_how_to_mark(
+    day: PgConnection, tmp_path: Path
+) -> None:
+    """«Инструкция»: листы, слова вердикта, «лишний» и «нет выпусков», критерий, отметка."""
+    out = tmp_path / "pack.xlsx"
+    review.build(day, DAY, out)
+    sheet = load_workbook(out)["Инструкция"]
+    rows = {row[0]: row[1] for row in sheet.iter_rows(values_only=True) if row[0]}
+    for title in ("«Разбор» (1)", "«Без внимания» (5)", "«Выборка» (3)"):
+        assert rows[title], title
+    assert "«лишний»" in rows["«Разбор» (1)"]
+    assert "файл / перечень / срез" in rows["«нет выпусков»"]
+    assert all(f"«{mark}»" in rows[review.VERDICT[0]] for mark in review.MARKS)
+    criterion = rows["Критерий проверки"]
+    assert "10 %" in criterion and "«да»" in criterion and "не завершена" in criterion
+    for sign in review.SIGNS:
+        assert sign in rows and rows[sign] is None
 
 
 def test_a_day_without_route_is_refused(db_conn: PgConnection, tmp_path: Path) -> None:

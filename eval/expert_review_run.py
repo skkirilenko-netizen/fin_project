@@ -40,6 +40,19 @@
 в обращении и наименования берутся с диска на день сборки, а не на дату
 маршрута, — истории объёмов нет. Крупный долг по облигациям у пакета
 за прошлую дату поэтому может разойтись с тем, что видел маршрут того дня.
+
+**Выпусков в обращении по источникам** (12.10.2026): графа «файл / перечень
+/ срез» — число выпусков в обращении у файла выпусков эмитента, перечня
+Cbonds и последнего среза биржи не позже дня маршрута, и, если есть,
+по поручительству за чужие выпуски. Считает тот же код, что периметр
+(`routing_store.bond_sources`): эксперт, отмечающий «нет выпусков», видит
+то же, что увидел бы маршрут, а расхождение источников видно строкой.
+Файл и перечень — с диска на день сборки, как объём.
+
+**Лист «Инструкция»** (12.10.2026) — для коллег: что проверить на каждом
+листе, как отмечать «лишний» и «нет выпусков», критерий проверки и графы
+отметки эксперта. Слова вердикта и критерий объявлены здесь одним местом
+(`MARKS`, `EXTRA_SHARE_MAX`); ответы по ним читает `eval/exit_criteria.py`.
 """
 
 import argparse
@@ -62,7 +75,16 @@ from finlib.db import PgConnection, connection  # noqa: E402
 from finlib.normalize.lines import load_lines  # noqa: E402
 from finlib.scoring.routing import load_routing  # noqa: E402
 from finlib.scoring.routing_catalogue import catalogue_for  # noqa: E402
-from finlib.scoring.routing_store import _outstanding, _top_share, cards  # noqa: E402
+from finlib.scoring.routing_store import (  # noqa: E402
+    BACKING,
+    BOARD,
+    LISTED,
+    OWN_FILE,
+    _outstanding,
+    _top_share,
+    bond_sources,
+    cards,
+)
 from finlib.sources.cbonds_events import OKEI_MULTIPLIER  # noqa: E402
 from finlib.sources.market import universe  # noqa: E402
 from finlib.standards import Standard  # noqa: E402
@@ -89,6 +111,7 @@ HEADER = (
     "единица",
     "крупный долг (верхняя доля по облигациям)",
     "объём облигаций в обращении, руб.",
+    "выпусков в обращении: файл / перечень / срез",
     *VALUES,
     "денежные средства",
     "платежи 12 месяцев",
@@ -96,11 +119,30 @@ HEADER = (
     "все величины решения",
     "карточка",
 )
+# **Слова вердикта — одно место.** Их пишет эксперт, а читает разбор
+# ответов: написание, разошедшееся между инструкцией и разбором, превратило
+# бы «лишний» в нераспознанное и молча выбросило бы его из доли.
+AGREE = "согласен"
+DISAGREE = "не согласен"
+EXTRA = "лишний"
+NO_BONDS = "нет выпусков"
+MARKS = (AGREE, DISAGREE, EXTRA, NO_BONDS)
+CRITICAL_YES = "да"
 VERDICT = (
-    "вердикт эксперта (согласен / не согласен)",
+    f"вердикт эксперта ({' / '.join(MARKS)})",
     "критичный дефект (да / нет)",
     "комментарий",
 )
+# Критерий проверки — решение владельца 12.10.2026: ни одного критичного
+# дефекта, «лишних» в «Разборе» не больше десятой части листа. Это критерий
+# экспертной проверки, а не порог маршрута, и в методику он не вносится.
+EXTRA_SHARE_MAX = Decimal("0.10")
+# Отметка эксперта в конце «Инструкции»: подписи в графе A, ответ — в графе B.
+SIGN_EXPERT = "Эксперт"
+SIGN_DATE = "Дата проверки"
+SIGN_CLEAR_SEEN = "«Без внимания» просмотрен целиком (да / нет)"
+SIGNS = (SIGN_EXPERT, SIGN_DATE, SIGN_CLEAR_SEEN)
+INSTRUCTION = "Инструкция"
 
 
 class NoRouteError(ValueError):
@@ -147,8 +189,22 @@ def _money(raw: object, unit: str) -> str:
     return _sum(Decimal(str(raw)), unit) if raw not in (None, "") else ""
 
 
+def _bonds(said: Mapping[str, int] | None) -> str:
+    """Выпуски в обращении по источникам: «файл / перечень / срез», поручительство — если есть."""
+    if said is None:
+        return ""
+    shown = " / ".join(str(said.get(name, 0)) for name in (OWN_FILE, LISTED, BOARD))
+    backing = said.get(BACKING, 0)
+    return f"{shown}, {BACKING} {backing}" if backing else shown
+
+
 def _row(
-    routing, point: Mapping, name: str, volume: Decimal | None, systemic: bool  # noqa: ANN001
+    routing,  # noqa: ANN001
+    point: Mapping,
+    name: str,
+    volume: Decimal | None,
+    systemic: bool,
+    bonds: Mapping[str, int] | None = None,
 ) -> list:
     """Строка листа по точке истории."""
     names = _ground_names(routing)
@@ -174,6 +230,7 @@ def _row(
         unit,
         "да" if systemic else "",
         f"{volume:,.0f}".replace(",", " ") if volume is not None else "",
+        _bonds(bonds),
         *[shown[code][1] if code in shown else "" for code in VALUES],
         _money(inputs.get("cash"), unit),
         _money(money.get("due"), money_unit),
@@ -206,6 +263,69 @@ def _sheet(
     sheet.freeze_panes = "C2"
 
 
+def _instruction(book: Workbook, as_of: date, review: int, clear: int, sample: int) -> None:
+    """Лист «Инструкция» первым: что проверить, как отмечать, критерий, отметка эксперта."""
+    verdict, critical, comment = VERDICT
+    limit = f"{EXTRA_SHARE_MAX * 100:.0f} %"
+    text: list[tuple[str, str]] = [
+        ("Экспертная проверка списка наблюдения", f"маршрут на {as_of:%d.%m.%Y}"),
+        ("Зачем", "Критерий выхода «экспертиза»: проверка не находит критичных "
+                  "дефектов два раза подряд. Маршрут отвечает на один вопрос — "
+                  "нужен ли по эмитенту человек; класс он не присваивает."),
+        ("", ""),
+        ("Что проверить", ""),
+        (f"«Разбор» ({review})", f"Каждую строку: нужен ли по эмитенту человек. "
+                                 f"«{AGREE}» — место в «Разборе»; «{EXTRA}» — разбор "
+                                 f"не нужен, по вашему знанию эмитента его место ниже "
+                                 f"(в комментарии — какая корзина и почему); "
+                                 f"«{DISAGREE}» — основание названо неверно (ошибка данных, "
+                                 f"не то событие); «{NO_BONDS}» — облигаций в обращении нет."),
+        (f"«Без внимания» ({clear})", f"Просмотреть целиком. Отмечать только тех, о ком "
+                                      f"знаете проблему: «{DISAGREE}» — человек нужен "
+                                      f"(в комментарии — что известно); «{NO_BONDS}» — "
+                                      f"облигаций нет. Пустой вердикт — просмотрен, "
+                                      f"возражений нет."),
+        (f"«Выборка» ({sample})", f"Углублённо, каждую строку: открыть карточку (графа "
+                                  f"«карточка»), сверить одну-две величины решения "
+                                  f"с отчётностью и основания с тем, что известно "
+                                  f"об эмитенте; «{AGREE}», «{DISAGREE}» или «{NO_BONDS}»."),
+        ("", ""),
+        ("Как отмечать", ""),
+        (verdict, f"Одно из слов: {', '.join(f'«{mark}»' for mark in MARKS)} — "
+                  "без других слов в ячейке."),
+        (f"«{NO_BONDS}»", "Сперва графа «выпусков в обращении: файл / перечень / срез»: "
+                          "три числа — выпуски в обращении у файла выпусков эмитента, "
+                          "перечня Cbonds и последнего среза биржи. Нули везде — "
+                          "маршрут тоже видит «нет выпусков»; числа расходятся — "
+                          "отметьте, что знаете вы, и напишите источник в комментарии."),
+        (critical, f"«{CRITICAL_YES}» — если по списку человек пропустил бы эмитента "
+                   "с проблемой: известный дефолт, неплатёж, банкротство или иное "
+                   "кредитное событие у эмитента в «Без внимания» или «Выборке», "
+                   "либо ошибка в данных, из-за которой корзина неверна. Иначе «нет» "
+                   "или пусто."),
+        (comment, f"Обязателен при «{DISAGREE}», «{EXTRA}», «{NO_BONDS}» "
+                  f"и критичном дефекте «{CRITICAL_YES}»."),
+        ("", ""),
+        ("Критерий проверки", f"Пройдена, если: ни одной строки с критичным дефектом "
+                              f"«{CRITICAL_YES}»; «{EXTRA}» в «Разборе» — не больше "
+                              f"{limit} строк листа; «Разбор» и «Выборка» размечены "
+                              f"целиком, «Без внимания» просмотрен целиком. Не размечено "
+                              f"целиком — проверка не завершена, а не пройдена."),
+        ("Ответ", "Файл не переименовывать и листов не менять; заполнить отметку "
+                  "ниже и вернуть файл."),
+        ("", ""),
+        ("Отметка эксперта", ""),
+        *[(sign, "") for sign in SIGNS],
+    ]
+    sheet = book.create_sheet(INSTRUCTION, 0)
+    for label, value in text:
+        sheet.append([label, value])
+        if label and not value or label == text[0][0]:
+            sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True)
+    sheet.column_dimensions["A"].width = 45
+    sheet.column_dimensions["B"].width = 110
+
+
 def build(conn: PgConnection, as_of: date, out: Path) -> list[tuple[str, object]]:
     """Собирает пакет на дату из истории маршрута; возвращает строки сводки."""
     routing = load_routing()
@@ -223,6 +343,7 @@ def build(conn: PgConnection, as_of: date, out: Path) -> list[tuple[str, object]
         if (total := _outstanding(inn)) is not None and total > 0
     }
     systemic = _top_share(volumes, routing.systemic.top_share)
+    bonds = bond_sources(points, as_of, routing)
     by_basket = {
         code: sorted(
             (point for point in points.values() if point["basket"] == code),
@@ -234,7 +355,9 @@ def build(conn: PgConnection, as_of: date, out: Path) -> list[tuple[str, object]
 
     def line(point: Mapping) -> tuple[str, list]:
         inn = point["inn"]
-        return inn, _row(routing, point, named[inn], volumes.get(inn), inn in systemic)
+        return inn, _row(
+            routing, point, named[inn], volumes.get(inn), inn in systemic, bonds.get(inn)
+        )
 
     book = Workbook()
     book.remove(book.active)
@@ -266,6 +389,13 @@ def build(conn: PgConnection, as_of: date, out: Path) -> list[tuple[str, object]
         ("основание отбора",),
     )
     carded = sum(1 for inn in points if (cards_dir / f"{inn}.md").exists())
+    silent = sum(1 for inn in points if not any((bonds.get(inn) or {}).values()))
+    disagree = sum(
+        1
+        for inn in points
+        if not (bonds.get(inn) or {}).get(OWN_FILE)
+        and any((bonds.get(inn) or {}).get(name) for name in (LISTED, BOARD, BACKING))
+    )
     summary: list[tuple[str, object]] = [
         ("Дата маршрута", f"{as_of:%d.%m.%Y}"),
         ("Источник", "история маршрута (routing_day: последняя точка дня), только чтение"),
@@ -294,14 +424,24 @@ def build(conn: PgConnection, as_of: date, out: Path) -> list[tuple[str, object]
         ),
         ("Отбор", "решение владельца 30.09.2026; отбор для проверки, не правило маршрута; "
                   "детерминирован — добор по убыванию долга, ничья по ИНН"),
-        ("Ограничение", "объём облигаций в обращении и наименования — с диска на день "
-                        "сборки, а не на дату маршрута: истории объёмов нет"),
+        (
+            "Выпуски в обращении по источникам",
+            f"графа «файл / перечень / срез» — тем же кодом, что периметр "
+            f"(routing_store.bond_sources); молчат все источники у {silent} "
+            f"из {len(points)}; файл эмитента пуст, а другой источник видит "
+            f"выпуски, — у {disagree}",
+        ),
+        ("Ограничение", "объём облигаций в обращении, наименования, файл выпусков "
+                        "и перечень Cbonds — с диска на день сборки, а не на дату "
+                        "маршрута: истории объёмов и статусов нет; срез биржи — "
+                        "последний не позже даты маршрута"),
     ]
     sheet = book.create_sheet("Сводка", 0)
     for label, value in summary:
         sheet.append([label, value])
     sheet.column_dimensions["A"].width = 40
     sheet.column_dimensions["B"].width = 100
+    _instruction(book, as_of, len(by_basket["review"]), len(clear), len(picked))
     out.parent.mkdir(parents=True, exist_ok=True)
     book.save(str(out))
     return summary
