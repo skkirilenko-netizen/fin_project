@@ -233,16 +233,16 @@ def test_expertise_needs_two_passed_reviews_in_a_row(tmp_path: Path) -> None:
 
 
 def test_reviews_before_the_counted_date_do_not_count(tmp_path: Path) -> None:
-    """Проверки до 13.10.2026 не засчитываются: ни продолжить серию, ни оборвать."""
+    """Проверки до 15.10.2026 не засчитываются: ни продолжить серию, ни оборвать."""
     good = [("согласен", "нет")]
     _answer(tmp_path / "a.xlsx", date(2026, 9, 30), good)
-    _answer(tmp_path / "b.xlsx", date(2026, 10, 13), good)
+    _answer(tmp_path / "b.xlsx", date(2026, 10, 15), good)
     found = exits.expertise(tmp_path, RULE)
     assert found.done is False
-    assert "в счёт с 13.10.2026 — 1" in found.fact
-    assert "30.09.2026 (a.xlsx): пройдена; не в счёт — до 13.10.2026" in found.fact
-    _answer(tmp_path / "c.xlsx", date(2026, 10, 12), [("согласен", "да")])
-    _answer(tmp_path / "d.xlsx", date(2026, 10, 14), good)
+    assert "в счёт с 15.10.2026 — 1" in found.fact
+    assert "30.09.2026 (a.xlsx): пройдена; не в счёт — до 15.10.2026" in found.fact
+    _answer(tmp_path / "c.xlsx", date(2026, 10, 14), [("согласен", "да")])
+    _answer(tmp_path / "d.xlsx", date(2026, 10, 16), good)
     assert exits.expertise(tmp_path, RULE).done is True
 
 
